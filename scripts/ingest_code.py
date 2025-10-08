@@ -120,8 +120,18 @@ def ensure_payload_indexes(client: QdrantClient, collection: str):
         "metadata.kind",
         "metadata.symbol",
         "metadata.symbol_path",
+        "metadata.imports",
+        "metadata.calls",
     ):
         try:
+            client.create_payload_index(
+                collection_name=collection,
+                field_name=field,
+                field_schema=models.PayloadSchemaType.KEYWORD,
+            )
+        except Exception:
+            pass
+
 
 # Lightweight import extraction per language (best-effort)
 def _extract_imports(language: str, text: str) -> list:
@@ -167,13 +177,23 @@ def _extract_imports(language: str, text: str) -> list:
             if m: imps.append(m.group(1)); continue
     return imps[:200]
 
-            client.create_payload_index(
-                collection_name=collection,
-                field_name=field,
-                field_schema=models.PayloadSchemaType.KEYWORD,
-            )
-        except Exception:
-            pass
+
+# Lightweight call-site extraction (best-effort, language-agnostic heuristics)
+def _extract_calls(language: str, text: str) -> list:
+    names = []
+    # Simple heuristic: word followed by '(' that isn't a keyword
+    kw = set(["if","for","while","switch","return","new","catch","func","def","class","match"])
+    for m in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(", text):
+        name = m.group(1)
+        if name not in kw:
+            names.append(name)
+    # Deduplicate preserving order
+    out = []
+    seen = set()
+    for n in names:
+        if n not in seen:
+            out.append(n); seen.add(n)
+    return out[:200]
 
 
 def get_indexed_file_hash(client: QdrantClient, collection: str, file_path: str) -> str:
@@ -451,6 +471,8 @@ def index_single_file(client: QdrantClient, model: TextEmbedding, collection: st
         delete_points_by_path(client, collection, str(file_path))
 
     symbols = _extract_symbols(language, text)
+    imports = _extract_imports(language, text)
+    calls = _extract_calls(language, text)
     chunks = chunk_lines(text)
     batch_texts: List[str] = []
     batch_meta: List[Dict] = []
@@ -480,6 +502,8 @@ def index_single_file(client: QdrantClient, model: TextEmbedding, collection: st
                 "end_line": ch["end"],
                 "code": ch["text"],
                 "file_hash": file_hash,
+                "imports": imports,
+                "calls": calls,
             },
         }
         batch_texts.append(info)
@@ -563,6 +587,8 @@ def index_repo(root: Path, qdrant_url: str, api_key: str, collection: str, model
             delete_points_by_path(client, collection, str(file_path))
 
         symbols = _extract_symbols(language, text)
+        imports = _extract_imports(language, text)
+        calls = _extract_calls(language, text)
         chunks = chunk_lines(text)
         for ch in chunks:
             info = build_information(language, file_path, ch["start"], ch["end"], ch["text"].splitlines()[0] if ch["text"] else "")
@@ -582,6 +608,8 @@ def index_repo(root: Path, qdrant_url: str, api_key: str, collection: str, model
                     "end_line": ch["end"],
                     "code": ch["text"],
                     "file_hash": file_hash,
+                    "imports": imports,
+                    "calls": calls,
                 },
             }
             batch_texts.append(info)

@@ -4,7 +4,7 @@
 - Idempotent + incremental indexing out of the box:
   - Skips unchanged files automatically using a file content hash stored in payload (metadata.file_hash)
   - De-duplicates per-file points by deleting prior entries for the same path before insert
-  - Payload indexes are auto-created on first run (metadata.language, metadata.path_prefix, metadata.repo, metadata.kind, metadata.symbol)
+  - Payload indexes are auto-created on first run (metadata.language, metadata.path_prefix, metadata.repo, metadata.kind, metadata.symbol, metadata.symbol_path, metadata.imports, metadata.calls)
 - Commands:
   - Full rebuild: `make reindex`
   - Fast incremental: `make index` (skips unchanged files)
@@ -12,6 +12,7 @@
   - Hybrid search: `make hybrid` (dense + lexical bump with RRF)
 - Bootstrap all services + index + checks: `make bootstrap`
 - Ingest Git history: `make history` (messages + file lists)
+  - If the repo has no local commits yet, the history ingester will shallow-fetch from the remote (default: origin) and use its HEAD. Configure with `--remote` and `--fetch-depth`.
 - Local reranker (ONNX): `make rerank-local` (set RERANKER_ONNX_PATH and RERANKER_TOKENIZER_PATH)
 - Flags (advanced):
   - Disable de-duplication: `docker compose run --rm indexer --root /work --no-dedupe`
@@ -175,6 +176,8 @@ We create payload indexes to accelerate filtered searches:
 - `metadata.kind` (keyword)
 - `metadata.symbol` (keyword)
 - `metadata.symbol_path` (keyword)
+- `metadata.imports` (keyword)
+- `metadata.calls` (keyword)
 - Git history fields available in payload: `commit_id`, `author_name`, `author_email`, `authored_date`, `message`, `files`
 
 This enables fast filters like “only Python results under scripts/”. Example (Qdrant REST):
