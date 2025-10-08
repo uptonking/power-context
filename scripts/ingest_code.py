@@ -11,6 +11,21 @@ from typing import List, Dict, Iterable
 from qdrant_client import QdrantClient, models
 from fastembed import TextEmbedding
 
+
+# Optional Tree-sitter import (graceful fallback)
+try:
+    from tree_sitter import Parser  # type: ignore
+    from tree_sitter_languages import get_language  # type: ignore
+    _TS_AVAILABLE = True
+except Exception:  # pragma: no cover
+    Parser = None  # type: ignore
+    get_language = None  # type: ignore
+    _TS_AVAILABLE = False
+
+
+def _use_tree_sitter() -> bool:
+    return _TS_AVAILABLE and os.environ.get("USE_TREE_SITTER", "").lower() in {"1", "true", "yes", "on"}
+
 CODE_EXTS = {
     ".py": "python", ".js": "javascript", ".ts": "typescript", ".tsx": "typescript",
     ".jsx": "javascript", ".java": "java", ".go": "go", ".rs": "rust",
@@ -375,6 +390,172 @@ def _extract_symbols_rust(text: str) -> List[_Sym]:
     return syms
 
 
+
+# ----- Tree-sitter based extraction (currently Python, JS/TS) -----
+def _ts_parser(lang_key: str):
+    if not _use_tree_sitter():
+        return None
+    try:
+        p = Parser()
+        p.set_language(get_language(lang_key))
+        return p
+    except Exception:
+        return None
+
+
+def _ts_extract_symbols_python(text: str) -> List[_Sym]:
+    parser = _ts_parser("python")
+    if not parser:
+        return []
+    tree = parser.parse(text.encode("utf-8"))
+    root = tree.root_node
+    syms: List[_Sym] = []
+
+    def node_text(n):
+        return text.encode("utf-8")[n.start_byte:n.end_byte].decode("utf-8", errors="ignore")
+
+    class_stack: List[str] = []
+
+    def walk(n):
+        t = n.type
+        if t == "class_definition":
+            name_node = n.child_by_field_name("name")
+            cls = node_text(name_node) if name_node else ""
+            start = n.start_point[0] + 1
+            end = n.end_point[0] + 1
+            syms.append(_Sym(kind="class", name=cls, start=start, end=end))
+            class_stack.append(cls)
+            # Walk body
+            for c in n.children:
+                walk(c)
+            class_stack.pop()
+            return
+        if t == "function_definition":
+            name_node = n.child_by_field_name("name")
+            fn = node_text(name_node) if name_node else ""
+            start = n.start_point[0] + 1
+            end = n.end_point[0] + 1
+            if class_stack:
+                path = f"{class_stack[-1]}.{fn}"
+                syms.append(_Sym(kind="method", name=fn, path=path, start=start, end=end))
+            else:
+                syms.append(_Sym(kind="function", name=fn, start=start, end=end))
+        for c in n.children:
+            walk(c)
+
+    walk(root)
+    return syms
+
+
+def _ts_extract_symbols_js(text: str) -> List[_Sym]:
+    # Works for javascript/typescript using a generic JS parser
+    parser = _ts_parser("javascript")
+    if not parser:
+        return []
+    tree = parser.parse(text.encode("utf-8"))
+    root = tree.root_node
+    syms: List[_Sym] = []
+
+    def node_text(n):
+        return text.encode("utf-8")[n.start_byte:n.end_byte].decode("utf-8", errors="ignore")
+
+    class_stack: List[str] = []
+
+    def walk(n):
+        t = n.type
+        if t == "class_declaration":
+            name_node = n.child_by_field_name("name")
+            cls = node_text(name_node) if name_node else ""
+            start = n.start_point[0] + 1
+            end = n.end_point[0] + 1
+            syms.append(_Sym(kind="class", name=cls, start=start, end=end))
+            class_stack.append(cls)
+            for c in n.children:
+                walk(c)
+            class_stack.pop()
+            return
+        if t in ("function_declaration",):
+            name_node = n.child_by_field_name("name")
+            fn = node_text(name_node) if name_node else ""
+            start = n.start_point[0] + 1
+            end = n.end_point[0] + 1
+            syms.append(_Sym(kind="function", name=fn, start=start, end=end))
+        if t == "method_definition":
+            name_node = n.child_by_field_name("name")
+            m = node_text(name_node) if name_node else ""
+            start = n.start_point[0] + 1
+            end = n.end_point[0] + 1
+            path = f"{class_stack[-1]}.{m}" if class_stack else m
+            syms.append(_Sym(kind="method", name=m, path=path, start=start, end=end))
+        for c in n.children:
+            walk(c)
+
+    walk(root)
+    return syms
+
+
+def _ts_extract_symbols(language: str, text: str) -> List[_Sym]:
+    if language == "python":
+        return _ts_extract_symbols_python(text)
+    if language in ("javascript", "typescript"):
+        return _ts_extract_symbols_js(text)
+    return []
+
+
+
+def _ts_extract_imports_calls_python(text: str):
+    parser = _ts_parser("python")
+    if not parser:
+        return [], []
+    data = text.encode("utf-8")
+    tree = parser.parse(data)
+    root = tree.root_node
+
+    def node_text(n):
+        return data[n.start_byte:n.end_byte].decode("utf-8", errors="ignore")
+
+    imports: List[str] = []
+    calls: List[str] = []
+
+    def walk(n):
+        t = n.type
+        if t == "import_statement":
+            s = node_text(n)
+            m = re.search(r"\bimport\s+([\w\.]+)", s)
+            if m:
+                imports.append(m.group(1))
+        elif t == "import_from_statement":
+            s = node_text(n)
+            m = re.search(r"\bfrom\s+([\w\.]+)\s+import\b", s)
+            if m:
+                imports.append(m.group(1))
+        elif t == "call":
+            func = n.child_by_field_name("function")
+            if func:
+                name = node_text(func)
+                # Take the last attribute part if dotted
+                base = re.split(r"[\.:]", name)[-1]
+                if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", base):
+                    calls.append(base)
+        for c in n.children:
+            walk(c)
+
+    walk(root)
+    # Deduplicate preserving order
+    seen = set()
+    calls_dedup = []
+    for x in calls:
+        if x not in seen:
+            calls_dedup.append(x)
+            seen.add(x)
+    return imports[:200], calls_dedup[:200]
+
+
+def _get_imports_calls(language: str, text: str):
+    if _use_tree_sitter() and language == "python":
+        return _ts_extract_imports_calls_python(text)
+    return _extract_imports(language, text), _extract_calls(language, text)
+
 def _extract_symbols_terraform(text: str) -> List[_Sym]:
     lines = text.splitlines()
     syms: List[_Sym] = []
@@ -414,6 +595,11 @@ def _extract_symbols_terraform(text: str) -> List[_Sym]:
 
 
 def _extract_symbols(language: str, text: str) -> List[_Sym]:
+    # Prefer tree-sitter when enabled and supported; fallback to existing extractors
+    if _use_tree_sitter():
+        ts_syms = _ts_extract_symbols(language, text)
+        if ts_syms:
+            return ts_syms
     if language == "python":
         return _extract_symbols_python(text)
     if language in ("javascript", "typescript"):
@@ -471,8 +657,7 @@ def index_single_file(client: QdrantClient, model: TextEmbedding, collection: st
         delete_points_by_path(client, collection, str(file_path))
 
     symbols = _extract_symbols(language, text)
-    imports = _extract_imports(language, text)
-    calls = _extract_calls(language, text)
+    imports, calls = _get_imports_calls(language, text)
     chunks = chunk_lines(text)
     batch_texts: List[str] = []
     batch_meta: List[Dict] = []
@@ -587,8 +772,7 @@ def index_repo(root: Path, qdrant_url: str, api_key: str, collection: str, model
             delete_points_by_path(client, collection, str(file_path))
 
         symbols = _extract_symbols(language, text)
-        imports = _extract_imports(language, text)
-        calls = _extract_calls(language, text)
+        imports, calls = _get_imports_calls(language, text)
         chunks = chunk_lines(text)
         for ch in chunks:
             info = build_information(language, file_path, ch["start"], ch["end"], ch["text"].splitlines()[0] if ch["text"] else "")

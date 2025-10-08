@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: up down logs ps restart rebuild index reindex env hybrid bootstrap history rerank-local
+.PHONY: up down logs ps restart rebuild index reindex env hybrid bootstrap history rerank-local setup-reranker
 
 up:
 	docker compose up -d --build
@@ -68,4 +68,13 @@ history:
 rerank-local:
 	docker compose run --rm --entrypoint python indexer /work/scripts/rerank_local.py --query "search symbols" --topk 50 --limit 12
 
+# Helper to download ONNX reranker + tokenizer and set .env
+# Usage: make setup-reranker ONNX_URL=... TOKENIZER_URL=... [DEST=models]
+setup-reranker:
+	@if [ -z "$(ONNX_URL)" ] || [ -z "$(TOKENIZER_URL)" ]; then \
+		echo "Provide ONNX_URL and TOKENIZER_URL, e.g."; \
+		echo "  make setup-reranker ONNX_URL=https://.../model.onnx TOKENIZER_URL=https://.../tokenizer.json"; \
+		exit 1; \
+	fi
+	python3 scripts/setup_reranker.py --onnx-url "$(ONNX_URL)" --tokenizer-url "$(TOKENIZER_URL)" --dest "$(or $(DEST),models)"
 

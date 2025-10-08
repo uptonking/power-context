@@ -14,6 +14,9 @@
 - Ingest Git history: `make history` (messages + file lists)
   - If the repo has no local commits yet, the history ingester will shallow-fetch from the remote (default: origin) and use its HEAD. Configure with `--remote` and `--fetch-depth`.
 - Local reranker (ONNX): `make rerank-local` (set RERANKER_ONNX_PATH and RERANKER_TOKENIZER_PATH)
+- Setup ONNX reranker quickly: `make setup-reranker ONNX_URL=... TOKENIZER_URL=...` (updates .env paths)
+- Enable Tree-sitter parsing (more accurate symbols/scopes): set `USE_TREE_SITTER=1` in `.env` then reindex
+
 - Flags (advanced):
   - Disable de-duplication: `docker compose run --rm indexer --root /work --no-dedupe`
   - Disable unchanged skipping: `docker compose run --rm indexer --root /work --no-skip-unchanged`
