@@ -1,0 +1,15 @@
+# Minimal image to run the Qdrant MCP server with SSE transport
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+# Install the MCP server package
+RUN pip install --no-cache-dir mcp-server-qdrant
+
+# Expose SSE port
+EXPOSE 8000
+
+# Default command: run the server with SSE transport (env provides host/port)
+CMD ["mcp-server-qdrant", "--transport", "sse"]
+

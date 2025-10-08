@@ -1,0 +1,625 @@
+#!/usr/bin/env python3
+import os
+import sys
+import argparse
+import hashlib
+import re
+import ast
+from pathlib import Path
+from typing import List, Dict, Iterable
+
+from qdrant_client import QdrantClient, models
+from fastembed import TextEmbedding
+
+CODE_EXTS = {
+    ".py": "python", ".js": "javascript", ".ts": "typescript", ".tsx": "typescript",
+    ".jsx": "javascript", ".java": "java", ".go": "go", ".rs": "rust",
+    ".rb": "ruby", ".php": "php", ".c": "c", ".h": "c", ".cpp": "cpp",
+    ".cc": "cpp", ".hpp": "cpp", ".cs": "csharp", ".kt": "kotlin",
+    ".swift": "swift", ".scala": "scala", ".sh": "shell",
+    ".sql": "sql", ".md": "markdown", ".yml": "yaml", ".yaml": "yaml",
+    ".toml": "toml", ".ini": "ini", ".json": "json", ".tf": "terraform"
+}
+
+SKIP_DIRS = {".git", "node_modules", "dist", "build", ".venv", "venv", ".mypy_cache", "__pycache__"}
+
+
+def hash_id(text: str, path: str, start: int, end: int) -> int:
+    h = hashlib.sha1(f"{path}:{start}-{end}\n{text}".encode("utf-8", errors="ignore")).hexdigest()
+    return int(h[:16], 16)
+
+
+def iter_files(root: Path) -> Iterable[Path]:
+    # Allow passing a single file
+    if root.is_file():
+        if root.suffix.lower() in CODE_EXTS:
+            yield root
+        return
+    for p in root.rglob("*"):
+        if p.is_dir():
+            if p.name in SKIP_DIRS:
+                continue
+            else:
+                continue
+        if p.is_file() and p.suffix.lower() in CODE_EXTS:
+            yield p
+
+
+def chunk_lines(text: str, max_lines: int = 120, overlap: int = 20) -> List[Dict]:
+    lines = text.splitlines()
+    chunks = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        j = min(n, i + max_lines)
+        chunk = "\n".join(lines[i:j])
+        chunks.append({"text": chunk, "start": i + 1, "end": j})
+        if j == n:
+            break
+        i = max(j - overlap, i + 1)
+    return chunks
+
+
+def _sanitize_vector_name(model_name: str) -> str:
+    # Derive a stable vector name similar to MCP server behavior
+    name = model_name.strip().lower()
+    # Common fastembed alias mapping for MiniLM
+    if name in ("sentence-transformers/all-minilm-l6-v2", "sentence-transformers/all-minilm-l-6-v2", "sentence-transformers/all-minilm-l6-v2"):
+        return "fast-all-minilm-l6-v2"
+    # Common fastembed alias mapping for BGE base
+    if "bge-base-en-v1.5" in name:
+        return "fast-bge-base-en-v1.5"
+    # General sanitization
+    for ch in ["/", ".", " ", "_"]:
+        name = name.replace(ch, "-")
+    while "--" in name:
+        name = name.replace("--", "-")
+    return name
+
+
+def ensure_collection(client: QdrantClient, name: str, dim: int, vector_name: str):
+    try:
+        client.get_collection(name)
+        # Ensure HNSW tuned params even if the collection already existed
+        try:
+            client.update_collection(
+                collection_name=name,
+                hnsw_config=models.HnswConfigDiff(m=16, ef_construct=256),
+            )
+        except Exception:
+            pass
+        return
+    except Exception:
+        pass
+    client.create_collection(
+        collection_name=name,
+        vectors_config={vector_name: models.VectorParams(size=dim, distance=models.Distance.COSINE)},
+        hnsw_config=models.HnswConfigDiff(m=16, ef_construct=256),
+    )
+
+
+def recreate_collection(client: QdrantClient, name: str, dim: int, vector_name: str):
+    try:
+        client.delete_collection(name)
+    except Exception:
+        pass
+    client.create_collection(
+        collection_name=name,
+        vectors_config={vector_name: models.VectorParams(size=dim, distance=models.Distance.COSINE)},
+        hnsw_config=models.HnswConfigDiff(m=16, ef_construct=256),
+    )
+
+
+
+def ensure_payload_indexes(client: QdrantClient, collection: str):
+    """Create helpful payload indexes if they don't exist (idempotent)."""
+    for field in (
+        "metadata.language",
+        "metadata.path_prefix",
+        "metadata.repo",
+        "metadata.kind",
+        "metadata.symbol",
+        "metadata.symbol_path",
+    ):
+        try:
+
+# Lightweight import extraction per language (best-effort)
+def _extract_imports(language: str, text: str) -> list:
+    lines = text.splitlines()
+    imps = []
+    if language == "python":
+        for ln in lines:
+            m = re.match(r"^\s*import\s+([\w\.]+)", ln)
+            if m: imps.append(m.group(1)); continue
+            m = re.match(r"^\s*from\s+([\w\.]+)\s+import\s+", ln)
+            if m: imps.append(m.group(1)); continue
+    elif language in ("javascript", "typescript"):
+        for ln in lines:
+            m = re.match(r"^\s*import\s+.*?from\s+['\"]([^'\"]+)['\"]", ln)
+            if m: imps.append(m.group(1)); continue
+            m = re.match(r"^\s*require\(\s*['\"]([^'\"]+)['\"]\s*\)", ln)
+            if m: imps.append(m.group(1)); continue
+    elif language == "go":
+        block = False
+        for ln in lines:
+            if re.match(r"^\s*import\s*\(", ln):
+                block = True; continue
+            if block:
+                if ")" in ln: block = False; continue
+                m = re.match(r"^\s*\"([^\"]+)\"", ln)
+                if m: imps.append(m.group(1)); continue
+            m = re.match(r"^\s*import\s+\"([^\"]+)\"", ln)
+            if m: imps.append(m.group(1)); continue
+    elif language == "java":
+        for ln in lines:
+            m = re.match(r"^\s*import\s+([\w\.\*]+);", ln)
+            if m: imps.append(m.group(1)); continue
+    elif language == "rust":
+        for ln in lines:
+            m = re.match(r"^\s*use\s+([^;]+);", ln)
+            if m: imps.append(m.group(1).strip()); continue
+    elif language == "terraform":
+        # modules/providers are most relevant cross-file references
+        for ln in lines:
+            m = re.match(r"^\s*source\s*=\s*['\"]([^'\"]+)['\"]", ln)
+            if m: imps.append(m.group(1)); continue
+            m = re.match(r"^\s*provider\s*=\s*['\"]([^'\"]+)['\"]", ln)
+            if m: imps.append(m.group(1)); continue
+    return imps[:200]
+
+            client.create_payload_index(
+                collection_name=collection,
+                field_name=field,
+                field_schema=models.PayloadSchemaType.KEYWORD,
+            )
+        except Exception:
+            pass
+
+
+def get_indexed_file_hash(client: QdrantClient, collection: str, file_path: str) -> str:
+    """Return previously indexed file hash for this path, or empty string."""
+    try:
+        filt = models.Filter(must=[models.FieldCondition(
+            key="metadata.path", match=models.MatchValue(value=file_path)
+        )])
+        points, _ = client.scroll(
+            collection_name=collection,
+            scroll_filter=filt,
+            with_payload=True,
+            limit=1,
+        )
+        if points:
+            md = (points[0].payload or {}).get("metadata") or {}
+            return str(md.get("file_hash") or "")
+    except Exception:
+        return ""
+    return ""
+
+
+def delete_points_by_path(client: QdrantClient, collection: str, file_path: str):
+    try:
+        filt = models.Filter(must=[models.FieldCondition(
+            key="metadata.path", match=models.MatchValue(value=file_path)
+        )])
+        client.delete(collection_name=collection, points_selector=filt, wait=True)
+    except Exception:
+        pass
+
+
+def embed_batch(model: TextEmbedding, texts: List[str]) -> List[List[float]]:
+    # fastembed returns a generator of numpy arrays
+    return [vec.tolist() for vec in model.embed(texts)]
+
+
+def upsert_points(client: QdrantClient, collection: str, points: List[models.PointStruct]):
+    if not points:
+        return
+    client.upsert(collection_name=collection, points=points, wait=True)
+
+
+def detect_language(path: Path) -> str:
+    return CODE_EXTS.get(path.suffix.lower(), "unknown")
+
+
+def build_information(language: str, path: Path, start: int, end: int, first_line: str) -> str:
+    first_line = (first_line or "").strip()
+    if len(first_line) > 160:
+        first_line = first_line[:160] + "…"
+    return f"{language} code from {path} lines {start}-{end}. {first_line}"
+
+# ---- Symbol extraction helpers ----
+class _Sym(dict):
+    __getattr__ = dict.get
+
+
+def _extract_symbols_python(text: str) -> List[_Sym]:
+    try:
+        tree = ast.parse(text)
+    except Exception:
+        return []
+    out: List[_Sym] = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            out.append(_Sym(kind="function", name=node.name, start=getattr(node, "lineno", 0), end=getattr(node, "end_lineno", getattr(node, "lineno", 0))))
+        elif isinstance(node, ast.ClassDef):
+            out.append(_Sym(kind="class", name=node.name, start=getattr(node, "lineno", 0), end=getattr(node, "end_lineno", getattr(node, "lineno", 0))))
+    # Filter invalid
+    return [s for s in out if s.start and s.end and s.end >= s.start]
+
+
+_JS_FUNC_PATTERNS = [
+    r"^\s*export\s+function\s+([A-Za-z_$][\w$]*)\s*\(",
+    r"^\s*function\s+([A-Za-z_$][\w$]*)\s*\(",
+    r"^\s*(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\s*=\s*\([^)]*\)\s*=>",
+    r"^\s*(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\s*=\s*function\s*\(",
+]
+_JS_CLASS_PATTERNS = [r"^\s*(?:export\s+)?class\s+([A-Za-z_$][\w$]*)\b"]
+
+
+def _extract_symbols_js_like(text: str) -> List[_Sym]:
+    lines = text.splitlines()
+    syms: List[_Sym] = []
+    for idx, line in enumerate(lines, 1):
+        for pat in _JS_CLASS_PATTERNS:
+            m = re.match(pat, line)
+            if m:
+                syms.append(_Sym(kind="class", name=m.group(1), start=idx, end=idx))
+                break
+        for pat in _JS_FUNC_PATTERNS:
+            m = re.match(pat, line)
+            if m:
+                syms.append(_Sym(kind="function", name=m.group(1), start=idx, end=idx))
+                break
+    # Approximate end by next symbol start-1
+    syms.sort(key=lambda s: s.start)
+    for i in range(len(syms)):
+        if i + 1 < len(syms):
+            syms[i]["end"] = max(syms[i].start, syms[i + 1].start - 1)
+        else:
+            syms[i]["end"] = max(syms[i].start, len(lines))
+    return syms
+
+
+def _extract_symbols_go(text: str) -> List[_Sym]:
+    lines = text.splitlines()
+    syms: List[_Sym] = []
+    for idx, line in enumerate(lines, 1):
+        m = re.match(r"^\s*type\s+([A-Za-z_][\w]*)\s+struct\b", line)
+        if m: syms.append(_Sym(kind="struct", name=m.group(1), start=idx, end=idx)); continue
+        m = re.match(r"^\s*type\s+([A-Za-z_][\w]*)\s+interface\b", line)
+        if m: syms.append(_Sym(kind="interface", name=m.group(1), start=idx, end=idx)); continue
+        m = re.match(r"^\s*func\s*\(\s*[^)]+\s+\*?([A-Za-z_][\w]*)\s*\)\s*([A-Za-z_][\w]*)\s*\(", line)
+        if m: syms.append(_Sym(kind="method", name=m.group(2), path=f"{m.group(1)}.{m.group(2)}", start=idx, end=idx)); continue
+        m = re.match(r"^\s*func\s+([A-Za-z_][\w]*)\s*\(", line)
+        if m: syms.append(_Sym(kind="function", name=m.group(1), start=idx, end=idx)); continue
+    syms.sort(key=lambda s: s.start)
+    for i in range(len(syms)):
+        syms[i]["end"] = (syms[i + 1].start - 1) if (i + 1 < len(syms)) else len(lines)
+    return syms
+
+
+def _extract_symbols_java(text: str) -> List[_Sym]:
+    lines = text.splitlines()
+    syms: List[_Sym] = []
+    current_class = None
+    for idx, line in enumerate(lines, 1):
+        m = re.match(r"^\s*(?:public|protected|private)?\s*(?:final\s+|abstract\s+)?class\s+([A-Za-z_][\w]*)\b", line)
+        if m:
+            current_class = m.group(1)
+            syms.append(_Sym(kind="class", name=current_class, start=idx, end=idx))
+            continue
+        m = re.match(r"^\s*(?:public|protected|private)?\s*(?:static\s+)?[A-Za-z_<>,\[\]]+\s+([A-Za-z_][\w]*)\s*\(", line)
+        if m:
+            name = m.group(1)
+            path = f"{current_class}.{name}" if current_class else name
+            syms.append(_Sym(kind="method", name=name, path=path, start=idx, end=idx))
+            continue
+    syms.sort(key=lambda s: s.start)
+    for i in range(len(syms)):
+        syms[i]["end"] = (syms[i + 1].start - 1) if (i + 1 < len(syms)) else len(lines)
+    return syms
+
+
+def _extract_symbols_rust(text: str) -> List[_Sym]:
+    lines = text.splitlines()
+    syms: List[_Sym] = []
+    current_impl = None
+    for idx, line in enumerate(lines, 1):
+        m = re.match(r"^\s*impl(?:\s*<[^>]+>)?\s*([A-Za-z_][\w:]*)", line)
+        if m:
+            current_impl = m.group(1)
+            syms.append(_Sym(kind="impl", name=current_impl, start=idx, end=idx))
+            continue
+        m = re.match(r"^\s*(?:pub\s+)?struct\s+([A-Za-z_][\w]*)\b", line)
+        if m:
+            syms.append(_Sym(kind="struct", name=m.group(1), start=idx, end=idx))
+            continue
+        m = re.match(r"^\s*(?:pub\s+)?enum\s+([A-Za-z_][\w]*)\b", line)
+        if m:
+            syms.append(_Sym(kind="enum", name=m.group(1), start=idx, end=idx))
+            continue
+        m = re.match(r"^\s*(?:pub\s+)?trait\s+([A-Za-z_][\w]*)\b", line)
+        if m:
+            syms.append(_Sym(kind="trait", name=m.group(1), start=idx, end=idx))
+            continue
+        m = re.match(r"^\s*(?:pub\s+)?fn\s+([A-Za-z_][\w]*)\s*\(", line)
+        if m:
+            name = m.group(1)
+            path = f"{current_impl}::{name}" if current_impl else name
+            kind = "method" if current_impl else "function"
+            syms.append(_Sym(kind=kind, name=name, path=path, start=idx, end=idx))
+            continue
+    syms.sort(key=lambda s: s.start)
+    for i in range(len(syms)):
+        syms[i]["end"] = (syms[i + 1].start - 1) if (i + 1 < len(syms)) else len(lines)
+    return syms
+
+
+def _extract_symbols_terraform(text: str) -> List[_Sym]:
+    lines = text.splitlines()
+    syms: List[_Sym] = []
+    for idx, line in enumerate(lines, 1):
+        m = re.match(r"^\s*(resource)\s+\"([^\"]+)\"\s+\"([^\"]+)\"\s*\{", line)
+        if m:
+            t, name = m.group(2), m.group(3)
+            syms.append(_Sym(kind="resource", name=name, path=f"{t}.{name}", start=idx, end=idx)); continue
+        m = re.match(r"^\s*(data)\s+\"([^\"]+)\"\s+\"([^\"]+)\"\s*\{", line)
+        if m:
+            t, name = m.group(2), m.group(3)
+            syms.append(_Sym(kind="data", name=name, path=f"data.{t}.{name}", start=idx, end=idx)); continue
+        m = re.match(r"^\s*(module)\s+\"([^\"]+)\"\s*\{", line)
+        if m:
+            name = m.group(2)
+            syms.append(_Sym(kind="module", name=name, path=f"module.{name}", start=idx, end=idx)); continue
+        m = re.match(r"^\s*(variable)\s+\"([^\"]+)\"\s*\{", line)
+        if m:
+            name = m.group(2)
+            syms.append(_Sym(kind="variable", name=name, path=f"var.{name}", start=idx, end=idx)); continue
+        m = re.match(r"^\s*(output)\s+\"([^\"]+)\"\s*\{", line)
+        if m:
+            name = m.group(2)
+            syms.append(_Sym(kind="output", name=name, path=f"output.{name}", start=idx, end=idx)); continue
+        m = re.match(r"^\s*(provider)\s+\"([^\"]+)\"\s*\{", line)
+        if m:
+            name = m.group(2)
+            syms.append(_Sym(kind="provider", name=name, path=f"provider.{name}", start=idx, end=idx)); continue
+        m = re.match(r"^\s*(locals)\s*\{", line)
+        if m:
+            syms.append(_Sym(kind="locals", name="locals", path="locals", start=idx, end=idx)); continue
+    syms.sort(key=lambda s: s.start)
+    for i in range(len(syms)):
+        syms[i]["end"] = (syms[i + 1].start - 1) if (i + 1 < len(syms)) else len(lines)
+    return syms
+
+
+
+def _extract_symbols(language: str, text: str) -> List[_Sym]:
+    if language == "python":
+        return _extract_symbols_python(text)
+    if language in ("javascript", "typescript"):
+        return _extract_symbols_js_like(text)
+    if language == "go":
+        return _extract_symbols_go(text)
+    if language == "java":
+        return _extract_symbols_java(text)
+    if language == "rust":
+        return _extract_symbols_rust(text)
+    if language == "terraform":
+        return _extract_symbols_terraform(text)
+    return []
+
+
+def _choose_symbol_for_chunk(start: int, end: int, symbols: List[_Sym]):
+    if not symbols:
+        return "", "", ""
+    overlaps = [s for s in symbols if s.start <= end and s.end >= start]
+    def pick(sym):
+        name = sym.get("name") or ""
+        path = sym.get("path") or name
+        return sym.get("kind") or "", name, path
+    if overlaps:
+        overlaps.sort(key=lambda s: (-(s.start), (s.end - s.start)))
+        return pick(overlaps[0])
+    preceding = [s for s in symbols if s.start <= end]
+    if preceding:
+        s = max(preceding, key=lambda x: x.start)
+        return pick(s)
+    return "", "", ""
+
+
+
+def index_single_file(client: QdrantClient, model: TextEmbedding, collection: str, vector_name: str, file_path: Path, *, dedupe: bool = True, skip_unchanged: bool = True) -> bool:
+    """Index a single file path. Returns True if indexed, False if skipped."""
+    try:
+        text = file_path.read_text(encoding="utf-8", errors="ignore")
+    except Exception as e:
+        print(f"Skipping {file_path}: {e}")
+        return False
+
+    language = detect_language(file_path)
+    file_hash = hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest()
+
+    repo_tag = os.environ.get("REPO_NAME", "workspace")
+
+    if skip_unchanged:
+        prev = get_indexed_file_hash(client, collection, str(file_path))
+        if prev and prev == file_hash:
+            print(f"Skipping unchanged file: {file_path}")
+            return False
+
+    if dedupe:
+        delete_points_by_path(client, collection, str(file_path))
+
+    symbols = _extract_symbols(language, text)
+    chunks = chunk_lines(text)
+    batch_texts: List[str] = []
+    batch_meta: List[Dict] = []
+    batch_ids: List[int] = []
+
+    def make_point(pid, vec, payload):
+        if vector_name:
+            return models.PointStruct(id=pid, vector={vector_name: vec}, payload=payload)
+        else:
+            return models.PointStruct(id=pid, vector=vec, payload=payload)
+
+    for ch in chunks:
+        info = build_information(language, file_path, ch["start"], ch["end"], ch["text"].splitlines()[0] if ch["text"] else "")
+        kind, sym, sym_path = _choose_symbol_for_chunk(ch["start"], ch["end"], symbols)
+        payload = {
+            "document": info,
+            "information": info,
+            "metadata": {
+                "path": str(file_path),
+                "path_prefix": str(file_path.parent),
+                "language": language,
+                "kind": kind,
+                "symbol": sym,
+                "symbol_path": sym_path,
+                "repo": repo_tag,
+                "start_line": ch["start"],
+                "end_line": ch["end"],
+                "code": ch["text"],
+                "file_hash": file_hash,
+            },
+        }
+        batch_texts.append(info)
+        batch_meta.append(payload)
+        batch_ids.append(hash_id(ch["text"], str(file_path), ch["start"], ch["end"]))
+
+    if batch_texts:
+        vectors = embed_batch(model, batch_texts)
+        points = [make_point(i, v, m) for i, v, m in zip(batch_ids, vectors, batch_meta)]
+        upsert_points(client, collection, points)
+        return True
+    return False
+
+
+
+def index_repo(root: Path, qdrant_url: str, api_key: str, collection: str, model_name: str, recreate: bool, *, dedupe: bool = True, skip_unchanged: bool = True):
+    print(f"Indexing root={root} -> {qdrant_url} collection={collection} model={model_name} recreate={recreate}")
+    model = TextEmbedding(model_name=model_name)
+    # Determine embedding dimension
+    dim = len(next(model.embed(["dimension probe"])) )
+
+    client = QdrantClient(url=qdrant_url, api_key=api_key or None)
+
+    # Determine vector name
+    if recreate:
+        vector_name = _sanitize_vector_name(model_name)
+    else:
+        vector_name = None
+        try:
+            info = client.get_collection(collection)
+            cfg = info.config.params.vectors
+            if isinstance(cfg, dict):
+                # Use the first vector name
+                vector_name = list(cfg.keys())[0]
+        except Exception:
+            pass
+        if vector_name is None:
+            vector_name = _sanitize_vector_name(model_name)
+
+    if recreate:
+        recreate_collection(client, collection, dim, vector_name)
+    else:
+        ensure_collection(client, collection, dim, vector_name)
+
+    # Ensure useful payload indexes exist (idempotent)
+    ensure_payload_indexes(client, collection)
+    # Repo tag for filtering (optional). Set REPO_NAME to customize.
+    repo_tag = os.environ.get("REPO_NAME", "workspace")
+
+
+    batch_texts = []
+    batch_meta = []
+    batch_ids = []
+    BATCH_SIZE = 64
+
+    def make_point(pid, vec, payload):
+        # Use named vectors if collection is named
+        if vector_name:
+            return models.PointStruct(id=pid, vector={vector_name: vec}, payload=payload)
+        else:
+            return models.PointStruct(id=pid, vector=vec, payload=payload)
+
+    for file_path in iter_files(root):
+        try:
+            text = file_path.read_text(encoding="utf-8", errors="ignore")
+        except Exception as e:
+            print(f"Skipping {file_path}: {e}")
+            continue
+        language = detect_language(file_path)
+        file_hash = hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest()
+
+        # Skip unchanged files if enabled (default)
+        if skip_unchanged:
+            prev = get_indexed_file_hash(client, collection, str(file_path))
+            if prev and prev == file_hash:
+                print(f"Skipping unchanged file: {file_path}")
+                continue
+
+        # Dedupe per-file by deleting previous points for this path (default)
+        if dedupe:
+            delete_points_by_path(client, collection, str(file_path))
+
+        symbols = _extract_symbols(language, text)
+        chunks = chunk_lines(text)
+        for ch in chunks:
+            info = build_information(language, file_path, ch["start"], ch["end"], ch["text"].splitlines()[0] if ch["text"] else "")
+            kind, sym, sym_path = _choose_symbol_for_chunk(ch["start"], ch["end"], symbols)
+            payload = {
+                "document": info,
+                "information": info,
+                "metadata": {
+                    "path": str(file_path),
+                    "path_prefix": str(file_path.parent),
+                    "language": language,
+                    "kind": kind,
+                    "symbol": sym,
+                    "symbol_path": sym or "",
+                    "repo": repo_tag,
+                    "start_line": ch["start"],
+                    "end_line": ch["end"],
+                    "code": ch["text"],
+                    "file_hash": file_hash,
+                },
+            }
+            batch_texts.append(info)
+            batch_meta.append(payload)
+            batch_ids.append(hash_id(ch["text"], str(file_path), ch["start"], ch["end"]))
+            if len(batch_texts) >= BATCH_SIZE:
+                vectors = embed_batch(model, batch_texts)
+                points = [make_point(i, v, m) for i, v, m in zip(batch_ids, vectors, batch_meta)]
+                upsert_points(client, collection, points)
+                batch_texts, batch_meta, batch_ids = [], [], []
+
+    if batch_texts:
+        vectors = embed_batch(model, batch_texts)
+        points = [make_point(i, v, m) for i, v, m in zip(batch_ids, vectors, batch_meta)]
+        upsert_points(client, collection, points)
+
+    print("Indexing complete.")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Index code into Qdrant with metadata for MCP code search.")
+    parser.add_argument("--root", type=str, default=".", help="Root directory to index")
+    parser.add_argument("--recreate", action="store_true", help="Recreate the collection before indexing")
+    parser.add_argument("--no-dedupe", action="store_true", help="Do not delete existing points for each file before inserting")
+    parser.add_argument("--no-skip-unchanged", action="store_true", help="Do not skip files whose content hash matches existing index")
+    args = parser.parse_args()
+
+    qdrant_url = os.environ.get("QDRANT_URL", "http://localhost:6333")
+    api_key = os.environ.get("QDRANT_API_KEY")
+    collection = os.environ.get("COLLECTION_NAME", "my-collection")
+    model_name = os.environ.get("EMBEDDING_MODEL", "intfloat/e5-base-v2")
+
+    index_repo(
+        Path(args.root).resolve(), qdrant_url, api_key, collection, model_name, args.recreate,
+        dedupe=(not args.no_dedupe), skip_unchanged=(not args.no_skip_unchanged)
+    )
+
+
+if __name__ == "__main__":
+    main()
+

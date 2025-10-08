@@ -1,0 +1,54 @@
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant-local
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_storage:/qdrant/storage
+
+  mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile.mcp
+    container_name: mcp-server-qdrant
+    depends_on:
+      - qdrant
+    env_file:
+      - .env
+    environment:
+      # Ensure the server binds to all interfaces for container networking
+      - FASTMCP_HOST=${FASTMCP_HOST}
+      - FASTMCP_PORT=${FASTMCP_PORT}
+      - QDRANT_URL=${QDRANT_URL}
+      - COLLECTION_NAME=${COLLECTION_NAME}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL}
+      - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER}
+      - TOOL_STORE_DESCRIPTION=${TOOL_STORE_DESCRIPTION}
+      - TOOL_FIND_DESCRIPTION=${TOOL_FIND_DESCRIPTION}
+    ports:
+      - "8000:8000"
+
+  indexer:
+    build:
+      context: .
+      dockerfile: Dockerfile.indexer
+    depends_on:
+      - qdrant
+    env_file:
+      - .env
+    environment:
+      - QDRANT_URL=${QDRANT_URL}
+      - QDRANT_API_KEY=${QDRANT_API_KEY}
+      - COLLECTION_NAME=${COLLECTION_NAME}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL}
+    working_dir: /work
+    volumes:
+      - ./:/work:ro
+    entrypoint: ["python", "scripts/ingest_code.py"]
+
+volumes:
+  qdrant_storage:
+    driver: local
+

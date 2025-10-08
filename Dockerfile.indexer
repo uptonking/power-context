@@ -1,0 +1,16 @@
+# Dockerized code indexer for Qdrant
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+# OS packages needed: git for history ingestion
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir qdrant-client fastembed watchdog
+
+WORKDIR /work
+
+# Default command shows help; Makefile will override
+CMD ["python", "scripts/ingest_code.py", "--help"]
+
