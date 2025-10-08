@@ -94,10 +94,23 @@ def rerank_local(pairs: List[str]) -> List[float]:
     input_ids = [pad(s) for s in input_ids]
     attn = [pad(s) for s in attn]
     sess = ort.InferenceSession(RERANKER_ONNX_PATH, providers=["CPUExecutionProvider"])  # local CPU
-    feeds = {
-        sess.get_inputs()[0].name: input_ids,
-        sess.get_inputs()[1].name: attn,
-    }
+    input_names = [i.name for i in sess.get_inputs()]
+    # Prepare optional token_type_ids (all zeros) if the model expects it
+    token_type_ids = [[0] * max_len for _ in input_ids] if "token_type_ids" in input_names else None
+    feeds = {}
+    # Prefer named inputs when available
+    if "input_ids" in input_names:
+        feeds["input_ids"] = input_ids
+    if "attention_mask" in input_names:
+        feeds["attention_mask"] = attn
+    if token_type_ids is not None:
+        feeds["token_type_ids"] = token_type_ids
+    # Fallback to positional if names are unexpected
+    if not feeds:
+        feeds = {
+            sess.get_inputs()[0].name: input_ids,
+            sess.get_inputs()[1].name: attn,
+        }
     out = sess.run(None, feeds)
     # Heuristic: prefer the first output; accept scalar per row or 2-class logits
     logits = out[0]
