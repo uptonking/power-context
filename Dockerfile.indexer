@@ -7,7 +7,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # OS packages needed: git for history ingestion
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir qdrant-client fastembed watchdog
+RUN pip install --no-cache-dir qdrant-client fastembed watchdog onnxruntime tokenizers tree_sitter tree_sitter_languages
 
 WORKDIR /work
 
