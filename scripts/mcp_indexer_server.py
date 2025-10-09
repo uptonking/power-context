@@ -26,10 +26,11 @@ import subprocess
 from typing import Any, Dict, Optional
 
 try:
-    # fastmcp is a lightweight helper to publish tools over MCP SSE
-    from fastmcp import FastMCP, tool
+    # Official MCP Python SDK
+    from mcp.server import Server
+    from mcp.server.sse import run
 except Exception as e:  # pragma: no cover
-    raise SystemExit("fastmcp package is required inside the container: pip install fastmcp")
+    raise SystemExit("mcp package is required inside the container: pip install mcp")
 
 APP_NAME = os.environ.get("FASTMCP_SERVER_NAME", "qdrant-indexer-mcp")
 HOST = os.environ.get("FASTMCP_HOST", "0.0.0.0")
@@ -39,7 +40,7 @@ QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
 DEFAULT_COLLECTION = os.environ.get("COLLECTION_NAME", "my-collection")
 DEFAULT_REPO = os.environ.get("REPO_NAME", "workspace")
 
-app = FastMCP(APP_NAME)
+server = Server(APP_NAME)
 
 
 def _run(cmd: list[str], env: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
@@ -52,8 +53,17 @@ def _run(cmd: list[str], env: Optional[Dict[str, str]] = None) -> Dict[str, Any]
     }
 
 
-@tool(description="List Qdrant collections")
-def qdrant_list() -> Dict[str, Any]:
+@server.list_tool()
+def tools():
+    return [
+        {"name": "qdrant-list", "description": "List Qdrant collections"},
+        {"name": "qdrant-index", "description": "Index /work or a subdir into Qdrant"},
+        {"name": "qdrant-prune", "description": "Prune stale points for /work"},
+    ]
+
+
+@server.tool()
+async def qdrant_list() -> Dict[str, Any]:
     try:
         from qdrant_client import QdrantClient
         client = QdrantClient(url=QDRANT_URL, api_key=os.environ.get("QDRANT_API_KEY"))
@@ -63,10 +73,8 @@ def qdrant_list() -> Dict[str, Any]:
         return {"error": str(e)}
 
 
-@tool(
-    description="Index the mounted path (/work) or a subdirectory. Args: subdir?, recreate? (bool), collection?, repo_name?",
-)
-def qdrant_index(subdir: Optional[str] = None, recreate: bool = False,
+@server.tool()
+async def qdrant_index(subdir: Optional[str] = None, recreate: bool = False,
                  collection: Optional[str] = None, repo_name: Optional[str] = None) -> Dict[str, Any]:
     root = "/work"
     if subdir:
@@ -89,8 +97,8 @@ def qdrant_index(subdir: Optional[str] = None, recreate: bool = False,
     return {"args": {"root": root, "collection": coll, "repo_name": repo, "recreate": recreate}, **res}
 
 
-@tool(description="Prune stale points for the mounted path (/work)")
-def qdrant_prune() -> Dict[str, Any]:
+@server.tool()
+async def qdrant_prune() -> Dict[str, Any]:
     env = os.environ.copy()
     env["PRUNE_ROOT"] = "/work"
     cmd = ["python", "/work/scripts/prune.py"]
@@ -99,5 +107,5 @@ def qdrant_prune() -> Dict[str, Any]:
 
 
 if __name__ == "__main__":
-    app.run_sse(host=HOST, port=PORT)
+    run(server, host=HOST, port=PORT)
 
