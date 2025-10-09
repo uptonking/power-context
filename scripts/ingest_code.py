@@ -640,8 +640,6 @@ def _extract_symbols_powershell(text: str) -> List[_Sym]:
             continue
     return syms
 
-    return syms
-
 
 
 def _extract_symbols_rust(text: str) -> List[_Sym]:
@@ -1012,10 +1010,6 @@ def index_single_file(client: QdrantClient, model: TextEmbedding, collection: st
         upsert_points(client, collection, points)
         return True
     return False
-
-
-        last_mod, churn_count, author_count = _git_metadata(file_path)
-
 
 def index_repo(root: Path, qdrant_url: str, api_key: str, collection: str, model_name: str, recreate: bool, *, dedupe: bool = True, skip_unchanged: bool = True):
     print(f"Indexing root={root} -> {qdrant_url} collection={collection} model={model_name} recreate={recreate}")
