@@ -9,9 +9,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Python deps: same as indexer + fastmcp for SSE MCP tooling
+# Python deps: same as indexer + official mcp SDK for SSE MCP tooling
 RUN pip install --no-cache-dir qdrant-client fastembed watchdog onnxruntime tokenizers \
-    tree_sitter tree_sitter_languages fastmcp
+    tree_sitter tree_sitter_languages mcp
 
 # Expose SSE port for this companion server
 EXPOSE 8001
