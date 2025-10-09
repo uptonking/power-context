@@ -68,6 +68,42 @@ services:
       - ${HOST_INDEX_PATH:-.}:/work:ro
     entrypoint: ["python", "scripts/ingest_code.py"]
 
+  watcher:
+    build:
+      context: .
+      dockerfile: Dockerfile.indexer
+    depends_on:
+      - qdrant
+    env_file:
+      - .env
+    environment:
+      - QDRANT_URL=${QDRANT_URL}
+      - QDRANT_API_KEY=${QDRANT_API_KEY}
+      - COLLECTION_NAME=${COLLECTION_NAME}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL}
+      - WATCH_ROOT=/work
+    working_dir: /work
+    volumes:
+      - ${HOST_INDEX_PATH:-.}:/work:ro
+    entrypoint: ["python", "scripts/watch_index.py"]
+
+  init_payload:
+    build:
+      context: .
+      dockerfile: Dockerfile.indexer
+    depends_on:
+      - qdrant
+    env_file:
+      - .env
+    environment:
+      - QDRANT_URL=${QDRANT_URL}
+      - QDRANT_API_KEY=${QDRANT_API_KEY}
+      - COLLECTION_NAME=${COLLECTION_NAME}
+    working_dir: /work
+    volumes:
+      - ${HOST_INDEX_PATH:-.}:/work:ro
+    entrypoint: ["python", "scripts/create_indexes.py"]
+
 volumes:
   qdrant_storage:
     driver: local
