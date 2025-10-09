@@ -105,7 +105,7 @@ def lang_matches_path(lang: str, path: str) -> bool:
 def parse_query_dsl(queries: List[str]) -> Tuple[List[str], Dict[str, str]]:
     clean: List[str] = []
     extracted: Dict[str, str] = {}
-    token_re = re.compile(r"\b(?:(lang|language|file|path|under|kind|symbol))\s*:\s*([^\s]+)", re.IGNORECASE)
+    token_re = re.compile(r"\b(?:(lang|language|file|path|under|kind|symbol|ext|not|case))\s*:\s*([^\s]+)", re.IGNORECASE)
     for q in queries:
         parts = []
         last = 0
@@ -116,6 +116,12 @@ def parse_query_dsl(queries: List[str]) -> Tuple[List[str], Dict[str, str]]:
                 extracted["under"] = val
             elif key in ("lang", "language"):
                 extracted["language"] = val
+            elif key in ("ext",):
+                extracted["ext"] = val
+            elif key in ("not",):
+                extracted["not"] = val
+            elif key in ("case",):
+                extracted["case"] = val
             else:
                 extracted[key] = val
             parts.append(q[last:m.start()].strip())
@@ -317,6 +323,9 @@ def main():
     eff_under = args.under or dsl.get("under")
     eff_kind = args.kind or dsl.get("kind")
     eff_symbol = args.symbol or dsl.get("symbol")
+    eff_ext = dsl.get("ext")
+    eff_not = dsl.get("not")
+    eff_case = dsl.get("case")
 
     # Normalize 'under' to absolute path_prefix used in payload (defaults to /work/<rel>)
     def _norm_under(u: str | None) -> str | None:
@@ -331,6 +340,7 @@ def main():
             # ensure it starts with /work when pointing into repo mount
             if not u.startswith("/work/") and u in {"work", "./work"}:
                 u = "/work"
+
         return u
 
     eff_under = _norm_under(eff_under)
@@ -342,6 +352,14 @@ def main():
         must.append(models.FieldCondition(key="metadata.language", match=models.MatchValue(value=eff_language)))
     if eff_under:
         must.append(models.FieldCondition(key="metadata.path_prefix", match=models.MatchValue(value=eff_under)))
+    # If ext: was provided without an explicit language, infer language from extension
+    if eff_ext and not eff_language:
+        ex = eff_ext.lower().lstrip('.')
+        for lang, exts in LANG_EXTS.items():
+            if any(ex == e.lstrip('.').lower() for e in exts):
+                eff_language = lang
+                break
+
     if eff_kind:
         must.append(models.FieldCondition(key="metadata.kind", match=models.MatchValue(value=eff_kind)))
     if eff_symbol:
@@ -350,8 +368,23 @@ def main():
 
     # Build query set (optionally expanded)
     queries = list(clean_queries)
+    # Server-side lexical vector search (hashing) as an additional ranked list
+    try:
+        lex_vec = lex_hash_vector(queries)
+        lex_results = lex_query(client, lex_vec, flt, args.per_query)
+    except Exception:
+        lex_results = []
+
     if args.expand:
         queries = expand_queries(queries, eff_language)
+
+    # Add server-side lexical vector ranking into fusion
+    for rank, p in enumerate(lex_results, 1):
+        pid = str(p.id)
+        score_map.setdefault(pid, {"pt": p, "s": 0.0, "d": 0.0, "lx": 0.0, "sym_sub": 0.0, "sym_eq": 0.0, "core": 0.0, "vendor": 0.0, "langb": 0.0, "rec": 0.0})
+        lxs = LEX_VECTOR_WEIGHT * rrf(rank)
+        score_map[pid]["lx"] += lxs
+        score_map[pid]["s"] += lxs
 
     embedded = [vec.tolist() for vec in model.embed(queries)]
     result_sets: List[List[Any]] = [dense_query(client, vec_name, v, flt, args.per_query) for v in embedded]
@@ -373,7 +406,7 @@ def main():
         lx = LEXICAL_WEIGHT * lexical_score(queries, md)
         rec["lx"] += lx
         rec["s"] += lx
-        ts = md.get("ingested_at")
+        ts = md.get("last_modified_at") or md.get("ingested_at")
         if isinstance(ts, int):
             timestamps.append(ts)
 
@@ -417,7 +450,7 @@ def main():
         span = max(1, tmax - tmin)
         for rec in score_map.values():
             md = (rec["pt"].payload or {}).get("metadata") or {}
-            ts = md.get("ingested_at")
+            ts = md.get("last_modified_at") or md.get("ingested_at")
             if isinstance(ts, int):
                 norm = (ts - tmin) / span
                 rec_comp = RECENCY_WEIGHT * norm
