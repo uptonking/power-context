@@ -36,12 +36,86 @@ CODE_EXTS = {
     ".toml": "toml", ".ini": "ini", ".json": "json", ".tf": "terraform"
 }
 
-SKIP_DIRS = {".git", "node_modules", "dist", "build", ".venv", "venv", ".mypy_cache", "__pycache__"}
+# --- Exclusions (configurable) ---
+# Defaults can be overridden by .qdrantignore, env, or CLI
+_DEFAULT_EXCLUDE_DIRS = [
+    "/models", "/node_modules", "/dist", "/build", "/.venv", "/venv", "/__pycache__", "/.git",
+]
+_DEFAULT_EXCLUDE_FILES = [
+    "*.onnx", "*.bin", "*.safetensors", "tokenizer.json", "*.whl", "*.tar.gz",
+]
+
+
+def _env_truthy(val: str | None, default: bool) -> bool:
+    if val is None:
+        return default
+    return val.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def hash_id(text: str, path: str, start: int, end: int) -> int:
     h = hashlib.sha1(f"{path}:{start}-{end}\n{text}".encode("utf-8", errors="ignore")).hexdigest()
     return int(h[:16], 16)
+
+
+class _Excluder:
+    def __init__(self, root: Path):
+        self.root = root
+        self.dir_prefixes = []  # absolute like /path/sub
+        self.file_globs = []    # fnmatch patterns
+
+        # Defaults
+        use_defaults = _env_truthy(os.environ.get("QDRANT_DEFAULT_EXCLUDES"), True)
+        if use_defaults:
+            self.dir_prefixes.extend(_DEFAULT_EXCLUDE_DIRS)
+            self.file_globs.extend(_DEFAULT_EXCLUDE_FILES)
+
+        # .qdrantignore
+        ignore_file = os.environ.get("QDRANT_IGNORE_FILE", ".qdrantignore")
+        ig_path = (root / ignore_file)
+        if ig_path.exists():
+            for raw in ig_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                self._add_pattern(line)
+
+        # Extra excludes via env (comma separated)
+        extra = os.environ.get("QDRANT_EXCLUDES", "").strip()
+        if extra:
+            for pat in [p.strip() for p in extra.split(",") if p.strip()]:
+                self._add_pattern(pat)
+
+    def _add_pattern(self, pat: str):
+        # Normalize to leading-slash for prefixes
+        has_wild = any(ch in pat for ch in "*?[")
+        if pat.startswith("/") and not has_wild:
+            # Treat as directory prefix if no wildcard
+            self.dir_prefixes.append(pat.rstrip("/"))
+        else:
+            # Treat as file glob (match against relpath and basename)
+            self.file_globs.append(pat.lstrip("/"))
+
+    def exclude_dir(self, rel: str) -> bool:
+        # rel like /a/b
+        for pref in self.dir_prefixes:
+            if rel == pref or rel.startswith(pref + "/"):
+                return True
+        # Also allow dir name-only patterns in file_globs (e.g., node_modules)
+        base = rel.rsplit("/", 1)[-1]
+        for g in self.file_globs:
+            # Match bare dir names without wildcards
+            if g and all(ch not in g for ch in "*?[") and base == g:
+                return True
+        return False
+
+    def exclude_file(self, rel: str) -> bool:
+        import fnmatch
+        # Try matching whole rel path and basename
+        base = rel.rsplit("/", 1)[-1]
+        for g in self.file_globs:
+            if fnmatch.fnmatch(rel.lstrip("/"), g) or fnmatch.fnmatch(base, g):
+                return True
+        return False
 
 
 def iter_files(root: Path) -> Iterable[Path]:
@@ -50,13 +124,30 @@ def iter_files(root: Path) -> Iterable[Path]:
         if root.suffix.lower() in CODE_EXTS:
             yield root
         return
-    for p in root.rglob("*"):
-        if p.is_dir():
-            if p.name in SKIP_DIRS:
+
+    excl = _Excluder(root)
+    # Use os.walk to prune directories for performance
+    for dirpath, dirnames, filenames in os.walk(root):
+        # Compute rel path like /a/b from root
+        rel_dir = "/" + str(Path(dirpath).resolve().relative_to(root.resolve())).replace(os.sep, "/")
+        if rel_dir == "/.":
+            rel_dir = "/"
+        # Prune excluded directories in-place
+        keep = []
+        for d in dirnames:
+            rel = (rel_dir.rstrip("/") + "/" + d).replace("//", "/")
+            if excl.exclude_dir(rel):
                 continue
-            else:
+            keep.append(d)
+        dirnames[:] = keep
+
+        for f in filenames:
+            p = Path(dirpath) / f
+            if p.suffix.lower() not in CODE_EXTS:
                 continue
-        if p.is_file() and p.suffix.lower() in CODE_EXTS:
+            relf = (rel_dir.rstrip("/") + "/" + f).replace("//", "/")
+            if excl.exclude_file(relf):
+                continue
             yield p
 
 
@@ -658,7 +749,9 @@ def index_single_file(client: QdrantClient, model: TextEmbedding, collection: st
 
     symbols = _extract_symbols(language, text)
     imports, calls = _get_imports_calls(language, text)
-    chunks = chunk_lines(text)
+    CHUNK_LINES = int(os.environ.get("INDEX_CHUNK_LINES", "120") or 120)
+    CHUNK_OVERLAP = int(os.environ.get("INDEX_CHUNK_OVERLAP", "20") or 20)
+    chunks = chunk_lines(text, CHUNK_LINES, CHUNK_OVERLAP)
     batch_texts: List[str] = []
     batch_meta: List[Dict] = []
     batch_ids: List[int] = []
@@ -739,10 +832,18 @@ def index_repo(root: Path, qdrant_url: str, api_key: str, collection: str, model
     repo_tag = os.environ.get("REPO_NAME", "workspace")
 
 
-    batch_texts = []
-    batch_meta = []
-    batch_ids = []
-    BATCH_SIZE = 64
+    # Batch and scaling config (env/CLI overridable)
+    batch_texts: list[str] = []
+    batch_meta: list[dict] = []
+    batch_ids: list[int] = []
+    BATCH_SIZE = int(os.environ.get("INDEX_BATCH_SIZE", "64") or 64)
+    CHUNK_LINES = int(os.environ.get("INDEX_CHUNK_LINES", "120") or 120)
+    CHUNK_OVERLAP = int(os.environ.get("INDEX_CHUNK_OVERLAP", "20") or 20)
+    PROGRESS_EVERY = int(os.environ.get("INDEX_PROGRESS_EVERY", "200") or 200)
+
+    files_seen = 0
+    files_indexed = 0
+    points_indexed = 0
 
     def make_point(pid, vec, payload):
         # Use named vectors if collection is named
@@ -752,6 +853,7 @@ def index_repo(root: Path, qdrant_url: str, api_key: str, collection: str, model
             return models.PointStruct(id=pid, vector=vec, payload=payload)
 
     for file_path in iter_files(root):
+        files_seen += 1
         try:
             text = file_path.read_text(encoding="utf-8", errors="ignore")
         except Exception as e:
@@ -764,16 +866,19 @@ def index_repo(root: Path, qdrant_url: str, api_key: str, collection: str, model
         if skip_unchanged:
             prev = get_indexed_file_hash(client, collection, str(file_path))
             if prev and prev == file_hash:
-                print(f"Skipping unchanged file: {file_path}")
+                if PROGRESS_EVERY <= 0 and files_seen % 50 == 0:
+                    # minor heartbeat when no progress cadence configured
+                    print(f"... processed {files_seen} files (skipping unchanged)")
                 continue
 
         # Dedupe per-file by deleting previous points for this path (default)
         if dedupe:
             delete_points_by_path(client, collection, str(file_path))
 
+        files_indexed += 1
         symbols = _extract_symbols(language, text)
         imports, calls = _get_imports_calls(language, text)
-        chunks = chunk_lines(text)
+        chunks = chunk_lines(text, CHUNK_LINES, CHUNK_OVERLAP)
         for ch in chunks:
             info = build_information(language, file_path, ch["start"], ch["end"], ch["text"].splitlines()[0] if ch["text"] else "")
             kind, sym, sym_path = _choose_symbol_for_chunk(ch["start"], ch["end"], symbols)
@@ -799,18 +904,22 @@ def index_repo(root: Path, qdrant_url: str, api_key: str, collection: str, model
             batch_texts.append(info)
             batch_meta.append(payload)
             batch_ids.append(hash_id(ch["text"], str(file_path), ch["start"], ch["end"]))
+            points_indexed += 1
             if len(batch_texts) >= BATCH_SIZE:
                 vectors = embed_batch(model, batch_texts)
                 points = [make_point(i, v, m) for i, v, m in zip(batch_ids, vectors, batch_meta)]
                 upsert_points(client, collection, points)
                 batch_texts, batch_meta, batch_ids = [], [], []
 
+        if PROGRESS_EVERY > 0 and files_seen % PROGRESS_EVERY == 0:
+            print(f"Progress: files_seen={files_seen}, files_indexed={files_indexed}, chunks_indexed={points_indexed}")
+
     if batch_texts:
         vectors = embed_batch(model, batch_texts)
         points = [make_point(i, v, m) for i, v, m in zip(batch_ids, vectors, batch_meta)]
         upsert_points(client, collection, points)
 
-    print("Indexing complete.")
+    print(f"Indexing complete. files_seen={files_seen}, files_indexed={files_indexed}, chunks_indexed={points_indexed}")
 
 
 def main():
@@ -819,7 +928,38 @@ def main():
     parser.add_argument("--recreate", action="store_true", help="Recreate the collection before indexing")
     parser.add_argument("--no-dedupe", action="store_true", help="Do not delete existing points for each file before inserting")
     parser.add_argument("--no-skip-unchanged", action="store_true", help="Do not skip files whose content hash matches existing index")
+    # Exclusion controls
+    parser.add_argument("--ignore-file", type=str, default=None, help="Path to a .qdrantignore-style file of patterns to exclude")
+    parser.add_argument("--no-default-excludes", action="store_true", help="Disable default exclusions (models, node_modules, build, venv, .git, etc.)")
+    parser.add_argument("--exclude", action="append", default=None, help="Additional exclude pattern(s); can be used multiple times or comma-separated")
+    # Scaling controls
+    parser.add_argument("--batch-size", type=int, default=None, help="Embedding/upsert batch size (default 64)")
+    parser.add_argument("--chunk-lines", type=int, default=None, help="Max lines per chunk (default 120)")
+    parser.add_argument("--chunk-overlap", type=int, default=None, help="Overlap lines between chunks (default 20)")
+    parser.add_argument("--progress-every", type=int, default=None, help="Print progress every N files (default 200; 0 disables)")
+
     args = parser.parse_args()
+
+    # Map CLI overrides to env so downstream helpers pick them up
+    if args.ignore_file:
+        os.environ["QDRANT_IGNORE_FILE"] = args.ignore_file
+    if args.no_default_excludes:
+        os.environ["QDRANT_DEFAULT_EXCLUDES"] = "0"
+    if args.exclude:
+        # allow comma-separated and repeated flags
+        parts = []
+        for e in args.exclude:
+            parts.extend([p.strip() for p in str(e).split(",") if p.strip()])
+        if parts:
+            os.environ["QDRANT_EXCLUDES"] = ",".join(parts)
+    if args.batch_size is not None:
+        os.environ["INDEX_BATCH_SIZE"] = str(args.batch_size)
+    if args.chunk_lines is not None:
+        os.environ["INDEX_CHUNK_LINES"] = str(args.chunk_lines)
+    if args.chunk_overlap is not None:
+        os.environ["INDEX_CHUNK_OVERLAP"] = str(args.chunk_overlap)
+    if args.progress_every is not None:
+        os.environ["INDEX_PROGRESS_EVERY"] = str(args.progress_every)
 
     qdrant_url = os.environ.get("QDRANT_URL", "http://localhost:6333")
     api_key = os.environ.get("QDRANT_API_KEY")

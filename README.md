@@ -149,6 +149,16 @@ curl -I http://localhost:8000/sse
 
 Or, since this stack already exposes SSE, you can configure the client to use `http://localhost:8000/sse` directly (recommended for Cursor/Windsurf).
 
+### MCP `qdrant-find` optional filters
+
+Most MCP clients let you pass structured tool arguments. The Qdrant MCP server supports applying server-side filters when these keys are present:
+- `language`: value matches `metadata.language`
+- `path_prefix`: value matches `metadata.path_prefix` (e.g., `/work/src`)
+- `kind`: value matches `metadata.kind` (e.g., `function`, `class`, `method`)
+
+Tip: Combine multiple query phrasings and apply these filters for best precision on large codebases.
+
+
 ## Notes
 
 ## Index your repository (code search quality)
@@ -169,6 +179,44 @@ Notes:
 - Skips typical build/venv directories.
 - Populates `metadata.kind`, `metadata.symbol`, and `metadata.symbol_path` for Python/JS/TS/Go/Java/Rust/Terraform (best-effort), per chunk.
 - Uses the same collection as the MCP server.
+
+### Exclusions (.qdrantignore) and defaults
+
+- The indexer now supports a `.qdrantignore` file at the repo root (similar to `.gitignore`). Use it to exclude directories/files from indexing.
+- Sensible defaults are excluded automatically (overridable): `/models`, `/node_modules`, `/dist`, `/build`, `/.venv`, `/venv`, `/__pycache__`, `/.git`, and files matching `*.onnx`, `*.bin`, `*.safetensors`, `tokenizer.json`, `*.whl`, `*.tar.gz`.
+- Override via env or flags:
+  - Env: `QDRANT_DEFAULT_EXCLUDES=0` to disable defaults; `QDRANT_IGNORE_FILE=.myignore`; `QDRANT_EXCLUDES='tokenizer.json,*.onnx,/third_party'`
+  - CLI examples:
+    - `docker compose run --rm indexer --root /work --ignore-file .qdrantignore`
+    - `docker compose run --rm indexer --root /work --no-default-excludes --exclude '/vendor' --exclude '*.bin'`
+
+### Scaling and tuning (small → large codebases)
+
+- Chunking and batching are tunable via env or flags:
+  - `INDEX_CHUNK_LINES` (default 120), `INDEX_CHUNK_OVERLAP` (default 20)
+  - `INDEX_BATCH_SIZE` (default 64)
+  - `INDEX_PROGRESS_EVERY` (default 200 files; 0 disables)
+- CLI equivalents: `--chunk-lines`, `--chunk-overlap`, `--batch-size`, `--progress-every`.
+- Recommendations:
+  - Small repos (<100 files): chunk 80–120, overlap 16–24, batch-size 32–64
+  - Medium (100s–1k files): chunk 120–160, overlap ~20, batch-size 64–128
+  - Large monorepos (1k+): start with defaults; consider `INDEX_PROGRESS_EVERY=200` for visibility and `INDEX_BATCH_SIZE=128` if RAM allows
+
+### MCP search filtering (language, path, kind)
+
+- The indexer creates payload indexes for efficient filtering.
+- When querying (via MCP client or scripts), you can filter by:
+  - `metadata.language` (e.g., python, typescript, javascript, go, rust)
+  - `metadata.path_prefix` (e.g., `/work/src`)
+  - `metadata.kind` (e.g., function, class, method)
+- Example: in the provided reranker script you can do:
+
+```bash
+make rerank ARGS="--language python --under /work/scripts"
+```
+
+- Direct Qdrant filter example is shown below; most MCP clients allow passing tool args that map to server-side filters. If your client supports adding structured args to `qdrant-find`, prefer these filters to reduce noise.
+
 
 ### Payload indexes (created for you)
 
