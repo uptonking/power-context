@@ -337,13 +337,13 @@ def main():
         u = str(u).strip()
         # remove trailing slashes and collapse
         u = "/".join([p for p in u.replace("\\", "/").split("/") if p])
+        if not u:
+            return None
         if not u.startswith("/"):
-            u = "/work/" + u
-        else:
-            # ensure it starts with /work when pointing into repo mount
-            if not u.startswith("/work/") and u in {"work", "./work"}:
-                u = "/work"
-
+            return "/work/" + u
+        # absolute path provided; normalize into /work mount if different root
+        if not u.startswith("/work/"):
+            return "/work/" + u.lstrip("/")
         return u
 
     eff_under = _norm_under(eff_under)

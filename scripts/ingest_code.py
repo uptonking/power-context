@@ -1,3 +1,32 @@
+# Helper: detect repository name automatically (no REPO_NAME env needed)
+def _detect_repo_name_from_path(path: Path) -> str:
+    try:
+        import subprocess, os as _os
+        base = path if path.is_dir() else path.parent
+        r = subprocess.run(["git", "-C", str(base), "rev-parse", "--show-toplevel"], capture_output=True, text=True)
+        top = r.stdout.strip()
+        if r.returncode == 0 and top:
+            return Path(top).name or "workspace"
+    except Exception:
+        pass
+    # Fallback: walk up to find a .git folder
+    try:
+        cur = path if path.is_dir() else path.parent
+        for p in [cur] + list(cur.parents):
+            try:
+                if (p / ".git").exists():
+                    return p.name or "workspace"
+            except Exception:
+                continue
+    except Exception:
+        pass
+    # Last resort: directory name
+    try:
+        return (path if path.is_dir() else path.parent).name or "workspace"
+    except Exception:
+        return "workspace"
+
+
 #!/usr/bin/env python3
 import os
 import sys
@@ -938,7 +967,7 @@ def index_single_file(client: QdrantClient, model: TextEmbedding, collection: st
     language = detect_language(file_path)
     file_hash = hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest()
 
-    repo_tag = os.environ.get("REPO_NAME", "workspace")
+    repo_tag = _detect_repo_name_from_path(file_path)
 
     if skip_unchanged:
         prev = get_indexed_file_hash(client, collection, str(file_path))
@@ -1042,8 +1071,8 @@ def index_repo(root: Path, qdrant_url: str, api_key: str, collection: str, model
 
     # Ensure useful payload indexes exist (idempotent)
     ensure_payload_indexes(client, collection)
-    # Repo tag for filtering (optional). Set REPO_NAME to customize.
-    repo_tag = os.environ.get("REPO_NAME", "workspace")
+    # Repo tag for filtering: auto-detect from git or folder name
+    repo_tag = _detect_repo_name_from_path(root)
 
 
     # Batch and scaling config (env/CLI overridable)

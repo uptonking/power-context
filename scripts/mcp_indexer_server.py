@@ -44,11 +44,22 @@ mcp = FastMCP(APP_NAME)
 
 def _run(cmd: list[str], env: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
+    # Configurable capture size (increase default; allow override via env)
+    max_cap = int(os.environ.get("FASTMCP_MAX_CAPTURE", "16000") or 16000)
+    def _cap(s: str) -> str:
+        if not s:
+            return s
+        if len(s) <= max_cap:
+            return s
+        # Keep head and tail slices to preserve early and late logs
+        head = s[: min(2000, max_cap // 4)]
+        tail = s[-(max_cap - len(head)) :]
+        return head + "\n...[truncated]...\n" + tail
     return {
         "ok": proc.returncode == 0,
         "code": proc.returncode,
-        "stdout": proc.stdout[-4000:],  # trim to avoid giant payloads
-        "stderr": proc.stderr[-4000:],
+        "stdout": _cap(proc.stdout),
+        "stderr": _cap(proc.stderr),
     }
 
 
@@ -185,6 +196,7 @@ async def repo_search(
     rerank_return_m: int = 12,
     rerank_timeout_ms: int = 120,
     highlight_snippet: bool = True,
+    collection: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Zero-config code search over the mounted repo via Qdrant using hybrid_search defaults.
     Args:
@@ -218,7 +230,7 @@ async def repo_search(
 
     env = os.environ.copy()
     env["QDRANT_URL"] = QDRANT_URL
-    env["COLLECTION_NAME"] = DEFAULT_COLLECTION
+    env["COLLECTION_NAME"] = (collection or DEFAULT_COLLECTION)
 
     # Try hybrid search first (JSONL output) unless rerank path is requested exclusively
     cmd = ["python", "/work/scripts/hybrid_search.py", "--limit", str(int(limit)), "--json"]
@@ -325,9 +337,10 @@ async def repo_search(
             "rerank_top_n": int(rerank_top_n),
             "rerank_return_m": int(rerank_return_m),
             "rerank_timeout_ms": int(rerank_timeout_ms),
-            "collection": DEFAULT_COLLECTION,
+            "collection": (collection or DEFAULT_COLLECTION),
         },
         "results": results,
+        "used_rerank": bool(used_rerank),
         **res,
     }
 
