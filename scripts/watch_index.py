@@ -105,21 +105,32 @@ def main():
     print(f"Watch mode: root={ROOT} qdrant={QDRANT_URL} collection={COLLECTION} model={MODEL}")
 
     client = QdrantClient(url=QDRANT_URL)
-    model = TextEmbedding(model_name=MODEL)
 
-    # Determine vector name
+    # Determine vector name from collection config if present; fallback to sanitizer
     try:
         info = client.get_collection(COLLECTION)
         cfg = info.config.params.vectors
         if isinstance(cfg, dict) and cfg:
             vector_name = list(cfg.keys())[0]
+            # Attempt to derive dimension from vector params
+            vec_params = info.config.params.vectors.get(vector_name)
+            dim = getattr(vec_params, "size", None) or getattr(vec_params, "dim", None)
         else:
             vector_name = idx._sanitize_vector_name(MODEL)
+            dim = None
     except Exception:
         vector_name = idx._sanitize_vector_name(MODEL)
+        dim = None
+
+    # Only load the model if we still don't know the dimension
+    if dim is None:
+        model = TextEmbedding(model_name=MODEL)
+        dim = len(next(model.embed(["dimension probe"])) )
+    else:
+        # Lazily create model on first change to avoid startup cost
+        model = None
 
     # Ensure collection + payload indexes exist
-    dim = len(next(model.embed(["dimension probe"])) )
     try:
         idx.ensure_collection(client, COLLECTION, dim, vector_name)
     except Exception:
@@ -148,6 +159,11 @@ def _process_paths(paths, client, model, vector_name: str):
     for p in sorted(set(Path(x) for x in paths)):
         if not p.exists():
             continue
+        # Lazily instantiate model if needed
+        if model is None:
+            from fastembed import TextEmbedding
+            mname = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
+            model = TextEmbedding(model_name=mname)
         ok = idx.index_single_file(client, model, COLLECTION, vector_name, p, dedupe=True, skip_unchanged=False)
         status = "indexed" if ok else "skipped"
         print(f"[{status}] {p}")

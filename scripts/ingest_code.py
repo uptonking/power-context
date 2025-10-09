@@ -324,21 +324,7 @@ def chunk_semantic(text: str, language: str, max_lines: int = 120, overlap: int 
     return chunks
 
 
-def _sanitize_vector_name(model_name: str) -> str:
-    # Derive a stable vector name similar to MCP server behavior
-    name = model_name.strip().lower()
-    # Common fastembed alias mapping for MiniLM
-    if name in ("sentence-transformers/all-minilm-l6-v2", "sentence-transformers/all-minilm-l-6-v2", "sentence-transformers/all-minilm-l6-v2"):
-        return "fast-all-minilm-l6-v2"
-    # Common fastembed alias mapping for BGE base
-    if "bge-base-en-v1.5" in name:
-        return "fast-bge-base-en-v1.5"
-    # General sanitization
-    for ch in ["/", ".", " ", "_"]:
-        name = name.replace(ch, "-")
-    while "--" in name:
-        name = name.replace("--", "-")
-    return name
+from scripts.utils import sanitize_vector_name as _sanitize_vector_name
 
 
 def ensure_collection(client: QdrantClient, name: str, dim: int, vector_name: str):

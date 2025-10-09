@@ -19,21 +19,7 @@ LEX_VECTOR_NAME = os.environ.get("LEX_VECTOR_NAME", "lex")
 LEX_VECTOR_DIM = int(os.environ.get("LEX_VECTOR_DIM", "4096") or 4096)
 
 
-def _sanitize_vector_name(model_name: str) -> str:
-    name = model_name.strip().lower()
-    if name in (
-        "sentence-transformers/all-minilm-l6-v2",
-        "sentence-transformers/all-minilm-l-6-v2",
-        "sentence-transformers/all-minilm-l6-v2",
-    ):
-        return "fast-all-minilm-l6-v2"
-    if "bge-base-en-v1.5" in name:
-        return "fast-bge-base-en-v1.5"
-    for ch in ["/", ".", " ", "_"]:
-        name = name.replace(ch, "-")
-    while "--" in name:
-        name = name.replace("--", "-")
-    return name
+from scripts.utils import sanitize_vector_name as _sanitize_vector_name
 
 
 RRF_K = int(os.environ.get("HYBRID_RRF_K", "60") or 60)
