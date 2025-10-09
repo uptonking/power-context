@@ -34,6 +34,25 @@ index: ## index code into Qdrant without dropping the collection
 reindex: ## recreate collection then index from scratch (will remove existing points!)
 	docker compose run --rm indexer --root /work --recreate
 
+# Index an arbitrary local path without cloning into this repo
+index-path: ## index an arbitrary repo: make index-path REPO_PATH=/abs/path [RECREATE=1] [REPO_NAME=name] [COLLECTION=name]
+	@if [ -z "$(REPO_PATH)" ]; then \
+		echo "Usage: make index-path REPO_PATH=/abs/path [RECREATE=1] [REPO_NAME=name] [COLLECTION=name]"; exit 1; \
+	fi
+	@NAME=$${REPO_NAME:-$$(basename "$(REPO_PATH)")}; \
+	COLL=$${COLLECTION:-$$NAME}; \
+	HOST_INDEX_PATH="$(REPO_PATH)" COLLECTION_NAME="$$COLL" REPO_NAME="$$NAME" \
+	docker compose run --rm indexer --root /work $${RECREATE:+--recreate}
+
+# Index the current working directory quickly
+index-here: ## index the current directory: make index-here [RECREATE=1] [REPO_NAME=name] [COLLECTION=name]
+	@RP=$$(pwd); \
+	NAME=$${REPO_NAME:-$$(basename "$$RP")}; \
+	COLL=$${COLLECTION:-$$NAME}; \
+	HOST_INDEX_PATH="$$RP" COLLECTION_NAME="$$COLL" REPO_NAME="$$NAME" \
+	docker compose run --rm indexer --root /work $${RECREATE:+--recreate}
+
+
 watch: ## watch mode: reindex changed files on save (Ctrl+C to stop)
 	docker compose run --rm --entrypoint python indexer /work/scripts/watch_index.py
 
@@ -64,6 +83,13 @@ bootstrap: env up ## one-shot: up -> wait -> index -> warm -> health
 
 history: ## ingest Git history (messages + file lists)
 	docker compose run --rm --entrypoint python indexer /work/scripts/ingest_history.py --max-commits 200
+
+prune-path: ## prune a repo by path: make prune-path REPO_PATH=/abs/path
+	@if [ -z "$(REPO_PATH)" ]; then \
+		echo "Usage: make prune-path REPO_PATH=/abs/path"; exit 1; \
+	fi
+	HOST_INDEX_PATH="$(REPO_PATH)" PRUNE_ROOT=/work \
+	docker compose run --rm --entrypoint python indexer /work/scripts/prune.py
 
 rerank-local: ## local cross-encoder reranker (requires RERANKER_ONNX_PATH, RERANKER_TOKENIZER_PATH)
 	@if [ -z "$(RERANKER_ONNX_PATH)" ] || [ -z "$(RERANKER_TOKENIZER_PATH)" ]; then \

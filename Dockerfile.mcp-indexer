@@ -1,0 +1,23 @@
+# Companion MCP server that exposes indexing/pruning/list tools over SSE
+# Reuse the same deps as the indexer image so we can call the scripts directly.
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+# OS deps (git for history if we extend later)
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Python deps: same as indexer + fastmcp for SSE MCP tooling
+RUN pip install --no-cache-dir qdrant-client fastembed watchdog onnxruntime tokenizers \
+    tree_sitter tree_sitter_languages fastmcp
+
+# Expose SSE port for this companion server
+EXPOSE 8001
+
+WORKDIR /work
+
+# Default command runs the companion MCP server
+CMD ["python", "/work/scripts/mcp_indexer_server.py"]
+

@@ -769,6 +769,8 @@ def _extract_symbols(language: str, text: str) -> List[_Sym]:
         return _extract_symbols_shell(text)
     if language == "yaml":
         return _extract_symbols_yaml(text)
+    if language == "powershell":
+        return _extract_symbols_powershell(text)
     return []
 
 

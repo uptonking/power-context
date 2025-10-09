@@ -118,6 +118,31 @@ curl -I http://localhost:8000/sse
 
 ```jsonc
 {
+
+### Index any local repo without cloning into this folder
+
+You can mount any local path as the index root at runtime via HOST_INDEX_PATH.
+
+- Index an arbitrary path (auto-derives REPO_NAME and COLLECTION from folder name):
+
+```
+make index-path REPO_PATH=/absolute/path/to/repo [RECREATE=1]
+```
+
+- Index the current directory quickly:
+
+```
+make index-here [RECREATE=1]
+```
+
+- Prune by path (removes points for missing files or hash mismatches):
+
+```
+make prune-path REPO_PATH=/absolute/path/to/repo
+```
+
+These commands do not move or copy your repo; they bind‑mount the target path into the indexer container as /work.
+
   "qdrant": {
     "command": "uvx",
     "args": ["mcp-server-qdrant"],
@@ -173,6 +198,26 @@ make index
 
 # Full reindex (drops existing points in the collection)
 make reindex
+
+### Companion MCP: Index/Prune/List (Option B)
+
+A second MCP server runs alongside the search MCP and exposes tools:
+- qdrant-list: list collections
+- qdrant-index: index the mounted path (/work or subdir)
+- qdrant-prune: prune stale points for the mounted path
+
+Configuration
+- FASTMCP_INDEXER_PORT (default 8001)
+- HOST_INDEX_PATH bind-mounts the target repo into /work (read-only)
+
+Add to your agent as a separate MCP endpoint (SSE):
+- URL: http://localhost:8001/sse
+
+Example calls (semantics vary by client):
+- qdrant-index with args {"subdir":"scripts","recreate":true}
+- qdrant-list with no args
+- qdrant-prune with no args
+
 ```
 
 Notes:

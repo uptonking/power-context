@@ -30,6 +30,26 @@ services:
     ports:
       - "8000:8000"
 
+  mcp_indexer:
+    build:
+      context: .
+      dockerfile: Dockerfile.mcp-indexer
+    container_name: mcp-server-qdrant-indexer
+    depends_on:
+      - qdrant
+    env_file:
+      - .env
+    environment:
+      - FASTMCP_HOST=${FASTMCP_HOST}
+      - FASTMCP_INDEXER_PORT=${FASTMCP_INDEXER_PORT}
+      - QDRANT_URL=${QDRANT_URL}
+      - COLLECTION_NAME=${COLLECTION_NAME}
+      - REPO_NAME=${REPO_NAME}
+    ports:
+      - "${FASTMCP_INDEXER_PORT:-8001}:8001"
+    volumes:
+      - ${HOST_INDEX_PATH:-.}:/work:ro
+
   indexer:
     build:
       context: .
@@ -45,7 +65,7 @@ services:
       - EMBEDDING_MODEL=${EMBEDDING_MODEL}
     working_dir: /work
     volumes:
-      - ./:/work:ro
+      - ${HOST_INDEX_PATH:-.}:/work:ro
     entrypoint: ["python", "scripts/ingest_code.py"]
 
 volumes:
