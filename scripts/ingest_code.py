@@ -456,6 +456,33 @@ def _extract_symbols_java(text: str) -> List[_Sym]:
     return syms
 
 
+def _extract_symbols_shell(text: str) -> List[_Sym]:
+    lines = text.splitlines()
+    syms: List[_Sym] = []
+    for idx, line in enumerate(lines, 1):
+        m = re.match(r"^\s*([A-Za-z_][\w]*)\s*\(\)\s*\{", line)
+        if m:
+            syms.append(_Sym(kind="function", name=m.group(1), start=idx, end=idx))
+            continue
+        m = re.match(r"^\s*function\s+([A-Za-z_][\w]*)\s*\{", line)
+        if m:
+            syms.append(_Sym(kind="function", name=m.group(1), start=idx, end=idx))
+            continue
+    return syms
+
+
+def _extract_symbols_yaml(text: str) -> List[_Sym]:
+    lines = text.splitlines()
+    syms: List[_Sym] = []
+    for idx, line in enumerate(lines, 1):
+        # treat Markdown-style headings in YAML files as anchors
+        m = re.match(r"^#\s+(.+)$", line)
+        if m:
+            syms.append(_Sym(kind="heading", name=m.group(1).strip(), start=idx, end=idx))
+    return syms
+
+
+
 def _extract_symbols_rust(text: str) -> List[_Sym]:
     lines = text.splitlines()
     syms: List[_Sym] = []
