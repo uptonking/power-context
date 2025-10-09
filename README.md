@@ -11,6 +11,8 @@
   - Health check: `make health` (verifies collection vector name/dim, HNSW, and filtered queries with kind/symbol)
   - Hybrid search: `make hybrid` (dense + lexical bump with RRF)
 - Bootstrap all services + index + checks: `make bootstrap`
+- Discover commands: `make help` lists all targets and descriptions
+
 - Ingest Git history: `make history` (messages + file lists)
   - If the repo has no local commits yet, the history ingester will shallow-fetch from the remote (default: origin) and use its HEAD. Configure with `--remote` and `--fetch-depth`.
 - Local reranker (ONNX): `make rerank-local` (set RERANKER_ONNX_PATH and RERANKER_TOKENIZER_PATH)
@@ -196,6 +198,14 @@ Notes:
   - `INDEX_CHUNK_LINES` (default 120), `INDEX_CHUNK_OVERLAP` (default 20)
   - `INDEX_BATCH_SIZE` (default 64)
   - `INDEX_PROGRESS_EVERY` (default 200 files; 0 disables)
+### Prune stale points (optional)
+
+If files were deleted or significantly changed outside the indexer, remove stale points safely:
+
+```bash
+make prune
+```
+
 - CLI equivalents: `--chunk-lines`, `--chunk-overlap`, `--batch-size`, `--progress-every`.
 - Recommendations:
   - Small repos (<100 files): chunk 80–120, overlap 16–24, batch-size 32–64
@@ -229,7 +239,9 @@ We create payload indexes to accelerate filtered searches:
 - `metadata.symbol_path` (keyword)
 - `metadata.imports` (keyword)
 - `metadata.calls` (keyword)
-- Git history fields available in payload: `commit_id`, `author_name`, `author_email`, `authored_date`, `message`, `files`
+- `metadata.file_hash` (keyword)
+- `metadata.ingested_at` (keyword)
+- Git history fields available in payload: `commit_id`, `author_name`, `authored_date`, `message`, `files`
 
 This enables fast filters like “only Python results under scripts/”. Example (Qdrant REST):
 

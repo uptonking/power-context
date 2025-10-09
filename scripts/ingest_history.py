@@ -5,6 +5,8 @@ import subprocess
 import shlex
 import hashlib
 from typing import List, Dict, Any
+import re
+import time
 
 from qdrant_client import QdrantClient, models
 from fastembed import TextEmbedding
@@ -85,6 +87,9 @@ def list_commits(args) -> List[str]:
     return commits
 
 
+def _redact_emails(text: str) -> str:
+    return re.sub(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", "<redacted>", text or "")
+
 def commit_metadata(commit: str) -> Dict[str, Any]:
     fmt = "%H%x1f%an%x1f%ae%x1f%ad%x1f%s%x1f%b"
     out = run(f"git show -s --format={fmt} {commit}")
@@ -92,12 +97,15 @@ def commit_metadata(commit: str) -> Dict[str, Any]:
     sha, an, ae, ad, subj, body = (parts + [""] * 6)[:6]
     files_out = run(f"git diff-tree --no-commit-id --name-only -r {commit}")
     files = [f for f in files_out.splitlines() if f]
+    message = _redact_emails((subj + ("\n" + body if body else "")).strip())
+    if len(message) > 2000:
+        message = message[:2000] + "…"
     return {
         "commit_id": sha,
         "author_name": an,
-        "author_email": ae,
+        # email stripped for privacy
         "authored_date": ad,
-        "message": (subj + ("\n" + body if body else "")).strip(),
+        "message": message,
         "files": files,
     }
 
@@ -150,18 +158,18 @@ def main():
             "information": text[:512],
             "metadata": {
                 "language": "git",
-                "kind": "commit",
+                "kind": "git_message",
                 "symbol": md["commit_id"],
                 "symbol_path": md["commit_id"],
                 "repo": REPO_NAME,
                 "commit_id": md["commit_id"],
                 "author_name": md["author_name"],
-                "author_email": md["author_email"],
                 "authored_date": md["authored_date"],
                 "message": md["message"],
                 "files": md["files"],
                 "path": ".git",
                 "path_prefix": ".git",
+                "ingested_at": int(time.time()),
             },
         }
         pid = stable_id(md["commit_id"])  # deterministic per-commit

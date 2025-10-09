@@ -29,7 +29,12 @@ def _sanitize_vector_name(model_name: str) -> str:
     return name
 
 
-def rrf(rank: int, k: int = 60) -> float:
+RRF_K = int(os.environ.get("HYBRID_RRF_K", "60") or 60)
+DENSE_WEIGHT = float(os.environ.get("HYBRID_DENSE_WEIGHT", "1.0") or 1.0)
+LEXICAL_WEIGHT = float(os.environ.get("HYBRID_LEXICAL_WEIGHT", "0.25") or 0.25)
+EF_SEARCH = int(os.environ.get("QDRANT_EF_SEARCH", "128") or 128)
+
+def rrf(rank: int, k: int = RRF_K) -> float:
     return 1.0 / (k + rank)
 
 
@@ -58,7 +63,7 @@ def dense_query(client: QdrantClient, vec_name: str, v: List[float], flt, per_qu
             query=v,
             using=vec_name,
             query_filter=flt,
-            search_params=models.SearchParams(hnsw_ef=128),
+            search_params=models.SearchParams(hnsw_ef=EF_SEARCH),
             limit=per_query,
             with_payload=True,
         )
@@ -79,6 +84,7 @@ def main():
     ap.add_argument("--query", "-q", action="append", required=True, help="One or more query strings (multi-query)")
     ap.add_argument("--language", type=str, default=None)
     ap.add_argument("--under", type=str, default=None)
+    ap.add_argument("--kind", type=str, default=None)
     ap.add_argument("--limit", type=int, default=10)
     ap.add_argument("--per-query", type=int, default=24)
     args = ap.parse_args()
@@ -94,24 +100,26 @@ def main():
         must.append(models.FieldCondition(key="metadata.language", match=models.MatchValue(value=args.language)))
     if args.under:
         must.append(models.FieldCondition(key="metadata.path_prefix", match=models.MatchValue(value=args.under)))
+    if args.kind:
+        must.append(models.FieldCondition(key="metadata.kind", match=models.MatchValue(value=args.kind)))
     flt = models.Filter(must=must) if must else None
 
     # Dense results per query
     embedded = [vec.tolist() for vec in model.embed(args.query)]
     result_sets: List[List[Any]] = [dense_query(client, vec_name, v, flt, args.per_query) for v in embedded]
 
-    # RRF fusion
+    # RRF fusion (weighted)
     score_map: Dict[str, Dict[str, Any]] = {}
     for res in result_sets:
         for rank, p in enumerate(res, 1):
             pid = str(p.id)
             score_map.setdefault(pid, {"pt": p, "s": 0.0})
-            score_map[pid]["s"] += rrf(rank)
+            score_map[pid]["s"] += DENSE_WEIGHT * rrf(rank)
 
-    # Lexical bump
+    # Lexical bump (weighted)
     for pid, rec in list(score_map.items()):
         md = (rec["pt"].payload or {}).get("metadata") or {}
-        rec["s"] += 0.25 * lexical_score(args.query, md)
+        rec["s"] += LEXICAL_WEIGHT * lexical_score(args.query, md)
 
     # Rank and print
     merged = sorted(score_map.values(), key=lambda x: x["s"], reverse=True)[: args.limit]

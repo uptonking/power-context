@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import re
 import ast
+import time
 from pathlib import Path
 from typing import List, Dict, Iterable
 
@@ -23,8 +24,15 @@ except Exception:  # pragma: no cover
     _TS_AVAILABLE = False
 
 
+_TS_WARNED = False
+
 def _use_tree_sitter() -> bool:
-    return _TS_AVAILABLE and os.environ.get("USE_TREE_SITTER", "").lower() in {"1", "true", "yes", "on"}
+    global _TS_WARNED
+    want = os.environ.get("USE_TREE_SITTER", "").lower() in {"1", "true", "yes", "on"}
+    if want and not _TS_AVAILABLE and not _TS_WARNED:
+        print("[WARN] USE_TREE_SITTER=1 but tree-sitter libs not available; falling back to regex heuristics")
+        _TS_WARNED = True
+    return _TS_AVAILABLE and want
 
 CODE_EXTS = {
     ".py": "python", ".js": "javascript", ".ts": "typescript", ".tsx": "typescript",
@@ -228,6 +236,8 @@ def ensure_payload_indexes(client: QdrantClient, collection: str):
         "metadata.symbol_path",
         "metadata.imports",
         "metadata.calls",
+        "metadata.file_hash",
+        "metadata.ingested_at",
     ):
         try:
             client.create_payload_index(
@@ -782,6 +792,7 @@ def index_single_file(client: QdrantClient, model: TextEmbedding, collection: st
                 "file_hash": file_hash,
                 "imports": imports,
                 "calls": calls,
+                "ingested_at": int(time.time()),
             },
         }
         batch_texts.append(info)
@@ -899,6 +910,7 @@ def index_repo(root: Path, qdrant_url: str, api_key: str, collection: str, model
                     "file_hash": file_hash,
                     "imports": imports,
                     "calls": calls,
+                    "ingested_at": int(time.time()),
                 },
             }
             batch_texts.append(info)
