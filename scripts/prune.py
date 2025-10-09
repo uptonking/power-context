@@ -43,7 +43,7 @@ def main():
             with_payload=True,
             limit=256,
             offset=next_page,
-            query_filter=None,
+            scroll_filter=None,
         )
         if not points:
             break
