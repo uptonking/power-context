@@ -122,6 +122,8 @@ def parse_query_dsl(queries: List[str]) -> Tuple[List[str], Dict[str, str]]:
                 extracted["not"] = val
             elif key in ("case",):
                 extracted["case"] = val
+            elif key in ("repo",):
+                extracted["repo"] = val
             else:
                 extracted[key] = val
             parts.append(q[last:m.start()].strip())
@@ -326,6 +328,7 @@ def main():
     eff_ext = dsl.get("ext")
     eff_not = dsl.get("not")
     eff_case = dsl.get("case")
+    eff_repo = dsl.get("repo")
 
     # Normalize 'under' to absolute path_prefix used in payload (defaults to /work/<rel>)
     def _norm_under(u: str | None) -> str | None:
@@ -350,6 +353,8 @@ def main():
     must = []
     if eff_language:
         must.append(models.FieldCondition(key="metadata.language", match=models.MatchValue(value=eff_language)))
+    if eff_repo:
+        must.append(models.FieldCondition(key="metadata.repo", match=models.MatchValue(value=eff_repo)))
     if eff_under:
         must.append(models.FieldCondition(key="metadata.path_prefix", match=models.MatchValue(value=eff_under)))
     # If ext: was provided without an explicit language, infer language from extension
