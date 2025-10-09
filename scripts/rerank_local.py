@@ -21,13 +21,49 @@ API_KEY = os.environ.get("QDRANT_API_KEY")
 
 RERANKER_ONNX_PATH = os.environ.get("RERANKER_ONNX_PATH", "")
 RERANKER_TOKENIZER_PATH = os.environ.get("RERANKER_TOKENIZER_PATH", "")
-
+RERANK_MAX_TOKENS = int(os.environ.get("RERANK_MAX_TOKENS", "512") or 512)
+EF_SEARCH = int(os.environ.get("EF_SEARCH", "128") or 128)
 
 from scripts.utils import sanitize_vector_name as _sanitize_vector_name
 
 
-def dense_results(client: QdrantClient, vec_name: str, query: str, flt, topk: int) -> List[Any]:
-    model = TextEmbedding(model_name=MODEL_NAME)
+def _norm_under(u: str | None) -> str | None:
+    if not u:
+        return None
+    u = str(u).strip().replace("\\", "/")
+    u = "/".join([p for p in u.split("/") if p])
+    if not u:
+        return None
+    if not u.startswith("/"):
+        return "/work/" + u
+    if not u.startswith("/work/"):
+        return "/work/" + u.lstrip("/")
+    return u
+
+
+def _select_dense_vector_name(client: QdrantClient, collection: str, model: TextEmbedding, dim: int) -> str:
+    try:
+        info = client.get_collection(collection)
+        cfg = info.config.params.vectors
+        if isinstance(cfg, dict) and cfg:
+            # Prefer name whose size matches embedding dim
+            for name, params in cfg.items():
+                psize = getattr(params, "size", None) or getattr(params, "dim", None)
+                if psize and int(psize) == int(dim):
+                    return name
+            # If LEX exists, pick the other name as dense
+            if hasattr(models, "VectorParams"):
+                pass
+            if "lex" in cfg:
+                for name in cfg.keys():
+                    if name != "lex":
+                        return name
+    except Exception:
+        pass
+    return _sanitize_vector_name(MODEL_NAME)
+
+
+def dense_results(client: QdrantClient, model: TextEmbedding, vec_name: str, query: str, flt, topk: int) -> List[Any]:
     vec = next(model.embed([query])).tolist()
     try:
         qp = client.query_points(
@@ -35,7 +71,7 @@ def dense_results(client: QdrantClient, vec_name: str, query: str, flt, topk: in
             query=vec,
             using=vec_name,
             query_filter=flt,
-            search_params=models.SearchParams(hnsw_ef=128),
+            search_params=models.SearchParams(hnsw_ef=EF_SEARCH),
             limit=topk,
             with_payload=True,
         )
@@ -55,10 +91,13 @@ def prepare_pairs(query: str, points: List[Any]) -> List[str]:
     pairs = []
     for p in points:
         md = (p.payload or {}).get("metadata") or {}
-        # prefer symbol_path or symbol + first lines of code
-        snippet = md.get("symbol_path") or md.get("symbol") or ""
-        code = (md.get("code") or "")[:500]
-        txt = f"{snippet}\n{code}" if code else snippet
+        path = md.get("path") or ""
+        lang = md.get("language") or ""
+        kind = md.get("kind") or ""
+        symp = md.get("symbol_path") or md.get("symbol") or ""
+        code = (md.get("code") or "")[:600]
+        header = f"[{lang}/{kind}] {symp} — {path}".strip()
+        txt = (header + ("\n" + code if code else "")).strip()
         if not txt:
             txt = (p.payload or {}).get("information") or ""
         pairs.append(f"{query} [SEP] {txt}")
@@ -70,48 +109,54 @@ def rerank_local(pairs: List[str]) -> List[float]:
     if not (ort and Tokenizer and RERANKER_ONNX_PATH and RERANKER_TOKENIZER_PATH):
         return [0.0 for _ in pairs]
     tok = Tokenizer.from_file(RERANKER_TOKENIZER_PATH)
+    try:
+        tok.enable_truncation(max_length=RERANK_MAX_TOKENS)
+    except Exception:
+        pass
     enc = tok.encode_batch(pairs)
     input_ids = [e.ids for e in enc]
     attn = [e.attention_mask for e in enc]
-    # Pad to max length
-    max_len = max(len(ids) for ids in input_ids) if input_ids else 0
+    max_len = max((len(ids) for ids in input_ids), default=0)
     def pad(seq, pad_id=0):
         return seq + [pad_id] * (max_len - len(seq))
     input_ids = [pad(s) for s in input_ids]
     attn = [pad(s) for s in attn]
-    sess = ort.InferenceSession(RERANKER_ONNX_PATH, providers=["CPUExecutionProvider"])  # local CPU
+    # Providers: prefer CUDA if available, else CPU
+    providers = os.environ.get("RERANK_PROVIDERS", "").split(",") if os.environ.get("RERANK_PROVIDERS") else None
+    if not providers:
+        try:
+            avail = set(ort.get_available_providers()) if ort else set()
+        except Exception:
+            avail = set()
+        providers = (["CUDAExecutionProvider"] if "CUDAExecutionProvider" in avail else []) + ["CPUExecutionProvider"]
+    sess = ort.InferenceSession(RERANKER_ONNX_PATH, providers=providers)
     input_names = [i.name for i in sess.get_inputs()]
-    # Prepare optional token_type_ids (all zeros) if the model expects it
     token_type_ids = [[0] * max_len for _ in input_ids] if "token_type_ids" in input_names else None
     feeds = {}
-    # Prefer named inputs when available
     if "input_ids" in input_names:
         feeds["input_ids"] = input_ids
     if "attention_mask" in input_names:
         feeds["attention_mask"] = attn
     if token_type_ids is not None:
         feeds["token_type_ids"] = token_type_ids
-    # Fallback to positional if names are unexpected
     if not feeds:
         feeds = {
             sess.get_inputs()[0].name: input_ids,
             sess.get_inputs()[1].name: attn,
         }
     out = sess.run(None, feeds)
-    # Heuristic: prefer the first output; accept scalar per row or 2-class logits
     logits = out[0]
     scores: List[float] = []
     for row in logits:
-        if isinstance(row, list) and len(row) == 2:
-            scores.append(float(row[1]))
-        elif hasattr(row, "__len__") and len(row) == 1:
-            scores.append(float(row[0]))
-        else:
-            # Fallback: mean of row
-            try:
+        try:
+            if isinstance(row, list) and len(row) == 2:
+                scores.append(float(row[1]))
+            elif hasattr(row, "__len__") and len(row) == 1:
+                scores.append(float(row[0]))
+            else:
                 scores.append(float(sum(row) / max(1, len(row))))
-            except Exception:
-                scores.append(0.0)
+        except Exception:
+            scores.append(0.0)
     return scores
 
 
@@ -124,23 +169,26 @@ def main():
     ap.add_argument("--under", type=str, default=None)
     args = ap.parse_args()
 
-    vec_name = _sanitize_vector_name(MODEL_NAME)
     client = QdrantClient(url=QDRANT_URL, api_key=API_KEY or None)
+    model = TextEmbedding(model_name=MODEL_NAME)
+    dim = len(next(model.embed(["dimension probe"])))
+
+    vec_name = _select_dense_vector_name(client, COLLECTION, model, dim)
 
     must = []
     if args.language:
         must.append(models.FieldCondition(key="metadata.language", match=models.MatchValue(value=args.language)))
-    if args.under:
-        must.append(models.FieldCondition(key="metadata.path_prefix", match=models.MatchValue(value=args.under)))
+    eff_under = _norm_under(args.under)
+    if eff_under:
+        must.append(models.FieldCondition(key="metadata.path_prefix", match=models.MatchValue(value=eff_under)))
     flt = models.Filter(must=must) if must else None
 
-    pts = dense_results(client, vec_name, args.query, flt, args.topk)
+    pts = dense_results(client, model, vec_name, args.query, flt, args.topk)
     if not pts:
         print("No results.")
         return
     pairs = prepare_pairs(args.query, pts)
     scores = rerank_local(pairs)
-    # Combine original ordering with reranker scores (stable if all zeros)
     ranked = list(zip(scores, pts))
     ranked.sort(key=lambda x: x[0], reverse=True)
     for s, p in ranked[: args.limit]:
