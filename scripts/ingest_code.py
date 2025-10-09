@@ -40,6 +40,7 @@ CODE_EXTS = {
     ".rb": "ruby", ".php": "php", ".c": "c", ".h": "c", ".cpp": "cpp",
     ".cc": "cpp", ".hpp": "cpp", ".cs": "csharp", ".kt": "kotlin",
     ".swift": "swift", ".scala": "scala", ".sh": "shell",
+    ".ps1": "powershell", ".psm1": "powershell", ".psd1": "powershell",
     ".sql": "sql", ".md": "markdown", ".yml": "yaml", ".yaml": "yaml",
     ".toml": "toml", ".ini": "ini", ".json": "json", ".tf": "terraform"
 }
@@ -479,6 +480,22 @@ def _extract_symbols_yaml(text: str) -> List[_Sym]:
         m = re.match(r"^#\s+(.+)$", line)
         if m:
             syms.append(_Sym(kind="heading", name=m.group(1).strip(), start=idx, end=idx))
+
+
+def _extract_symbols_powershell(text: str) -> List[_Sym]:
+    lines = text.splitlines()
+    syms: List[_Sym] = []
+    for idx, line in enumerate(lines, 1):
+        if re.match(r"^\s*function\s+([A-Za-z_][\w-]*)\s*\{", line, flags=re.IGNORECASE):
+            name = re.sub(r"^\s*function\s+", "", line, flags=re.IGNORECASE).split("{")[0].strip()
+            syms.append(_Sym(kind="function", name=name, start=idx, end=idx))
+            continue
+        m = re.match(r"^\s*class\s+([A-Za-z_][\w-]*)\s*\{", line, flags=re.IGNORECASE)
+        if m:
+            syms.append(_Sym(kind="class", name=m.group(1), start=idx, end=idx))
+            continue
+    return syms
+
     return syms
 
 
@@ -740,6 +757,10 @@ def _extract_symbols(language: str, text: str) -> List[_Sym]:
         return _extract_symbols_rust(text)
     if language == "terraform":
         return _extract_symbols_terraform(text)
+    if language == "shell":
+        return _extract_symbols_shell(text)
+    if language == "yaml":
+        return _extract_symbols_yaml(text)
     return []
 
 
