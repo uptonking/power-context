@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 # Helper: detect repository name automatically (no REPO_NAME env needed)
 def _detect_repo_name_from_path(path: Path) -> str:
     try:
@@ -497,7 +499,7 @@ def delete_points_by_path(client: QdrantClient, collection: str, file_path: str)
         filt = models.Filter(must=[models.FieldCondition(
             key="metadata.path", match=models.MatchValue(value=file_path)
         )])
-        client.delete(collection_name=collection, points_selector=filt, wait=True)
+        client.delete(collection_name=collection, points_selector=models.FilterSelector(filter=filt), wait=True)
     except Exception:
         pass
 
@@ -639,7 +641,7 @@ def _extract_symbols_yaml(text: str) -> List[_Sym]:
         m = re.match(r"^#\s+(.+)$", line)
         if m:
             syms.append(_Sym(kind="heading", name=m.group(1).strip(), start=idx, end=idx))
-
+    return syms
 
 def _extract_symbols_powershell(text: str) -> List[_Sym]:
     lines = text.splitlines()
@@ -1126,6 +1128,8 @@ def index_repo(root: Path, qdrant_url: str, api_key: str, collection: str, model
                 kind = ch.get("kind") or kind
             if "symbol" in ch and ch.get("symbol"):
                 sym = ch.get("symbol") or sym
+            if "symbol_path" in ch and ch.get("symbol_path"):
+                sym_path = ch.get("symbol_path") or sym_path
             payload = {
                 "document": info,
                 "information": info,
@@ -1135,7 +1139,7 @@ def index_repo(root: Path, qdrant_url: str, api_key: str, collection: str, model
                     "language": language,
                     "kind": kind,
                     "symbol": sym,
-                    "symbol_path": sym or "",
+                    "symbol_path": sym_path or "",
                     "repo": repo_tag,
                     "start_line": ch["start"],
                     "end_line": ch["end"],
