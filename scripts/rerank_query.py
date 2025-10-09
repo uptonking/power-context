@@ -6,12 +6,42 @@ from typing import List, Dict, Any
 
 from qdrant_client import QdrantClient, models
 from fastembed import TextEmbedding
+import re
+
 
 # Env configuration
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
 COLLECTION = os.environ.get("COLLECTION_NAME", "my-collection")
 MODEL = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
 
+# Quick-win boosts
+SYMBOL_BOOST = float(os.environ.get("HYBRID_SYMBOL_BOOST", "0.15") or 0.15)
+RECENCY_WEIGHT = float(os.environ.get("HYBRID_RECENCY_WEIGHT", "0.1") or 0.1)
+
+# Minimal code-aware query expansion
+CODE_SYNONYMS = {
+    "function": ["method", "def", "fn"],
+    "class": ["type", "object"],
+    "create": ["init", "initialize", "construct"],
+}
+
+def expand_queries(queries: List[str], language: str | None = None, max_extra: int = 2) -> List[str]:
+    out: List[str] = list(queries)
+    for q in list(queries):
+        ql = q.lower()
+        for word, syns in CODE_SYNONYMS.items():
+            if word in ql:
+                for s in syns[:max_extra]:
+                    exp = re.sub(rf"\b{re.escape(word)}\b", s, q, flags=re.IGNORECASE)
+                    if exp not in out:
+                        out.append(exp)
+    return out[: max(8, len(queries))]
+
+
+def _env_truthy(val: str | None, default: bool) -> bool:
+    if val is None:
+        return default
+    return val.strip().lower() in {"1", "true", "yes", "on"}
 
 def derive_vector_name(model_name: str) -> str:
     name = model_name.strip().lower()
@@ -48,25 +78,37 @@ def main():
     parser.add_argument("--per-query", type=int, default=12, help="How many results to pull per query before fusing")
     parser.add_argument("--language", type=str, default="", help="Preferred language (boost)")
     parser.add_argument("--under", type=str, default="", help="Preferred path_prefix (boost), e.g. /work/scripts")
+    parser.add_argument("--symbol", type=str, default="", help="Optional server-side symbol filter (exact)")
+    # Expansion enabled by default; allow disabling via --no-expand or RERANK_EXPAND=0
+    parser.add_argument("--expand", dest="expand", action="store_true", default=_env_truthy(os.environ.get("RERANK_EXPAND"), True), help="Enable simple query expansion")
+    parser.add_argument("--no-expand", dest="expand", action="store_false", help="Disable query expansion")
+
     args = parser.parse_args()
 
     client = QdrantClient(url=QDRANT_URL)
     model = TextEmbedding(model_name=MODEL)
     vec_name = derive_vector_name(MODEL)
 
+    # Build query list (optionally expanded)
+    queries = list(args.query)
+    if args.expand:
+        queries = expand_queries(queries, args.language or None)
+
     cand: Dict[str, Dict[str, Any]] = {}
     counts: Dict[str, int] = defaultdict(int)
 
-    for q in args.query:
+    for q in queries:
         v = next(model.embed([q]))
         # Optional server-side filter to reduce bandwidth
         flt = None
-        if args.language or args.under:
+        if args.language or args.under or args.symbol:
             must = []
             if args.language:
                 must.append(models.FieldCondition(key="metadata.language", match=models.MatchValue(value=args.language)))
             if args.under:
                 must.append(models.FieldCondition(key="metadata.path_prefix", match=models.MatchValue(value=args.under)))
+            if args.symbol:
+                must.append(models.FieldCondition(key="metadata.symbol", match=models.MatchValue(value=args.symbol)))
             flt = models.Filter(must=must)
 
         # Prefer modern query_points API with 'using' for named vector
@@ -99,10 +141,44 @@ def main():
                     "payload": p.payload or {},
                 }
 
+    # Prepare recency normalization
+    timestamps: List[int] = []
+    for data in cand.values():
+        md = (data.get("payload") or {}).get("metadata") or {}
+        ts = md.get("ingested_at")
+        if isinstance(ts, int):
+            timestamps.append(ts)
+    has_ts = len(timestamps) > 0
+    if has_ts:
+        tmin, tmax = min(timestamps), max(timestamps)
+        span = max(1, tmax - tmin)
+
+    # Auto-infer dominant language if none provided (no config needed)
+    want_lang = args.language
+    if not want_lang and cand:
+        lang_counts: Dict[str, int] = defaultdict(int)
+        for data in cand.values():
+            md = (data.get("payload") or {}).get("metadata") or {}
+            l = (md.get("language") or "").lower()
+            if l:
+                lang_counts[l] += 1
+        if lang_counts:
+            want_lang = max(lang_counts.items(), key=lambda x: x[1])[0]
+
     fused = []
     for pid, data in cand.items():
         md = (data["payload"] or {}).get("metadata") or {}
-        final = score_candidate(data["base_score"], counts[pid], md, args.language, args.under)
+        final = score_candidate(data["base_score"], counts[pid], md, want_lang, args.under)
+        # Symbol/path match boost using expanded queries
+        sym_text = " ".join([str(md.get("symbol") or ""), str(md.get("symbol_path") or "")]).lower()
+        if any((q.lower() in sym_text) for q in queries):
+            final += SYMBOL_BOOST
+        # Recency bump (normalized)
+        if 'span' in locals() and has_ts:
+            ts = md.get("ingested_at")
+            if isinstance(ts, int):
+                norm = (ts - tmin) / span if span else 0.0
+                final += RECENCY_WEIGHT * norm
         fused.append((final, pid, data))
 
     fused.sort(key=lambda x: x[0], reverse=True)

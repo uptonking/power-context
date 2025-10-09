@@ -315,6 +315,42 @@ Augment (SSE for both servers – recommended):
 }
 ```
 
+Qodo (Remote MCPs use simplified format - add each tool individually):
+
+**Note**: In Qodo, you must add each MCP tool separately through the UI, not as a single JSON config.
+
+For each tool, use this format:
+
+**Tool 1 - qdrant:**
+```json
+{
+  "qdrant": { "url": "http://localhost:8000/sse" }
+}
+```
+
+**Tool 2 - qdrant-indexer:**
+```json
+{
+  "qdrant-indexer": { "url": "http://localhost:8001/sse" }
+}
+```
+
+#### Important for IDE agents (Cursor/Windsurf/Augment)
+- Do not send null values to MCP tools. Omit the field or pass an empty string "" instead.
+- qdrant-index examples:
+  - {"subdir":"","recreate":false,"collection":"my-collection","repo_name":"workspace"}
+  - {"subdir":"scripts","recreate":true}
+- For indexing the repo root with no params, use the zero-arg tool `qdrant_index_root` (new) or call `qdrant-index` with `subdir:""`.
+
+
+##### Zero-config search tool (new)
+- repo_search: run code search without filters or config.
+  - Examples:
+    - {"query": "semantic chunking"}
+    - {"query": ["function to split code", "overlapping chunks"], "limit": 15, "per_path": 3}
+  - Returns structured results: score, path, symbol, start_line, end_line.
+
+
 Verification:
 - You should see tools from both servers (e.g., `qdrant-find`, `qdrant-store`, `qdrant-list`, `qdrant-index`, `qdrant-prune`).
 - Call `qdrant-list` to confirm Qdrant connectivity.

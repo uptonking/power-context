@@ -5,6 +5,8 @@ from typing import List, Dict, Any, Tuple
 
 from qdrant_client import QdrantClient, models
 from fastembed import TextEmbedding
+import re
+
 
 COLLECTION = os.environ.get("COLLECTION_NAME", "my-collection")
 MODEL_NAME = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
@@ -33,6 +35,37 @@ RRF_K = int(os.environ.get("HYBRID_RRF_K", "60") or 60)
 DENSE_WEIGHT = float(os.environ.get("HYBRID_DENSE_WEIGHT", "1.0") or 1.0)
 LEXICAL_WEIGHT = float(os.environ.get("HYBRID_LEXICAL_WEIGHT", "0.25") or 0.25)
 EF_SEARCH = int(os.environ.get("QDRANT_EF_SEARCH", "128") or 128)
+# Lightweight, configurable boosts
+SYMBOL_BOOST = float(os.environ.get("HYBRID_SYMBOL_BOOST", "0.15") or 0.15)
+RECENCY_WEIGHT = float(os.environ.get("HYBRID_RECENCY_WEIGHT", "0.1") or 0.1)
+CORE_FILE_BOOST = float(os.environ.get("HYBRID_CORE_FILE_BOOST", "0.1") or 0.1)
+
+# Minimal code-aware query expansion (quick win)
+CODE_SYNONYMS = {
+    "function": ["method", "def", "fn"],
+    "class": ["type", "object"],
+    "create": ["init", "initialize", "construct"],
+    "get": ["fetch", "retrieve"],
+    "set": ["assign", "update"],
+}
+
+def expand_queries(queries: List[str], language: str | None = None, max_extra: int = 2) -> List[str]:
+    out: List[str] = list(queries)
+    for q in list(queries):
+        ql = q.lower()
+        for word, syns in CODE_SYNONYMS.items():
+            if word in ql:
+                for s in syns[:max_extra]:
+                    exp = re.sub(rf"\b{re.escape(word)}\b", s, q, flags=re.IGNORECASE)
+                    if exp not in out:
+                        out.append(exp)
+    return out[: max(8, len(queries))]
+
+def _env_truthy(val: str | None, default: bool) -> bool:
+    if val is None:
+        return default
+    return val.strip().lower() in {"1", "true", "yes", "on"}
+
 
 def rrf(rank: int, k: int = RRF_K) -> float:
     return 1.0 / (k + rank)
@@ -85,6 +118,13 @@ def main():
     ap.add_argument("--language", type=str, default=None)
     ap.add_argument("--under", type=str, default=None)
     ap.add_argument("--kind", type=str, default=None)
+    ap.add_argument("--symbol", type=str, default=None)
+    # Expansion enabled by default; allow disabling via --no-expand or HYBRID_EXPAND=0
+    ap.add_argument("--expand", dest="expand", action="store_true", default=_env_truthy(os.environ.get("HYBRID_EXPAND"), True), help="Enable simple query expansion")
+    ap.add_argument("--no-expand", dest="expand", action="store_false", help="Disable query expansion")
+    # Per-path diversification enabled by default (1) unless overridden by env/flag
+    ap.add_argument("--per-path", type=int, default=int(os.environ.get("HYBRID_PER_PATH", "1") or 1), help="Cap results per file path to diversify (0=off)")
+
     ap.add_argument("--limit", type=int, default=10)
     ap.add_argument("--per-query", type=int, default=24)
     args = ap.parse_args()
@@ -102,10 +142,16 @@ def main():
         must.append(models.FieldCondition(key="metadata.path_prefix", match=models.MatchValue(value=args.under)))
     if args.kind:
         must.append(models.FieldCondition(key="metadata.kind", match=models.MatchValue(value=args.kind)))
+    if args.symbol:
+        must.append(models.FieldCondition(key="metadata.symbol", match=models.MatchValue(value=args.symbol)))
     flt = models.Filter(must=must) if must else None
 
-    # Dense results per query
-    embedded = [vec.tolist() for vec in model.embed(args.query)]
+    # Build query set (optionally expanded)
+    queries = list(args.query)
+    if args.expand:
+        queries = expand_queries(queries, args.language)
+
+    embedded = [vec.tolist() for vec in model.embed(queries)]
     result_sets: List[List[Any]] = [dense_query(client, vec_name, v, flt, args.per_query) for v in embedded]
 
     # RRF fusion (weighted)
@@ -116,13 +162,51 @@ def main():
             score_map.setdefault(pid, {"pt": p, "s": 0.0})
             score_map[pid]["s"] += DENSE_WEIGHT * rrf(rank)
 
-    # Lexical bump (weighted)
+    # Lexical bump + symbol boost; also collect recency
+    timestamps: List[int] = []
     for pid, rec in list(score_map.items()):
         md = (rec["pt"].payload or {}).get("metadata") or {}
-        rec["s"] += LEXICAL_WEIGHT * lexical_score(args.query, md)
+        rec["s"] += LEXICAL_WEIGHT * lexical_score(queries, md)
+        ts = md.get("ingested_at")
+        if isinstance(ts, int):
+            timestamps.append(ts)
+        sym_text = " ".join([str(md.get("symbol") or ""), str(md.get("symbol_path") or "")]).lower()
+        for q in queries:
+            ql = q.lower()
+            if ql and ql in sym_text:
+                rec["s"] += SYMBOL_BOOST
+                break
 
-    # Rank and print
-    merged = sorted(score_map.values(), key=lambda x: x["s"], reverse=True)[: args.limit]
+    # Recency bump (normalize across results)
+    if timestamps and RECENCY_WEIGHT > 0.0:
+        tmin, tmax = min(timestamps), max(timestamps)
+        span = max(1, tmax - tmin)
+        for rec in score_map.values():
+            md = (rec["pt"].payload or {}).get("metadata") or {}
+            ts = md.get("ingested_at")
+            if isinstance(ts, int):
+                norm = (ts - tmin) / span
+                rec["s"] += RECENCY_WEIGHT * norm
+
+    # Rank
+    ranked = sorted(score_map.values(), key=lambda x: x["s"], reverse=True)
+
+    # Optional diversification by path
+    if args.per_path and args.per_path > 0:
+        counts: Dict[str, int] = {}
+        merged: List[Dict[str, Any]] = []
+        for m in ranked:
+            md = (m["pt"].payload or {}).get("metadata") or {}
+            path = str(md.get("path", ""))
+            c = counts.get(path, 0)
+            if c < args.per_path:
+                merged.append(m)
+                counts[path] = c + 1
+            if len(merged) >= args.limit:
+                break
+    else:
+        merged = ranked[: args.limit]
+
     for m in merged:
         md = (m["pt"].payload or {}).get("metadata") or {}
         print(f"{m['s']:.3f}\t{md.get('path')}\t{md.get('symbol_path') or md.get('symbol') or ''}\t{md.get('start_line')}-{md.get('end_line')}")

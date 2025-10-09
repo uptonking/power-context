@@ -175,6 +175,66 @@ def chunk_lines(text: str, max_lines: int = 120, overlap: int = 20) -> List[Dict
     return chunks
 
 
+def chunk_semantic(text: str, language: str, max_lines: int = 120, overlap: int = 20) -> List[Dict]:
+    """AST-aware chunking that tries to keep complete functions/classes together."""
+    if not _use_tree_sitter() or language not in ("python", "javascript", "typescript"):
+        # Fallback to line-based chunking
+        return chunk_lines(text, max_lines, overlap)
+
+    lines = text.splitlines()
+    n = len(lines)
+
+    # Extract symbols with line ranges
+    symbols = _extract_symbols(language, text)
+    if not symbols:
+        return chunk_lines(text, max_lines, overlap)
+
+    # Sort symbols by start line
+    symbols.sort(key=lambda s: s.start)
+
+    chunks = []
+    i = 0  # Current line index (0-based)
+
+    while i < n:
+        chunk_start = i + 1  # 1-based for output
+        chunk_end = min(n, i + max_lines)  # 1-based
+
+        # Try to find a symbol that starts within our current window
+        best_symbol = None
+        for sym in symbols:
+            if sym.start >= chunk_start and sym.start <= chunk_end:
+                # Check if the entire symbol fits within max_lines from current position
+                symbol_size = sym.end - sym.start + 1
+                if symbol_size <= max_lines and sym.end <= i + max_lines:
+                    best_symbol = sym
+                    break
+
+        if best_symbol:
+            # Chunk this complete symbol
+            chunk_text = "\n".join(lines[best_symbol.start - 1:best_symbol.end])
+            chunks.append({
+                "text": chunk_text,
+                "start": best_symbol.start,
+                "end": best_symbol.end,
+                "symbol": best_symbol.name,
+                "kind": best_symbol.kind
+            })
+            # Move past this symbol with minimal overlap
+            i = max(best_symbol.end - overlap, i + 1)
+        else:
+            # No suitable symbol found, fall back to line-based chunking
+            chunk_text = "\n".join(lines[i:i + max_lines])
+            actual_end = min(n, i + max_lines)
+            chunks.append({
+                "text": chunk_text,
+                "start": i + 1,
+                "end": actual_end
+            })
+            i = max(actual_end - overlap, i + 1)
+
+    return chunks
+
+
 def _sanitize_vector_name(model_name: str) -> str:
     # Derive a stable vector name similar to MCP server behavior
     name = model_name.strip().lower()
@@ -819,7 +879,12 @@ def index_single_file(client: QdrantClient, model: TextEmbedding, collection: st
     imports, calls = _get_imports_calls(language, text)
     CHUNK_LINES = int(os.environ.get("INDEX_CHUNK_LINES", "120") or 120)
     CHUNK_OVERLAP = int(os.environ.get("INDEX_CHUNK_OVERLAP", "20") or 20)
-    chunks = chunk_lines(text, CHUNK_LINES, CHUNK_OVERLAP)
+    # Use semantic chunking if enabled, fallback to line-based
+    use_semantic = os.environ.get("INDEX_SEMANTIC_CHUNKS", "1").lower() in {"1", "true", "yes", "on"}
+    if use_semantic:
+        chunks = chunk_semantic(text, language, CHUNK_LINES, CHUNK_OVERLAP)
+    else:
+        chunks = chunk_lines(text, CHUNK_LINES, CHUNK_OVERLAP)
     batch_texts: List[str] = []
     batch_meta: List[Dict] = []
     batch_ids: List[int] = []
@@ -909,6 +974,8 @@ def index_repo(root: Path, qdrant_url: str, api_key: str, collection: str, model
     CHUNK_LINES = int(os.environ.get("INDEX_CHUNK_LINES", "120") or 120)
     CHUNK_OVERLAP = int(os.environ.get("INDEX_CHUNK_OVERLAP", "20") or 20)
     PROGRESS_EVERY = int(os.environ.get("INDEX_PROGRESS_EVERY", "200") or 200)
+    # Semantic chunking toggle
+    use_semantic = os.environ.get("INDEX_SEMANTIC_CHUNKS", "1").lower() in {"1", "true", "yes", "on"}
 
     files_seen = 0
     files_indexed = 0
@@ -947,10 +1014,19 @@ def index_repo(root: Path, qdrant_url: str, api_key: str, collection: str, model
         files_indexed += 1
         symbols = _extract_symbols(language, text)
         imports, calls = _get_imports_calls(language, text)
-        chunks = chunk_lines(text, CHUNK_LINES, CHUNK_OVERLAP)
+        # Use semantic chunking if enabled, fallback to line-based
+        if use_semantic:
+            chunks = chunk_semantic(text, language, CHUNK_LINES, CHUNK_OVERLAP)
+        else:
+            chunks = chunk_lines(text, CHUNK_LINES, CHUNK_OVERLAP)
         for ch in chunks:
             info = build_information(language, file_path, ch["start"], ch["end"], ch["text"].splitlines()[0] if ch["text"] else "")
             kind, sym, sym_path = _choose_symbol_for_chunk(ch["start"], ch["end"], symbols)
+            # If chunk_semantic returned embedded symbol/kind, prefer it
+            if "kind" in ch and ch.get("kind"):
+                kind = ch.get("kind") or kind
+            if "symbol" in ch and ch.get("symbol"):
+                sym = ch.get("symbol") or sym
             payload = {
                 "document": info,
                 "information": info,
