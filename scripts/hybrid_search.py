@@ -39,6 +39,61 @@ EF_SEARCH = int(os.environ.get("QDRANT_EF_SEARCH", "128") or 128)
 SYMBOL_BOOST = float(os.environ.get("HYBRID_SYMBOL_BOOST", "0.15") or 0.15)
 RECENCY_WEIGHT = float(os.environ.get("HYBRID_RECENCY_WEIGHT", "0.1") or 0.1)
 CORE_FILE_BOOST = float(os.environ.get("HYBRID_CORE_FILE_BOOST", "0.1") or 0.1)
+SYMBOL_EQUALITY_BOOST = float(os.environ.get("HYBRID_SYMBOL_EQUALITY_BOOST", "0.25") or 0.25)
+VENDOR_PENALTY = float(os.environ.get("HYBRID_VENDOR_PENALTY", "0.05") or 0.05)
+LANG_MATCH_BOOST = float(os.environ.get("HYBRID_LANG_MATCH_BOOST", "0.05") or 0.05)
+CLUSTER_LINES = int(os.environ.get("HYBRID_CLUSTER_LINES", "15") or 15)
+
+# Core file patterns (prioritize implementation over tests/docs)
+CORE_FILE_PATTERNS = [
+    r"\.py$", r"\.js$", r"\.ts$", r"\.tsx$", r"\.jsx$", r"\.go$", r"\.rs$", r"\.java$", r"\.cpp$", r"\.c$", r"\.h$"
+]
+NON_CORE_PATTERNS = [
+    r"test", r"spec", r"__test__", r"\.test\.", r"\.spec\.", r"_test\.py$", r"_spec\.py$",
+    r"docs?/", r"documentation/", r"\.md$", r"\.txt$", r"README", r"CHANGELOG"
+]
+
+def is_core_file(path: str) -> bool:
+    """Check if file is core implementation (not test/doc)"""
+    import re
+    path_lower = path.lower()
+    # Skip non-core files
+    for pattern in NON_CORE_PATTERNS:
+        if re.search(pattern, path_lower):
+            return False
+    # Check for core file extensions
+    for pattern in CORE_FILE_PATTERNS:
+        if re.search(pattern, path_lower):
+            return True
+    return False
+
+# Vendor/third-party detection
+VENDOR_PATTERNS = [
+    "vendor/", "third_party/", "node_modules/", "/dist/", "/build/", ".generated/", "generated/", "autogen/", "target/"
+]
+
+def is_vendor_path(path: str) -> bool:
+    p = path.lower()
+    return any(s in p for s in VENDOR_PATTERNS)
+
+# Language extension mapping and checks
+LANG_EXTS: Dict[str, List[str]] = {
+    "python": [".py"],
+    "typescript": [".ts", ".tsx"],
+    "javascript": [".js", ".jsx"],
+    "go": [".go"],
+    "rust": [".rs"],
+    "java": [".java"],
+    "cpp": [".cpp", ".cc", ".cxx", ".hpp", ".h"],
+    "c": [".c", ".h"],
+}
+
+def lang_matches_path(lang: str, path: str) -> bool:
+    if not lang:
+        return False
+    exts = LANG_EXTS.get(lang.lower(), [])
+    pl = path.lower()
+    return any(pl.endswith(ext) for ext in exts)
 
 # Minimal code-aware query expansion (quick win)
 CODE_SYNONYMS = {
@@ -170,12 +225,35 @@ def main():
         ts = md.get("ingested_at")
         if isinstance(ts, int):
             timestamps.append(ts)
-        sym_text = " ".join([str(md.get("symbol") or ""), str(md.get("symbol_path") or "")]).lower()
+
+        # Symbol-based boosts
+        sym = str(md.get("symbol") or "").lower()
+        sym_path = str(md.get("symbol_path") or "").lower()
+        sym_text = f"{sym} {sym_path}"
         for q in queries:
             ql = q.lower()
-            if ql and ql in sym_text:
+            if not ql:
+                continue
+            # substring match boost
+            if ql in sym_text:
                 rec["s"] += SYMBOL_BOOST
-                break
+            # exact match boost (symbol or symbol_path)
+            if ql == sym or ql == sym_path:
+                rec["s"] += SYMBOL_EQUALITY_BOOST
+
+        # Path-based adjustments
+        path = str(md.get("path") or "")
+        if CORE_FILE_BOOST > 0.0 and path and is_core_file(path):
+            rec["s"] += CORE_FILE_BOOST
+        if VENDOR_PENALTY > 0.0 and path and is_vendor_path(path):
+            rec["s"] -= VENDOR_PENALTY
+
+        # Language match boost if requested
+        if LANG_MATCH_BOOST > 0.0 and path and getattr(args, "language", None):
+            lang = str(args.language or "").lower()
+            md_lang = str((md.get("language") or "")).lower()
+            if (lang and md_lang and md_lang == lang) or lang_matches_path(lang, path):
+                rec["s"] += LANG_MATCH_BOOST
 
     # Recency bump (normalize across results)
     if timestamps and RECENCY_WEIGHT > 0.0:
@@ -188,8 +266,38 @@ def main():
                 norm = (ts - tmin) / span
                 rec["s"] += RECENCY_WEIGHT * norm
 
-    # Rank
-    ranked = sorted(score_map.values(), key=lambda x: x["s"], reverse=True)
+    # Rank with deterministic tie-breakers
+    def _tie_key(m: Dict[str, Any]):
+        md = (m["pt"].payload or {}).get("metadata") or {}
+        sp = str(md.get("symbol_path") or md.get("symbol") or "")
+        path = str(md.get("path") or "")
+        start_line = int(md.get("start_line") or 0)
+        return (-float(m["s"]), len(sp), path, start_line)
+
+    ranked = sorted(score_map.values(), key=_tie_key)
+
+    # Adjacent-hit clustering by path
+    clusters: Dict[str, List[Dict[str, Any]]] = {}
+    for m in ranked:
+        md = (m["pt"].payload or {}).get("metadata") or {}
+        path = str(md.get("path") or "")
+        start_line = int(md.get("start_line") or 0)
+        end_line = int(md.get("end_line") or 0)
+        lst = clusters.setdefault(path, [])
+        merged_flag = False
+        for c in lst:
+            if start_line <= c["end"] + CLUSTER_LINES and end_line >= c["start"] - CLUSTER_LINES:
+                # Near/overlapping: keep the higher-scoring rep and expand bounds
+                if float(m["s"]) > float(c["m"]["s"]):
+                    c["m"] = m
+                c["start"] = min(c["start"], start_line)
+                c["end"] = max(c["end"], end_line)
+                merged_flag = True
+                break
+        if not merged_flag:
+            lst.append({"start": start_line, "end": end_line, "m": m})
+
+    ranked = sorted([c["m"] for lst in clusters.values() for c in lst], key=_tie_key)
 
     # Optional diversification by path
     if args.per_path and args.per_path > 0:

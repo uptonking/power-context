@@ -134,7 +134,7 @@ async def qdrant_prune() -> Dict[str, Any]:
     return res
 
 @mcp.tool()
-async def repo_search(query, limit: int = 10, per_path: int = 2) -> Dict[str, Any]:
+async def repo_search(query, limit: int = 10, per_path: int = 2, include_snippet: bool = False, context_lines: int = 2) -> Dict[str, Any]:
     """Zero-config code search over the mounted repo via Qdrant using hybrid_search defaults.
     Args:
       - query: string or list of strings
@@ -193,18 +193,33 @@ async def repo_search(query, limit: int = 10, per_path: int = 2) -> Dict[str, An
                 score = float(score_s)
             except Exception:
                 score = 0.0
-            results.append({
+
+            item = {
                 "score": score,
                 "path": path,
                 "symbol": symbol,
                 "start_line": start_line,
                 "end_line": end_line,
-            })
+            }
+
+            if include_snippet and path and start_line:
+                try:
+                    # Read a small snippet around the hit lines
+                    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                        lines = f.readlines()
+                    si = max(1, start_line - max(1, int(context_lines)))
+                    ei = min(len(lines), max(start_line, end_line) + max(1, int(context_lines)))
+                    snippet = "".join(lines[si-1:ei])
+                    item["snippet"] = snippet
+                except Exception:
+                    item["snippet"] = ""
+
+            results.append(item)
     except Exception:
         pass
 
     return {
-        "args": {"queries": queries, "limit": int(limit), "per_path": int(per_path), "collection": DEFAULT_COLLECTION},
+        "args": {"queries": queries, "limit": int(limit), "per_path": int(per_path), "include_snippet": bool(include_snippet), "context_lines": int(context_lines), "collection": DEFAULT_COLLECTION},
         "results": results,
         **res,
     }
