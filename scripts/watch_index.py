@@ -12,6 +12,12 @@ from fastembed import TextEmbedding
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
+# Ensure project root is on sys.path when run as a script (so 'scripts' can be imported)
+import sys
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
 import scripts.ingest_code as idx
 
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
@@ -52,6 +58,8 @@ class IndexHandler(FileSystemEventHandler):
         super().__init__()
         self.root = root
         self.queue = queue
+        self.excl = idx._Excluder(root)
+
 
     def _maybe_enqueue(self, src_path: str):
         p = Path(src_path)
@@ -63,17 +71,23 @@ class IndexHandler(FileSystemEventHandler):
         # skip directories
         if p.is_dir():
             return
-        # honor skip dirs by path parts
-        for part in p.parts:
-            if part in idx.SKIP_DIRS:
-                return
+        # ensure file is under root
+        try:
+            rel = p.resolve().relative_to(self.root.resolve())
+        except ValueError:
+            return
+        # directory-level excludes (parent dir)
+        rel_dir = "/" + str(rel.parent).replace(os.sep, "/")
+        if rel_dir == "/.":
+            rel_dir = "/"
+        if self.excl.exclude_dir(rel_dir):
+            return
         # only code files
         if p.suffix.lower() not in idx.CODE_EXTS:
             return
-        # ensure file is under root
-        try:
-            p.relative_to(self.root)
-        except ValueError:
+        # file-level excludes
+        relf = (rel_dir.rstrip("/") + "/" + p.name).replace("//", "/")
+        if self.excl.exclude_file(relf):
             return
         self.queue.add(p)
 

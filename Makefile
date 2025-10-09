@@ -109,3 +109,21 @@ setup-reranker: ## download ONNX reranker + tokenizer, update .env, then smoke-t
 prune: ## remove points for missing files or mismatched file_hash
 	docker compose run --rm --entrypoint python indexer /work/scripts/prune.py
 
+
+
+# Convenience: full no-cache rebuild and bring-up sequences
+up-nc: ## up with full no-cache rebuild
+	docker compose build --no-cache && docker compose up -d
+
+restart-nc: ## down, no-cache rebuild, up
+	docker compose down && docker compose build --no-cache && docker compose up -d
+
+reset-dev: ## full dev reset: qdrant -> wait -> init payload -> reindex -> bring up services
+	docker compose down || true
+	docker compose build --no-cache
+	docker compose up -d qdrant
+	./scripts/wait-for-qdrant.sh
+	docker compose run --rm init_payload || true
+	docker compose run --rm indexer --root /work --recreate
+	docker compose up -d mcp mcp_indexer watcher
+	docker compose ps
