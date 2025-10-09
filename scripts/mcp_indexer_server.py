@@ -100,8 +100,13 @@ async def qdrant_prune() -> Dict[str, Any]:
 
 
 if __name__ == "__main__":
-    # Configure host/port then serve over SSE at /sse
-    mcp.settings.host = HOST
-    mcp.settings.port = PORT
-    mcp.run(transport="sse")
+    transport = os.environ.get("FASTMCP_TRANSPORT", "sse").strip().lower()
+    if transport == "stdio":
+        # Run over stdio (for clients that don't support SSE)
+        mcp.run(transport="stdio")
+    else:
+        # Serve over SSE at /sse on the configured host/port
+        mcp.settings.host = HOST
+        mcp.settings.port = PORT
+        mcp.run(transport="sse")
 
