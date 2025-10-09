@@ -26,9 +26,8 @@ import subprocess
 from typing import Any, Dict, Optional
 
 try:
-    # Official MCP Python SDK
-    from mcp.server import Server
-    from mcp.server.sse import run
+    # Official MCP Python SDK (FastMCP convenience server)
+    from mcp.server.fastmcp import FastMCP
 except Exception as e:  # pragma: no cover
     raise SystemExit("mcp package is required inside the container: pip install mcp")
 
@@ -40,7 +39,7 @@ QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
 DEFAULT_COLLECTION = os.environ.get("COLLECTION_NAME", "my-collection")
 DEFAULT_REPO = os.environ.get("REPO_NAME", "workspace")
 
-server = Server(APP_NAME)
+mcp = FastMCP(APP_NAME)
 
 
 def _run(cmd: list[str], env: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
@@ -53,17 +52,9 @@ def _run(cmd: list[str], env: Optional[Dict[str, str]] = None) -> Dict[str, Any]
     }
 
 
-@server.list_tool()
-def tools():
-    return [
-        {"name": "qdrant-list", "description": "List Qdrant collections"},
-        {"name": "qdrant-index", "description": "Index /work or a subdir into Qdrant"},
-        {"name": "qdrant-prune", "description": "Prune stale points for /work"},
-    ]
-
-
-@server.tool()
+@mcp.tool()
 async def qdrant_list() -> Dict[str, Any]:
+    """List Qdrant collections"""
     try:
         from qdrant_client import QdrantClient
         client = QdrantClient(url=QDRANT_URL, api_key=os.environ.get("QDRANT_API_KEY"))
@@ -73,9 +64,10 @@ async def qdrant_list() -> Dict[str, Any]:
         return {"error": str(e)}
 
 
-@server.tool()
+@mcp.tool()
 async def qdrant_index(subdir: Optional[str] = None, recreate: bool = False,
                  collection: Optional[str] = None, repo_name: Optional[str] = None) -> Dict[str, Any]:
+    """Index the mounted path (/work) or a subdirectory. Args: subdir?, recreate? (bool), collection?, repo_name?"""
     root = "/work"
     if subdir:
         subdir = subdir.lstrip("/")
@@ -97,8 +89,9 @@ async def qdrant_index(subdir: Optional[str] = None, recreate: bool = False,
     return {"args": {"root": root, "collection": coll, "repo_name": repo, "recreate": recreate}, **res}
 
 
-@server.tool()
+@mcp.tool()
 async def qdrant_prune() -> Dict[str, Any]:
+    """Prune stale points for the mounted path (/work)"""
     env = os.environ.copy()
     env["PRUNE_ROOT"] = "/work"
     cmd = ["python", "/work/scripts/prune.py"]
@@ -107,5 +100,8 @@ async def qdrant_prune() -> Dict[str, Any]:
 
 
 if __name__ == "__main__":
-    run(server, host=HOST, port=PORT)
+    # Configure host/port then serve over SSE at /sse
+    mcp.settings.host = HOST
+    mcp.settings.port = PORT
+    mcp.run(transport="sse")
 

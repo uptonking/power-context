@@ -174,6 +174,68 @@ These commands do not move or copy your repo; they bind‑mount the target path 
 }
 ```
 
+Windsurf:
+
+```json
+{
+  "mcpServers": {
+    "qdrant": {
+      "command": "uvx",
+      "args": ["mcp-server-qdrant"],
+      "env": {
+        "QDRANT_URL": "http://localhost:6333",
+        "COLLECTION_NAME": "my-collection",
+        "EMBEDDING_MODEL": "BAAI/bge-base-en-v1.5"
+      },
+      "disabled": false
+    },
+    "qdrant-indexer": {
+      "type": "sse",
+      "url": "http://localhost:8001/sse",
+      "disabled": false
+    }
+  }
+}
+```
+
+
+Augment
+
+Indexer MCP (SSE):
+
+```json
+{
+  "mcpServers": {
+    "qdrant-indexer": {
+      "type": "sse",
+      "url": "http://localhost:8001/sse",
+      "disabled": false
+    }
+  }
+}
+```
+
+Search MCP (default via uvx/stdio):
+
+```json
+{
+  "mcpServers": {
+    "qdrant": {
+      "command": "uvx",
+      "args": ["mcp-server-qdrant"],
+      "env": {
+        "QDRANT_URL": "http://localhost:6333",
+        "COLLECTION_NAME": "my-collection",
+        "EMBEDDING_MODEL": "BAAI/bge-base-en-v1.5"
+      }
+    }
+  }
+}
+```
+
+
+
+
 Or, since this stack already exposes SSE, you can configure the client to use `http://localhost:8000/sse` directly (recommended for Cursor/Windsurf).
 
 ### MCP `qdrant-find` optional filters
@@ -215,6 +277,49 @@ Add to your agent as a separate MCP endpoint (SSE):
 
 Example calls (semantics vary by client):
 - qdrant-index with args {"subdir":"scripts","recreate":true}
+
+### MCP client configuration examples
+
+Windsurf/Cursor (stdio for search + SSE for indexer):
+
+```json
+{
+  "mcpServers": {
+    "qdrant": {
+      "command": "uvx",
+      "args": ["mcp-server-qdrant"],
+      "env": {
+        "QDRANT_URL": "http://localhost:6333",
+        "COLLECTION_NAME": "my-collection",
+        "EMBEDDING_MODEL": "BAAI/bge-base-en-v1.5"
+      },
+      "disabled": false
+    },
+    "qdrant-indexer": {
+      "type": "sse",
+      "url": "http://localhost:8001/sse",
+      "disabled": false
+    }
+  }
+}
+```
+
+Augment (SSE for both servers – recommended):
+
+```json
+{
+  "mcpServers": {
+    "qdrant": { "type": "sse", "url": "http://localhost:8000/sse", "disabled": false },
+    "qdrant-indexer": { "type": "sse", "url": "http://localhost:8001/sse", "disabled": false }
+  }
+}
+```
+
+Verification:
+- You should see tools from both servers (e.g., `qdrant-find`, `qdrant-store`, `qdrant-list`, `qdrant-index`, `qdrant-prune`).
+- Call `qdrant-list` to confirm Qdrant connectivity.
+- Call `qdrant-index` with arguments like `{ "subdir": "scripts", "recreate": true }` to (re)index the mounted repo.
+
 - qdrant-list with no args
 - qdrant-prune with no args
 
