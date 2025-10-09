@@ -292,6 +292,14 @@ def _extract_imports(language: str, text: str) -> list:
             if m: imps.append(m.group(1)); continue
             m = re.match(r"^\s*provider\s*=\s*['\"]([^'\"]+)['\"]", ln)
             if m: imps.append(m.group(1)); continue
+    elif language == "powershell":
+        for ln in lines:
+            m = re.match(r"^\s*Import-Module\s+([A-Za-z0-9_.\-]+)", ln, flags=re.IGNORECASE)
+            if m: imps.append(m.group(1)); continue
+            m = re.match(r"^\s*using\s+module\s+([^\s;]+)", ln, flags=re.IGNORECASE)
+            if m: imps.append(m.group(1)); continue
+            m = re.match(r"^\s*using\s+namespace\s+([^\s;]+)", ln, flags=re.IGNORECASE)
+            if m: imps.append(m.group(1)); continue
     return imps[:200]
 
 
