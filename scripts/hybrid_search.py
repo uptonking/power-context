@@ -105,7 +105,7 @@ def lang_matches_path(lang: str, path: str) -> bool:
 def parse_query_dsl(queries: List[str]) -> Tuple[List[str], Dict[str, str]]:
     clean: List[str] = []
     extracted: Dict[str, str] = {}
-    token_re = re.compile(r"\b(?:(lang|language|file|path|under|kind|symbol|ext|not|case))\s*:\s*([^\s]+)", re.IGNORECASE)
+    token_re = re.compile(r"\b(?:(lang|language|file|path|under|kind|symbol|ext|not|case|repo))\s*:\s*([^\s]+)", re.IGNORECASE)
     for q in queries:
         parts = []
         last = 0
