@@ -347,7 +347,9 @@ def main():
             ts = md.get("ingested_at")
             if isinstance(ts, int):
                 norm = (ts - tmin) / span
-                rec["s"] += RECENCY_WEIGHT * norm
+                rec_comp = RECENCY_WEIGHT * norm
+                rec["rec"] += rec_comp
+                rec["s"] += rec_comp
 
     # Rank with deterministic tie-breakers
     def _tie_key(m: Dict[str, Any]):
@@ -400,7 +402,39 @@ def main():
 
     for m in merged:
         md = (m["pt"].payload or {}).get("metadata") or {}
-        print(f"{m['s']:.3f}\t{md.get('path')}\t{md.get('symbol_path') or md.get('symbol') or ''}\t{md.get('start_line')}-{md.get('end_line')}")
+        if getattr(args, "json", False):
+            item = {
+                "score": round(float(m["s"]), 4),
+                "path": md.get("path"),
+                "symbol": md.get("symbol_path") or md.get("symbol") or "",
+                "start_line": md.get("start_line"),
+                "end_line": md.get("end_line"),
+                "components": {
+                    "dense_rrf": round(float(m.get("d", 0.0)), 4),
+                    "lexical": round(float(m.get("lx", 0.0)), 4),
+                    "symbol_substr": round(float(m.get("sym_sub", 0.0)), 4),
+                    "symbol_exact": round(float(m.get("sym_eq", 0.0)), 4),
+                    "core_boost": round(float(m.get("core", 0.0)), 4),
+                    "vendor_penalty": round(float(m.get("vendor", 0.0)), 4),
+                    "lang_boost": round(float(m.get("langb", 0.0)), 4),
+                    "recency": round(float(m.get("rec", 0.0)), 4),
+                },
+            }
+            # Build a human friendly why list
+            why = []
+            if item["components"]["dense_rrf"]:
+                why.append(f"dense_rrf:{item['components']['dense_rrf']}")
+            for k in ("lexical","symbol_substr","symbol_exact","core_boost","lang_boost"):
+                if item["components"][k]:
+                    why.append(f"{k}:{item['components'][k]}")
+            if item["components"]["vendor_penalty"]:
+                why.append(f"vendor_penalty:{item['components']['vendor_penalty']}")
+            if item["components"]["recency"]:
+                why.append(f"recency:{item['components']['recency']}")
+            item["why"] = why
+            print(json.dumps(item))
+        else:
+            print(f"{m['s']:.3f}\t{md.get('path')}\t{md.get('symbol_path') or md.get('symbol') or ''}\t{md.get('start_line')}-{md.get('end_line')}")
 
 
 if __name__ == "__main__":

@@ -52,6 +52,46 @@ def _run(cmd: list[str], env: Optional[Dict[str, str]] = None) -> Dict[str, Any]
     }
 
 
+# Lightweight tokenizer and snippet highlighter
+import re
+_STOP = {"the","a","an","of","in","on","for","and","or","to","with","by","is","are","be","this","that"}
+
+def _split_ident(s: str):
+    parts = re.split(r"[^A-Za-z0-9]+", s)
+    out = []
+    for p in parts:
+        if not p:
+            continue
+        segs = re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|\d+", p)
+        out.extend([x for x in segs if x])
+    return [x.lower() for x in out if x and x.lower() not in _STOP]
+
+def _tokens_from_queries(qs):
+    toks = []
+    for q in qs:
+        toks.extend(_split_ident(q))
+    seen = set(); out = []
+    for t in toks:
+        if t not in seen:
+            out.append(t); seen.add(t)
+    return out
+
+def _highlight_snippet(snippet: str, tokens: list[str]) -> str:
+    if not snippet or not tokens:
+        return snippet
+    # longest first to avoid partial overlaps
+    toks = sorted(set(tokens), key=len, reverse=True)
+    def repl(m):
+        return f"<<{m.group(0)}>>"
+    for t in toks:
+        try:
+            pat = re.compile(re.escape(t), re.IGNORECASE)
+            snippet = pat.sub(repl, snippet)
+        except Exception:
+            continue
+    return snippet
+
+
 @mcp.tool()
 async def qdrant_index_root(recreate: bool = False,
                             collection: str | None = None,
@@ -134,15 +174,29 @@ async def qdrant_prune() -> Dict[str, Any]:
     return res
 
 @mcp.tool()
-async def repo_search(query, limit: int = 10, per_path: int = 2, include_snippet: bool = False, context_lines: int = 2) -> Dict[str, Any]:
+async def repo_search(
+    query,
+    limit: int = 10,
+    per_path: int = 2,
+    include_snippet: bool = False,
+    context_lines: int = 2,
+    rerank_enabled: bool = False,
+    rerank_top_n: int = 50,
+    rerank_return_m: int = 12,
+    rerank_timeout_ms: int = 120,
+    highlight_snippet: bool = True,
+) -> Dict[str, Any]:
     """Zero-config code search over the mounted repo via Qdrant using hybrid_search defaults.
     Args:
       - query: string or list of strings
       - limit: total number of results to return (default 10)
       - per_path: cap of results per file path to diversify output (default 2)
+      - include_snippet/context_lines: embed code snippets near hit lines
+      - rerank_*: optional ONNX reranker via rerank_local.py; graceful timeout fallback
+      - highlight_snippet: emphasize matched tokens in snippet
     Notes:
       - No filters required; uses existing environment defaults (COLLECTION_NAME, QDRANT_URL).
-      - Returns structured results parsed from hybrid_search output.
+      - Returns structured results parsed from hybrid_search JSONL output when possible.
     """
     # Normalize queries to a list[str]
     queries: list[str] = []
@@ -166,7 +220,8 @@ async def repo_search(query, limit: int = 10, per_path: int = 2, include_snippet
     env["QDRANT_URL"] = QDRANT_URL
     env["COLLECTION_NAME"] = DEFAULT_COLLECTION
 
-    cmd = ["python", "/work/scripts/hybrid_search.py", "--limit", str(int(limit))]
+    # Try hybrid search first (JSONL output) unless rerank path is requested exclusively
+    cmd = ["python", "/work/scripts/hybrid_search.py", "--limit", str(int(limit)), "--json"]
     if per_path and int(per_path) > 0:
         cmd += ["--per-path", str(int(per_path))]
     for q in queries:
@@ -174,52 +229,104 @@ async def repo_search(query, limit: int = 10, per_path: int = 2, include_snippet
 
     res = _run(cmd, env=env)
 
-    # Parse hybrid_search tab-separated output: score\tpath\tsymbol_or_path\tstart-end
     results = []
-    try:
-        for line in (res.get("stdout") or "").splitlines():
-            parts = line.strip().split("\t")
-            if len(parts) != 4:
-                continue
-            score_s, path, symbol, range_s = parts
-            try:
-                start_s, end_s = range_s.split("-", 1)
-                start_line = int(start_s)
-                end_line = int(end_s)
-            except Exception:
-                start_line = 0
-                end_line = 0
-            try:
-                score = float(score_s)
-            except Exception:
-                score = 0.0
+    json_lines = []
+    for line in (res.get("stdout") or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+            json_lines.append(obj)
+        except Exception:
+            continue
 
+    # Optional rerank fallback path: if enabled, attempt; on timeout or error, keep hybrid
+    used_rerank = False
+    if rerank_enabled:
+        try:
+            rq = queries[0] if queries else ""
+            rcmd = [
+                "python", "/work/scripts/rerank_local.py",
+                "--query", rq,
+                "--topk", str(int(rerank_top_n)),
+                "--limit", str(int(rerank_return_m)),
+            ]
+            r = subprocess.run(rcmd, capture_output=True, text=True, timeout=max(0.1, int(rerank_timeout_ms)/1000.0), env=env)
+            if r.returncode == 0 and r.stdout.strip():
+                tmp = []
+                for ln in r.stdout.splitlines():
+                    parts = ln.strip().split("\t")
+                    if len(parts) != 4:
+                        continue
+                    score_s, path, symbol, range_s = parts
+                    try:
+                        start_s, end_s = range_s.split("-", 1)
+                        start_line = int(start_s); end_line = int(end_s)
+                    except Exception:
+                        start_line = 0; end_line = 0
+                    try:
+                        score = float(score_s)
+                    except Exception:
+                        score = 0.0
+                    item = {"score": score, "path": path, "symbol": symbol, "start_line": start_line, "end_line": end_line, "why": [f"rerank_onnx:{score:.3f}"]}
+                    tmp.append(item)
+                if tmp:
+                    results = tmp
+                    used_rerank = True
+        except subprocess.TimeoutExpired:
+            used_rerank = False
+        except Exception:
+            used_rerank = False
+
+    if not used_rerank:
+        # Build results from hybrid JSON lines
+        for obj in json_lines:
             item = {
-                "score": score,
-                "path": path,
-                "symbol": symbol,
-                "start_line": start_line,
-                "end_line": end_line,
+                "score": float(obj.get("score", 0.0)),
+                "path": obj.get("path", ""),
+                "symbol": obj.get("symbol", ""),
+                "start_line": int(obj.get("start_line") or 0),
+                "end_line": int(obj.get("end_line") or 0),
+                "why": obj.get("why", []),
+                "components": obj.get("components", {}),
             }
-
-            if include_snippet and path and start_line:
-                try:
-                    # Read a small snippet around the hit lines
-                    with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                        lines = f.readlines()
-                    si = max(1, start_line - max(1, int(context_lines)))
-                    ei = min(len(lines), max(start_line, end_line) + max(1, int(context_lines)))
-                    snippet = "".join(lines[si-1:ei])
-                    item["snippet"] = snippet
-                except Exception:
-                    item["snippet"] = ""
-
             results.append(item)
-    except Exception:
-        pass
+
+    # Optionally add snippets (with highlighting)
+    toks = _tokens_from_queries(queries)
+    if include_snippet:
+        for item in results:
+            path = item.get("path")
+            sl = int(item.get("start_line") or 0)
+            el = int(item.get("end_line") or 0)
+            if not path or not sl:
+                continue
+            try:
+                with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                    lines = f.readlines()
+                si = max(1, sl - max(1, int(context_lines)))
+                ei = min(len(lines), max(sl, el) + max(1, int(context_lines)))
+                snippet = "".join(lines[si-1:ei])
+                if highlight_snippet:
+                    snippet = _highlight_snippet(snippet, toks)
+                item["snippet"] = snippet
+            except Exception:
+                item["snippet"] = ""
 
     return {
-        "args": {"queries": queries, "limit": int(limit), "per_path": int(per_path), "include_snippet": bool(include_snippet), "context_lines": int(context_lines), "collection": DEFAULT_COLLECTION},
+        "args": {
+            "queries": queries,
+            "limit": int(limit),
+            "per_path": int(per_path),
+            "include_snippet": bool(include_snippet),
+            "context_lines": int(context_lines),
+            "rerank_enabled": bool(rerank_enabled),
+            "rerank_top_n": int(rerank_top_n),
+            "rerank_return_m": int(rerank_return_m),
+            "rerank_timeout_ms": int(rerank_timeout_ms),
+            "collection": DEFAULT_COLLECTION,
+        },
         "results": results,
         **res,
     }
