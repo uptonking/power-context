@@ -6,6 +6,7 @@ from typing import List, Dict, Any, Tuple
 from qdrant_client import QdrantClient, models
 from fastembed import TextEmbedding
 import re
+import json
 
 
 COLLECTION = os.environ.get("COLLECTION_NAME", "my-collection")
@@ -95,6 +96,61 @@ def lang_matches_path(lang: str, path: str) -> bool:
     pl = path.lower()
     return any(pl.endswith(ext) for ext in exts)
 
+# --- Query DSL parsing (lang:, file:/path, path:, under:, kind:, symbol:) ---
+def parse_query_dsl(queries: List[str]) -> Tuple[List[str], Dict[str, str]]:
+    clean: List[str] = []
+    extracted: Dict[str, str] = {}
+    token_re = re.compile(r"\b(?:(lang|language|file|path|under|kind|symbol))\s*:\s*([^\s]+)", re.IGNORECASE)
+    for q in queries:
+        parts = []
+        last = 0
+        for m in token_re.finditer(q):
+            key = m.group(1).lower()
+            val = m.group(2)
+            if key in ("file", "path"):
+                extracted["under"] = val
+            elif key in ("lang", "language"):
+                extracted["language"] = val
+            else:
+                extracted[key] = val
+            parts.append(q[last:m.start()].strip())
+            last = m.end()
+        parts.append(q[last:].strip())
+        remaining = " ".join([p for p in parts if p])
+        if remaining:
+            clean.append(remaining)
+    # Keep at least an empty query if everything was tokens
+    if not clean and queries:
+        clean = [""]
+    return clean, extracted
+
+# --- Tokenization helpers for smarter lexical ---
+_STOP = {"the","a","an","of","in","on","for","and","or","to","with","by","is","are","be","this","that"}
+
+def _split_ident(s: str) -> List[str]:
+    # split snake_case and camelCase
+    parts = re.split(r"[^A-Za-z0-9]+", s)
+    out: List[str] = []
+    for p in parts:
+        if not p:
+            continue
+        # camelCase split
+        segs = re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|\d+", p)
+        out.extend([x for x in segs if x])
+    return [x.lower() for x in out if x and x.lower() not in _STOP]
+
+def tokenize_queries(phrases: List[str]) -> List[str]:
+    toks: List[str] = []
+    for ph in phrases:
+        toks.extend(_split_ident(ph))
+    # de-dup preserving order
+    seen = set()
+    out: List[str] = []
+    for t in toks:
+        if t not in seen:
+            out.append(t); seen.add(t)
+    return out
+
 # Minimal code-aware query expansion (quick win)
 CODE_SYNONYMS = {
     "function": ["method", "def", "fn"],
@@ -127,31 +183,39 @@ def rrf(rank: int, k: int = RRF_K) -> float:
 
 
 def lexical_score(phrases: List[str], md: Dict[str, Any]) -> float:
-    text = " ".join([
-        str(md.get("path", "")),
-        str(md.get("path_prefix", "")),
-        str(md.get("symbol", "")),
-        str(md.get("symbol_path", "")),
-        str(md.get("code", ""))[:2000],
-    ]).lower()
+    """Smarter lexical: split identifiers, weight matches in symbol/path higher."""
+    tokens = tokenize_queries(phrases)
+    if not tokens:
+        return 0.0
+    path = str(md.get("path", "")).lower()
+    path_segs = re.split(r"[/\\]", path)
+    path_text = " ".join(path_segs)
+    sym = str(md.get("symbol", "")).lower()
+    symp = str(md.get("symbol_path", "")).lower()
+    code = str(md.get("code", ""))[:2000].lower()
+
     s = 0.0
-    for p in phrases:
-        q = p.lower()
-        if not q:
+    for t in tokens:
+        if not t:
             continue
-        if q in text:
-            s += 1.0
+        if t and (t in sym or t in symp):
+            s += 1.2  # symbol emphasis
+        if t and any(t in seg for seg in path_segs):
+            s += 0.6  # path segment
+        if t and t in code:
+            s += 1.0  # body occurrence
     return s
 
 
 def dense_query(client: QdrantClient, vec_name: str, v: List[float], flt, per_query: int) -> List[Any]:
     try:
+        ef = max(EF_SEARCH, 32 + 4*int(per_query))
         qp = client.query_points(
             collection_name=COLLECTION,
             query=v,
             using=vec_name,
             query_filter=flt,
-            search_params=models.SearchParams(hnsw_ef=EF_SEARCH),
+            search_params=models.SearchParams(hnsw_ef=ef),
             limit=per_query,
             with_payload=True,
         )
@@ -182,29 +246,39 @@ def main():
 
     ap.add_argument("--limit", type=int, default=10)
     ap.add_argument("--per-query", type=int, default=24)
+    ap.add_argument("--json", dest="json", action="store_true", help="Emit JSON lines with score breakdown")
+
     args = ap.parse_args()
 
     model = TextEmbedding(model_name=MODEL_NAME)
     vec_name = _sanitize_vector_name(MODEL_NAME)
     client = QdrantClient(url=QDRANT_URL, api_key=API_KEY or None)
 
+    # Parse Query DSL from queries, then build effective filters
+    raw_queries = list(args.query)
+    clean_queries, dsl = parse_query_dsl(raw_queries)
+    eff_language = args.language or dsl.get("language")
+    eff_under = args.under or dsl.get("under")
+    eff_kind = args.kind or dsl.get("kind")
+    eff_symbol = args.symbol or dsl.get("symbol")
+
     # Build optional filter
     flt = None
     must = []
-    if args.language:
-        must.append(models.FieldCondition(key="metadata.language", match=models.MatchValue(value=args.language)))
-    if args.under:
-        must.append(models.FieldCondition(key="metadata.path_prefix", match=models.MatchValue(value=args.under)))
-    if args.kind:
-        must.append(models.FieldCondition(key="metadata.kind", match=models.MatchValue(value=args.kind)))
-    if args.symbol:
-        must.append(models.FieldCondition(key="metadata.symbol", match=models.MatchValue(value=args.symbol)))
+    if eff_language:
+        must.append(models.FieldCondition(key="metadata.language", match=models.MatchValue(value=eff_language)))
+    if eff_under:
+        must.append(models.FieldCondition(key="metadata.path_prefix", match=models.MatchValue(value=eff_under)))
+    if eff_kind:
+        must.append(models.FieldCondition(key="metadata.kind", match=models.MatchValue(value=eff_kind)))
+    if eff_symbol:
+        must.append(models.FieldCondition(key="metadata.symbol", match=models.MatchValue(value=eff_symbol)))
     flt = models.Filter(must=must) if must else None
 
     # Build query set (optionally expanded)
-    queries = list(args.query)
+    queries = list(clean_queries)
     if args.expand:
-        queries = expand_queries(queries, args.language)
+        queries = expand_queries(queries, eff_language)
 
     embedded = [vec.tolist() for vec in model.embed(queries)]
     result_sets: List[List[Any]] = [dense_query(client, vec_name, v, flt, args.per_query) for v in embedded]
@@ -214,14 +288,18 @@ def main():
     for res in result_sets:
         for rank, p in enumerate(res, 1):
             pid = str(p.id)
-            score_map.setdefault(pid, {"pt": p, "s": 0.0})
-            score_map[pid]["s"] += DENSE_WEIGHT * rrf(rank)
+            score_map.setdefault(pid, {"pt": p, "s": 0.0, "d": 0.0, "lx": 0.0, "sym_sub": 0.0, "sym_eq": 0.0, "core": 0.0, "vendor": 0.0, "langb": 0.0, "rec": 0.0})
+            dens = DENSE_WEIGHT * rrf(rank)
+            score_map[pid]["d"] += dens
+            score_map[pid]["s"] += dens
 
     # Lexical bump + symbol boost; also collect recency
     timestamps: List[int] = []
     for pid, rec in list(score_map.items()):
         md = (rec["pt"].payload or {}).get("metadata") or {}
-        rec["s"] += LEXICAL_WEIGHT * lexical_score(queries, md)
+        lx = LEXICAL_WEIGHT * lexical_score(queries, md)
+        rec["lx"] += lx
+        rec["s"] += lx
         ts = md.get("ingested_at")
         if isinstance(ts, int):
             timestamps.append(ts)
@@ -236,23 +314,28 @@ def main():
                 continue
             # substring match boost
             if ql in sym_text:
+                rec["sym_sub"] += SYMBOL_BOOST
                 rec["s"] += SYMBOL_BOOST
             # exact match boost (symbol or symbol_path)
             if ql == sym or ql == sym_path:
+                rec["sym_eq"] += SYMBOL_EQUALITY_BOOST
                 rec["s"] += SYMBOL_EQUALITY_BOOST
 
         # Path-based adjustments
         path = str(md.get("path") or "")
         if CORE_FILE_BOOST > 0.0 and path and is_core_file(path):
+            rec["core"] += CORE_FILE_BOOST
             rec["s"] += CORE_FILE_BOOST
         if VENDOR_PENALTY > 0.0 and path and is_vendor_path(path):
+            rec["vendor"] -= VENDOR_PENALTY
             rec["s"] -= VENDOR_PENALTY
 
         # Language match boost if requested
-        if LANG_MATCH_BOOST > 0.0 and path and getattr(args, "language", None):
-            lang = str(args.language or "").lower()
+        if LANG_MATCH_BOOST > 0.0 and path and (eff_language or getattr(args, "language", None)):
+            lang = str((eff_language or args.language or "")).lower()
             md_lang = str((md.get("language") or "")).lower()
             if (lang and md_lang and md_lang == lang) or lang_matches_path(lang, path):
+                rec["langb"] += LANG_MATCH_BOOST
                 rec["s"] += LANG_MATCH_BOOST
 
     # Recency bump (normalize across results)
