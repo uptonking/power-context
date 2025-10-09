@@ -23,21 +23,7 @@ RERANKER_ONNX_PATH = os.environ.get("RERANKER_ONNX_PATH", "")
 RERANKER_TOKENIZER_PATH = os.environ.get("RERANKER_TOKENIZER_PATH", "")
 
 
-def _sanitize_vector_name(model_name: str) -> str:
-    name = model_name.strip().lower()
-    if name in (
-        "sentence-transformers/all-minilm-l6-v2",
-        "sentence-transformers/all-minilm-l-6-v2",
-        "sentence-transformers/all-minilm-l6-v2",
-    ):
-        return "fast-all-minilm-l6-v2"
-    if "bge-base-en-v1.5" in name:
-        return "fast-bge-base-en-v1.5"
-    for ch in ["/", ".", " ", "_"]:
-        name = name.replace(ch, "-")
-    while "--" in name:
-        name = name.replace("--", "-")
-    return name
+from scripts.utils import sanitize_vector_name as _sanitize_vector_name
 
 
 def dense_results(client: QdrantClient, vec_name: str, query: str, flt, topk: int) -> List[Any]:

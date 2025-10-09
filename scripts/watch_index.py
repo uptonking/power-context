@@ -106,29 +106,34 @@ def main():
 
     client = QdrantClient(url=QDRANT_URL)
 
-    # Determine vector name from collection config if present; fallback to sanitizer
+    # Compute embedding dimension first (for deterministic dense vector selection)
+    model = TextEmbedding(model_name=MODEL)
+    dim = len(next(model.embed(["dimension probe"])) )
+
+    # Determine dense vector name deterministically
     try:
         info = client.get_collection(COLLECTION)
         cfg = info.config.params.vectors
         if isinstance(cfg, dict) and cfg:
-            vector_name = list(cfg.keys())[0]
-            # Attempt to derive dimension from vector params
-            vec_params = info.config.params.vectors.get(vector_name)
-            dim = getattr(vec_params, "size", None) or getattr(vec_params, "dim", None)
+            # Prefer vector whose size matches embedding dim
+            vector_name = None
+            for name, params in cfg.items():
+                psize = getattr(params, "size", None) or getattr(params, "dim", None)
+                if psize and int(psize) == int(dim):
+                    vector_name = name
+                    break
+            # If LEX vector exists, pick a different name as dense
+            if vector_name is None and getattr(idx, 'LEX_VECTOR_NAME', None) in cfg:
+                for name in cfg.keys():
+                    if name != idx.LEX_VECTOR_NAME:
+                        vector_name = name
+                        break
+            if vector_name is None:
+                vector_name = idx._sanitize_vector_name(MODEL)
         else:
             vector_name = idx._sanitize_vector_name(MODEL)
-            dim = None
     except Exception:
         vector_name = idx._sanitize_vector_name(MODEL)
-        dim = None
-
-    # Only load the model if we still don't know the dimension
-    if dim is None:
-        model = TextEmbedding(model_name=MODEL)
-        dim = len(next(model.embed(["dimension probe"])) )
-    else:
-        # Lazily create model on first change to avoid startup cost
-        model = None
 
     # Ensure collection + payload indexes exist
     try:

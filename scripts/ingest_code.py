@@ -993,6 +993,14 @@ def index_single_file(client: QdrantClient, model: TextEmbedding, collection: st
     for ch in chunks:
         info = build_information(language, file_path, ch["start"], ch["end"], ch["text"].splitlines()[0] if ch["text"] else "")
         kind, sym, sym_path = _choose_symbol_for_chunk(ch["start"], ch["end"], symbols)
+        # Prefer embedded symbol metadata from semantic chunker when present
+        if "kind" in ch and ch.get("kind"):
+            kind = ch.get("kind") or kind
+        if "symbol" in ch and ch.get("symbol"):
+            sym = ch.get("symbol") or sym
+        if "symbol_path" in ch and ch.get("symbol_path"):
+            sym_path = ch.get("symbol_path") or sym_path
+
         payload = {
             "document": info,
             "information": info,
@@ -1044,9 +1052,19 @@ def index_repo(root: Path, qdrant_url: str, api_key: str, collection: str, model
         try:
             info = client.get_collection(collection)
             cfg = info.config.params.vectors
-            if isinstance(cfg, dict):
-                # Use the first vector name
-                vector_name = list(cfg.keys())[0]
+            if isinstance(cfg, dict) and cfg:
+                # Prefer named vector whose size matches current embedding dim
+                for name, params in cfg.items():
+                    psize = getattr(params, "size", None) or getattr(params, "dim", None)
+                    if psize and int(psize) == int(dim):
+                        vector_name = name
+                        break
+                # Otherwise, if a LEX vector exists, pick a different name as dense
+                if vector_name is None and LEX_VECTOR_NAME in cfg:
+                    for name in cfg.keys():
+                        if name != LEX_VECTOR_NAME:
+                            vector_name = name
+                            break
         except Exception:
             pass
         if vector_name is None:
@@ -1217,7 +1235,7 @@ def main():
     qdrant_url = os.environ.get("QDRANT_URL", "http://localhost:6333")
     api_key = os.environ.get("QDRANT_API_KEY")
     collection = os.environ.get("COLLECTION_NAME", "my-collection")
-    model_name = os.environ.get("EMBEDDING_MODEL", "intfloat/e5-base-v2")
+    model_name = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
 
     index_repo(
         Path(args.root).resolve(), qdrant_url, api_key, collection, model_name, args.recreate,
