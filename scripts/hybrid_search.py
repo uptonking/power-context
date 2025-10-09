@@ -456,6 +456,15 @@ def main():
                 rec_comp = RECENCY_WEIGHT * norm
                 rec["rec"] += rec_comp
                 rec["s"] += rec_comp
+    # Apply client-side NOT filter if requested
+    if eff_not:
+        nn = eff_not.lower()
+        def _ok(m):
+            md = (m["pt"].payload or {}).get("metadata") or {}
+            p = str(md.get("path") or "").lower()
+            pp = str(md.get("path_prefix") or "").lower()
+            return (nn not in p) and (nn not in pp)
+        ranked = [m for m in ranked if _ok(m)]
 
     # Rank with deterministic tie-breakers
     def _tie_key(m: Dict[str, Any]):
