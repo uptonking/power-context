@@ -15,6 +15,10 @@ QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
 API_KEY = os.environ.get("QDRANT_API_KEY")
 
 
+LEX_VECTOR_NAME = os.environ.get("LEX_VECTOR_NAME", "lex")
+LEX_VECTOR_DIM = int(os.environ.get("LEX_VECTOR_DIM", "4096") or 4096)
+
+
 def _sanitize_vector_name(model_name: str) -> str:
     name = model_name.strip().lower()
     if name in (
@@ -35,6 +39,7 @@ def _sanitize_vector_name(model_name: str) -> str:
 RRF_K = int(os.environ.get("HYBRID_RRF_K", "60") or 60)
 DENSE_WEIGHT = float(os.environ.get("HYBRID_DENSE_WEIGHT", "1.0") or 1.0)
 LEXICAL_WEIGHT = float(os.environ.get("HYBRID_LEXICAL_WEIGHT", "0.25") or 0.25)
+LEX_VECTOR_WEIGHT = float(os.environ.get("HYBRID_LEX_VECTOR_WEIGHT", str(LEXICAL_WEIGHT)) or LEXICAL_WEIGHT)
 EF_SEARCH = int(os.environ.get("QDRANT_EF_SEARCH", "128") or 128)
 # Lightweight, configurable boosts
 SYMBOL_BOOST = float(os.environ.get("HYBRID_SYMBOL_BOOST", "0.15") or 0.15)
@@ -193,18 +198,69 @@ def lexical_score(phrases: List[str], md: Dict[str, Any]) -> float:
     sym = str(md.get("symbol", "")).lower()
     symp = str(md.get("symbol_path", "")).lower()
     code = str(md.get("code", ""))[:2000].lower()
-
     s = 0.0
     for t in tokens:
         if not t:
             continue
-        if t and (t in sym or t in symp):
-            s += 1.2  # symbol emphasis
-        if t and any(t in seg for seg in path_segs):
-            s += 0.6  # path segment
-        if t and t in code:
-            s += 1.0  # body occurrence
+        if t in sym or t in symp:
+            s += 2.0
+        if any(t in seg for seg in path_segs):
+            s += 0.6
+        if t in code:
+            s += 1.0
     return s
+
+
+
+# --- Lexical vector (hashing trick) for server-side hybrid ---
+def _split_ident_lex(s: str) -> List[str]:
+    parts = re.split(r"[^A-Za-z0-9]+", s)
+    out: List[str] = []
+    for p in parts:
+        if not p:
+            continue
+        segs = re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|\d+", p)
+        out.extend([x for x in segs if x])
+    return [x.lower() for x in out if x and x.lower() not in _STOP]
+
+
+def lex_hash_vector(phrases: List[str], dim: int = LEX_VECTOR_DIM) -> List[float]:
+    import hashlib, math
+    toks: List[str] = []
+    for ph in phrases:
+        toks.extend(_split_ident_lex(ph))
+    if not toks:
+        return [0.0] * dim
+    vec = [0.0] * dim
+    for t in toks:
+        h = int(hashlib.md5(t.encode("utf-8", errors="ignore")).hexdigest()[:8], 16)
+        vec[h % dim] += 1.0
+    norm = math.sqrt(sum(v*v for v in vec)) or 1.0
+    return [v / norm for v in vec]
+
+
+def lex_query(client: QdrantClient, v: List[float], flt, per_query: int) -> List[Any]:
+    try:
+        ef = max(EF_SEARCH, 32 + 4*int(per_query))
+        qp = client.query_points(
+            collection_name=COLLECTION,
+            query=v,
+            using=LEX_VECTOR_NAME,
+            query_filter=flt,
+            search_params=models.SearchParams(hnsw_ef=ef),
+            limit=per_query,
+            with_payload=True,
+        )
+        return getattr(qp, "points", qp)
+    except Exception:
+        res = client.search(
+            collection_name=COLLECTION,
+            query_vector={"name": LEX_VECTOR_NAME, "vector": v},
+            limit=per_query,
+            with_payload=True,
+            query_filter=flt,
+        )
+        return res
 
 
 def dense_query(client: QdrantClient, vec_name: str, v: List[float], flt, per_query: int) -> List[Any]:
@@ -261,6 +317,23 @@ def main():
     eff_under = args.under or dsl.get("under")
     eff_kind = args.kind or dsl.get("kind")
     eff_symbol = args.symbol or dsl.get("symbol")
+
+    # Normalize 'under' to absolute path_prefix used in payload (defaults to /work/<rel>)
+    def _norm_under(u: str | None) -> str | None:
+        if not u:
+            return None
+        u = str(u).strip()
+        # remove trailing slashes and collapse
+        u = "/".join([p for p in u.replace("\\", "/").split("/") if p])
+        if not u.startswith("/"):
+            u = "/work/" + u
+        else:
+            # ensure it starts with /work when pointing into repo mount
+            if not u.startswith("/work/") and u in {"work", "./work"}:
+                u = "/work"
+        return u
+
+    eff_under = _norm_under(eff_under)
 
     # Build optional filter
     flt = None

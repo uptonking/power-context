@@ -45,6 +45,66 @@ CODE_EXTS = {
     ".toml": "toml", ".ini": "ini", ".json": "json", ".tf": "terraform"
 }
 
+# --- Named vector config ---
+LEX_VECTOR_NAME = os.environ.get("LEX_VECTOR_NAME", "lex")
+LEX_VECTOR_DIM = int(os.environ.get("LEX_VECTOR_DIM", "4096") or 4096)
+
+# Lightweight hashing-trick sparse vector (fixed-size dense) for lexical signals
+_STOP = {"the","a","an","of","in","on","for","and","or","to","with","by","is","are","be","this","that"}
+
+def _split_ident_lex(s: str):
+    parts = re.split(r"[^A-Za-z0-9]+", s)
+    out = []
+    for p in parts:
+        if not p:
+            continue
+        segs = re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|\d+", p)
+        out.extend([x for x in segs if x])
+    return [x.lower() for x in out if x and x.lower() not in _STOP]
+
+
+def _lex_hash_vector(text: str, dim: int = LEX_VECTOR_DIM) -> list[float]:
+    if not text:
+        return [0.0] * dim
+    vec = [0.0] * dim
+    # Tokenize identifiers & words
+    toks = _split_ident_lex(text)
+    if not toks:
+        return vec
+    for t in toks:
+        h = int(hashlib.md5(t.encode("utf-8", errors="ignore")).hexdigest()[:8], 16)
+        idx = h % dim
+        vec[idx] += 1.0
+    # L2 normalize (avoid huge magnitudes)
+    import math
+    norm = math.sqrt(sum(v*v for v in vec)) or 1.0
+    return [v / norm for v in vec]
+
+
+def _git_metadata(file_path: Path) -> tuple[int, int, int]:
+    """Return (last_modified_at, churn_count, author_count) using git when available.
+    Fallbacks to fs mtime and zeros when not in a repo.
+    """
+    try:
+        import subprocess
+        fp = str(file_path)
+        # last commit unix timestamp (%ct)
+        ts = subprocess.run(["git", "log", "-1", "--format=%ct", "--", fp], capture_output=True, text=True, cwd=file_path.parent).stdout.strip()
+        last_ts = int(ts) if ts.isdigit() else int(file_path.stat().st_mtime)
+        # churn: number of commits touching this file (bounded)
+        churn_s = subprocess.run(["git", "rev-list", "--count", "HEAD", "--", fp], capture_output=True, text=True, cwd=file_path.parent).stdout.strip()
+        churn = int(churn_s) if churn_s.isdigit() else 0
+        # author count
+        authors = subprocess.run(["git", "shortlog", "-s", "--", fp], capture_output=True, text=True, cwd=file_path.parent).stdout
+        author_count = len([ln for ln in authors.splitlines() if ln.strip()])
+        return last_ts, churn, author_count
+    except Exception:
+        try:
+            return int(file_path.stat().st_mtime), 0, 0
+        except Exception:
+            return int(time.time()), 0, 0
+
+
 # --- Exclusions (configurable) ---
 # Defaults can be overridden by .qdrantignore, env, or CLI
 _DEFAULT_EXCLUDE_DIRS = [
@@ -253,6 +313,10 @@ def _sanitize_vector_name(model_name: str) -> str:
 
 
 def ensure_collection(client: QdrantClient, name: str, dim: int, vector_name: str):
+    """Ensure collection exists with dual named vectors: dense and lexical (hashing).
+    - dense vector named by vector_name, size=dim
+    - lexical vector named by LEX_VECTOR_NAME, size=LEX_VECTOR_DIM
+    """
     try:
         client.get_collection(name)
         # Ensure HNSW tuned params even if the collection already existed
@@ -266,21 +330,30 @@ def ensure_collection(client: QdrantClient, name: str, dim: int, vector_name: st
         return
     except Exception:
         pass
+    vectors_cfg = {
+        vector_name: models.VectorParams(size=dim, distance=models.Distance.COSINE),
+        LEX_VECTOR_NAME: models.VectorParams(size=LEX_VECTOR_DIM, distance=models.Distance.COSINE),
+    }
     client.create_collection(
         collection_name=name,
-        vectors_config={vector_name: models.VectorParams(size=dim, distance=models.Distance.COSINE)},
+        vectors_config=vectors_cfg,
         hnsw_config=models.HnswConfigDiff(m=16, ef_construct=256),
     )
 
 
 def recreate_collection(client: QdrantClient, name: str, dim: int, vector_name: str):
+    """Drop and recreate collection with dual named vectors."""
     try:
         client.delete_collection(name)
     except Exception:
         pass
+    vectors_cfg = {
+        vector_name: models.VectorParams(size=dim, distance=models.Distance.COSINE),
+        LEX_VECTOR_NAME: models.VectorParams(size=LEX_VECTOR_DIM, distance=models.Distance.COSINE),
+    }
     client.create_collection(
         collection_name=name,
-        vectors_config={vector_name: models.VectorParams(size=dim, distance=models.Distance.COSINE)},
+        vectors_config=vectors_cfg,
         hnsw_config=models.HnswConfigDiff(m=16, ef_construct=256),
     )
 
@@ -299,6 +372,9 @@ def ensure_payload_indexes(client: QdrantClient, collection: str):
         "metadata.calls",
         "metadata.file_hash",
         "metadata.ingested_at",
+        "metadata.last_modified_at",
+        "metadata.churn_count",
+        "metadata.author_count",
     ):
         try:
             client.create_payload_index(
@@ -877,6 +953,8 @@ def index_single_file(client: QdrantClient, model: TextEmbedding, collection: st
 
     symbols = _extract_symbols(language, text)
     imports, calls = _get_imports_calls(language, text)
+    last_mod, churn_count, author_count = _git_metadata(file_path)
+
     CHUNK_LINES = int(os.environ.get("INDEX_CHUNK_LINES", "120") or 120)
     CHUNK_OVERLAP = int(os.environ.get("INDEX_CHUNK_OVERLAP", "20") or 20)
     # Use semantic chunking if enabled, fallback to line-based
@@ -888,12 +966,14 @@ def index_single_file(client: QdrantClient, model: TextEmbedding, collection: st
     batch_texts: List[str] = []
     batch_meta: List[Dict] = []
     batch_ids: List[int] = []
+    batch_lex: List[list[float]] = []
 
-    def make_point(pid, vec, payload):
+    def make_point(pid, dense_vec, lex_vec, payload):
         if vector_name:
-            return models.PointStruct(id=pid, vector={vector_name: vec}, payload=payload)
+            return models.PointStruct(id=pid, vector={vector_name: dense_vec, LEX_VECTOR_NAME: lex_vec}, payload=payload)
         else:
-            return models.PointStruct(id=pid, vector=vec, payload=payload)
+            # unnamed collection: store dense only
+            return models.PointStruct(id=pid, vector=dense_vec, payload=payload)
 
     for ch in chunks:
         info = build_information(language, file_path, ch["start"], ch["end"], ch["text"].splitlines()[0] if ch["text"] else "")
@@ -916,19 +996,25 @@ def index_single_file(client: QdrantClient, model: TextEmbedding, collection: st
                 "imports": imports,
                 "calls": calls,
                 "ingested_at": int(time.time()),
+                "last_modified_at": int(last_mod),
+                "churn_count": int(churn_count),
+                "author_count": int(author_count),
             },
         }
         batch_texts.append(info)
         batch_meta.append(payload)
         batch_ids.append(hash_id(ch["text"], str(file_path), ch["start"], ch["end"]))
+        batch_lex.append(_lex_hash_vector(ch.get("text") or ""))
 
     if batch_texts:
         vectors = embed_batch(model, batch_texts)
-        points = [make_point(i, v, m) for i, v, m in zip(batch_ids, vectors, batch_meta)]
+        points = [make_point(i, v, lx, m) for i, v, lx, m in zip(batch_ids, vectors, batch_lex, batch_meta)]
         upsert_points(client, collection, points)
         return True
     return False
 
+
+        last_mod, churn_count, author_count = _git_metadata(file_path)
 
 
 def index_repo(root: Path, qdrant_url: str, api_key: str, collection: str, model_name: str, recreate: bool, *, dedupe: bool = True, skip_unchanged: bool = True):
@@ -970,6 +1056,7 @@ def index_repo(root: Path, qdrant_url: str, api_key: str, collection: str, model
     batch_texts: list[str] = []
     batch_meta: list[dict] = []
     batch_ids: list[int] = []
+    batch_lex: list[list[float]] = []
     BATCH_SIZE = int(os.environ.get("INDEX_BATCH_SIZE", "64") or 64)
     CHUNK_LINES = int(os.environ.get("INDEX_CHUNK_LINES", "120") or 120)
     CHUNK_OVERLAP = int(os.environ.get("INDEX_CHUNK_OVERLAP", "20") or 20)
@@ -981,12 +1068,13 @@ def index_repo(root: Path, qdrant_url: str, api_key: str, collection: str, model
     files_indexed = 0
     points_indexed = 0
 
-    def make_point(pid, vec, payload):
-        # Use named vectors if collection is named
+    def make_point(pid, dense_vec, lex_vec, payload):
+        # Use named vectors if collection has names: store dense + lexical
         if vector_name:
-            return models.PointStruct(id=pid, vector={vector_name: vec}, payload=payload)
+            return models.PointStruct(id=pid, vector={vector_name: dense_vec, LEX_VECTOR_NAME: lex_vec}, payload=payload)
         else:
-            return models.PointStruct(id=pid, vector=vec, payload=payload)
+            # unnamed collection: store dense only
+            return models.PointStruct(id=pid, vector=dense_vec, payload=payload)
 
     for file_path in iter_files(root):
         files_seen += 1
@@ -1014,6 +1102,8 @@ def index_repo(root: Path, qdrant_url: str, api_key: str, collection: str, model
         files_indexed += 1
         symbols = _extract_symbols(language, text)
         imports, calls = _get_imports_calls(language, text)
+        last_mod, churn_count, author_count = _git_metadata(file_path)
+
         # Use semantic chunking if enabled, fallback to line-based
         if use_semantic:
             chunks = chunk_semantic(text, language, CHUNK_LINES, CHUNK_OVERLAP)
@@ -1045,24 +1135,28 @@ def index_repo(root: Path, qdrant_url: str, api_key: str, collection: str, model
                     "imports": imports,
                     "calls": calls,
                     "ingested_at": int(time.time()),
+                    "last_modified_at": int(last_mod),
+                    "churn_count": int(churn_count),
+                    "author_count": int(author_count),
                 },
             }
             batch_texts.append(info)
             batch_meta.append(payload)
             batch_ids.append(hash_id(ch["text"], str(file_path), ch["start"], ch["end"]))
+            batch_lex.append(_lex_hash_vector(ch.get("text") or ""))
             points_indexed += 1
             if len(batch_texts) >= BATCH_SIZE:
                 vectors = embed_batch(model, batch_texts)
-                points = [make_point(i, v, m) for i, v, m in zip(batch_ids, vectors, batch_meta)]
+                points = [make_point(i, v, lx, m) for i, v, lx, m in zip(batch_ids, vectors, batch_lex, batch_meta)]
                 upsert_points(client, collection, points)
-                batch_texts, batch_meta, batch_ids = [], [], []
+                batch_texts, batch_meta, batch_ids, batch_lex = [], [], [], []
 
         if PROGRESS_EVERY > 0 and files_seen % PROGRESS_EVERY == 0:
             print(f"Progress: files_seen={files_seen}, files_indexed={files_indexed}, chunks_indexed={points_indexed}")
 
     if batch_texts:
         vectors = embed_batch(model, batch_texts)
-        points = [make_point(i, v, m) for i, v, m in zip(batch_ids, vectors, batch_meta)]
+        points = [make_point(i, v, lx, m) for i, v, lx, m in zip(batch_ids, vectors, batch_lex, batch_meta)]
         upsert_points(client, collection, points)
 
     print(f"Indexing complete. files_seen={files_seen}, files_indexed={files_indexed}, chunks_indexed={points_indexed}")
