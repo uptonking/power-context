@@ -145,6 +145,70 @@ async def qdrant_list() -> Dict[str, Any]:
         return {"error": str(e)}
 
 @mcp.tool()
+async def memory_store(information: str,
+                       metadata: Optional[Dict[str, Any]] = None,
+                       collection: Optional[str] = None) -> Dict[str, Any]:
+    """Store a memory-like entry directly into Qdrant using the default collection.
+    - information: free-form text to remember
+    - metadata: optional tags (e.g., {"kind":"preference","source":"memory"})
+    - collection: override target collection (defaults to env COLLECTION_NAME)
+    """
+    try:
+        from qdrant_client import QdrantClient, models  # type: ignore
+        from fastembed import TextEmbedding  # type: ignore
+        import time, hashlib, re
+        from scripts.utils import sanitize_vector_name
+    except Exception as e:  # pragma: no cover
+        return {"error": f"deps: {e}"}
+
+    if not information or not str(information).strip():
+        return {"error": "information is required"}
+
+    coll = (collection or DEFAULT_COLLECTION) or ""
+    model_name = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
+    vector_name = sanitize_vector_name(model_name)
+
+    # Minimal lexical hashing (aligns with ingest_code defaults)
+    LEX_VECTOR_NAME = os.environ.get("LEX_VECTOR_NAME", "lex")
+    LEX_VECTOR_DIM = int(os.environ.get("LEX_VECTOR_DIM", "4096") or 4096)
+
+    def _split_ident_lex(s: str):
+        parts = re.split(r"[^A-Za-z0-9]+", s)
+        out: list[str] = []
+        for p in parts:
+            if not p:
+                continue
+            segs = re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|\d+", p)
+            out.extend([x for x in segs if x])
+        return [x.lower() for x in out if x]
+
+    def _lex_hash_vector(text: str, dim: int = LEX_VECTOR_DIM) -> list[float]:
+        if not text:
+            return [0.0] * dim
+        vec = [0.0] * dim
+        for t in _split_ident_lex(text):
+            h = int(hashlib.md5(t.encode("utf-8", errors="ignore")).hexdigest()[:8], 16)
+            vec[h % dim] += 1.0
+        return vec
+
+    # Build vectors
+    model = TextEmbedding(model_name=model_name)
+    dense = next(model.embed([str(information)])).tolist()
+    lex = _lex_hash_vector(str(information))
+
+    # Upsert
+    try:
+        client = QdrantClient(url=QDRANT_URL, api_key=os.environ.get("QDRANT_API_KEY"))
+        pid = int(time.time_ns() % (2**31 - 1))
+        payload = {"information": str(information), "metadata": metadata or {"kind": "memory", "source": "memory"}}
+        point = models.PointStruct(id=pid, vector={vector_name: dense, LEX_VECTOR_NAME: lex}, payload=payload)
+        client.upsert(collection_name=coll, points=[point], wait=True)
+        return {"ok": True, "id": pid, "collection": coll, "vector_name": vector_name}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
 async def qdrant_status(collection: Optional[str] = None, max_points: Optional[int] = None, batch: Optional[int] = None) -> Dict[str, Any]:
     """Report collection size and approximate last index times.
     Args:

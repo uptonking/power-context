@@ -4,8 +4,8 @@ FROM python:3.11-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# Install the MCP server package
-RUN pip install --no-cache-dir mcp-server-qdrant
+# Install/upgrade the MCP server package (and FastMCP) to ensure protocol compatibility
+RUN pip install --no-cache-dir --upgrade mcp-server-qdrant fastmcp
 
 # Expose SSE port
 EXPOSE 8000
