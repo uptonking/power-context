@@ -309,6 +309,8 @@ def main():
     ap.add_argument("--not", dest="not_filter", type=str, default=None)
     ap.add_argument("--case", type=str, choices=["sensitive", "insensitive"], default=os.environ.get("HYBRID_CASE", "insensitive"))
     ap.add_argument("--path-regex", dest="path_regex", type=str, default=None)
+    ap.add_argument("--path-glob", dest="path_glob", type=str, default=None)
+    ap.add_argument("--not-glob", dest="not_glob", type=str, default=None)
 
     args = ap.parse_args()
 
@@ -328,6 +330,8 @@ def main():
     eff_case = args.case or dsl.get("case")
     eff_repo = dsl.get("repo")
     eff_path_regex = args.path_regex
+    eff_path_glob = getattr(args, "path_glob", None)
+    eff_not_glob = getattr(args, "not_glob", None)
 
     # Normalize 'under' to absolute path_prefix used in payload (defaults to /work/<rel>)
     def _norm_under(u: str | None) -> str | None:
@@ -511,10 +515,16 @@ def main():
 
     ranked = sorted([c["m"] for lst in clusters.values() for c in lst], key=_tie_key)
 
-    # Apply client-side filters: NOT substring, path regex, and ext
-    import re as _re
+    # Apply client-side filters: NOT substring, path regex, glob, and ext
+    import re as _re, fnmatch as _fnm
     case_sensitive = (str(eff_case or "").lower() == "sensitive")
-    if eff_not or eff_path_regex or eff_ext:
+    if eff_not or eff_path_regex or eff_ext or eff_path_glob or eff_not_glob:
+        def _match_glob(pat: str, path: str) -> bool:
+            if not pat:
+                return True
+            if case_sensitive:
+                return _fnm.fnmatchcase(path, pat)
+            return _fnm.fnmatchcase(path.lower(), pat.lower())
         def _pass_filters(m: Dict[str, Any]) -> bool:
             md = (m["pt"].payload or {}).get("metadata") or {}
             path = str(md.get("path") or "")
@@ -526,6 +536,9 @@ def main():
                 nn = eff_not if case_sensitive else eff_not.lower()
                 if nn in p_for_sub or nn in pp_for_sub:
                     return False
+            # not_glob exclusion
+            if eff_not_glob and _match_glob(eff_not_glob, path):
+                return False
             # Extension filter (normalize to .ext)
             if eff_ext:
                 ex = eff_ext.lower().lstrip('.')
@@ -540,6 +553,9 @@ def main():
                 except Exception:
                     # Ignore invalid regex
                     pass
+            # path_glob inclusion
+            if eff_path_glob and not _match_glob(eff_path_glob, path):
+                return False
             return True
         ranked = [m for m in ranked if _pass_filters(m)]
 

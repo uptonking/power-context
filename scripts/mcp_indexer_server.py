@@ -267,6 +267,8 @@ async def repo_search(
     symbol: Any = None,
     # Additional structured parity
     path_regex: Any = None,
+    path_glob: Any = None,
+    not_glob: Any = None,
     ext: Any = None,
     not_: Any = None,
     case: Any = None,
@@ -327,9 +329,12 @@ async def repo_search(
     kind = _to_str(kind, "").strip()
     symbol = _to_str(symbol, "").strip()
     path_regex = _to_str(path_regex, "").strip()
+    path_glob = _to_str(path_glob, "").strip()
+    not_glob = _to_str(not_glob, "").strip()
     ext = _to_str(ext, "").strip()
     not_ = _to_str(not_, "").strip()
     case = _to_str(case, "").strip()
+    compact_raw = compact
     compact = _to_bool(compact, False)
 
     # Normalize queries to a list[str]
@@ -376,6 +381,10 @@ async def repo_search(
         cmd += ["--path-regex", path_regex]
     for q in queries:
         cmd += ["--query", q]
+    if path_glob:
+        cmd += ["--path-glob", path_glob]
+    if not_glob:
+        cmd += ["--not-glob", not_glob]
 
     res = _run(cmd, env=env)
 
@@ -464,6 +473,10 @@ async def repo_search(
             except Exception:
                 item["snippet"] = ""
 
+    # Smart default: compact true for multi-query calls if compact not explicitly set
+    if (len(queries) > 1) and (compact_raw is None or (isinstance(compact_raw, str) and compact_raw.strip() == "")):
+        compact = True
+
     # Compact mode: return only path and line range
     if compact:
         results = [
@@ -519,6 +532,8 @@ async def code_search(
     kind: Any = None,
     symbol: Any = None,
     path_regex: Any = None,
+    path_glob: Any = None,
+    not_glob: Any = None,
     ext: Any = None,
     not_: Any = None,
     case: Any = None,
@@ -542,6 +557,8 @@ async def code_search(
         kind=kind,
         symbol=symbol,
         path_regex=path_regex,
+        path_glob=path_glob,
+        not_glob=not_glob,
         ext=ext,
         not_=not_,
         case=case,

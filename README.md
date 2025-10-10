@@ -345,13 +345,15 @@ For each tool, use this format:
 
 ##### Zero-config search tool (new)
 - repo_search: run code search without filters or config.
-  - Structured fields supported (parity with DSL): language, under, kind, symbol, ext, not_, case, path_regex
+  - Structured fields supported (parity with DSL): language, under, kind, symbol, ext, not_, case, path_regex, path_glob, not_glob
   - Response shaping: compact (bool) returns only path/start_line/end_line
+  - Smart default: compact=true when query is an array with multiple queries (unless explicitly set)
   - Examples:
     - {"query": "semantic chunking"}
     - {"query": ["function to split code", "overlapping chunks"], "limit": 15, "per_path": 3}
     - {"query": "watcher debounce", "language": "python", "under": "scripts/", "include_snippet": true, "context_lines": 2}
     - {"query": "parser", "ext": "ts", "path_regex": "/services/.+", "compact": true}
+    - {"query": "adapter", "path_glob": "**/src/**", "not_glob": "**/tests/**"}
   - Returns structured results: score, path, symbol, start_line, end_line, and optional snippet; or compact form.
 - code_search: alias of repo_search (same args) for easier discovery in some clients.
 
