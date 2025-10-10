@@ -748,6 +748,9 @@ async def context_search(
                         if len(mem_hits) >= mem_limit:
                             break
                 checked += len(sc)
+        except Exception:
+            pass
+
 
     # Blend results
     try:
