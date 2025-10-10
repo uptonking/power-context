@@ -11,5 +11,5 @@ RUN pip install --no-cache-dir --upgrade mcp-server-qdrant fastmcp
 EXPOSE 8000
 
 # Default command: run the server with SSE transport (env provides host/port)
-CMD ["mcp-server-qdrant", "--transport", "sse"]
+CMD ["python", "/work/scripts/mcp_memory_server.py"]
 
