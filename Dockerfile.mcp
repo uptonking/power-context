@@ -4,8 +4,8 @@ FROM python:3.11-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# Install/upgrade the MCP server package (and FastMCP) to ensure protocol compatibility
-RUN pip install --no-cache-dir --upgrade mcp-server-qdrant fastmcp
+# Install FastMCP + Qdrant client + FastEmbed for embeddings
+RUN pip install --no-cache-dir --upgrade fastmcp==2.12.4 qdrant-client fastembed
 
 # Expose SSE port
 EXPOSE 8000

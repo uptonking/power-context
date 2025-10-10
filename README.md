@@ -18,6 +18,30 @@ flowchart LR
 ```
 
 ## Production-ready local development
+### SSE Memory Server (port 8000)
+
+- URL: http://localhost:8000/sse
+- Tools: `store`, `find`
+- Env (used by the indexer to blend memory):
+  - `MEMORY_SSE_ENABLED=true`
+  - `MEMORY_MCP_URL=http://mcp:8000/sse`
+  - `MEMORY_MCP_TIMEOUT=6`
+
+IDE/Agent config (recommended):
+
+```json
+{
+  "mcpServers": {
+    "memory": { "type": "sse", "url": "http://localhost:8000/sse", "disabled": false },
+    "qdrant-indexer": { "type": "sse", "url": "http://localhost:8001/sse", "disabled": false }
+  }
+}
+```
+
+Blended search:
+- Call `context_search` on :8001 with `{ "include_memories": true }` to return both memory and code results.
+
+
 
 - Idempotent + incremental indexing out of the box:
   - Skips unchanged files automatically using a file content hash stored in payload (metadata.file_hash)
