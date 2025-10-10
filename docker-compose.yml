@@ -14,7 +14,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.mcp
-    container_name: mcp-server-qdrant
+    container_name: mcp-search
     depends_on:
       - qdrant
     env_file:
