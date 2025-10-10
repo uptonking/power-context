@@ -29,6 +29,7 @@ services:
       - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER}
       - TOOL_STORE_DESCRIPTION=${TOOL_STORE_DESCRIPTION}
       - TOOL_FIND_DESCRIPTION=${TOOL_FIND_DESCRIPTION}
+    # SSE endpoint for IDE agents at http://localhost:8000/sse
     ports:
       - "8000:8000"
 
