@@ -104,7 +104,7 @@ def _highlight_snippet(snippet: str, tokens: list[str]) -> str:
 
 @mcp.tool()
 async def qdrant_index_root(recreate: bool = False,
-                            collection: str | None = None) -> Dict[str, Any]:
+                            collection: str = "") -> Dict[str, Any]:
     """Index the mounted root path (/work) with zero-arg safe defaults.
     Notes for IDE agents (Cursor/Windsurf/Augment):
     - Prefer this tool when you want to index the repo root without specifying params.
@@ -139,8 +139,8 @@ async def qdrant_list() -> Dict[str, Any]:
 
 
 @mcp.tool()
-async def qdrant_index(subdir: Optional[str] = None, recreate: bool = False,
-                 collection: Optional[str] = None) -> Dict[str, Any]:
+async def qdrant_index(subdir: str = "", recreate: bool = False,
+                 collection: str = "") -> Dict[str, Any]:
     """Index the mounted path (/work) or a subdirectory.
     Important for IDE agents (Cursor/Windsurf/Augment):
     - Do NOT pass null values; omit a field or pass empty string "".
@@ -178,7 +178,7 @@ async def qdrant_prune() -> Dict[str, Any]:
 
 @mcp.tool()
 async def repo_search(
-    query,
+    query: str = "",
     limit: int = 10,
     per_path: int = 2,
     include_snippet: bool = False,
@@ -188,7 +188,7 @@ async def repo_search(
     rerank_return_m: int = 12,
     rerank_timeout_ms: int = 120,
     highlight_snippet: bool = True,
-    collection: Optional[str] = None,
+    collection: str = "",
 ) -> Dict[str, Any]:
     """Zero-config code search over the mounted repo via Qdrant using hybrid_search defaults.
     Args:
