@@ -579,9 +579,8 @@ async def context_search(
     coll = (collection or DEFAULT_COLLECTION) or ""
     mcoll = (os.environ.get("MEMORY_COLLECTION_NAME") or coll) or ""
     use_sse_memory = str(os.environ.get("MEMORY_SSE_ENABLED", "false")).lower() in ("1","true","yes")
-    try:
     # Auto-detect memory collection if not explicitly set
-    if include_memories and mem_limit > 0 and not os.environ.get("MEMORY_COLLECTION_NAME"):
+    if include_memories and not os.environ.get("MEMORY_COLLECTION_NAME"):
         try:
             from qdrant_client import QdrantClient  # type: ignore
             client = QdrantClient(url=QDRANT_URL, api_key=os.environ.get("QDRANT_API_KEY"))
@@ -613,6 +612,7 @@ async def context_search(
         except Exception:
             pass
 
+    try:
         lim = int(limit) if (limit is not None and str(limit).strip() != "") else 10
     except Exception:
         lim = 10
