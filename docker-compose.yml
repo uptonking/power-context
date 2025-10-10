@@ -36,7 +36,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.mcp-indexer
-    container_name: mcp-server-qdrant-indexer
+    container_name: mcp-indexer
     depends_on:
       - qdrant
     env_file:
