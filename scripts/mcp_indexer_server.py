@@ -111,8 +111,8 @@ def _highlight_snippet(snippet: str, tokens: list[str]) -> str:
 
 
 @mcp.tool()
-async def qdrant_index_root(recreate: bool = False,
-                            collection: str = "") -> Dict[str, Any]:
+async def qdrant_index_root(recreate: Optional[bool] = None,
+                            collection: Optional[str] = None) -> Dict[str, Any]:
     """Index the mounted root path (/work) with zero-arg safe defaults.
     Notes for IDE agents (Cursor/Windsurf/Augment):
     - Prefer this tool when you want to index the repo root without specifying params.
@@ -146,8 +146,8 @@ async def qdrant_list() -> Dict[str, Any]:
 
 
 @mcp.tool()
-async def qdrant_index(subdir: str = "", recreate: bool = False,
-                 collection: str = "") -> Dict[str, Any]:
+async def qdrant_index(subdir: Optional[str] = None, recreate: Optional[bool] = None,
+                 collection: Optional[str] = None) -> Dict[str, Any]:
     """Index the mounted path (/work) or a subdirectory.
     Important for IDE agents (Cursor/Windsurf/Augment):
     - Do NOT pass null values; omit a field or pass empty string "".
@@ -185,17 +185,17 @@ async def qdrant_prune() -> Dict[str, Any]:
 
 @mcp.tool()
 async def repo_search(
-    query: str = "",
-    limit: int = 10,
-    per_path: int = 2,
-    include_snippet: bool = False,
-    context_lines: int = 2,
-    rerank_enabled: bool = False,
-    rerank_top_n: int = 50,
-    rerank_return_m: int = 12,
-    rerank_timeout_ms: int = 120,
-    highlight_snippet: bool = True,
-    collection: str = "",
+    query: Any = None,
+    limit: Any = None,
+    per_path: Any = None,
+    include_snippet: Any = None,
+    context_lines: Any = None,
+    rerank_enabled: Any = None,
+    rerank_top_n: Any = None,
+    rerank_return_m: Any = None,
+    rerank_timeout_ms: Any = None,
+    highlight_snippet: Any = None,
+    collection: Any = None,
 ) -> Dict[str, Any]:
     """Zero-config code search over the mounted repo via Qdrant using hybrid_search defaults.
     Args:
@@ -209,6 +209,40 @@ async def repo_search(
       - No filters required; uses existing environment defaults (COLLECTION_NAME, QDRANT_URL).
       - Returns structured results parsed from hybrid_search JSONL output when possible.
     """
+    # Leniency shim: coerce null/invalid args to sane defaults so buggy clients don't fail schema
+    def _to_int(x, default):
+        try:
+            if x is None or (isinstance(x, str) and x.strip() == ""):
+                return default
+            return int(x)
+        except Exception:
+            return default
+    def _to_bool(x, default):
+        if x is None or (isinstance(x, str) and x.strip() == ""):
+            return default
+        if isinstance(x, bool):
+            return x
+        s = str(x).strip().lower()
+        if s in {"1","true","yes","on"}: return True
+        if s in {"0","false","no","off"}: return False
+        return default
+    def _to_str(x, default=""):
+        if x is None:
+            return default
+        return str(x)
+
+    # Coerce incoming args (which may be null) to proper types
+    limit = _to_int(limit, 10)
+    per_path = _to_int(per_path, 2)
+    include_snippet = _to_bool(include_snippet, False)
+    context_lines = _to_int(context_lines, 2)
+    rerank_enabled = _to_bool(rerank_enabled, False)
+    rerank_top_n = _to_int(rerank_top_n, 50)
+    rerank_return_m = _to_int(rerank_return_m, 12)
+    rerank_timeout_ms = _to_int(rerank_timeout_ms, 120)
+    highlight_snippet = _to_bool(highlight_snippet, True)
+    collection = (_to_str(collection, "").strip() or DEFAULT_COLLECTION)
+
     # Normalize queries to a list[str]
     queries: list[str] = []
     if isinstance(query, str):

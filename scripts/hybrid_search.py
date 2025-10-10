@@ -344,8 +344,13 @@ def main():
         try:
             from pathlib import Path as _P
             p = _P(v)
+            # If it's an existing file, use its parent directory as the prefix
             if p.is_file():
                 return str(p.parent)
+            # Heuristic: if path doesn't exist and looks like a file stem (no dot),
+            # treat it as a file name and use its parent directory
+            if (not p.exists()) and p.name and ("." not in p.name):
+                return str(p.parent) if str(p.parent) else v
         except Exception:
             pass
         # Already normalized /work/... dir path or non-existent path; use as-is
