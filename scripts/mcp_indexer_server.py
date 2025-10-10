@@ -134,8 +134,8 @@ async def qdrant_index_root(recreate: Optional[bool] = None,
     return {"args": {"root": "/work", "collection": coll, "recreate": recreate}, **res}
 
 @mcp.tool()
-async def qdrant_list() -> Dict[str, Any]:
-    """List Qdrant collections"""
+async def qdrant_list(**kwargs) -> Dict[str, Any]:
+    """List Qdrant collections (ignores any extra params)"""
     try:
         from qdrant_client import QdrantClient
         client = QdrantClient(url=QDRANT_URL, api_key=os.environ.get("QDRANT_API_KEY"))
@@ -209,8 +209,8 @@ async def memory_store(information: str,
 
 
 @mcp.tool()
-async def qdrant_status(collection: Optional[str] = None, max_points: Optional[int] = None, batch: Optional[int] = None) -> Dict[str, Any]:
-    """Report collection size and approximate last index times.
+async def qdrant_status(collection: Optional[str] = None, max_points: Optional[int] = None, batch: Optional[int] = None, **kwargs) -> Dict[str, Any]:
+    """Report collection size and approximate last index times. Extra params are ignored.
     Args:
       - collection: override collection name (defaults to env COLLECTION_NAME)
       - max_points: safety cap on points to scan when estimating last timestamps (default 5000)
@@ -303,8 +303,8 @@ async def qdrant_index(subdir: Optional[str] = None, recreate: Optional[bool] = 
 
 
 @mcp.tool()
-async def qdrant_prune() -> Dict[str, Any]:
-    """Prune stale points for the mounted path (/work)"""
+async def qdrant_prune(**kwargs) -> Dict[str, Any]:
+    """Prune stale points for the mounted path (/work). Extra params are ignored."""
     env = os.environ.copy()
     env["PRUNE_ROOT"] = "/work"
     cmd = ["python", "/work/scripts/prune.py"]
@@ -338,6 +338,7 @@ async def repo_search(
     case: Any = None,
     # Response shaping
     compact: Any = None,
+    **kwargs,
 ) -> Dict[str, Any]:
     """Zero-config code search over the mounted repo via Qdrant using hybrid_search defaults.
     Args:
@@ -353,6 +354,14 @@ async def repo_search(
       - No filters required; uses existing environment defaults (COLLECTION_NAME, QDRANT_URL).
       - You can also pass DSL tokens inside the query text, e.g. "lang:python file:scripts/".
       - Returns structured results parsed from hybrid_search JSONL output when possible.
+    # Accept common alias keys from clients
+    if (limit is None or (isinstance(limit, str) and limit.strip() == "")) and ("top_k" in kwargs):
+        limit = kwargs.get("top_k")
+    if (query is None or (isinstance(query, str) and query.strip() == "")):
+        q_alt = kwargs.get("q") or kwargs.get("text")
+        if q_alt is not None:
+            query = q_alt
+
     """
     # Leniency shim: coerce null/invalid args to sane defaults so buggy clients don't fail schema
     def _to_int(x, default):
@@ -629,6 +638,7 @@ async def context_search(
     not_: Any = None,
     case: Any = None,
     compact: Any = None,
+    **kwargs,
 ) -> Dict[str, Any]:
     """Context-aware search that optionally blends code hits with memory hits.
 
@@ -685,12 +695,26 @@ async def context_search(
     except Exception:
         per_path_val = 1
 
-    # Normalize queries to list
+    # Normalize queries to list (accept q/text aliases)
     queries: List[str] = []
+    if (query is None or (isinstance(query, str) and query.strip() == "")):
+        q_alt = kwargs.get("q") or kwargs.get("text")
+        if q_alt is not None:
+            query = q_alt
     if isinstance(query, (list, tuple)):
         queries = [str(q) for q in query]
     elif query is not None and str(query).strip() != "":
         queries = [str(query)]
+
+    # Accept common alias keys and camelCase from clients
+    if (limit is None or (isinstance(limit, str) and limit.strip() == "")) and ("top_k" in kwargs):
+        limit = kwargs.get("top_k")
+    if include_memories is None and ("includeMemories" in kwargs):
+        include_memories = kwargs.get("includeMemories")
+    if memory_weight is None and ("memoryWeight" in kwargs):
+        memory_weight = kwargs.get("memoryWeight")
+    if per_source_limits is None and ("perSourceLimits" in kwargs):
+        per_source_limits = kwargs.get("perSourceLimits")
 
     # Smart defaults inspired by stored preferences, but without external calls
     compact_raw = compact
@@ -1022,6 +1046,7 @@ async def code_search(
     not_: Any = None,
     case: Any = None,
     compact: Any = None,
+    **kwargs,
 ) -> Dict[str, Any]:
     """Alias of repo_search with the same arguments; provided for better discoverability."""
     return await repo_search(
@@ -1047,6 +1072,7 @@ async def code_search(
         not_=not_,
         case=case,
         compact=compact,
+        **kwargs,
     )
 
 
