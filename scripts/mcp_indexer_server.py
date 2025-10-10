@@ -46,8 +46,16 @@ DEFAULT_REPO = "workspace"
 mcp = FastMCP(APP_NAME)
 
 
-def _run(cmd: list[str], env: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
-    proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
+def _run(cmd: list[str], env: Optional[Dict[str, str]] = None, timeout: int = 60) -> Dict[str, Any]:
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=timeout)
+    except subprocess.TimeoutExpired as e:
+        return {
+            "ok": False,
+            "code": -1,
+            "stdout": (e.stdout or "")[-4000:] if e.stdout else "",
+            "stderr": f"Command timed out after {timeout}s\n" + ((e.stderr or "")[-3900:] if e.stderr else ""),
+        }
     # Truncate to the last 4000 characters (tail-only) for both stdout and stderr
     max_cap = 4000
     def _cap_tail(s: str) -> str:
@@ -126,7 +134,6 @@ async def qdrant_index_root(recreate: bool = False,
     return {"args": {"root": "/work", "collection": coll, "recreate": recreate}, **res}
 
 @mcp.tool()
-
 async def qdrant_list() -> Dict[str, Any]:
     """List Qdrant collections"""
     try:
