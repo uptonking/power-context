@@ -328,15 +328,20 @@ def main():
         if not u:
             return None
         u = str(u).strip()
-        # remove trailing slashes and collapse
-        u = "/".join([p for p in u.replace("\\", "/").split("/") if p])
+        # Handle common path variations: backslashes, multiple slashes, trailing slashes
+        u = u.replace("\\", "/")
+        # Collapse multiple slashes and remove empty segments
+        u = "/".join([p for p in u.split("/") if p])
         if not u:
             return None
+        # Relative path: prepend /work/
         if not u.startswith("/"):
             return "/work/" + u
-        # absolute path provided; normalize into /work mount if different root
+        # Absolute path: ensure it's under /work mount
         if not u.startswith("/work/"):
+            # Strip leading slash and prepend /work/
             return "/work/" + u.lstrip("/")
+        # Already normalized /work/... path
         return u
 
     eff_under = _norm_under(eff_under)

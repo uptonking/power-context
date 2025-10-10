@@ -42,6 +42,7 @@ PORT = int(os.environ.get("FASTMCP_INDEXER_PORT", "8001"))
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
 DEFAULT_COLLECTION = os.environ.get("COLLECTION_NAME", "my-collection")
 DEFAULT_REPO = "workspace"
+MAX_LOG_TAIL = int(os.environ.get("MCP_MAX_LOG_TAIL", "4000"))
 
 mcp = FastMCP(APP_NAME)
 
@@ -53,15 +54,14 @@ def _run(cmd: list[str], env: Optional[Dict[str, str]] = None, timeout: int = 60
         return {
             "ok": False,
             "code": -1,
-            "stdout": (e.stdout or "")[-4000:] if e.stdout else "",
-            "stderr": f"Command timed out after {timeout}s\n" + ((e.stderr or "")[-3900:] if e.stderr else ""),
+            "stdout": (e.stdout or "")[-MAX_LOG_TAIL:] if e.stdout else "",
+            "stderr": f"Command timed out after {timeout}s\n" + ((e.stderr or "")[-(MAX_LOG_TAIL-100):] if e.stderr else ""),
         }
-    # Truncate to the last 4000 characters (tail-only) for both stdout and stderr
-    max_cap = 4000
+    # Truncate to the last MAX_LOG_TAIL characters (tail-only) for both stdout and stderr
     def _cap_tail(s: str) -> str:
         if not s:
             return s
-        return s if len(s) <= max_cap else s[-max_cap:]
+        return s if len(s) <= MAX_LOG_TAIL else s[-MAX_LOG_TAIL:]
     return {
         "ok": proc.returncode == 0,
         "code": proc.returncode,
