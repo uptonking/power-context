@@ -336,13 +336,20 @@ def main():
             return None
         # Relative path: prepend /work/
         if not u.startswith("/"):
-            return "/work/" + u
-        # Absolute path: ensure it's under /work mount
-        if not u.startswith("/work/"):
-            # Strip leading slash and prepend /work/
-            return "/work/" + u.lstrip("/")
-        # Already normalized /work/... path
-        return u
+            v = "/work/" + u
+        else:
+            # Absolute path: ensure it's under /work mount
+            v = "/work/" + u.lstrip("/") if not u.startswith("/work/") else u
+        # If the normalized path points to a real file under /work, use its parent directory as prefix
+        try:
+            from pathlib import Path as _P
+            p = _P(v)
+            if p.is_file():
+                return str(p.parent)
+        except Exception:
+            pass
+        # Already normalized /work/... dir path or non-existent path; use as-is
+        return v
 
     eff_under = _norm_under(eff_under)
 
