@@ -49,12 +49,13 @@ services:
       - FASTMCP_HOST=${FASTMCP_HOST}
       - FASTMCP_INDEXER_PORT=${FASTMCP_INDEXER_PORT}
       - QDRANT_URL=${QDRANT_URL}
-      - COLLECTION_NAME=${COLLECTION_NAME}
+      - COLLECTION_NAME=entra-toolkit
     # SSE endpoint for IDE agents at http://localhost:${FASTMCP_INDEXER_PORT:-8001}/sse
     ports:
       - "${FASTMCP_INDEXER_PORT:-8001}:8001"
     volumes:
-      - ${HOST_INDEX_PATH:-.}:/work:ro
+      - ${HOST_INDEX_PATH:-.}:/work
+      - /Users/johndonalson/entra-toolkit:/work/entra-toolkit:ro
 
   indexer:
     build:

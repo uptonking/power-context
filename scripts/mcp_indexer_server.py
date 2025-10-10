@@ -70,6 +70,76 @@ def _run(cmd: list[str], env: Optional[Dict[str, str]] = None, timeout: int = 60
     }
 
 
+# Lenient argument normalization to tolerate buggy clients (e.g., JSON-in-kwargs, booleans where strings expected)
+from typing import Any as _Any, Dict as _Dict
+
+def _maybe_parse_jsonish(obj: _Any):
+    if isinstance(obj, dict):
+        return obj
+    if not isinstance(obj, str):
+        return None
+    s = obj.strip()
+    if not s:
+        return None
+    try:
+        return json.loads(s)
+    except Exception:
+        pass
+    try:
+        return json.loads("{" + s + "}")
+    except Exception:
+        return None
+
+def _extract_kwargs_payload(kwargs: _Any) -> _Dict[str, _Any]:
+    try:
+        if isinstance(kwargs, dict) and "kwargs" in kwargs:
+            inner = kwargs.get("kwargs")
+            if isinstance(inner, dict):
+                return inner
+            parsed = _maybe_parse_jsonish(inner)
+            return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+    return {}
+
+def _looks_jsonish_string(s: _Any) -> bool:
+    if not isinstance(s, str):
+        return False
+    t = s.strip()
+    if not t:
+        return False
+    if t.startswith("{") and ":" in t:
+        return True
+    if t.endswith("}"):
+        return True
+    # quick heuristics for comma/colon pairs often seen when args are concatenated
+    return ("," in t and ":" in t) or ('":' in t)
+
+def _coerce_bool(x, default=False):
+    if isinstance(x, bool):
+        return x
+    if x is None:
+        return default
+    s = str(x).strip().lower()
+    if s in {"1", "true", "yes", "on"}:
+        return True
+    if s in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+def _coerce_int(x, default=0):
+    try:
+        if x is None or (isinstance(x, str) and x.strip() == ""):
+            return default
+        return int(x)
+    except Exception:
+        return default
+
+def _coerce_str(x, default=""):
+    if x is None:
+        return default
+    return str(x)
+
 # Lightweight tokenizer and snippet highlighter
 import re
 _STOP = {"the","a","an","of","in","on","for","and","or","to","with","by","is","are","be","this","that"}
@@ -121,6 +191,17 @@ async def qdrant_index_root(recreate: Optional[bool] = None,
       - recreate (bool, default false): drop and recreate collection schema if needed
       - collection (string, optional): defaults to env COLLECTION_NAME
     """
+    # Leniency: if clients embed JSON in 'collection' (and include 'recreate'), parse it
+    try:
+        if _looks_jsonish_string(collection):
+            _parsed = _maybe_parse_jsonish(collection)
+            if isinstance(_parsed, dict):
+                collection = _parsed.get("collection", collection)
+                if recreate is None and "recreate" in _parsed:
+                    recreate = _coerce_bool(_parsed.get("recreate"), False)
+    except Exception:
+        pass
+
     coll = collection or DEFAULT_COLLECTION
 
     env = os.environ.copy()
@@ -216,6 +297,17 @@ async def qdrant_status(collection: Optional[str] = None, max_points: Optional[i
       - max_points: safety cap on points to scan when estimating last timestamps (default 5000)
       - batch: page size for scroll (default 1000)
     """
+    # Leniency: absorb 'kwargs' JSON payload some clients send instead of top-level args
+    try:
+        _extra = _extract_kwargs_payload(kwargs)
+        if _extra and not collection:
+            collection = _extra.get("collection", collection)
+        if _extra and max_points in (None, "") and _extra.get("max_points") is not None:
+            max_points = _coerce_int(_extra.get("max_points"), None)
+        if _extra and batch in (None, "") and _extra.get("batch") is not None:
+            batch = _coerce_int(_extra.get("batch"), None)
+    except Exception:
+        pass
     coll = collection or DEFAULT_COLLECTION
     try:
         from qdrant_client import QdrantClient
@@ -283,6 +375,25 @@ async def qdrant_index(subdir: Optional[str] = None, recreate: Optional[bool] = 
     - recreate: bool (default false)
     - collection: string (optional; defaults to env COLLECTION_NAME)
     """
+    # Leniency: parse JSON-ish payloads mistakenly sent in 'collection' or 'subdir'
+    try:
+        if _looks_jsonish_string(collection):
+            _parsed = _maybe_parse_jsonish(collection)
+            if isinstance(_parsed, dict):
+                subdir = _parsed.get("subdir", subdir)
+                collection = _parsed.get("collection", collection)
+                if recreate is None and "recreate" in _parsed:
+                    recreate = _coerce_bool(_parsed.get("recreate"), False)
+        if _looks_jsonish_string(subdir):
+            _parsed2 = _maybe_parse_jsonish(subdir)
+            if isinstance(_parsed2, dict):
+                subdir = _parsed2.get("subdir", subdir)
+                collection = _parsed2.get("collection", collection)
+                if recreate is None and "recreate" in _parsed2:
+                    recreate = _coerce_bool(_parsed2.get("recreate"), False)
+    except Exception:
+        pass
+
     root = "/work"
     if subdir:
         subdir = subdir.lstrip("/")
@@ -363,6 +474,57 @@ async def repo_search(
             query = q_alt
 
     """
+    # Leniency: absorb nested 'kwargs' JSON payload some clients send
+    try:
+        _extra = _extract_kwargs_payload(kwargs)
+        if _extra:
+            if (query is None or (isinstance(query, str) and query.strip() == "")):
+                query = _extra.get("query") or _extra.get("queries")
+            if limit in (None, "") and _extra.get("limit") is not None:
+                limit = _extra.get("limit")
+            if per_path in (None, "") and _extra.get("per_path") is not None:
+                per_path = _extra.get("per_path")
+            if include_snippet in (None, "") and _extra.get("include_snippet") is not None:
+                include_snippet = _extra.get("include_snippet")
+            if context_lines in (None, "") and _extra.get("context_lines") is not None:
+                context_lines = _extra.get("context_lines")
+            if rerank_enabled in (None, "") and _extra.get("rerank_enabled") is not None:
+                rerank_enabled = _extra.get("rerank_enabled")
+            if rerank_top_n in (None, "") and _extra.get("rerank_top_n") is not None:
+                rerank_top_n = _extra.get("rerank_top_n")
+            if rerank_return_m in (None, "") and _extra.get("rerank_return_m") is not None:
+                rerank_return_m = _extra.get("rerank_return_m")
+            if rerank_timeout_ms in (None, "") and _extra.get("rerank_timeout_ms") is not None:
+                rerank_timeout_ms = _extra.get("rerank_timeout_ms")
+            if highlight_snippet in (None, "") and _extra.get("highlight_snippet") is not None:
+                highlight_snippet = _extra.get("highlight_snippet")
+            if (collection is None or (isinstance(collection, str) and collection.strip() == "")) and _extra.get("collection"):
+                collection = _extra.get("collection")
+            if (language is None or (isinstance(language, str) and language.strip() == "")) and _extra.get("language"):
+                language = _extra.get("language")
+            if (under is None or (isinstance(under, str) and under.strip() == "")) and _extra.get("under"):
+                under = _extra.get("under")
+            if (kind is None or (isinstance(kind, str) and kind.strip() == "")) and _extra.get("kind"):
+                kind = _extra.get("kind")
+            if (symbol is None or (isinstance(symbol, str) and symbol.strip() == "")) and _extra.get("symbol"):
+                symbol = _extra.get("symbol")
+            if (path_regex is None or (isinstance(path_regex, str) and path_regex.strip() == "")) and _extra.get("path_regex"):
+                path_regex = _extra.get("path_regex")
+            if path_glob in (None, "") and _extra.get("path_glob") is not None:
+                path_glob = _extra.get("path_glob")
+            if not_glob in (None, "") and _extra.get("not_glob") is not None:
+                not_glob = _extra.get("not_glob")
+            if (ext is None or (isinstance(ext, str) and ext.strip() == "")) and _extra.get("ext"):
+                ext = _extra.get("ext")
+            if (not_ is None or (isinstance(not_, str) and not_.strip() == "")) and (_extra.get("not") or _extra.get("not_")):
+                not_ = _extra.get("not") or _extra.get("not_")
+            if (case is None or (isinstance(case, str) and case.strip() == "")) and _extra.get("case"):
+                case = _extra.get("case")
+            if compact in (None, "") and _extra.get("compact") is not None:
+                compact = _extra.get("compact")
+    except Exception:
+        pass
+
     # Leniency shim: coerce null/invalid args to sane defaults so buggy clients don't fail schema
     def _to_int(x, default):
         try:
