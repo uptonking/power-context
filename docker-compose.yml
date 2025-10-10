@@ -47,6 +47,7 @@ services:
       - FASTMCP_INDEXER_PORT=${FASTMCP_INDEXER_PORT}
       - QDRANT_URL=${QDRANT_URL}
       - COLLECTION_NAME=${COLLECTION_NAME}
+    # SSE endpoint for IDE agents at http://localhost:${FASTMCP_INDEXER_PORT:-8001}/sse
     ports:
       - "${FASTMCP_INDEXER_PORT:-8001}:8001"
     volumes:

@@ -27,7 +27,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 
 try:
     # Official MCP Python SDK (FastMCP convenience server)
@@ -532,6 +532,258 @@ async def repo_search(
         "results": results,
         **res,
     }
+
+
+
+@mcp.tool()
+async def context_search(
+    # Core query + limits
+    query: Any = None,
+    limit: Any = None,
+    per_path: Any = None,
+    # Include memory hits and blending controls
+    include_memories: Any = None,
+    memory_weight: Any = None,
+    per_source_limits: Any = None,  # e.g., {"code": 5, "memory": 3}
+    # Pass-through structured filters (same as repo_search)
+    include_snippet: Any = None,
+    context_lines: Any = None,
+    rerank_enabled: Any = None,
+    rerank_top_n: Any = None,
+    rerank_return_m: Any = None,
+    rerank_timeout_ms: Any = None,
+    highlight_snippet: Any = None,
+    collection: Any = None,
+    language: Any = None,
+    under: Any = None,
+    kind: Any = None,
+    symbol: Any = None,
+    path_regex: Any = None,
+    path_glob: Any = None,
+    not_glob: Any = None,
+    ext: Any = None,
+    not_: Any = None,
+    case: Any = None,
+    compact: Any = None,
+) -> Dict[str, Any]:
+    """Context-aware search that optionally blends code hits with memory hits.
+
+    - Applies memory-derived defaults (safe subset) automatically:
+      * compact=true if multi-query and compact not explicitly provided
+      * per_path=1 if not explicitly provided
+    - When include_memories is true, queries Qdrant directly for memory-like points
+      (payloads lacking code path metadata) and blends them with code results.
+    - memory_weight scales memory scores when merging.
+    """
+    # Normalize inputs
+    coll = (collection or DEFAULT_COLLECTION) or ""
+    try:
+        lim = int(limit) if (limit is not None and str(limit).strip() != "") else 10
+    except Exception:
+        lim = 10
+    try:
+        per_path_val = int(per_path) if (per_path is not None and str(per_path).strip() != "") else 1
+    except Exception:
+        per_path_val = 1
+
+    # Normalize queries to list
+    queries: List[str] = []
+    if isinstance(query, (list, tuple)):
+        queries = [str(q) for q in query]
+    elif query is not None and str(query).strip() != "":
+        queries = [str(query)]
+
+    # Smart defaults inspired by stored preferences, but without external calls
+    compact_raw = compact
+    smart_compact = False
+    if len(queries) > 1 and (compact_raw is None or (isinstance(compact_raw, str) and compact_raw.strip() == "")):
+        smart_compact = True
+    eff_compact = True if (smart_compact or (str(compact_raw).lower() == "true")) else False
+
+    # Per-source limits
+    code_limit = lim
+    mem_limit = 0
+    include_mem = False
+    if include_memories is not None and str(include_memories).lower() in ("true", "1", "yes"):  # opt-in
+        include_mem = True
+        # Parse per_source_limits if provided
+        code_limit = lim
+        mem_limit = min(3, lim)  # sensible default
+        try:
+            if isinstance(per_source_limits, dict):
+                code_limit = int(per_source_limits.get("code", code_limit))
+                mem_limit = int(per_source_limits.get("memory", mem_limit))
+        except Exception:
+            pass
+
+    # First: run code search via internal repo_search for consistent behavior
+    code_res = await repo_search(
+        query=queries if len(queries) > 1 else (queries[0] if queries else ""),
+        limit=code_limit,
+        per_path=per_path_val,
+        include_snippet=include_snippet,
+        context_lines=context_lines,
+        rerank_enabled=rerank_enabled,
+        rerank_top_n=rerank_top_n,
+        rerank_return_m=rerank_return_m,
+        rerank_timeout_ms=rerank_timeout_ms,
+        highlight_snippet=highlight_snippet,
+        collection=coll,
+        language=language,
+        under=under,
+        kind=kind,
+        symbol=symbol,
+        path_regex=path_regex,
+        path_glob=path_glob,
+        not_glob=not_glob,
+        ext=ext,
+        not_=not_,
+        case=case,
+        compact=eff_compact,
+    )
+
+    # Shape code results to a common schema
+    code_hits: List[Dict[str, Any]] = []
+    if isinstance(code_res, dict):
+        items = code_res.get("results") or code_res.get("data") or code_res.get("items")
+        # If compact mode was used, results may be a list; support both shapes
+        items = items if items is not None else code_res.get("results", code_res)
+    else:
+        items = code_res
+    # Normalize list
+    if isinstance(items, list):
+        for r in items:
+            if isinstance(r, dict):
+                ch = {
+                    "source": "code",
+                    "score": float(r.get("score") or r.get("s") or 0.0),
+                    "path": r.get("path"),
+                    "symbol": r.get("symbol", ""),
+                    "start_line": r.get("start_line"),
+                    "end_line": r.get("end_line"),
+                    "_raw": r,
+                }
+                code_hits.append(ch)
+
+    # Optionally: fetch memory hits directly from Qdrant
+    mem_hits: List[Dict[str, Any]] = []
+    if include_mem and mem_limit > 0 and queries:
+        try:
+            from qdrant_client import QdrantClient, models  # type: ignore
+            from fastembed import TextEmbedding  # type: ignore
+            from scripts.utils import sanitize_vector_name  # local util
+
+            client = QdrantClient(url=QDRANT_URL, api_key=os.environ.get("QDRANT_API_KEY"))
+            model_name = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
+            vec_name = sanitize_vector_name(model_name)
+            model = TextEmbedding(model_name=model_name)
+
+            # Use first query for memory retrieval (can be extended to multi-query fusion)
+            qtext = " ".join([q for q in queries if q]).strip() or queries[0]
+            v = next(model.embed([qtext])).tolist()
+            # Fetch a few extra and filter client-side for "memory-like" payloads
+            k = max(mem_limit, 5)
+            res = client.search(
+                collection_name=coll,
+                query_vector={"name": vec_name, "vector": v},
+                limit=k,
+                with_payload=True,
+            )
+            for pt in res:
+                payload = (getattr(pt, "payload", {}) or {})
+                md = payload.get("metadata") or {}
+                # Heuristic: memory entries typically lack code path/lines
+                path = str(md.get("path") or "")
+                start_line = md.get("start_line")
+                end_line = md.get("end_line")
+                content = payload.get("content") or payload.get("text") or payload.get("information") or md.get("information")
+                is_memory_like = (not path) or (start_line in (None, 0) and end_line in (None, 0))
+                if is_memory_like and content:
+                    mem_hits.append({
+                        "source": "memory",
+                        "score": float(getattr(pt, "score", 0.0) or 0.0),
+                        "content": content,
+                        "metadata": md,
+                    })
+        except Exception:  # pragma: no cover
+            pass
+
+    # Fallback: lightweight substring scan over a capped scroll if vector name mismatch
+    if include_mem and mem_limit > 0 and not mem_hits and queries:
+        try:
+            from qdrant_client import QdrantClient  # type: ignore
+            client = QdrantClient(url=QDRANT_URL, api_key=os.environ.get("QDRANT_API_KEY"))
+            terms = [str(t).lower() for t in queries if t]
+            checked = 0
+            cap = 2000
+            page = None
+            while len(mem_hits) < mem_limit and checked < cap:
+                sc, page = client.scroll(
+                    collection_name=coll,
+                    with_payload=True,
+                    with_vectors=False,
+                    limit=500,
+                    offset=page,
+                )
+                if not sc:
+                    break
+                for pt in sc:
+                    payload = (getattr(pt, "payload", {}) or {})
+                    md = payload.get("metadata") or {}
+                    path = str(md.get("path") or "")
+                    start_line = md.get("start_line")
+                    end_line = md.get("end_line")
+                    content = payload.get("content") or payload.get("text") or payload.get("information") or md.get("information")
+                    is_memory_like = (not path) or (start_line in (None, 0) and end_line in (None, 0))
+                    if not (is_memory_like and content):
+                        continue
+                    low = str(content).lower()
+                    if any(t in low for t in terms):
+                        mem_hits.append({
+                            "source": "memory",
+                            "score": 0.5,  # nominal score for substring match; blended via memory_weight
+                            "content": content,
+                            "metadata": md,
+                        })
+                        if len(mem_hits) >= mem_limit:
+                            break
+                checked += len(sc)
+
+    # Blend results
+    try:
+        mw = float(memory_weight) if (memory_weight is not None and str(memory_weight).strip() != "") else 0.3
+    except Exception:
+        mw = 0.3
+
+    blended: List[Dict[str, Any]] = []
+    for h in code_hits:
+        blended.append({**h, "score": float(h.get("score", 0.0))})
+    for h in mem_hits:
+        blended.append({**h, "score": float(h.get("score", 0.0)) * mw})
+
+    # Sort by score descending and truncate to limit
+    blended.sort(key=lambda x: (-float(x.get("score", 0.0)), x.get("source", ""), str(x.get("path", ""))))
+    blended = blended[:lim]
+
+    # Compact shaping if requested
+    if eff_compact:
+        compacted: List[Dict[str, Any]] = []
+        for b in blended:
+            if b.get("source") == "code":
+                compacted.append({
+                    "source": "code",
+                    "path": b.get("path"),
+                    "start_line": b.get("start_line") or 0,
+                    "end_line": b.get("end_line") or 0,
+                })
+            else:
+                compacted.append({
+                    "source": "memory",
+                    "content": (b.get("content") or "")[:500],
+                })
+        return {"results": compacted, "total": len(compacted)}
+
+    return {"results": blended, "total": len(blended)}
 
 @mcp.tool()
 async def code_search(
