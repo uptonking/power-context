@@ -144,6 +144,70 @@ async def qdrant_list() -> Dict[str, Any]:
     except Exception as e:
         return {"error": str(e)}
 
+@mcp.tool()
+async def qdrant_status(collection: Optional[str] = None, max_points: Optional[int] = None, batch: Optional[int] = None) -> Dict[str, Any]:
+    """Report collection size and approximate last index times.
+    Args:
+      - collection: override collection name (defaults to env COLLECTION_NAME)
+      - max_points: safety cap on points to scan when estimating last timestamps (default 5000)
+      - batch: page size for scroll (default 1000)
+    """
+    coll = collection or DEFAULT_COLLECTION
+    try:
+        from qdrant_client import QdrantClient
+        import datetime as _dt
+        client = QdrantClient(url=QDRANT_URL, api_key=os.environ.get("QDRANT_API_KEY"))
+        # Count points
+        try:
+            cnt_res = client.count(collection_name=coll, exact=True)
+            total = int(getattr(cnt_res, "count", 0))
+        except Exception:
+            total = 0
+        # Scan a limited number of points to estimate last timestamps
+        max_points = int(max_points) if max_points not in (None, "") else int(os.environ.get("MCP_STATUS_MAX_POINTS", "5000"))
+        batch = int(batch) if batch not in (None, "") else 1000
+        scanned = 0
+        last_ing = None
+        last_mod = None
+        next_page = None
+        while scanned < max_points:
+            limit = min(batch, max_points - scanned)
+            try:
+                pts, next_page = client.scroll(collection_name=coll, limit=limit, offset=next_page, with_payload=True, with_vectors=False)
+            except Exception:
+                # Fallback without offset keyword (older clients)
+                pts, next_page = client.scroll(collection_name=coll, limit=limit, with_payload=True, with_vectors=False)
+            if not pts:
+                break
+            scanned += len(pts)
+            for p in pts:
+                md = (p.payload or {}).get("metadata") or {}
+                ti = md.get("ingested_at")
+                tm = md.get("last_modified_at")
+                if isinstance(ti, int):
+                    last_ing = ti if last_ing is None else max(last_ing, ti)
+                if isinstance(tm, int):
+                    last_mod = tm if last_mod is None else max(last_mod, tm)
+            if not next_page:
+                break
+        def _iso(ts):
+            if isinstance(ts, int) and ts > 0:
+                try:
+                    return _dt.datetime.fromtimestamp(ts, _dt.timezone.utc).isoformat()
+                except Exception:
+                    return ""
+            return ""
+        return {
+            "collection": coll,
+            "count": total,
+            "scanned_points": scanned,
+            "last_ingested_at": {"unix": last_ing or 0, "iso": _iso(last_ing)},
+            "last_modified_at": {"unix": last_mod or 0, "iso": _iso(last_mod)},
+        }
+    except Exception as e:
+        return {"collection": coll, "error": str(e)}
+
+
 
 @mcp.tool()
 async def qdrant_index(subdir: Optional[str] = None, recreate: Optional[bool] = None,
