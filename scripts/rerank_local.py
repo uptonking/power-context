@@ -87,8 +87,8 @@ def dense_results(client: QdrantClient, model: TextEmbedding, vec_name: str, que
         return res
 
 
-def prepare_pairs(query: str, points: List[Any]) -> List[str]:
-    pairs = []
+def prepare_pairs(query: str, points: List[Any]) -> List[tuple[str, str]]:
+    pairs: List[tuple[str, str]] = []
     for p in points:
         md = (p.payload or {}).get("metadata") or {}
         path = md.get("path") or ""
@@ -97,14 +97,14 @@ def prepare_pairs(query: str, points: List[Any]) -> List[str]:
         symp = md.get("symbol_path") or md.get("symbol") or ""
         code = (md.get("code") or "")[:600]
         header = f"[{lang}/{kind}] {symp} — {path}".strip()
-        txt = (header + ("\n" + code if code else "")).strip()
-        if not txt:
-            txt = (p.payload or {}).get("information") or ""
-        pairs.append(f"{query} [SEP] {txt}")
+        doc = (header + ("\n" + code if code else "")).strip()
+        if not doc:
+            doc = (p.payload or {}).get("information") or ""
+        pairs.append((query, doc))
     return pairs
 
 
-def rerank_local(pairs: List[str]) -> List[float]:
+def rerank_local(pairs: List[tuple[str, str]]) -> List[float]:
     # Requires RERANKER_ONNX_PATH and RERANKER_TOKENIZER_PATH to be set
     if not (ort and Tokenizer and RERANKER_ONNX_PATH and RERANKER_TOKENIZER_PATH):
         return [0.0 for _ in pairs]
@@ -113,6 +113,7 @@ def rerank_local(pairs: List[str]) -> List[float]:
         tok.enable_truncation(max_length=RERANK_MAX_TOKENS)
     except Exception:
         pass
+    # Proper pair encoding for token_type_ids
     enc = tok.encode_batch(pairs)
     input_ids = [e.ids for e in enc]
     attn = [e.attention_mask for e in enc]

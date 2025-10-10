@@ -19,6 +19,13 @@ LEX_VECTOR_NAME = os.environ.get("LEX_VECTOR_NAME", "lex")
 LEX_VECTOR_DIM = int(os.environ.get("LEX_VECTOR_DIM", "4096") or 4096)
 
 
+# Ensure project root is on sys.path when run as a script (so 'scripts' package imports work)
+import sys
+from pathlib import Path as _P
+_ROOT = _P(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
 from scripts.utils import sanitize_vector_name as _sanitize_vector_name
 
 
@@ -359,6 +366,8 @@ def main():
 
     # Build query set (optionally expanded)
     queries = list(clean_queries)
+    # Initialize score map early so we can accumulate from lex and dense
+    score_map: Dict[str, Dict[str, Any]] = {}
     # Server-side lexical vector search (hashing) as an additional ranked list
     try:
         lex_vec = lex_hash_vector(queries)
@@ -381,7 +390,6 @@ def main():
     result_sets: List[List[Any]] = [dense_query(client, vec_name, v, flt, args.per_query) for v in embedded]
 
     # RRF fusion (weighted)
-    score_map: Dict[str, Dict[str, Any]] = {}
     for res in result_sets:
         for rank, p in enumerate(res, 1):
             pid = str(p.id)
