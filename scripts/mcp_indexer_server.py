@@ -769,17 +769,12 @@ async def context_search(
     mem_hits: List[Dict[str, Any]] = []
     if include_mem and mem_limit > 0 and queries and use_sse_memory:
         try:
-            from mcp.client.sse import sse_client  # type: ignore
-            from mcp.client.session import ClientSession  # type: ignore
+            from fastmcp import Client  # use FastMCP client for SSE interop
+            import asyncio
+            timeout = float(os.environ.get("MEMORY_MCP_TIMEOUT", "6"))
             base_url = os.environ.get("MEMORY_MCP_URL") or "http://mcp:8000/sse"
-            async with sse_client(base_url) as (read_stream, write_stream):
-                sess = ClientSession(read_stream, write_stream)
-                # Apply short timeouts so context_search never hangs
-                import asyncio
-                from datetime import timedelta
-                timeout = float(os.environ.get("MEMORY_MCP_TIMEOUT", "6"))
-                await asyncio.wait_for(sess.initialize(), timeout=timeout)
-                tools = await asyncio.wait_for(sess.list_tools(), timeout=timeout)
+            async with Client(base_url) as c:
+                tools = await asyncio.wait_for(c.list_tools(), timeout=timeout)
                 tool_name = None
                 # Prefer canonical names
                 for t in tools:
@@ -804,13 +799,18 @@ async def context_search(
                     res_obj = None
                     for args in arg_variants:
                         try:
-                            res_obj = await sess.call_tool(tool_name, args, read_timeout_seconds=timedelta(seconds=timeout))
+                            res_obj = await asyncio.wait_for(c.call_tool(tool_name, args), timeout=timeout)
                             break
                         except Exception:
                             continue
                     if res_obj is not None:
+                        # Normalize FastMCP result content -> rd-like dict
+                        rd = {"content": []}
                         try:
-                            rd = res_obj.model_dump(mode="json") if hasattr(res_obj, "model_dump") else {}
+                            for item in getattr(res_obj, "content", []) or []:
+                                txt = getattr(item, "text", None)
+                                if isinstance(txt, str):
+                                    rd["content"].append({"type": "text", "text": txt})
                         except Exception:
                             rd = {}
                         # Parse common MCP tool result shapes

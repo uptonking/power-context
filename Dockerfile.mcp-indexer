@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends git ca-certific
 
 # Python deps: same as indexer + official mcp SDK for SSE MCP tooling
 RUN pip install --no-cache-dir --upgrade qdrant-client fastembed watchdog onnxruntime tokenizers \
-    tree_sitter tree_sitter_languages mcp
+    tree_sitter tree_sitter_languages mcp fastmcp
 
 # Expose SSE port for this companion server
 EXPOSE 8001
