@@ -12,9 +12,13 @@ indexer image and shells out to our existing scripts to keep behavior consistent
 Environment:
 - FASTMCP_HOST (default: 0.0.0.0)
 - FASTMCP_INDEXER_PORT (default: 8001)
-- QDRANT_URL (e.g., http://qdrant:6333)
+- QDRANT_URL (e.g., http://qdrant:6333) — server expects Qdrant reachable via this env
 - COLLECTION_NAME (default: my-collection)
-- REPO_NAME (default: workspace)
+
+Conventions:
+- Repo content must be mounted at /work inside containers
+- Clients must not send null values for tool args; omit field or pass empty string ""
+- To index repo root: use qdrant_index_root with no args, or qdrant_index with subdir=""
 
 Note: We use the fastmcp library for quick SSE hosting. If you change to another
 MCP server framework, keep the tool names and args stable.
@@ -37,29 +41,24 @@ PORT = int(os.environ.get("FASTMCP_INDEXER_PORT", "8001"))
 
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
 DEFAULT_COLLECTION = os.environ.get("COLLECTION_NAME", "my-collection")
-DEFAULT_REPO = os.environ.get("REPO_NAME", "workspace")
+DEFAULT_REPO = "workspace"
 
 mcp = FastMCP(APP_NAME)
 
 
 def _run(cmd: list[str], env: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
-    # Configurable capture size (increase default; allow override via env)
-    max_cap = int(os.environ.get("FASTMCP_MAX_CAPTURE", "16000") or 16000)
-    def _cap(s: str) -> str:
+    # Truncate to the last 4000 characters (tail-only) for both stdout and stderr
+    max_cap = 4000
+    def _cap_tail(s: str) -> str:
         if not s:
             return s
-        if len(s) <= max_cap:
-            return s
-        # Keep head and tail slices to preserve early and late logs
-        head = s[: min(2000, max_cap // 4)]
-        tail = s[-(max_cap - len(head)) :]
-        return head + "\n...[truncated]...\n" + tail
+        return s if len(s) <= max_cap else s[-max_cap:]
     return {
         "ok": proc.returncode == 0,
         "code": proc.returncode,
-        "stdout": _cap(proc.stdout),
-        "stderr": _cap(proc.stderr),
+        "stdout": _cap_tail(proc.stdout),
+        "stderr": _cap_tail(proc.stderr),
     }
 
 
@@ -105,8 +104,7 @@ def _highlight_snippet(snippet: str, tokens: list[str]) -> str:
 
 @mcp.tool()
 async def qdrant_index_root(recreate: bool = False,
-                            collection: str | None = None,
-                            repo_name: str | None = None) -> Dict[str, Any]:
+                            collection: str | None = None) -> Dict[str, Any]:
     """Index the mounted root path (/work) with zero-arg safe defaults.
     Notes for IDE agents (Cursor/Windsurf/Augment):
     - Prefer this tool when you want to index the repo root without specifying params.
@@ -114,21 +112,18 @@ async def qdrant_index_root(recreate: bool = False,
     - Args:
       - recreate (bool, default false): drop and recreate collection schema if needed
       - collection (string, optional): defaults to env COLLECTION_NAME
-      - repo_name (string, optional): defaults to env REPO_NAME
     """
     coll = collection or DEFAULT_COLLECTION
-    repo = repo_name or DEFAULT_REPO
 
     env = os.environ.copy()
     env["QDRANT_URL"] = QDRANT_URL
     env["COLLECTION_NAME"] = coll
-    env["REPO_NAME"] = repo
 
     cmd = ["python", "/work/scripts/ingest_code.py", "--root", "/work"]
     if recreate:
         cmd.append("--recreate")
     res = _run(cmd, env=env)
-    return {"args": {"root": "/work", "collection": coll, "repo_name": repo, "recreate": recreate}, **res}
+    return {"args": {"root": "/work", "collection": coll, "recreate": recreate}, **res}
 
 @mcp.tool()
 
@@ -145,26 +140,23 @@ async def qdrant_list() -> Dict[str, Any]:
 
 @mcp.tool()
 async def qdrant_index(subdir: Optional[str] = None, recreate: bool = False,
-                 collection: Optional[str] = None, repo_name: Optional[str] = None) -> Dict[str, Any]:
+                 collection: Optional[str] = None) -> Dict[str, Any]:
     """Index the mounted path (/work) or a subdirectory.
     Important for IDE agents (Cursor/Windsurf/Augment):
     - Do NOT pass null values; omit a field or pass empty string "".
     - subdir: "" or omit to index repo root; or a relative path like "scripts"
     - recreate: bool (default false)
     - collection: string (optional; defaults to env COLLECTION_NAME)
-    - repo_name: string (optional; defaults to env REPO_NAME)
     """
     root = "/work"
     if subdir:
         subdir = subdir.lstrip("/")
         root = os.path.join(root, subdir)
     coll = collection or DEFAULT_COLLECTION
-    repo = repo_name or DEFAULT_REPO
 
     env = os.environ.copy()
     env["QDRANT_URL"] = QDRANT_URL
     env["COLLECTION_NAME"] = coll
-    env["REPO_NAME"] = repo
 
     cmd = [
         "python", "/work/scripts/ingest_code.py", "--root", root,
@@ -172,7 +164,7 @@ async def qdrant_index(subdir: Optional[str] = None, recreate: bool = False,
     if recreate:
         cmd.append("--recreate")
     res = _run(cmd, env=env)
-    return {"args": {"root": root, "collection": coll, "repo_name": repo, "recreate": recreate}, **res}
+    return {"args": {"root": root, "collection": coll, "recreate": recreate}, **res}
 
 
 @mcp.tool()
@@ -340,7 +332,6 @@ async def repo_search(
             "collection": (collection or DEFAULT_COLLECTION),
         },
         "results": results,
-        "used_rerank": bool(used_rerank),
         **res,
     }
 
