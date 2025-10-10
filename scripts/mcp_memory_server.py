@@ -85,6 +85,7 @@ def find(
     query: str,
     limit: int = 5,
     collection: Optional[str] = None,
+    top_k: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Find memory-like entries by vector similarity (dense + lexical fusion)."""
     coll = collection or DEFAULT_COLLECTION
@@ -92,9 +93,12 @@ def find(
     dense = next(model.embed([str(query)])).tolist()
     lex = _lex_hash_vector(str(query))
 
+    # Harmonize alias: top_k -> limit
+    lim = int(limit or top_k or 5)
+
     # Two searches then simple RRF-like merge
-    res_dense = client.search(collection_name=coll, query_vector=(VECTOR_NAME, dense), limit=max(10, limit))
-    res_lex = client.search(collection_name=coll, query_vector=(LEX_VECTOR_NAME, lex), limit=max(10, limit))
+    res_dense = client.search(collection_name=coll, query_vector=(VECTOR_NAME, dense), limit=max(10, lim))
+    res_lex = client.search(collection_name=coll, query_vector=(LEX_VECTOR_NAME, lex), limit=max(10, lim))
 
     def is_memory_like(payload: Dict[str, Any]) -> bool:
         md = (payload or {}).get("metadata") or {}
