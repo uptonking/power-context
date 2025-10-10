@@ -792,7 +792,7 @@ async def context_search(
                 if tool_name:
                     qtext = " ".join([q for q in queries if q]).strip() or queries[0]
                     arg_variants: List[Dict[str, Any]] = [
-                        {"query": qtext, "top_k": mem_limit},
+                        {"query": qtext, "limit": mem_limit},
                         {"q": qtext, "limit": mem_limit},
                         {"text": qtext, "limit": mem_limit},
                     ]
