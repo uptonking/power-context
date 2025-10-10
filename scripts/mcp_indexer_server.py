@@ -577,7 +577,42 @@ async def context_search(
     """
     # Normalize inputs
     coll = (collection or DEFAULT_COLLECTION) or ""
+    mcoll = (os.environ.get("MEMORY_COLLECTION_NAME") or coll) or ""
+    use_sse_memory = str(os.environ.get("MEMORY_SSE_ENABLED", "false")).lower() in ("1","true","yes")
     try:
+    # Auto-detect memory collection if not explicitly set
+    if include_memories and mem_limit > 0 and not os.environ.get("MEMORY_COLLECTION_NAME"):
+        try:
+            from qdrant_client import QdrantClient  # type: ignore
+            client = QdrantClient(url=QDRANT_URL, api_key=os.environ.get("QDRANT_API_KEY"))
+            info = client.get_collections()
+            best_name = None
+            best_hits = -1
+            for c in info.collections:
+                name = getattr(c, "name", None)
+                if not name:
+                    continue
+                # Sample a small page for memory-like payloads
+                try:
+                    pts, _ = client.scroll(collection_name=name, with_payload=True, with_vectors=False, limit=300)
+                    hits = 0
+                    for pt in pts:
+                        pl = (getattr(pt, "payload", {}) or {})
+                        md = pl.get("metadata") or {}
+                        path = md.get("path")
+                        content = pl.get("content") or pl.get("text") or pl.get("information") or md.get("information")
+                        if not path and content:
+                            hits += 1
+                    if hits > best_hits:
+                        best_hits = hits
+                        best_name = name
+                except Exception:
+                    continue
+            if best_name and best_hits > 0:
+                mcoll = best_name
+        except Exception:
+            pass
+
         lim = int(limit) if (limit is not None and str(limit).strip() != "") else 10
     except Exception:
         lim = 10
@@ -665,11 +700,113 @@ async def context_search(
                 }
                 code_hits.append(ch)
 
-    # Optionally: fetch memory hits directly from Qdrant
+
+    # Option A: Query the memory MCP server over SSE and blend results (real integration)
     mem_hits: List[Dict[str, Any]] = []
-    if include_mem and mem_limit > 0 and queries:
+    if include_mem and mem_limit > 0 and queries and use_sse_memory:
         try:
-            from qdrant_client import QdrantClient, models  # type: ignore
+            from mcp.client.sse import sse_client  # type: ignore
+            from mcp.client.session import ClientSession  # type: ignore
+            base_url = os.environ.get("MEMORY_MCP_URL") or "http://mcp:8000/sse"
+            async with sse_client(base_url) as (read_stream, write_stream):
+                sess = ClientSession(read_stream, write_stream)
+                # Apply short timeouts so context_search never hangs
+                import asyncio
+                from datetime import timedelta
+                timeout = float(os.environ.get("MEMORY_MCP_TIMEOUT", "6"))
+                await asyncio.wait_for(sess.initialize(), timeout=timeout)
+                tools = await asyncio.wait_for(sess.list_tools(), timeout=timeout)
+                tool_name = None
+                # Prefer canonical names
+                for t in tools:
+                    tn = (getattr(t, "name", None) or "").strip()
+                    tl = tn.lower()
+                    if tl in ("find", "memory.find"):
+                        tool_name = tn
+                        break
+                if tool_name is None:
+                    for t in tools:
+                        tn = (getattr(t, "name", None) or "").strip()
+                        if "find" in tn.lower():
+                            tool_name = tn
+                            break
+                if tool_name:
+                    qtext = " ".join([q for q in queries if q]).strip() or queries[0]
+                    arg_variants: List[Dict[str, Any]] = [
+                        {"query": qtext, "top_k": mem_limit},
+                        {"q": qtext, "limit": mem_limit},
+                        {"text": qtext, "limit": mem_limit},
+                    ]
+                    res_obj = None
+                    for args in arg_variants:
+                        try:
+                            res_obj = await sess.call_tool(tool_name, args, read_timeout_seconds=timedelta(seconds=timeout))
+                            break
+                        except Exception:
+                            continue
+                    if res_obj is not None:
+                        try:
+                            rd = res_obj.model_dump(mode="json") if hasattr(res_obj, "model_dump") else {}
+                        except Exception:
+                            rd = {}
+                        # Parse common MCP tool result shapes
+                        def push_text(txt: str, md: Dict[str, Any] | None = None, score: float | int | None = None):
+                            if not txt:
+                                return
+                            mem_hits.append({
+                                "source": "memory",
+                                "score": float(score or 1.0),
+                                "content": txt,
+                                "metadata": (md or {}),
+                            })
+                        if isinstance(rd, dict):
+                            cont = rd.get("content")
+                            if isinstance(cont, list):
+                                for c in cont:
+                                    try:
+                                        ctype = c.get("type")
+                                        if ctype == "text" and isinstance(c.get("text"), str):
+                                            push_text(c["text"], {})
+                                        elif ctype == "json":
+                                            j = c.get("json")
+                                            if isinstance(j, list):
+                                                for it in j:
+                                                    if isinstance(it, dict):
+                                                        push_text(
+                                                            str(it.get("text") or it.get("content") or it.get("information") or ""),
+                                                            it.get("metadata") or {},
+                                                            it.get("score") or 1.0,
+                                                        )
+                                            elif isinstance(j, dict):
+                                                items = j.get("results") or j.get("items") or j.get("memories") or j.get("data")
+                                                if isinstance(items, list):
+                                                    for it in items:
+                                                        if isinstance(it, dict):
+                                                            push_text(
+                                                                str(it.get("text") or it.get("content") or it.get("information") or ""),
+                                                                it.get("metadata") or {},
+                                                                it.get("score") or 1.0,
+                                                            )
+                                    except Exception:
+                                        continue
+                            # Fallback if provider returns flat dict
+                            if not mem_hits:
+                                items = rd.get("results") or rd.get("items")
+                                if isinstance(items, list):
+                                    for it in items:
+                                        if isinstance(it, dict):
+                                            push_text(
+                                                str(it.get("text") or it.get("content") or it.get("information") or ""),
+                                                it.get("metadata") or {},
+                                                it.get("score") or 1.0,
+                                            )
+        except Exception:
+            pass
+
+    # If SSE memory didn’t yield hits, try local Qdrant memory-like retrieval as fallback
+    if include_mem and mem_limit > 0 and not mem_hits and queries:
+        try:
+            from qdrant_client import QdrantClient  # type: ignore
             from fastembed import TextEmbedding  # type: ignore
             from scripts.utils import sanitize_vector_name  # local util
 
@@ -678,13 +815,11 @@ async def context_search(
             vec_name = sanitize_vector_name(model_name)
             model = TextEmbedding(model_name=model_name)
 
-            # Use first query for memory retrieval (can be extended to multi-query fusion)
             qtext = " ".join([q for q in queries if q]).strip() or queries[0]
             v = next(model.embed([qtext])).tolist()
-            # Fetch a few extra and filter client-side for "memory-like" payloads
             k = max(mem_limit, 5)
             res = client.search(
-                collection_name=coll,
+                collection_name=mcoll,
                 query_vector={"name": vec_name, "vector": v},
                 limit=k,
                 with_payload=True,
@@ -692,7 +827,6 @@ async def context_search(
             for pt in res:
                 payload = (getattr(pt, "payload", {}) or {})
                 md = payload.get("metadata") or {}
-                # Heuristic: memory entries typically lack code path/lines
                 path = str(md.get("path") or "")
                 start_line = md.get("start_line")
                 end_line = md.get("end_line")
@@ -719,7 +853,7 @@ async def context_search(
             page = None
             while len(mem_hits) < mem_limit and checked < cap:
                 sc, page = client.scroll(
-                    collection_name=coll,
+                    collection_name=mcoll,
                     with_payload=True,
                     with_vectors=False,
                     limit=500,
