@@ -348,7 +348,9 @@ For each tool, use this format:
   - Examples:
     - {"query": "semantic chunking"}
     - {"query": ["function to split code", "overlapping chunks"], "limit": 15, "per_path": 3}
-  - Returns structured results: score, path, symbol, start_line, end_line.
+    - {"query": "watcher debounce", "language": "python", "under": "scripts/", "include_snippet": true, "context_lines": 2}
+  - Returns structured results: score, path, symbol, start_line, end_line, and optional snippet.
+- code_search: alias of repo_search (same args) for easier discovery in some clients.
 
 
 Verification:

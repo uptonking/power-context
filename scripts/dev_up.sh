@@ -77,5 +77,27 @@ echo "  - Qdrant:      ${QDRANT_URL:-http://localhost:6333}"
 echo "  - MCP (SSE):   http://localhost:8000/sse"
 echo "  - Indexer SSE: http://localhost:8001/sse"
 
+echo
+log "Copy-paste MCP config for Cursor/Windsurf (settings.json):"
+cat <<'JSON'
+{
+  "mcpServers": {
+    "qdrant": { "type": "sse", "url": "http://localhost:8000/sse", "disabled": false },
+    "qdrant-indexer": { "type": "sse", "url": "http://localhost:8001/sse", "disabled": false }
+  }
+}
+JSON
+
+echo
+log "Copy-paste MCP config for Augment:"
+cat <<'JSON'
+{
+  "mcpServers": {
+    "qdrant": { "type": "sse", "url": "http://localhost:8000/sse", "disabled": false },
+    "qdrant-indexer": { "type": "sse", "url": "http://localhost:8001/sse", "disabled": false }
+  }
+}
+JSON
+
 log "Tip: tail logs via: ${DC[*]} logs -f --tail=100"
 

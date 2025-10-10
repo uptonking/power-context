@@ -304,6 +304,11 @@ def main():
     ap.add_argument("--limit", type=int, default=10)
     ap.add_argument("--per-query", type=int, default=24)
     ap.add_argument("--json", dest="json", action="store_true", help="Emit JSON lines with score breakdown")
+    # Structured filters to mirror MCP tool fields
+    ap.add_argument("--ext", type=str, default=None)
+    ap.add_argument("--not", dest="not_filter", type=str, default=None)
+    ap.add_argument("--case", type=str, choices=["sensitive", "insensitive"], default=os.environ.get("HYBRID_CASE", "insensitive"))
+    ap.add_argument("--path-regex", dest="path_regex", type=str, default=None)
 
     args = ap.parse_args()
 
@@ -318,10 +323,11 @@ def main():
     eff_under = args.under or dsl.get("under")
     eff_kind = args.kind or dsl.get("kind")
     eff_symbol = args.symbol or dsl.get("symbol")
-    eff_ext = dsl.get("ext")
-    eff_not = dsl.get("not")
-    eff_case = dsl.get("case")
+    eff_ext = args.ext or dsl.get("ext")
+    eff_not = args.not_filter or dsl.get("not")
+    eff_case = args.case or dsl.get("case")
     eff_repo = dsl.get("repo")
+    eff_path_regex = args.path_regex
 
     # Normalize 'under' to absolute path_prefix used in payload (defaults to /work/<rel>)
     def _norm_under(u: str | None) -> str | None:
@@ -472,16 +478,6 @@ def main():
                 rec_comp = RECENCY_WEIGHT * norm
                 rec["rec"] += rec_comp
                 rec["s"] += rec_comp
-    # Apply client-side NOT filter if requested
-    if eff_not:
-        nn = eff_not.lower()
-        def _ok(m):
-            md = (m["pt"].payload or {}).get("metadata") or {}
-            p = str(md.get("path") or "").lower()
-            pp = str(md.get("path_prefix") or "").lower()
-            return (nn not in p) and (nn not in pp)
-        ranked = [m for m in ranked if _ok(m)]
-
     # Rank with deterministic tie-breakers
     def _tie_key(m: Dict[str, Any]):
         md = (m["pt"].payload or {}).get("metadata") or {}
@@ -514,6 +510,38 @@ def main():
             lst.append({"start": start_line, "end": end_line, "m": m})
 
     ranked = sorted([c["m"] for lst in clusters.values() for c in lst], key=_tie_key)
+
+    # Apply client-side filters: NOT substring, path regex, and ext
+    import re as _re
+    case_sensitive = (str(eff_case or "").lower() == "sensitive")
+    if eff_not or eff_path_regex or eff_ext:
+        def _pass_filters(m: Dict[str, Any]) -> bool:
+            md = (m["pt"].payload or {}).get("metadata") or {}
+            path = str(md.get("path") or "")
+            pp = str(md.get("path_prefix") or "")
+            p_for_sub = path if case_sensitive else path.lower()
+            pp_for_sub = pp if case_sensitive else pp.lower()
+            # NOT substring filter
+            if eff_not:
+                nn = eff_not if case_sensitive else eff_not.lower()
+                if nn in p_for_sub or nn in pp_for_sub:
+                    return False
+            # Extension filter (normalize to .ext)
+            if eff_ext:
+                ex = eff_ext.lower().lstrip('.')
+                if not path.lower().endswith('.' + ex):
+                    return False
+            # Path regex filter
+            if eff_path_regex:
+                flags = 0 if case_sensitive else _re.IGNORECASE
+                try:
+                    if not _re.search(eff_path_regex, path, flags=flags):
+                        return False
+                except Exception:
+                    # Ignore invalid regex
+                    pass
+            return True
+        ranked = [m for m in ranked if _pass_filters(m)]
 
     # Optional diversification by path
     if args.per_path and args.per_path > 0:

@@ -196,6 +196,18 @@ async def repo_search(
     rerank_timeout_ms: Any = None,
     highlight_snippet: Any = None,
     collection: Any = None,
+    # Structured filters (optional; mirrors hybrid_search flags)
+    language: Any = None,
+    under: Any = None,
+    kind: Any = None,
+    symbol: Any = None,
+    # Additional structured parity
+    path_regex: Any = None,
+    ext: Any = None,
+    not_: Any = None,
+    case: Any = None,
+    # Response shaping
+    compact: Any = None,
 ) -> Dict[str, Any]:
     """Zero-config code search over the mounted repo via Qdrant using hybrid_search defaults.
     Args:
@@ -205,8 +217,11 @@ async def repo_search(
       - include_snippet/context_lines: embed code snippets near hit lines
       - rerank_*: optional ONNX reranker via rerank_local.py; graceful timeout fallback
       - highlight_snippet: emphasize matched tokens in snippet
+      - collection: override target collection (default env COLLECTION_NAME)
+      - language/under/kind/symbol: structured search filters (alternative to DSL tokens)
     Notes:
       - No filters required; uses existing environment defaults (COLLECTION_NAME, QDRANT_URL).
+      - You can also pass DSL tokens inside the query text, e.g. "lang:python file:scripts/".
       - Returns structured results parsed from hybrid_search JSONL output when possible.
     """
     # Leniency shim: coerce null/invalid args to sane defaults so buggy clients don't fail schema
@@ -243,6 +258,16 @@ async def repo_search(
     highlight_snippet = _to_bool(highlight_snippet, True)
     collection = (_to_str(collection, "").strip() or DEFAULT_COLLECTION)
 
+    language = _to_str(language, "").strip()
+    under = _to_str(under, "").strip()
+    kind = _to_str(kind, "").strip()
+    symbol = _to_str(symbol, "").strip()
+    path_regex = _to_str(path_regex, "").strip()
+    ext = _to_str(ext, "").strip()
+    not_ = _to_str(not_, "").strip()
+    case = _to_str(case, "").strip()
+    compact = _to_bool(compact, False)
+
     # Normalize queries to a list[str]
     queries: list[str] = []
     if isinstance(query, str):
@@ -269,6 +294,22 @@ async def repo_search(
     cmd = ["python", "/work/scripts/hybrid_search.py", "--limit", str(int(limit)), "--json"]
     if per_path and int(per_path) > 0:
         cmd += ["--per-path", str(int(per_path))]
+    if language:
+        cmd += ["--language", language]
+    if under:
+        cmd += ["--under", under]
+    if kind:
+        cmd += ["--kind", kind]
+    if symbol:
+        cmd += ["--symbol", symbol]
+    if ext:
+        cmd += ["--ext", ext]
+    if not_:
+        cmd += ["--not", not_]
+    if case:
+        cmd += ["--case", case]
+    if path_regex:
+        cmd += ["--path-regex", path_regex]
     for q in queries:
         cmd += ["--query", q]
 
@@ -359,6 +400,17 @@ async def repo_search(
             except Exception:
                 item["snippet"] = ""
 
+    # Compact mode: return only path and line range
+    if compact:
+        results = [
+            {
+                "path": r.get("path", ""),
+                "start_line": int(r.get("start_line") or 0),
+                "end_line": int(r.get("end_line") or 0),
+            }
+            for r in results
+        ]
+
     return {
         "args": {
             "queries": queries,
@@ -371,10 +423,66 @@ async def repo_search(
             "rerank_return_m": int(rerank_return_m),
             "rerank_timeout_ms": int(rerank_timeout_ms),
             "collection": (collection or DEFAULT_COLLECTION),
+            "language": language,
+            "under": under,
+            "kind": kind,
+            "symbol": symbol,
+            "ext": ext,
+            "not": not_,
+            "case": case,
+            "path_regex": path_regex,
+            "compact": bool(compact),
         },
         "results": results,
         **res,
     }
+
+@mcp.tool()
+async def code_search(
+    query: Any = None,
+    limit: Any = None,
+    per_path: Any = None,
+    include_snippet: Any = None,
+    context_lines: Any = None,
+    rerank_enabled: Any = None,
+    rerank_top_n: Any = None,
+    rerank_return_m: Any = None,
+    rerank_timeout_ms: Any = None,
+    highlight_snippet: Any = None,
+    collection: Any = None,
+    language: Any = None,
+    under: Any = None,
+    kind: Any = None,
+    symbol: Any = None,
+    path_regex: Any = None,
+    ext: Any = None,
+    not_: Any = None,
+    case: Any = None,
+    compact: Any = None,
+) -> Dict[str, Any]:
+    """Alias of repo_search with the same arguments; provided for better discoverability."""
+    return await repo_search(
+        query=query,
+        limit=limit,
+        per_path=per_path,
+        include_snippet=include_snippet,
+        context_lines=context_lines,
+        rerank_enabled=rerank_enabled,
+        rerank_top_n=rerank_top_n,
+        rerank_return_m=rerank_return_m,
+        rerank_timeout_ms=rerank_timeout_ms,
+        highlight_snippet=highlight_snippet,
+        collection=collection,
+        language=language,
+        under=under,
+        kind=kind,
+        symbol=symbol,
+        path_regex=path_regex,
+        ext=ext,
+        not_=not_,
+        case=case,
+        compact=compact,
+    )
 
 
 
