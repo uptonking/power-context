@@ -33,6 +33,9 @@ services:
     ports:
       - "8000:8000"
 
+    volumes:
+      - ${HOST_INDEX_PATH:-.}:/work:ro
+
   mcp_indexer:
     build:
       context: .
