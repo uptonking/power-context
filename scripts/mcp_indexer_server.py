@@ -831,7 +831,10 @@ async def context_search(
                 start_line = md.get("start_line")
                 end_line = md.get("end_line")
                 content = payload.get("content") or payload.get("text") or payload.get("information") or md.get("information")
-                is_memory_like = (not path) or (start_line in (None, 0) and end_line in (None, 0))
+                kind = (md.get("kind") or payload.get("kind") or "").lower()
+                source_tag = (md.get("source") or payload.get("source") or "").lower()
+                flagged = kind in ("memory","preference","note","policy","infra","chat") or source_tag in ("memory","chat")
+                is_memory_like = (not path) or (start_line in (None, 0) and end_line in (None, 0)) or flagged
                 if is_memory_like and content:
                     mem_hits.append({
                         "source": "memory",
@@ -847,7 +850,13 @@ async def context_search(
         try:
             from qdrant_client import QdrantClient  # type: ignore
             client = QdrantClient(url=QDRANT_URL, api_key=os.environ.get("QDRANT_API_KEY"))
+            import re
             terms = [str(t).lower() for t in queries if t]
+            tokens = set()
+            for t in terms:
+                tokens.update([w for w in re.split(r"[^a-z0-9_]+", t) if len(w) >= 3])
+            if not tokens:
+                tokens = set(terms)
             checked = 0
             cap = 2000
             page = None
@@ -868,11 +877,14 @@ async def context_search(
                     start_line = md.get("start_line")
                     end_line = md.get("end_line")
                     content = payload.get("content") or payload.get("text") or payload.get("information") or md.get("information")
-                    is_memory_like = (not path) or (start_line in (None, 0) and end_line in (None, 0))
+                    kind = (md.get("kind") or payload.get("kind") or "").lower()
+                    source_tag = (md.get("source") or payload.get("source") or "").lower()
+                    flagged = kind in ("memory","preference","note","policy","infra","chat") or source_tag in ("memory","chat")
+                    is_memory_like = (not path) or (start_line in (None, 0) and end_line in (None, 0)) or flagged
                     if not (is_memory_like and content):
                         continue
                     low = str(content).lower()
-                    if any(t in low for t in terms):
+                    if any(tok in low for tok in tokens):
                         mem_hits.append({
                             "source": "memory",
                             "score": 0.5,  # nominal score for substring match; blended via memory_weight
