@@ -329,8 +329,24 @@ async def repo_search(
     kind = _to_str(kind, "").strip()
     symbol = _to_str(symbol, "").strip()
     path_regex = _to_str(path_regex, "").strip()
-    path_glob = _to_str(path_glob, "").strip()
-    not_glob = _to_str(not_glob, "").strip()
+    # Normalize globs to lists (accept string or list)
+    def _to_str_list(x):
+        if x is None:
+            return []
+        if isinstance(x, (list, tuple)):
+            out = []
+            for e in x:
+                s = str(e).strip()
+                if s:
+                    out.append(s)
+            return out
+        s = str(x).strip()
+        if not s:
+            return []
+        # support comma-separated shorthand
+        return [t.strip() for t in s.split(",") if t.strip()]
+    path_globs = _to_str_list(path_glob)
+    not_globs = _to_str_list(not_glob)
     ext = _to_str(ext, "").strip()
     not_ = _to_str(not_, "").strip()
     case = _to_str(case, "").strip()
@@ -379,12 +395,12 @@ async def repo_search(
         cmd += ["--case", case]
     if path_regex:
         cmd += ["--path-regex", path_regex]
+    for g in path_globs:
+        cmd += ["--path-glob", g]
+    for g in not_globs:
+        cmd += ["--not-glob", g]
     for q in queries:
         cmd += ["--query", q]
-    if path_glob:
-        cmd += ["--path-glob", path_glob]
-    if not_glob:
-        cmd += ["--not-glob", not_glob]
 
     res = _run(cmd, env=env)
 
@@ -508,8 +524,11 @@ async def repo_search(
             "not": not_,
             "case": case,
             "path_regex": path_regex,
+            "path_glob": path_globs,
+            "not_glob": not_globs,
             "compact": bool(compact),
         },
+        "total": len(results),
         "results": results,
         **res,
     }

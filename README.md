@@ -1,4 +1,22 @@
 
+## Architecture overview
+
+- Agents connect via MCP over SSE:
+  - Search MCP: http://localhost:8000/sse
+  - Indexer MCP: http://localhost:8001/sse
+- Both MCP servers talk to Qdrant inside Docker at http://qdrant:6333 (DB HTTP API)
+- Supporting jobs (indexer, watcher, init_payload) write to/read from Qdrant directly
+
+```mermaid
+flowchart LR
+  A[IDE Agents] -- SSE /sse --> B(MCP Search :8000)
+  A -- SSE /sse --> C(MCP Indexer :8001)
+  B -- HTTP 6333 --> D[Qdrant DB]
+  C -- HTTP 6333 --> D
+  E[(One-shot Indexer)] -- HTTP 6333 --> D
+  F[(Watcher)] -- HTTP 6333 --> D
+```
+
 ## Production-ready local development
 
 - Idempotent + incremental indexing out of the box:
@@ -348,12 +366,13 @@ For each tool, use this format:
   - Structured fields supported (parity with DSL): language, under, kind, symbol, ext, not_, case, path_regex, path_glob, not_glob
   - Response shaping: compact (bool) returns only path/start_line/end_line
   - Smart default: compact=true when query is an array with multiple queries (unless explicitly set)
+  - Glob fields accept a single string or an array; you can also pass a comma-separated string which will be split
   - Examples:
     - {"query": "semantic chunking"}
     - {"query": ["function to split code", "overlapping chunks"], "limit": 15, "per_path": 3}
     - {"query": "watcher debounce", "language": "python", "under": "scripts/", "include_snippet": true, "context_lines": 2}
     - {"query": "parser", "ext": "ts", "path_regex": "/services/.+", "compact": true}
-    - {"query": "adapter", "path_glob": "**/src/**", "not_glob": "**/tests/**"}
+    - {"query": "adapter", "path_glob": ["**/src/**", "**/pkg/**"], "not_glob": "**/tests/**"}
   - Returns structured results: score, path, symbol, start_line, end_line, and optional snippet; or compact form.
 - code_search: alias of repo_search (same args) for easier discovery in some clients.
 
