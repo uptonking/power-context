@@ -474,6 +474,17 @@ async def repo_search(
             query = q_alt
 
     """
+    # Accept common alias keys from clients (top-level)
+    try:
+        if (limit is None or (isinstance(limit, str) and str(limit).strip() == "")) and ("top_k" in kwargs):
+            limit = kwargs.get("top_k")
+        if (query is None or (isinstance(query, str) and str(query).strip() == "")):
+            q_alt = kwargs.get("q") or kwargs.get("text")
+            if q_alt is not None:
+                query = q_alt
+    except Exception:
+        pass
+
     # Leniency: absorb nested 'kwargs' JSON payload some clients send
     try:
         _extra = _extract_kwargs_payload(kwargs)

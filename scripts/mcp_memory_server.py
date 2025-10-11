@@ -51,8 +51,14 @@ def _ensure_collection(name: str):
         return True
     except Exception:
         pass
+    # Derive dense vector dimension from embedding model to avoid mismatch
+    try:
+        _model = TextEmbedding(model_name=EMBEDDING_MODEL)
+        _dense_dim = len(next(_model.embed(["__dim_probe__"])).tolist())
+    except Exception:
+        _dense_dim = 768
     vectors_cfg = {
-        VECTOR_NAME: models.VectorParams(size=768, distance=models.Distance.COSINE),
+        VECTOR_NAME: models.VectorParams(size=int(_dense_dim or 768), distance=models.Distance.COSINE),
         LEX_VECTOR_NAME: models.VectorParams(size=LEX_VECTOR_DIM, distance=models.Distance.COSINE),
     }
     client.create_collection(collection_name=name, vectors_config=vectors_cfg)
