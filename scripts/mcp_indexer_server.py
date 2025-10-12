@@ -45,33 +45,12 @@ PORT = int(os.environ.get("FASTMCP_INDEXER_PORT", "8001"))
 
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
 DEFAULT_COLLECTION = os.environ.get("COLLECTION_NAME", "my-collection")
-DEFAULT_REPO = "workspace"
 MAX_LOG_TAIL = int(os.environ.get("MCP_MAX_LOG_TAIL", "4000"))
+SNIPPET_MAX_BYTES = int(os.environ.get("MCP_SNIPPET_MAX_BYTES", "8192") or 8192)
 
 mcp = FastMCP(APP_NAME)
 
 
-def _run(cmd: list[str], env: Optional[Dict[str, str]] = None, timeout: int = 60) -> Dict[str, Any]:
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=timeout)
-    except subprocess.TimeoutExpired as e:
-        return {
-            "ok": False,
-            "code": -1,
-            "stdout": (e.stdout or "")[-MAX_LOG_TAIL:] if e.stdout else "",
-            "stderr": f"Command timed out after {timeout}s\n" + ((e.stderr or "")[-(MAX_LOG_TAIL-100):] if e.stderr else ""),
-        }
-    # Truncate to the last MAX_LOG_TAIL characters (tail-only) for both stdout and stderr
-    def _cap_tail(s: str) -> str:
-        if not s:
-            return s
-        return s if len(s) <= MAX_LOG_TAIL else s[-MAX_LOG_TAIL:]
-    return {
-        "ok": proc.returncode == 0,
-        "code": proc.returncode,
-        "stdout": _cap_tail(proc.stdout),
-        "stderr": _cap_tail(proc.stderr),
-    }
 
 # Async subprocess runner to avoid blocking event loop
 async def _run_async(cmd: list[str], env: Optional[Dict[str, str]] = None, timeout: int = 60) -> Dict[str, Any]:
@@ -101,7 +80,7 @@ async def _run_async(cmd: list[str], env: Optional[Dict[str, str]] = None, timeo
         def _cap_tail(s: str) -> str:
             if not s:
                 return s
-            return s if len(s) <= MAX_LOG_TAIL else s[-MAX_LOG_TAIL:]
+            return s if len(s) <= MAX_LOG_TAIL else ("...[tail truncated]\n" + s[-MAX_LOG_TAIL:])
         return {"ok": code == 0, "code": code, "stdout": _cap_tail(stdout), "stderr": _cap_tail(stderr)}
     except Exception as e:
         return {"ok": False, "code": -2, "stdout": "", "stderr": str(e)}
@@ -278,6 +257,8 @@ async def qdrant_list(**kwargs) -> Dict[str, Any]:
         client = QdrantClient(url=QDRANT_URL, api_key=os.environ.get("QDRANT_API_KEY"))
         cols_info = await asyncio.to_thread(client.get_collections)
         return {"collections": [c.name for c in cols_info.collections]}
+    except ImportError:
+        return {"error": "qdrant_client is not installed in this container"}
     except Exception as e:
         return {"error": str(e)}
 
@@ -466,6 +447,11 @@ async def qdrant_index(subdir: Optional[str] = None, recreate: Optional[bool] = 
     if subdir:
         subdir = subdir.lstrip("/")
         root = os.path.join(root, subdir)
+    # Enforce /work sandbox
+    real_root = os.path.realpath(root)
+    if not (real_root == "/work" or real_root.startswith("/work/")):
+        return {"ok": False, "error": "subdir escapes /work sandbox"}
+    root = real_root
     coll = collection or DEFAULT_COLLECTION
 
     env = os.environ.copy()
@@ -486,6 +472,7 @@ async def qdrant_prune(**kwargs) -> Dict[str, Any]:
     """Prune stale points for the mounted path (/work). Extra params are ignored."""
     env = os.environ.copy()
     env["PRUNE_ROOT"] = "/work"
+
     cmd = ["python", "/work/scripts/prune.py"]
     res = await _run_async(cmd, env=env)
     return res
@@ -717,8 +704,8 @@ async def repo_search(
                 not_filter=not_ or None,
                 case=case or None,
                 path_regex=path_regex or None,
-                path_glob=path_glob or None,
-                not_glob=not_glob or None,
+                path_glob=path_globs or None,
+                not_glob=not_globs or None,
                 expand=str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower() in {"1","true","yes","on"},
                 model=model,
             )
@@ -878,6 +865,9 @@ async def repo_search(
                 si = max(1, sl - max(1, int(context_lines)))
                 ei = min(len(lines), max(sl, el) + max(1, int(context_lines)))
                 snippet = "".join(lines[si-1:ei])
+                # Cap snippet size to avoid large payloads
+                if len(snippet) > SNIPPET_MAX_BYTES:
+                    snippet = snippet[:SNIPPET_MAX_BYTES] + "\n...[snippet truncated]"
                 if highlight_snippet:
                     snippet = _highlight_snippet(snippet, toks)
                 item["snippet"] = snippet
