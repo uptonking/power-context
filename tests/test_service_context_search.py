@@ -76,12 +76,24 @@ def test_context_search_weight_scaling(monkeypatch):
     async def fake_repo_search(**kwargs):
         return {"results": [{"score": 0.5, "path": "/x/a.py", "start_line": 1, "end_line": 3}]}
     monkeypatch.setattr(srv, "repo_search", fake_repo_search)
-    monkeypatch.setattr(srv, "_get_embedding_model", lambda *a, **k: FakeEmbed())
 
-    # One memory hit score=0.9 -> after mw=2.0 becomes 1.8 > code 0.5
-    mem_items = [FakePoint(0.9, {"content": "foo note", "metadata": {}})]
-    import qdrant_client
-    monkeypatch.setattr(qdrant_client, "QdrantClient", lambda *a, **k: FakeQdrantMem(mem_items))
+    # Force SSE memory path with a fake FastMCP client
+    monkeypatch.setenv("MEMORY_SSE_ENABLED", "1")
+
+    class T:
+        def __init__(self, name): self.name = name
+    class Item:
+        def __init__(self, text): self.text = text
+    class Resp:
+        def __init__(self): self.content = [Item("foo note")]
+    class FakeClient:
+        async def __aenter__(self): return self
+        async def __aexit__(self, exc_type, exc, tb): return False
+        async def list_tools(self): return [T("find")]
+        async def call_tool(self, *a, **k): return Resp()
+
+    import fastmcp
+    monkeypatch.setattr(fastmcp, "Client", lambda *a, **k: FakeClient())
 
     res = srv.asyncio.get_event_loop().run_until_complete(
         srv.context_search(
@@ -94,6 +106,9 @@ def test_context_search_weight_scaling(monkeypatch):
         )
     )
 
-    assert res["results"][0]["source"] == "memory"
-    assert res["results"][0]["score"] > res["results"][1]["score"]
+    mem_scores = [r["score"] for r in res["results"] if r.get("source") == "memory"]
+    code_scores = [r["score"] for r in res["results"] if r.get("source") == "code"]
+    assert mem_scores, "expected at least one memory result"
+    assert code_scores, "expected at least one code result"
+    assert max(mem_scores) > max(code_scores)
 
