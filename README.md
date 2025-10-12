@@ -404,6 +404,7 @@ For each tool, use this format:
   - Response shaping: compact (bool) returns only path/start_line/end_line
   - Smart default: compact=true when query is an array with multiple queries (unless explicitly set)
   - Glob fields accept a single string or an array; you can also pass a comma-separated string which will be split
+  - Parity note: path_glob/not_glob list handling works in both modes — in-process and subprocess — with OR semantics for path_glob and reject-on-any for not_glob.
   - Examples:
     - {"query": "semantic chunking"}
     - {"query": ["function to split code", "overlapping chunks"], "limit": 15, "per_path": 3}
