@@ -1122,18 +1122,17 @@ async def context_search(
     memory_note: str = ""
     if include_mem and mem_limit > 0 and queries and use_sse_memory:
         try:
-            from fastmcp import Client  # use FastMCP client for SSE interop
+            # Import the FastMCP client if available; record a helpful note otherwise
+            try:
+                from fastmcp import Client  # use FastMCP client for SSE interop
+            except ImportError:
+                memory_note = "SSE memory disabled: fastmcp client not installed"
+                raise
             import asyncio
             timeout = float(os.environ.get("MEMORY_MCP_TIMEOUT", "6"))
             base_url = os.environ.get("MEMORY_MCP_URL") or "http://mcp:8000/sse"
             async with Client(base_url) as c:
                 tools = await asyncio.wait_for(c.list_tools(), timeout=timeout)
-        except ImportError:
-            memory_note = "SSE memory disabled: fastmcp client not installed"
-            # fall through to local/fallback paths
-        except Exception:
-            # swallow and fall back
-            pass
                 tool_name = None
                 # Prefer canonical names
                 for t in tools:
