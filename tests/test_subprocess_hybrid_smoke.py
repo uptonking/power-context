@@ -3,6 +3,7 @@ import uuid
 import subprocess
 import sys
 import pytest
+import importlib
 
 pytestmark = pytest.mark.integration
 
@@ -17,6 +18,8 @@ def qdrant_container():
     except Exception:
         pytest.skip("testcontainers not available")
     import time, urllib.request
+    # Disable ryuk to avoid port mapping flakiness in some environments
+    os.environ.setdefault("TESTCONTAINERS_RYUK_DISABLED", "true")
     container = DockerContainer("qdrant/qdrant:latest").with_exposed_ports(6333)
     container.start()
     host = container.get_container_host_ip()
@@ -45,13 +48,28 @@ def test_hybrid_cli_runs_basic(tmp_path, qdrant_container):
     # Warm the FastEmbed model cache to avoid long first-run download inside subprocess
     try:
         from fastembed import TextEmbedding
-        TextEmbedding(model_name=os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5"))
+        TextEmbedding(model_name="BAAI/bge-base-en-v1.5")
     except Exception:
         pass
 
+    # Create a tiny repo and index it so the CLI has something to return
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "a.py").write_text("def test():\n    return 1\n", encoding="utf-8")
+    ing = importlib.import_module("scripts.ingest_code")
+    ing.index_repo(
+        root=tmp_path,
+        qdrant_url=qdrant_container,
+        api_key="",
+        collection=env["COLLECTION_NAME"],
+        model_name="BAAI/bge-base-en-v1.5",
+        recreate=True,
+    )
+
     # Use the real model; allow time to download on first run
+    env["EMBEDDING_MODEL"] = "BAAI/bge-base-en-v1.5"
     cmd = [sys.executable, "scripts/hybrid_search.py", "--query", "test", "--limit", "1"]
     proc = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=300)
-    # Either it returns non-empty stdout (success) or cleanly errors out with a message about missing model
-    assert proc.returncode in (0, 1)
+    # Assert successful run with real model and output
+    assert proc.returncode == 0
+    assert (proc.stdout or "").strip() != ""
 

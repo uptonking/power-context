@@ -28,6 +28,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from scripts.utils import sanitize_vector_name as _sanitize_vector_name
+from scripts.ingest_code import ensure_collection as _ensure_collection
 
 
 RRF_K = int(os.environ.get("HYBRID_RRF_K", "60") or 60)
@@ -600,6 +601,14 @@ def main():
     model = TextEmbedding(model_name=MODEL_NAME)
     vec_name = _sanitize_vector_name(MODEL_NAME)
     client = QdrantClient(url=QDRANT_URL, api_key=API_KEY or None)
+
+    # Ensure collection exists with dual named vectors before search
+    try:
+        first_vec = next(model.embed(["__dim__warmup__"]))
+        dim = len(first_vec.tolist())
+        _ensure_collection(client, _collection(), dim, vec_name)
+    except Exception:
+        pass
 
     # Parse Query DSL from queries, then build effective filters
     raw_queries = list(args.query)
