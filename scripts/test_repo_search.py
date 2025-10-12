@@ -41,7 +41,7 @@ async def main():
         rerank_enabled=True,
         rerank_top_n=40,
         rerank_return_m=8,
-        rerank_timeout_ms=250,
+        rerank_timeout_ms=10000,
         include_snippet=True,
     )
     await run_case(

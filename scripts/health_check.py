@@ -7,6 +7,11 @@ from typing import Dict, Any
 from qdrant_client import QdrantClient, models
 from fastembed import TextEmbedding
 
+# Ensure /work (repo root) is on sys.path when run from /work/scripts
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
 
 from scripts.utils import sanitize_vector_name
 

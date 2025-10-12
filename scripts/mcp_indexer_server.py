@@ -563,10 +563,12 @@ async def repo_search(
     per_path = _to_int(per_path, 2)
     include_snippet = _to_bool(include_snippet, False)
     context_lines = _to_int(context_lines, 2)
-    rerank_enabled = _to_bool(rerank_enabled, False)
-    rerank_top_n = _to_int(rerank_top_n, 50)
-    rerank_return_m = _to_int(rerank_return_m, 12)
-    rerank_timeout_ms = _to_int(rerank_timeout_ms, 120)
+    # Reranker: allow env-defaults to enable without client args
+    rerank_env_default = str(os.environ.get("RERANKER_ENABLED", "")).strip().lower() in {"1","true","yes","on"}
+    rerank_enabled = _to_bool(rerank_enabled, rerank_env_default)
+    rerank_top_n = _to_int(rerank_top_n, int(os.environ.get("RERANKER_TOPN", "50") or 50))
+    rerank_return_m = _to_int(rerank_return_m, int(os.environ.get("RERANKER_RETURN_M", "12") or 12))
+    rerank_timeout_ms = _to_int(rerank_timeout_ms, int(os.environ.get("RERANKER_TIMEOUT_MS", "120") or 120))
     highlight_snippet = _to_bool(highlight_snippet, True)
     collection = (_to_str(collection, "").strip() or DEFAULT_COLLECTION)
 
@@ -673,7 +675,21 @@ async def repo_search(
                 "--topk", str(int(rerank_top_n)),
                 "--limit", str(int(rerank_return_m)),
             ]
+            if language:
+                rcmd += ["--language", language]
+            if under:
+                rcmd += ["--under", under]
+            if os.environ.get("MCP_DEBUG_RERANK", "").strip():
+                try:
+                    print("RERANK_CMD:", " ".join(rcmd))
+                except Exception:
+                    pass
             r = subprocess.run(rcmd, capture_output=True, text=True, timeout=max(0.1, int(rerank_timeout_ms)/1000.0), env=env)
+            if os.environ.get("MCP_DEBUG_RERANK", "").strip():
+                try:
+                    print("RERANK_RET:", r.returncode, "OUT_LEN:", len((r.stdout or "").strip()), "ERR_TAIL:", (r.stderr or "")[ -200: ])
+                except Exception:
+                    pass
             if r.returncode == 0 and r.stdout.strip():
                 tmp = []
                 for ln in r.stdout.splitlines():
@@ -774,6 +790,7 @@ async def repo_search(
             "not_glob": not_globs,
             "compact": bool(compact),
         },
+        "used_rerank": bool(used_rerank),
         "total": len(results),
         "results": results,
         **res,

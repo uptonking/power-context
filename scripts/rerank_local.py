@@ -24,6 +24,14 @@ RERANKER_TOKENIZER_PATH = os.environ.get("RERANKER_TOKENIZER_PATH", "")
 RERANK_MAX_TOKENS = int(os.environ.get("RERANK_MAX_TOKENS", "512") or 512)
 EF_SEARCH = int(os.environ.get("EF_SEARCH", "128") or 128)
 
+
+# Ensure project root is on sys.path when run as a script (so 'scripts' package imports work)
+import sys
+from pathlib import Path as _P
+_ROOT = _P(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
 from scripts.utils import sanitize_vector_name as _sanitize_vector_name
 
 
@@ -185,8 +193,10 @@ def main():
     flt = models.Filter(must=must) if must else None
 
     pts = dense_results(client, model, vec_name, args.query, flt, args.topk)
+    # Fallback: if filtered search yields nothing, retry without filters to avoid empty rerank
+    if not pts and flt is not None:
+        pts = dense_results(client, model, vec_name, args.query, None, args.topk)
     if not pts:
-        print("No results.")
         return
     pairs = prepare_pairs(args.query, pts)
     scores = rerank_local(pairs)

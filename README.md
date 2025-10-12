@@ -105,7 +105,7 @@ make warm
 
 
 
-# Local Qdrant + MCP Server (mcp-server-qdrant)
+## Legacy (deprecated): command-based mcp-server-qdrant
 
 This folder spins up a local Qdrant (vector DB) and a Model Context Protocol server that stores/finds memories in Qdrant.
 
@@ -155,47 +155,6 @@ curl -I http://localhost:8000/sse
 - Claude Desktop: configure an MCP server entry pointing to this running SSE server, or use command-based config to run `mcp-server-qdrant` with the same env.
 - Cursor/Windsurf: add a custom MCP server pointing to `http://localhost:8000/sse`.
 - VS Code MCP extensions: point to the SSE endpoint or run via command.
-
-### Example Claude Desktop block (command-based)
-
-```jsonc
-{
-
-### Index any local repo without cloning into this folder
-
-You can mount any local path as the index root at runtime via HOST_INDEX_PATH.
-
-- Index an arbitrary path (auto-derives REPO_NAME and COLLECTION from folder name):
-
-```
-make index-path REPO_PATH=/absolute/path/to/repo [RECREATE=1]
-```
-
-- Index the current directory quickly:
-
-```
-make index-here [RECREATE=1]
-```
-
-- Prune by path (removes points for missing files or hash mismatches):
-
-```
-make prune-path REPO_PATH=/absolute/path/to/repo
-```
-
-These commands do not move or copy your repo; they bind‑mount the target path into the indexer container as /work.
-
-  "qdrant": {
-    "command": "uvx",
-    "args": ["mcp-server-qdrant"],
-    "env": {
-      "QDRANT_URL": "http://localhost:6333",
-      "COLLECTION_NAME": "my-collection",
-      "EMBEDDING_MODEL": "BAAI/bge-base-en-v1.5"
-    }
-  }
-}
-```
 
 
 ### Known-good full config block (with mcpServers)
