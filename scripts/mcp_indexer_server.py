@@ -648,6 +648,11 @@ async def repo_search(
     compact_raw = compact
     compact = _to_bool(compact, False)
 
+    # Accept top-level alias `queries` as a drop-in for `query`
+    # Many clients send queries=[...] instead of query=[...]
+    if "queries" in kwargs and kwargs.get("queries") is not None:
+        query = kwargs.get("queries")
+
     # Normalize queries to a list[str]
     queries: list[str] = []
     if isinstance(query, str):
