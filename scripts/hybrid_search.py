@@ -288,6 +288,275 @@ def dense_query(client: QdrantClient, vec_name: str, v: List[float], flt, per_qu
         return res
 
 
+# In-process API: run hybrid search and return structured items list
+# Optional: pass an existing TextEmbedding instance via model to reuse cache
+
+def run_hybrid_search(
+    queries: List[str],
+    limit: int = 10,
+    per_path: int = 1,
+    language: str | None = None,
+    under: str | None = None,
+    kind: str | None = None,
+    symbol: str | None = None,
+    ext: str | None = None,
+    not_filter: str | None = None,
+    case: str | None = None,
+    path_regex: str | None = None,
+    path_glob: str | None = None,
+    not_glob: str | None = None,
+    expand: bool = True,
+    model: TextEmbedding | None = None,
+) -> List[Dict[str, Any]]:
+    client = QdrantClient(url=QDRANT_URL, api_key=API_KEY)
+    _model = model or TextEmbedding(model_name=MODEL_NAME)
+    vec_name = _sanitize_vector_name(MODEL_NAME)
+
+    # Parse Query DSL and merge with explicit args
+    raw_queries = list(queries)
+    clean_queries, dsl = parse_query_dsl(raw_queries)
+    eff_language = language or dsl.get("language")
+    eff_under = under or dsl.get("under")
+    eff_kind = kind or dsl.get("kind")
+    eff_symbol = symbol or dsl.get("symbol")
+    eff_ext = ext or dsl.get("ext")
+    eff_not = not_filter or dsl.get("not")
+    eff_case = case or dsl.get("case") or os.environ.get("HYBRID_CASE", "insensitive")
+    eff_repo = dsl.get("repo")
+    eff_path_regex = path_regex
+    eff_path_glob = path_glob
+    eff_not_glob = not_glob
+
+    # Normalize under
+    def _norm_under(u: str | None) -> str | None:
+        if not u:
+            return None
+        u = str(u).strip().replace("\\", "/")
+        u = "/".join([p for p in u.split("/") if p])
+        if not u:
+            return None
+        if not u.startswith("/"):
+            v = "/work/" + u
+        else:
+            v = "/work/" + u.lstrip("/") if not u.startswith("/work/") else u
+        return v
+    eff_under = _norm_under(eff_under)
+
+    # Build optional filter
+    flt = None
+    must = []
+    if eff_language:
+        must.append(models.FieldCondition(key="metadata.language", match=models.MatchValue(value=eff_language)))
+    if eff_repo:
+        must.append(models.FieldCondition(key="metadata.repo", match=models.MatchValue(value=eff_repo)))
+    if eff_under:
+        must.append(models.FieldCondition(key="metadata.path_prefix", match=models.MatchValue(value=eff_under)))
+    if eff_kind:
+        must.append(models.FieldCondition(key="metadata.kind", match=models.MatchValue(value=eff_kind)))
+    if eff_symbol:
+        must.append(models.FieldCondition(key="metadata.symbol", match=models.MatchValue(value=eff_symbol)))
+    flt = models.Filter(must=must) if must else None
+
+    # Optionally expand queries
+    qlist = list(clean_queries)
+    if expand:
+        qlist = expand_queries(qlist, eff_language)
+
+    # Lexical vector query
+    score_map: Dict[str, Dict[str, Any]] = {}
+    try:
+        lex_vec = lex_hash_vector(qlist)
+        lex_results = lex_query(client, lex_vec, flt, max(24, limit))
+    except Exception:
+        lex_results = []
+    for rank, p in enumerate(lex_results, 1):
+        pid = str(p.id)
+        score_map.setdefault(pid, {"pt": p, "s": 0.0, "d": 0.0, "lx": 0.0, "sym_sub": 0.0, "sym_eq": 0.0, "core": 0.0, "vendor": 0.0, "langb": 0.0, "rec": 0.0})
+        lxs = LEX_VECTOR_WEIGHT * rrf(rank)
+        score_map[pid]["lx"] += lxs
+        score_map[pid]["s"] += lxs
+
+    # Dense queries
+    embedded = [vec.tolist() for vec in _model.embed(qlist)]
+    result_sets: List[List[Any]] = [dense_query(client, vec_name, v, flt, max(24, limit)) for v in embedded]
+    for res in result_sets:
+        for rank, p in enumerate(res, 1):
+            pid = str(p.id)
+            score_map.setdefault(pid, {"pt": p, "s": 0.0, "d": 0.0, "lx": 0.0, "sym_sub": 0.0, "sym_eq": 0.0, "core": 0.0, "vendor": 0.0, "langb": 0.0, "rec": 0.0})
+            dens = DENSE_WEIGHT * rrf(rank)
+            score_map[pid]["d"] += dens
+            score_map[pid]["s"] += dens
+
+    # Lexical + boosts
+    timestamps: List[int] = []
+    for pid, rec in list(score_map.items()):
+        md = (rec["pt"].payload or {}).get("metadata") or {}
+        lx = LEXICAL_WEIGHT * lexical_score(qlist, md)
+        rec["lx"] += lx
+        rec["s"] += lx
+        ts = md.get("last_modified_at") or md.get("ingested_at")
+        if isinstance(ts, int):
+            timestamps.append(ts)
+        sym = str(md.get("symbol") or "").lower()
+        sym_path = str(md.get("symbol_path") or "").lower()
+        sym_text = f"{sym} {sym_path}"
+        for q in qlist:
+            ql = q.lower()
+            if not ql:
+                continue
+            if ql in sym_text:
+                rec["sym_sub"] += SYMBOL_BOOST
+                rec["s"] += SYMBOL_BOOST
+            if ql == sym or ql == sym_path:
+                rec["sym_eq"] += SYMBOL_EQUALITY_BOOST
+                rec["s"] += SYMBOL_EQUALITY_BOOST
+        path = str(md.get("path") or "")
+        if CORE_FILE_BOOST > 0.0 and path and is_core_file(path):
+            rec["core"] += CORE_FILE_BOOST
+            rec["s"] += CORE_FILE_BOOST
+        if VENDOR_PENALTY > 0.0 and path and is_vendor_path(path):
+            rec["vendor"] -= VENDOR_PENALTY
+            rec["s"] -= VENDOR_PENALTY
+        if LANG_MATCH_BOOST > 0.0 and path and eff_language:
+            lang = str(eff_language).lower()
+            md_lang = str((md.get("language") or "")).lower()
+            if (lang and md_lang and md_lang == lang) or lang_matches_path(lang, path):
+                rec["langb"] += LANG_MATCH_BOOST
+                rec["s"] += LANG_MATCH_BOOST
+
+    if timestamps and RECENCY_WEIGHT > 0.0:
+        tmin, tmax = min(timestamps), max(timestamps)
+        span = max(1, tmax - tmin)
+        for rec in score_map.values():
+            md = (rec["pt"].payload or {}).get("metadata") or {}
+            ts = md.get("last_modified_at") or md.get("ingested_at")
+            if isinstance(ts, int):
+                norm = (ts - tmin) / span
+                rec_comp = RECENCY_WEIGHT * norm
+                rec["rec"] += rec_comp
+                rec["s"] += rec_comp
+
+    def _tie_key(m: Dict[str, Any]):
+        md = (m["pt"].payload or {}).get("metadata") or {}
+        sp = str(md.get("symbol_path") or md.get("symbol") or "")
+        path = str(md.get("path") or "")
+        start_line = int(md.get("start_line") or 0)
+        return (-float(m["s"]), len(sp), path, start_line)
+
+    ranked = sorted(score_map.values(), key=_tie_key)
+
+    # Cluster by path adjacency
+    clusters: Dict[str, List[Dict[str, Any]]] = {}
+    for m in ranked:
+        md = (m["pt"].payload or {}).get("metadata") or {}
+        path = str(md.get("path") or "")
+        start_line = int(md.get("start_line") or 0)
+        end_line = int(md.get("end_line") or 0)
+        lst = clusters.setdefault(path, [])
+        merged_flag = False
+        for c in lst:
+            if start_line <= c["end"] + CLUSTER_LINES and end_line >= c["start"] - CLUSTER_LINES:
+                if float(m["s"]) > float(c["m"]["s"]):
+                    c["m"] = m
+                c["start"] = min(c["start"], start_line)
+                c["end"] = max(c["end"], end_line)
+                merged_flag = True
+                break
+        if not merged_flag:
+            lst.append({"start": start_line, "end": end_line, "m": m})
+
+    ranked = sorted([c["m"] for lst in clusters.values() for c in lst], key=_tie_key)
+
+    # Client-side filters and per-path diversification
+    import re as _re, fnmatch as _fnm
+    case_sensitive = (str(eff_case or "").lower() == "sensitive")
+    def _match_glob(pat: str, path: str) -> bool:
+        if not pat:
+            return True
+        if case_sensitive:
+            return _fnm.fnmatchcase(path, pat)
+        return _fnm.fnmatchcase(path.lower(), pat.lower())
+
+    if eff_not or eff_path_regex or eff_ext or eff_path_glob or eff_not_glob:
+        def _pass_filters(m: Dict[str, Any]) -> bool:
+            md = (m["pt"].payload or {}).get("metadata") or {}
+            path = str(md.get("path") or "")
+            pp = str(md.get("path_prefix") or "")
+            p_for_sub = path if case_sensitive else path.lower()
+            pp_for_sub = pp if case_sensitive else pp.lower()
+            if eff_not:
+                nn = eff_not if case_sensitive else eff_not.lower()
+                if nn in p_for_sub or nn in pp_for_sub:
+                    return False
+            if eff_not_glob and _match_glob(eff_not_glob, path):
+                return False
+            if eff_ext:
+                ex = eff_ext.lower().lstrip('.')
+                if not path.lower().endswith('.' + ex):
+                    return False
+            if eff_path_regex:
+                flags = 0 if case_sensitive else _re.IGNORECASE
+                try:
+                    if not _re.search(eff_path_regex, path, flags=flags):
+                        return False
+                except Exception:
+                    pass
+            if eff_path_glob and not _match_glob(eff_path_glob, path):
+                return False
+            return True
+        ranked = [m for m in ranked if _pass_filters(m)]
+
+    if per_path and per_path > 0:
+        counts: Dict[str, int] = {}
+        merged: List[Dict[str, Any]] = []
+        for m in ranked:
+            md = (m["pt"].payload or {}).get("metadata") or {}
+            path = str(md.get("path", ""))
+            c = counts.get(path, 0)
+            if c < per_path:
+                merged.append(m)
+                counts[path] = c + 1
+            if len(merged) >= limit:
+                break
+    else:
+        merged = ranked[: limit]
+
+    # Emit structured items
+    items: List[Dict[str, Any]] = []
+    for m in merged:
+        md = (m["pt"].payload or {}).get("metadata") or {}
+        comp = {
+            "dense_rrf": round(float(m.get("d", 0.0)), 4),
+            "lexical": round(float(m.get("lx", 0.0)), 4),
+            "symbol_substr": round(float(m.get("sym_sub", 0.0)), 4),
+            "symbol_exact": round(float(m.get("sym_eq", 0.0)), 4),
+            "core_boost": round(float(m.get("core", 0.0)), 4),
+            "vendor_penalty": round(float(m.get("vendor", 0.0)), 4),
+            "lang_boost": round(float(m.get("langb", 0.0)), 4),
+            "recency": round(float(m.get("rec", 0.0)), 4),
+        }
+        why = []
+        if comp["dense_rrf"]:
+            why.append(f"dense_rrf:{comp['dense_rrf']}")
+        for k in ("lexical","symbol_substr","symbol_exact","core_boost","lang_boost"):
+            if comp[k]:
+                why.append(f"{k}:{comp[k]}")
+        if comp["vendor_penalty"]:
+            why.append(f"vendor_penalty:{comp['vendor_penalty']}")
+        if comp["recency"]:
+            why.append(f"recency:{comp['recency']}")
+        items.append({
+            "score": round(float(m["s"]), 4),
+            "path": md.get("path"),
+            "symbol": md.get("symbol_path") or md.get("symbol") or "",
+            "start_line": md.get("start_line"),
+            "end_line": md.get("end_line"),
+            "components": comp,
+            "why": why,
+        })
+    return items
+
+
 def main():
     ap = argparse.ArgumentParser(description="Hybrid search: dense + lexical RRF")
     ap.add_argument("--query", "-q", action="append", required=True, help="One or more query strings (multi-query)")

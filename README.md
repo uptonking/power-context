@@ -147,6 +147,9 @@ Optional:
 - EMBEDDING_WARMUP: 0/1 to preload the embedding model at startup (default 0)
 - RERANK_WARMUP: 0/1 to run a tiny rerank warmup at startup when RERANKER_ENABLED=1 (default 0)
 
+- HYBRID_IN_PROCESS: 0/1 to call hybrid search in-process (default 1). Falls back to subprocess if import fails.
+- RERANK_IN_PROCESS: 0/1 to call reranker in-process with cached ONNX session/tokenizer (default 1). Falls back to subprocess if import/session init fails.
+
 Notes:
 - Effective rerank timeout = max(RERANK_TIMEOUT_FLOOR_MS, RERANKER_TIMEOUT_MS)
 - Warmups are optional; enable when you want the very first query to be warm at the cost of slightly slower container readiness on a fresh image.

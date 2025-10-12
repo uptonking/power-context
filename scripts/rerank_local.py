@@ -32,6 +32,41 @@ _ROOT = _P(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+import threading
+
+# Module-level cache for ONNX session and tokenizer
+_RERANK_SESSION = None
+_RERANK_TOKENIZER = None
+_RERANK_LOCK = threading.Lock()
+
+def _get_rerank_session():
+    global _RERANK_SESSION, _RERANK_TOKENIZER
+    if not (ort and Tokenizer and RERANKER_ONNX_PATH and RERANKER_TOKENIZER_PATH):
+        return None, None
+    if _RERANK_SESSION is not None and _RERANK_TOKENIZER is not None:
+        return _RERANK_SESSION, _RERANK_TOKENIZER
+    with _RERANK_LOCK:
+        if _RERANK_SESSION is not None and _RERANK_TOKENIZER is not None:
+            return _RERANK_SESSION, _RERANK_TOKENIZER
+        tok = Tokenizer.from_file(RERANKER_TOKENIZER_PATH)
+        try:
+            tok.enable_truncation(max_length=RERANK_MAX_TOKENS)
+        except Exception:
+            pass
+        try:
+            providers = os.environ.get("RERANK_PROVIDERS", "").split(",") if os.environ.get("RERANK_PROVIDERS") else None
+            if not providers:
+                try:
+                    avail = set(ort.get_available_providers()) if ort else set()
+                except Exception:
+                    avail = set()
+                providers = (["CUDAExecutionProvider"] if "CUDAExecutionProvider" in avail else []) + ["CPUExecutionProvider"]
+            sess = ort.InferenceSession(RERANKER_ONNX_PATH, providers=providers)
+        except Exception:
+            sess = None
+        _RERANK_SESSION, _RERANK_TOKENIZER = sess, tok
+        return _RERANK_SESSION, _RERANK_TOKENIZER
+
 from scripts.utils import sanitize_vector_name as _sanitize_vector_name
 
 
@@ -113,14 +148,10 @@ def prepare_pairs(query: str, points: List[Any]) -> List[tuple[str, str]]:
 
 
 def rerank_local(pairs: List[tuple[str, str]]) -> List[float]:
-    # Requires RERANKER_ONNX_PATH and RERANKER_TOKENIZER_PATH to be set
-    if not (ort and Tokenizer and RERANKER_ONNX_PATH and RERANKER_TOKENIZER_PATH):
+    # Cached ONNX session + tokenizer
+    sess, tok = _get_rerank_session()
+    if not (sess and tok):
         return [0.0 for _ in pairs]
-    tok = Tokenizer.from_file(RERANKER_TOKENIZER_PATH)
-    try:
-        tok.enable_truncation(max_length=RERANK_MAX_TOKENS)
-    except Exception:
-        pass
     # Proper pair encoding for token_type_ids
     enc = tok.encode_batch(pairs)
     input_ids = [e.ids for e in enc]
@@ -130,15 +161,6 @@ def rerank_local(pairs: List[tuple[str, str]]) -> List[float]:
         return seq + [pad_id] * (max_len - len(seq))
     input_ids = [pad(s) for s in input_ids]
     attn = [pad(s) for s in attn]
-    # Providers: prefer CUDA if available, else CPU
-    providers = os.environ.get("RERANK_PROVIDERS", "").split(",") if os.environ.get("RERANK_PROVIDERS") else None
-    if not providers:
-        try:
-            avail = set(ort.get_available_providers()) if ort else set()
-        except Exception:
-            avail = set()
-        providers = (["CUDAExecutionProvider"] if "CUDAExecutionProvider" in avail else []) + ["CPUExecutionProvider"]
-    sess = ort.InferenceSession(RERANKER_ONNX_PATH, providers=providers)
     input_names = [i.name for i in sess.get_inputs()]
     token_type_ids = [[0] * max_len for _ in input_ids] if "token_type_ids" in input_names else None
     feeds = {}
@@ -167,6 +189,47 @@ def rerank_local(pairs: List[tuple[str, str]]) -> List[float]:
         except Exception:
             scores.append(0.0)
     return scores
+
+
+# In-process API: rerank using local ONNX; returns structured items
+# Optional: pass an existing TextEmbedding instance via model to reuse cache
+
+def rerank_in_process(query: str, topk: int = 50, limit: int = 12, language: str | None = None, under: str | None = None, model: TextEmbedding | None = None) -> List[Dict[str, Any]]:
+    client = QdrantClient(url=QDRANT_URL, api_key=API_KEY or None)
+    _model = model or TextEmbedding(model_name=MODEL_NAME)
+    dim = len(next(_model.embed(["dimension probe"])))
+    vec_name = _select_dense_vector_name(client, COLLECTION, _model, dim)
+
+    must = []
+    if language:
+        must.append(models.FieldCondition(key="metadata.language", match=models.MatchValue(value=language)))
+    eff_under = _norm_under(under)
+    if eff_under:
+        must.append(models.FieldCondition(key="metadata.path_prefix", match=models.MatchValue(value=eff_under)))
+    flt = models.Filter(must=must) if must else None
+
+    pts = dense_results(client, _model, vec_name, query, flt, topk)
+    if not pts and flt is not None:
+        pts = dense_results(client, _model, vec_name, query, None, topk)
+    if not pts:
+        return []
+
+    pairs = prepare_pairs(query, pts)
+    scores = rerank_local(pairs)
+    ranked = list(zip(scores, pts))
+    ranked.sort(key=lambda x: x[0], reverse=True)
+    items: List[Dict[str, Any]] = []
+    for s, p in ranked[: max(0, int(limit))]:
+        md = (p.payload or {}).get("metadata") or {}
+        items.append({
+            "score": float(s),
+            "path": md.get("path"),
+            "symbol": md.get("symbol_path") or md.get("symbol") or "",
+            "start_line": md.get("start_line"),
+            "end_line": md.get("end_line"),
+            "components": {"rerank_onnx": float(s)},
+        })
+    return items
 
 
 def main():
