@@ -211,6 +211,150 @@ def expand_queries(queries: List[str], language: str | None = None, max_extra: i
                         out.append(exp)
     return out[: max(8, len(queries))]
 
+# --- LLM-assisted expansion (optional if configured) and PRF (default-on) ---
+def _llm_expand_queries(queries: List[str], language: str | None = None, max_new: int = 4) -> List[str]:
+    """Best-effort LLM expansion with preference for a local runtime (Ollama).
+    Providers (by env):
+      - LLM_PROVIDER=ollama (preferred if OLLAMA_HOST set; default http://localhost:11434)
+      - fallback: OPENAI_API_KEY + LLM_EXPAND_MODEL
+    On any error or if not configured, returns []."""
+    import json
+    import urllib.request
+    model = os.environ.get("LLM_EXPAND_MODEL", "glm4")
+    prompt = (
+        "You are a code search expert. Given one or more short queries, suggest up to "
+        f"{max_new} semantically diverse, code-oriented expansions. Only return a JSON list of strings.\n"
+        f"Language hint: {language or 'any'}. Queries: {queries}"
+    )
+
+    # 1) Prefer local Ollama
+    prov = (os.environ.get("LLM_PROVIDER") or "").strip().lower()
+    ollama_host = os.environ.get("OLLAMA_HOST", "http://localhost:11434").strip() or "http://localhost:11434"
+    if prov in {"", "ollama"}:  # default to ollama if reachable
+        try:
+            payload = {
+                "model": model,
+                "prompt": prompt,
+                "stream": False,
+                "format": "json",
+                "options": {"temperature": 0.2, "num_predict": 128}
+            }
+            req = urllib.request.Request(
+                ollama_host.rstrip("/") + "/api/generate",
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                body = json.loads(resp.read().decode("utf-8", "ignore"))
+            txt = body.get("response", "")
+            def _parse_list(t: str):
+                t = t.strip().strip("`")
+                import re, json as _json
+                try:
+                    v = _json.loads(t)
+                    if isinstance(v, list):
+                        return v
+                except Exception:
+                    pass
+                if t.startswith("```"):
+                    t = t.strip("`")
+                m = re.search(r"\[.*?\]", t, flags=re.S)
+                if m:
+                    try:
+                        v = _json.loads(m.group(0))
+                        if isinstance(v, list):
+                            return v
+                    except Exception:
+                        pass
+                return None
+            arr = _parse_list(txt)
+            if isinstance(arr, list):
+                return [str(x) for x in arr[:max_new] if str(x).strip()]
+            out: List[str] = []
+            for line in txt.splitlines():
+                s = line.strip().strip("- ").strip("`")
+                if s:
+                    out.append(s)
+                if len(out) >= max_new:
+                    break
+            return out
+        except Exception:
+            pass
+
+    # 2) Fallback to OpenAI if configured
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        return []
+    try:
+        data = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.2,
+        }
+        req = urllib.request.Request(
+            "https://api.openai.com/v1/chat/completions",
+            data=json.dumps(data).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            body = json.loads(resp.read().decode("utf-8", "ignore"))
+        txt = body.get("choices", [{}])[0].get("message", {}).get("content", "")
+        def _parse_list(t: str):
+            t = t.strip().strip("`")
+            import re, json as _json
+            try:
+                v = _json.loads(t)
+                if isinstance(v, list):
+                    return v
+            except Exception:
+                pass
+            if t.startswith("```"):
+                t = t.strip("`")
+            m = re.search(r"\[.*?\]", t, flags=re.S)
+            if m:
+                try:
+                    v = _json.loads(m.group(0))
+                    if isinstance(v, list):
+                        return v
+                except Exception:
+                    pass
+            return None
+        arr = _parse_list(txt)
+        if isinstance(arr, list):
+            return [str(x) for x in arr[:max_new] if str(x).strip()]
+        out = []
+        for line in txt.splitlines():
+            s = line.strip().strip("- ").strip("`")
+            if s:
+                out.append(s)
+            if len(out) >= max_new:
+                break
+        return out
+    except Exception:
+        return []
+
+
+def _prf_terms_from_results(score_map: Dict[str, Dict[str, Any]], top_docs: int = 8, max_terms: int = 6) -> List[str]:
+    """Extract pseudo-relevant feedback terms from top documents' metadata."""
+    # Rank by current fused score 's'
+    ranked = sorted(score_map.values(), key=lambda r: r.get("s", 0.0), reverse=True)[: max(1, top_docs)]
+    freq: Dict[str, int] = {}
+    for rec in ranked:
+        md = (rec.get("pt").payload or {}).get("metadata") or {}
+        path = str(md.get("path") or md.get("symbol_path") or md.get("file_path") or "")
+        symbol = str(md.get("symbol") or "")
+        text = f"{symbol} {path}"
+        for tok in tokenize_queries([text]):
+            if tok:
+                freq[tok] = freq.get(tok, 0) + 1
+    # sort by frequency desc
+    terms = sorted(freq.items(), key=lambda kv: kv[1], reverse=True)
+    return [t for t, _ in terms[:max(1, max_terms)]]
+
+
 def _env_truthy(val: str | None, default: bool) -> bool:
     if val is None:
         return default
@@ -403,8 +547,16 @@ def run_hybrid_search(
         must.append(models.FieldCondition(key="metadata.symbol", match=models.MatchValue(value=eff_symbol)))
     flt = models.Filter(must=must) if must else None
 
-    # Optionally expand queries
+    # Build query list (LLM-assisted first, then synonym expansion)
     qlist = list(clean_queries)
+    try:
+        llm_max = int(os.environ.get("LLM_EXPAND_MAX", "4") or 4)
+    except Exception:
+        llm_max = 4
+    _llm_more = _llm_expand_queries(qlist, eff_language, max_new=llm_max)
+    for s in _llm_more:
+        if s and s not in qlist:
+            qlist.append(s)
     if expand:
         qlist = expand_queries(qlist, eff_language)
 
@@ -425,6 +577,69 @@ def run_hybrid_search(
     # Dense queries
     embedded = _embed_queries_cached(_model, qlist)
     result_sets: List[List[Any]] = [dense_query(client, vec_name, v, flt, max(24, limit)) for v in embedded]
+
+    # Pseudo-Relevance Feedback (default-on): mine top terms from current results and run a light second pass
+    try:
+        prf_enabled = _env_truthy(os.environ.get("PRF_ENABLED"), True)
+    except Exception:
+        prf_enabled = True
+    if prf_enabled and score_map:
+        try:
+            top_docs = int(os.environ.get("PRF_TOP_DOCS", "8") or 8)
+        except Exception:
+            top_docs = 8
+        try:
+            max_terms = int(os.environ.get("PRF_MAX_TERMS", "6") or 6)
+        except Exception:
+            max_terms = 6
+        try:
+            extra_q = int(os.environ.get("PRF_EXTRA_QUERIES", "4") or 4)
+        except Exception:
+            extra_q = 4
+        try:
+            prf_dw = float(os.environ.get("PRF_DENSE_WEIGHT", "0.4") or 0.4)
+        except Exception:
+            prf_dw = 0.4
+        try:
+            prf_lw = float(os.environ.get("PRF_LEX_WEIGHT", "0.6") or 0.6)
+        except Exception:
+            prf_lw = 0.6
+        terms = _prf_terms_from_results(score_map, top_docs=top_docs, max_terms=max_terms)
+        base = (clean_queries[0] if clean_queries else (qlist[0] if qlist else ""))
+        prf_qs: List[str] = []
+        for t in terms:
+            cand = (base + " " + t).strip()
+            if cand and cand not in qlist and cand not in prf_qs:
+                prf_qs.append(cand)
+                if len(prf_qs) >= extra_q:
+                    break
+        if prf_qs:
+            # Lexical PRF pass
+            try:
+                lex_vec2 = lex_hash_vector(prf_qs)
+                lex_results2 = lex_query(client, lex_vec2, flt, max(12, limit // 2 or 6))
+            except Exception:
+                lex_results2 = []
+            for rank, p in enumerate(lex_results2, 1):
+                pid = str(p.id)
+                score_map.setdefault(pid, {"pt": p, "s": 0.0, "d": 0.0, "lx": 0.0, "sym_sub": 0.0, "sym_eq": 0.0, "core": 0.0, "vendor": 0.0, "langb": 0.0, "rec": 0.0})
+                lxs = prf_lw * rrf(rank)
+                score_map[pid]["lx"] += lxs
+                score_map[pid]["s"] += lxs
+            # Dense PRF pass
+            try:
+                embedded2 = _embed_queries_cached(_model, prf_qs)
+                result_sets2: List[List[Any]] = [dense_query(client, vec_name, v, flt, max(12, limit // 2 or 6)) for v in embedded2]
+                for res2 in result_sets2:
+                    for rank, p in enumerate(res2, 1):
+                        pid = str(p.id)
+                        score_map.setdefault(pid, {"pt": p, "s": 0.0, "d": 0.0, "lx": 0.0, "sym_sub": 0.0, "sym_eq": 0.0, "core": 0.0, "vendor": 0.0, "langb": 0.0, "rec": 0.0})
+                        dens = prf_dw * rrf(rank)
+                        score_map[pid]["d"] += dens
+                        score_map[pid]["s"] += dens
+            except Exception:
+                pass
+
     for res in result_sets:
         for rank, p in enumerate(res, 1):
             pid = str(p.id)
