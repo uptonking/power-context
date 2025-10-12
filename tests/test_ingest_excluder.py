@@ -17,8 +17,8 @@ def test_excluder_defaults_and_ignore(tmp_path, monkeypatch):
 
     excl = ing._Excluder(root)
     # Defaults should exclude .git and node_modules directories
-    assert excl.exclude_dir(".git")
-    assert excl.exclude_dir("node_modules")
+    assert excl.exclude_dir("/.git")
+    assert excl.exclude_dir("/node_modules")
     # .qdrantignore should exclude .log files
     assert excl.exclude_file("skip.log")
     # keep.py should be allowed
@@ -36,6 +36,6 @@ def test_excluder_env_overrides(tmp_path, monkeypatch):
     monkeypatch.setenv("QDRANT_EXCLUDE_FILES", "*.tmp,*.bak")
 
     excl = ing._Excluder(root)
-    assert not excl.exclude_dir(".git")  # defaults off
+    assert not excl.exclude_dir("/.git")  # defaults off
     assert excl.exclude_file("a/file.tmp")
 
