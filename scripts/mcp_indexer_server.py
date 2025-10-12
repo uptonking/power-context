@@ -30,6 +30,7 @@ import uuid
 
 import os
 import subprocess
+import threading
 from typing import Any, Dict, Optional, List
 
 try:
@@ -107,16 +108,22 @@ async def _run_async(cmd: list[str], env: Optional[Dict[str, str]] = None, timeo
 
 # Embedding model cache to avoid re-initialization costs
 _EMBED_MODEL_CACHE: Dict[str, Any] = {}
+_EMBED_MODEL_LOCKS: Dict[str, threading.Lock] = {}
 
 def _get_embedding_model(model_name: str):
     try:
         from fastembed import TextEmbedding  # type: ignore
-    except Exception as e:
+    except Exception:
         raise
     m = _EMBED_MODEL_CACHE.get(model_name)
     if m is None:
-        m = TextEmbedding(model_name=model_name)
-        _EMBED_MODEL_CACHE[model_name] = m
+        # Double-checked locking to avoid duplicate inits under concurrency
+        lock = _EMBED_MODEL_LOCKS.setdefault(model_name, threading.Lock())
+        with lock:
+            m = _EMBED_MODEL_CACHE.get(model_name)
+            if m is None:
+                m = TextEmbedding(model_name=model_name)
+                _EMBED_MODEL_CACHE[model_name] = m
     return m
 
 # Lenient argument normalization to tolerate buggy clients (e.g., JSON-in-kwargs, booleans where strings expected)
@@ -269,8 +276,8 @@ async def qdrant_list(**kwargs) -> Dict[str, Any]:
     try:
         from qdrant_client import QdrantClient
         client = QdrantClient(url=QDRANT_URL, api_key=os.environ.get("QDRANT_API_KEY"))
-        cols = client.get_collections().collections
-        return {"collections": [c.name for c in cols]}
+        cols_info = await asyncio.to_thread(client.get_collections)
+        return {"collections": [c.name for c in cols_info.collections]}
     except Exception as e:
         return {"error": str(e)}
 
@@ -365,7 +372,7 @@ async def qdrant_status(collection: Optional[str] = None, max_points: Optional[i
         client = QdrantClient(url=QDRANT_URL, api_key=os.environ.get("QDRANT_API_KEY"))
         # Count points
         try:
-            cnt_res = client.count(collection_name=coll, exact=True)
+            cnt_res = await asyncio.to_thread(lambda: client.count(collection_name=coll, exact=True))
             total = int(getattr(cnt_res, "count", 0))
         except Exception:
             total = 0
@@ -379,10 +386,10 @@ async def qdrant_status(collection: Optional[str] = None, max_points: Optional[i
         while scanned < max_points:
             limit = min(batch, max_points - scanned)
             try:
-                pts, next_page = client.scroll(collection_name=coll, limit=limit, offset=next_page, with_payload=True, with_vectors=False)
+                pts, next_page = await asyncio.to_thread(lambda: client.scroll(collection_name=coll, limit=limit, offset=next_page, with_payload=True, with_vectors=False))
             except Exception:
                 # Fallback without offset keyword (older clients)
-                pts, next_page = client.scroll(collection_name=coll, limit=limit, with_payload=True, with_vectors=False)
+                pts, next_page = await asyncio.to_thread(lambda: client.scroll(collection_name=coll, limit=limit, with_payload=True, with_vectors=False))
             if not pts:
                 break
             scanned += len(pts)
@@ -734,7 +741,16 @@ async def repo_search(
                     print("RERANK_CMD:", " ".join(rcmd))
                 except Exception:
                     pass
-            rres = await _run_async(rcmd, env=env, timeout=max(1, int(rerank_timeout_ms)/1000))
+            # Effective rerank timeout with floor to avoid spurious cold starts
+            _floor_ms = int(os.environ.get("RERANK_TIMEOUT_FLOOR_MS", "1000"))
+            try:
+                _req_ms = int(rerank_timeout_ms)
+            except Exception:
+                _req_ms = _floor_ms
+            _eff_ms = max(_floor_ms, _req_ms)
+            _t_sec = max(0.1, _eff_ms / 1000.0)
+
+            rres = await _run_async(rcmd, env=env, timeout=_t_sec)
             if os.environ.get("MCP_DEBUG_RERANK", "").strip():
                 try:
                     print("RERANK_RET:", rres.get("code"), "OUT_LEN:", len((rres.get("stdout") or "").strip()), "ERR_TAIL:", (rres.get("stderr") or "")[ -200: ])
@@ -898,7 +914,7 @@ async def context_search(
         try:
             from qdrant_client import QdrantClient  # type: ignore
             client = QdrantClient(url=QDRANT_URL, api_key=os.environ.get("QDRANT_API_KEY"))
-            info = client.get_collections()
+            info = await asyncio.to_thread(client.get_collections)
             best_name = None
             best_hits = -1
             for c in info.collections:
@@ -907,7 +923,7 @@ async def context_search(
                     continue
                 # Sample a small page for memory-like payloads
                 try:
-                    pts, _ = client.scroll(collection_name=name, with_payload=True, with_vectors=False, limit=300)
+                    pts, _ = await asyncio.to_thread(lambda: client.scroll(collection_name=name, with_payload=True, with_vectors=False, limit=300))
                     hits = 0
                     for pt in pts:
                         pl = (getattr(pt, "payload", {}) or {})
@@ -1135,7 +1151,7 @@ async def context_search(
     if include_mem and mem_limit > 0 and not mem_hits and queries:
         try:
             from qdrant_client import QdrantClient  # type: ignore
-            from fastembed import TextEmbedding  # type: ignore
+
             from scripts.utils import sanitize_vector_name  # local util
 
             client = QdrantClient(url=QDRANT_URL, api_key=os.environ.get("QDRANT_API_KEY"))
@@ -1146,12 +1162,12 @@ async def context_search(
             qtext = " ".join([q for q in queries if q]).strip() or queries[0]
             v = next(model.embed([qtext])).tolist()
             k = max(mem_limit, 5)
-            res = client.search(
+            res = await asyncio.to_thread(lambda: client.search(
                 collection_name=mcoll,
                 query_vector={"name": vec_name, "vector": v},
                 limit=k,
                 with_payload=True,
-            )
+            ))
             for pt in res:
                 payload = (getattr(pt, "payload", {}) or {})
                 md = payload.get("metadata") or {}
@@ -1189,12 +1205,14 @@ async def context_search(
             cap = 2000
             page = None
             while len(mem_hits) < mem_limit and checked < cap:
-                sc, page = client.scroll(
-                    collection_name=mcoll,
-                    with_payload=True,
-                    with_vectors=False,
-                    limit=500,
-                    offset=page,
+                sc, page = await asyncio.to_thread(
+                    lambda: client.scroll(
+                        collection_name=mcoll,
+                        with_payload=True,
+                        with_vectors=False,
+                        limit=500,
+                        offset=page,
+                    )
                 )
                 if not sc:
                     break
@@ -1319,14 +1337,15 @@ async def code_search(
 
 if __name__ == "__main__":
 
-    # Warmup: preload embedding model and (optionally) reranker to avoid cold-start latency
+    # Optional warmups: gated by env flags to avoid delaying readiness on fresh containers
     try:
-        _ = _get_embedding_model(os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5"))
+        if str(os.environ.get("EMBEDDING_WARMUP", "")).strip().lower() in {"1","true","yes","on"}:
+            _ = _get_embedding_model(os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5"))
     except Exception:
         pass
     try:
-        rerank_default = str(os.environ.get("RERANKER_ENABLED", "")).strip().lower() in {"1","true","yes","on"}
-        if rerank_default:
+        if str(os.environ.get("RERANK_WARMUP", "")).strip().lower() in {"1","true","yes","on"} and \
+           str(os.environ.get("RERANKER_ENABLED", "")).strip().lower() in {"1","true","yes","on"}:
             # Fire a tiny warmup rerank once; ignore failures
             _env = os.environ.copy()
             _env["QDRANT_URL"] = QDRANT_URL

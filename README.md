@@ -139,6 +139,18 @@ Optional:
 - `REPO_NAME` to tag each point's payload with a repository label (metadata.repo) for filtering.
 
 > Do not set `QDRANT_LOCAL_PATH` when `QDRANT_URL` is set.
+### Reranker and warmup flags
+
+- RERANKER_ENABLED: 0/1 to enable ONNX cross-encoder re-ranking in the indexer search path
+- RERANKER_TOPN, RERANKER_RETURN_M, RERANKER_TIMEOUT_MS: tuning knobs
+- RERANK_TIMEOUT_FLOOR_MS: minimum timeout floor (ms) applied to reranker calls to prevent spurious cold-start timeouts (default 1000)
+- EMBEDDING_WARMUP: 0/1 to preload the embedding model at startup (default 0)
+- RERANK_WARMUP: 0/1 to run a tiny rerank warmup at startup when RERANKER_ENABLED=1 (default 0)
+
+Notes:
+- Effective rerank timeout = max(RERANK_TIMEOUT_FLOOR_MS, RERANKER_TIMEOUT_MS)
+- Warmups are optional; enable when you want the very first query to be warm at the cost of slightly slower container readiness on a fresh image.
+
 
 ## Verify services
 
