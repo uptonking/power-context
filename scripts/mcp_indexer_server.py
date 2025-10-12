@@ -755,65 +755,67 @@ async def repo_search(
     # Optional rerank fallback path: if enabled, attempt; on timeout or error, keep hybrid
     used_rerank = False
     if rerank_enabled:
-        # Prefer fusion-aware reranking over hybrid candidates when available
-        try:
-            if json_lines:
-                from scripts.rerank_local import rerank_local as _rr_local  # type: ignore
-                import concurrent.futures as _fut
-                rq = queries[0] if queries else ""
-                # Prepare candidate docs from top-N hybrid hits (path+symbol + small snippet)
-                cand_objs = list(json_lines[: int(rerank_top_n)])
-                def _doc_for(obj: dict) -> str:
-                    path = str(obj.get("path") or "")
-                    symbol = str(obj.get("symbol") or "")
-                    header = f"{symbol} — {path}".strip()
-                    sl = int(obj.get("start_line") or 0)
-                    el = int(obj.get("end_line") or 0)
-                    if not path or not sl:
-                        return header
-                    try:
-                        p = path
-                        if not os.path.isabs(p):
-                            p = os.path.join("/work", p)
-                        realp = os.path.realpath(p)
-                        if not (realp == "/work" or realp.startswith("/work/")):
+        # Resolve in-process gating once and reuse
+        use_rerank_inproc = str(os.environ.get("RERANK_IN_PROCESS", "")).strip().lower() in {"1","true","yes","on"}
+        # Prefer fusion-aware reranking over hybrid candidates when available, but only if in-process reranker is enabled
+        if use_rerank_inproc:
+            try:
+                if json_lines:
+                    from scripts.rerank_local import rerank_local as _rr_local  # type: ignore
+                    import concurrent.futures as _fut
+                    rq = queries[0] if queries else ""
+                    # Prepare candidate docs from top-N hybrid hits (path+symbol + small snippet)
+                    cand_objs = list(json_lines[: int(rerank_top_n)])
+                    def _doc_for(obj: dict) -> str:
+                        path = str(obj.get("path") or "")
+                        symbol = str(obj.get("symbol") or "")
+                        header = f"{symbol} — {path}".strip()
+                        sl = int(obj.get("start_line") or 0)
+                        el = int(obj.get("end_line") or 0)
+                        if not path or not sl:
                             return header
-                        with open(realp, "r", encoding="utf-8", errors="ignore") as f:
-                            lines = f.readlines()
-                        ctx = max(1, int(context_lines)) if 'context_lines' in locals() else 2
-                        si = max(1, sl - ctx)
-                        ei = min(len(lines), max(sl, el) + ctx)
-                        snippet = "".join(lines[si-1:ei]).strip()
-                        return (header + ("\n" + snippet if snippet else "")).strip()
-                    except Exception:
-                        return header
-                # Build docs concurrently
-                max_workers = min(8, (os.cpu_count() or 4) * 2)
-                with _fut.ThreadPoolExecutor(max_workers=max_workers) as ex:
-                    docs = list(ex.map(_doc_for, cand_objs))
-                pairs = [(rq, d) for d in docs]
-                scores = _rr_local(pairs)
-                ranked = sorted(zip(scores, cand_objs), key=lambda x: x[0], reverse=True)
-                tmp = []
-                for s, obj in ranked[: int(rerank_return_m)]:
-                    item = {
-                        "score": float(s),
-                        "path": obj.get("path", ""),
-                        "symbol": obj.get("symbol", ""),
-                        "start_line": int(obj.get("start_line") or 0),
-                        "end_line": int(obj.get("end_line") or 0),
-                        "why": obj.get("why", []) + [f"rerank_onnx:{float(s):.3f}"],
-                        "components": (obj.get("components") or {}) | {"rerank_onnx": float(s)},
-                    }
-                    tmp.append(item)
-                if tmp:
-                    results = tmp
-                    used_rerank = True
-        except Exception:
-            used_rerank = False
+                        try:
+                            p = path
+                            if not os.path.isabs(p):
+                                p = os.path.join("/work", p)
+                            realp = os.path.realpath(p)
+                            if not (realp == "/work" or realp.startswith("/work/")):
+                                return header
+                            with open(realp, "r", encoding="utf-8", errors="ignore") as f:
+                                lines = f.readlines()
+                            ctx = max(1, int(context_lines)) if 'context_lines' in locals() else 2
+                            si = max(1, sl - ctx)
+                            ei = min(len(lines), max(sl, el) + ctx)
+                            snippet = "".join(lines[si-1:ei]).strip()
+                            return (header + ("\n" + snippet if snippet else "")).strip()
+                        except Exception:
+                            return header
+                    # Build docs concurrently
+                    max_workers = min(8, (os.cpu_count() or 4) * 2)
+                    with _fut.ThreadPoolExecutor(max_workers=max_workers) as ex:
+                        docs = list(ex.map(_doc_for, cand_objs))
+                    pairs = [(rq, d) for d in docs]
+                    scores = _rr_local(pairs)
+                    ranked = sorted(zip(scores, cand_objs), key=lambda x: x[0], reverse=True)
+                    tmp = []
+                    for s, obj in ranked[: int(rerank_return_m)]:
+                        item = {
+                            "score": float(s),
+                            "path": obj.get("path", ""),
+                            "symbol": obj.get("symbol", ""),
+                            "start_line": int(obj.get("start_line") or 0),
+                            "end_line": int(obj.get("end_line") or 0),
+                            "why": obj.get("why", []) + [f"rerank_onnx:{float(s):.3f}"],
+                            "components": (obj.get("components") or {}) | {"rerank_onnx": float(s)},
+                        }
+                        tmp.append(item)
+                    if tmp:
+                        results = tmp
+                        used_rerank = True
+            except Exception:
+                used_rerank = False
         # Fallback paths (in-process reranker dense candidates, then subprocess)
         if not used_rerank:
-            use_rerank_inproc = str(os.environ.get("RERANK_IN_PROCESS", "")).strip().lower() in {"1","true","yes","on"}
             if use_rerank_inproc:
                 try:
                     from scripts.rerank_local import rerank_in_process  # type: ignore
@@ -833,7 +835,7 @@ async def repo_search(
                         used_rerank = True
                 except Exception:
                     use_rerank_inproc = False
-            if not use_rerank_inproc and not used_rerank:
+            if (not use_rerank_inproc) and (not used_rerank):
                 try:
                     rq = queries[0] if queries else ""
                     rcmd = [
