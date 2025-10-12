@@ -13,33 +13,47 @@ srv = importlib.import_module("scripts.mcp_indexer_server")
 class FakeEmbedder:
     def __init__(self, model_name: str = "fake"):
         self.model_name = model_name
+    class _Vec:
+        def __init__(self, arr): self._arr = arr
+        def tolist(self): return self._arr
+        def __len__(self): return len(self._arr)
     def embed(self, texts):
-        # Deterministic small vector by hashing
-        out = []
+        # Deterministic small vector by hashing; yields objects with .tolist()
         for t in texts:
             h = sum(ord(c) for c in t) % 997
             vec = [(float((h + i) % 13) / 13.0) for i in range(32)]
-            out.append(vec)
-        return out
+            yield self._Vec(vec)
 
 
 @pytest.fixture(scope="module")
 def qdrant_container():
     try:
         from testcontainers.core.container import DockerContainer
-        from testcontainers.core.waiting_utils import wait_for_logs
     except Exception as e:  # pragma: no cover
         pytest.skip("testcontainers not available")
+    import time, urllib.request
+
     container = DockerContainer("qdrant/qdrant:latest").with_exposed_ports(6333)
     container.start()
-    try:
-        # Wait for Qdrant to be ready
-        wait_for_logs(container, "Actix runtime found; starting workers")
-    except Exception:
-        pass
     host = container.get_container_host_ip()
     port = int(container.get_exposed_port(6333))
     url = f"http://{host}:{port}"
+
+    # Poll readiness endpoint up to 60s to avoid hanging on log waits
+    deadline = time.time() + 60
+    ready = False
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(url + "/readyz", timeout=2) as r:
+                if 200 <= r.status < 300:
+                    ready = True
+                    break
+        except Exception:
+            pass
+        time.sleep(1)
+    if not ready:
+        pytest.skip("Qdrant not ready in time")
+
     yield url
     container.stop()
 
@@ -50,6 +64,7 @@ def test_index_and_search_minirepo(tmp_path, monkeypatch, qdrant_container):
     os.environ["QDRANT_URL"] = qdrant_container
     os.environ["COLLECTION_NAME"] = f"test-{uuid.uuid4().hex[:8]}"
     os.environ["USE_TREE_SITTER"] = "0"
+    os.environ["HYBRID_IN_PROCESS"] = "1"
 
     # Stub embeddings everywhere
     monkeypatch.setattr(ing, "TextEmbedding", lambda *a, **k: FakeEmbedder("fake"))
@@ -96,10 +111,16 @@ def test_filters_language_and_path(tmp_path, monkeypatch, qdrant_container):
     os.environ["QDRANT_URL"] = qdrant_container
     os.environ.setdefault("COLLECTION_NAME", f"test-{uuid.uuid4().hex[:8]}")
     os.environ["USE_TREE_SITTER"] = "0"
+    os.environ["HYBRID_IN_PROCESS"] = "1"
 
     # Stub embeddings
     monkeypatch.setattr(ing, "TextEmbedding", lambda *a, **k: FakeEmbedder("fake"))
     monkeypatch.setattr(srv, "_get_embedding_model", lambda *a, **k: FakeEmbedder("fake"))
+
+    # Create tiny repo again in this temp path
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "a.py").write_text("def f():\n    return 1\n")
+    (tmp_path / "pkg" / "b.txt").write_text("hello world\nthis is a test\n")
 
     # Ensure index exists from previous test; run a no-op ingest to be safe
     ing.index_repo(

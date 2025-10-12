@@ -717,8 +717,8 @@ async def repo_search(
                 not_filter=not_ or None,
                 case=case or None,
                 path_regex=path_regex or None,
-                path_glob=None,
-                not_glob=None,
+                path_glob=path_glob or None,
+                not_glob=not_glob or None,
                 expand=str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower() in {"1","true","yes","on"},
                 model=model,
             )
