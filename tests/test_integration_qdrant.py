@@ -87,3 +87,47 @@ def test_index_and_search_minirepo(tmp_path, monkeypatch, qdrant_container):
     assert res.get("ok", True)
     assert any(str(f1) in (r.get("path") or "") for r in res.get("results", []))
 
+
+
+
+@pytest.mark.integration
+def test_filters_language_and_path(tmp_path, monkeypatch, qdrant_container):
+    # Reuse container; set env
+    os.environ["QDRANT_URL"] = qdrant_container
+    os.environ.setdefault("COLLECTION_NAME", f"test-{uuid.uuid4().hex[:8]}")
+    os.environ["USE_TREE_SITTER"] = "0"
+
+    # Stub embeddings
+    monkeypatch.setattr(ing, "TextEmbedding", lambda *a, **k: FakeEmbedder("fake"))
+    monkeypatch.setattr(srv, "_get_embedding_model", lambda *a, **k: FakeEmbedder("fake"))
+
+    # Ensure index exists from previous test; run a no-op ingest to be safe
+    ing.index_repo(
+        root=tmp_path,
+        qdrant_url=qdrant_container,
+        api_key="",
+        collection=os.environ["COLLECTION_NAME"],
+        model_name="fake",
+        recreate=False,
+    )
+
+    f_py = str(tmp_path / "pkg" / "a.py")
+    f_txt = str(tmp_path / "pkg" / "b.txt")
+
+    # Filter by language=python should bias toward .py
+    res1 = srv.asyncio.get_event_loop().run_until_complete(
+        srv.repo_search(queries=["def"], limit=5, language="python", under=str(tmp_path), compact=False)
+    )
+    assert any(f_py in (r.get("path") or "") for r in res1.get("results", []))
+
+    # Filter by ext=txt should retrieve text file
+    res2 = srv.asyncio.get_event_loop().run_until_complete(
+        srv.repo_search(queries=["hello"], limit=5, ext="txt", under=str(tmp_path), compact=False)
+    )
+    assert any(f_txt in (r.get("path") or "") for r in res2.get("results", []))
+
+    # Path glob to only allow pkg/*.py
+    res3 = srv.asyncio.get_event_loop().run_until_complete(
+        srv.repo_search(queries=["def"], limit=5, path_glob=str(tmp_path / "pkg" / "*.py"), compact=False)
+    )
+    assert all("/pkg/" in (r.get("path") or "") and r.get("path", "").endswith(".py") for r in res3.get("results", []))

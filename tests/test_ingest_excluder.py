@@ -30,10 +30,9 @@ def test_excluder_env_overrides(tmp_path, monkeypatch):
     (root / "a").mkdir()
     (root / "a" / "file.tmp").write_text("x\n")
 
-    # Disable defaults and add custom patterns
+    # Disable defaults and add custom patterns via QDRANT_EXCLUDES (comma-separated)
     monkeypatch.setenv("QDRANT_DEFAULT_EXCLUDES", "0")
-    monkeypatch.setenv("QDRANT_EXCLUDE_DIRS", "build,dist")
-    monkeypatch.setenv("QDRANT_EXCLUDE_FILES", "*.tmp,*.bak")
+    monkeypatch.setenv("QDRANT_EXCLUDES", "build,dist,*.tmp,*.bak")
 
     excl = ing._Excluder(root)
     assert not excl.exclude_dir("/.git")  # defaults off

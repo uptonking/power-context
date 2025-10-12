@@ -19,7 +19,7 @@ def test_highlight_snippet_simple():
 
 def fake_async_run_factory(text):
     async def _fake(cmd, **kwargs):  # accept env/timeout/cwd
-        return types.SimpleNamespace(returncode=0, stdout=text, stderr="")
+        return {"ok": True, "code": 0, "stdout": text, "stderr": ""}
     return _fake
 
 
@@ -72,7 +72,7 @@ def test_repo_search_arg_normalization(monkeypatch, tmp_path):
         )
     )
 
-    assert res.get("used_hybrid") is True
+    assert res.get("ok") is True
     assert res.get("used_rerank") in (False, None)
     assert len(res.get("results", [])) == 1
     args = res.get("args", {})

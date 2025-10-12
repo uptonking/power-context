@@ -1,5 +1,4 @@
 import importlib
-import types
 import pytest
 
 srv = importlib.import_module("scripts.mcp_indexer_server")
@@ -16,24 +15,37 @@ class FakeQdrantMem:
         self._items = items
     def search(self, **kwargs):
         return self._items
+    def scroll(self, **kwargs):
+        return (self._items, None)
+
+
+class FakeEmbed:
+    class _Vec:
+        def tolist(self):
+            return [0.1] * 8
+    def embed(self, texts):
+        # return an iterator of vector-like objects with .tolist()
+        for _ in texts:
+            yield self._Vec()
 
 
 @pytest.mark.service
 def test_context_search_blend_compact(monkeypatch):
-    # repo_search returns two code hits
-    def fake_repo_search(**kwargs):
+    # repo_search returns two code hits (async stub)
+    async def fake_repo_search(**kwargs):
         return {
             "results": [
                 {"score": 0.8, "path": "/x/a.py", "start_line": 1, "end_line": 3},
                 {"score": 0.6, "path": "/x/b.py", "start_line": 5, "end_line": 9},
             ]
         }
-    monkeypatch.setattr(srv, "repo_search", lambda **kw: fake_repo_search(**kw))
+    monkeypatch.setattr(srv, "repo_search", fake_repo_search)
+    monkeypatch.setattr(srv, "_get_embedding_model", lambda *a, **k: FakeEmbed())
 
     # Memory fallback via Qdrant: two memory-like points (no path in metadata)
     mem_items = [
-        FakePoint(0.9, {"content": "note one", "metadata": {}}),
-        FakePoint(0.2, {"content": "note two", "metadata": {}}),
+        FakePoint(0.9, {"content": "foo note one", "metadata": {}}),
+        FakePoint(0.2, {"content": "bar note two", "metadata": {}}),
     ]
     import qdrant_client
     monkeypatch.setattr(qdrant_client, "QdrantClient", lambda *a, **k: FakeQdrantMem(mem_items))
@@ -60,13 +72,14 @@ def test_context_search_blend_compact(monkeypatch):
 
 @pytest.mark.service
 def test_context_search_weight_scaling(monkeypatch):
-    # repo_search returns one code hit
-    def fake_repo_search(**kwargs):
+    # repo_search returns one code hit (async stub)
+    async def fake_repo_search(**kwargs):
         return {"results": [{"score": 0.5, "path": "/x/a.py", "start_line": 1, "end_line": 3}]}
-    monkeypatch.setattr(srv, "repo_search", lambda **kw: fake_repo_search(**kw))
+    monkeypatch.setattr(srv, "repo_search", fake_repo_search)
+    monkeypatch.setattr(srv, "_get_embedding_model", lambda *a, **k: FakeEmbed())
 
     # One memory hit score=0.9 -> after mw=2.0 becomes 1.8 > code 0.5
-    mem_items = [FakePoint(0.9, {"content": "note", "metadata": {}})]
+    mem_items = [FakePoint(0.9, {"content": "foo note", "metadata": {}})]
     import qdrant_client
     monkeypatch.setattr(qdrant_client, "QdrantClient", lambda *a, **k: FakeQdrantMem(mem_items))
 
