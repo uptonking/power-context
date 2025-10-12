@@ -54,14 +54,29 @@ def _get_rerank_session():
         except Exception:
             pass
         try:
-            providers = os.environ.get("RERANK_PROVIDERS", "").split(",") if os.environ.get("RERANK_PROVIDERS") else None
+            # Provider selection: explicit RERANK_PROVIDERS overrides
+            prov_env = os.environ.get("RERANK_PROVIDERS")
+            providers = prov_env.split(",") if prov_env else None
             if not providers:
                 try:
                     avail = set(ort.get_available_providers()) if ort else set()
                 except Exception:
                     avail = set()
-                providers = (["CUDAExecutionProvider"] if "CUDAExecutionProvider" in avail else []) + ["CPUExecutionProvider"]
-            sess = ort.InferenceSession(RERANKER_ONNX_PATH, providers=providers)
+                use_trt = str(os.environ.get("RERANK_USE_TRT", "")).strip().lower() in {"1","true","yes","on"}
+                if use_trt and "TensorrtExecutionProvider" in avail:
+                    providers = ["TensorrtExecutionProvider"]
+                    if "CUDAExecutionProvider" in avail:
+                        providers.append("CUDAExecutionProvider")
+                    providers.append("CPUExecutionProvider")
+                else:
+                    providers = (["CUDAExecutionProvider"] if "CUDAExecutionProvider" in avail else []) + ["CPUExecutionProvider"]
+            # Session options with full graph optimizations
+            so = ort.SessionOptions()
+            try:
+                so.graph_optimization_level = getattr(ort.GraphOptimizationLevel, "ORT_ENABLE_ALL", 99)
+            except Exception:
+                pass
+            sess = ort.InferenceSession(RERANKER_ONNX_PATH, sess_options=so, providers=providers)
         except Exception:
             sess = None
         _RERANK_SESSION, _RERANK_TOKENIZER = sess, tok

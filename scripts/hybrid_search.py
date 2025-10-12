@@ -20,6 +20,37 @@ LEX_VECTOR_NAME = os.environ.get("LEX_VECTOR_NAME", "lex")
 LEX_VECTOR_DIM = int(os.environ.get("LEX_VECTOR_DIM", "4096") or 4096)
 
 
+# Lightweight embedding cache for query embeddings (model_name, text) -> vector
+from threading import Lock as _Lock
+_EMBED_QUERY_CACHE: Dict[tuple[str, str], List[float]] = {}
+_EMBED_LOCK = _Lock()
+
+def _embed_queries_cached(model: TextEmbedding, queries: List[str]) -> List[List[float]]:
+    """Cache dense query embeddings to avoid repeated compute across expansions/retries."""
+    out: List[List[float]] = []
+    try:
+        # Best-effort model name extraction; fall back to env
+        name = getattr(model, "model_name", None) or os.environ.get("EMBEDDING_MODEL", MODEL_NAME)
+    except Exception:
+        name = os.environ.get("EMBEDDING_MODEL", MODEL_NAME)
+    for q in queries:
+        key = (str(name), str(q))
+        v = _EMBED_QUERY_CACHE.get(key)
+        if v is None:
+            try:
+                vec = next(model.embed([q])).tolist()
+            except Exception:
+                # Fallback: embed batch and take first
+                vec = next(model.embed([str(q)])).tolist()
+            with _EMBED_LOCK:
+                # Double-check inside lock
+                if key not in _EMBED_QUERY_CACHE:
+                    _EMBED_QUERY_CACHE[key] = vec
+            v = vec
+        out.append(v)
+    return out
+
+
 # Ensure project root is on sys.path when run as a script (so 'scripts' package imports work)
 import sys
 from pathlib import Path as _P
@@ -392,7 +423,7 @@ def run_hybrid_search(
         score_map[pid]["s"] += lxs
 
     # Dense queries
-    embedded = [vec.tolist() for vec in _model.embed(qlist)]
+    embedded = _embed_queries_cached(_model, qlist)
     result_sets: List[List[Any]] = [dense_query(client, vec_name, v, flt, max(24, limit)) for v in embedded]
     for res in result_sets:
         for rank, p in enumerate(res, 1):
@@ -705,7 +736,7 @@ def main():
         score_map[pid]["lx"] += lxs
         score_map[pid]["s"] += lxs
 
-    embedded = [vec.tolist() for vec in model.embed(queries)]
+    embedded = _embed_queries_cached(model, queries)
     result_sets: List[List[Any]] = [dense_query(client, vec_name, v, flt, args.per_query) for v in embedded]
 
     # RRF fusion (weighted)
