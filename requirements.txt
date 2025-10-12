@@ -1,0 +1,17 @@
+# Runtime dependencies (mirrors Dockerfiles)
+qdrant-client
+fastembed
+watchdog
+onnxruntime
+tokenizers
+tree_sitter
+tree_sitter_languages
+mcp==1.17.0
+fastmcp==2.12.4
+
+# Test-only
+pytest
+pytest-asyncio
+anyio
+testcontainers
+

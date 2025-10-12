@@ -1,6 +1,16 @@
 SHELL := /bin/bash
 
 .PHONY: help up down logs ps restart rebuild index reindex watch env hybrid bootstrap history rerank-local setup-reranker prune warm health
+.PHONY: venv venv-install
+
+venv: ## create local virtualenv .venv
+	python3 -m venv .venv && . .venv/bin/activate && pip install -U pip
+
+venv-install: ## install project dependencies into .venv
+	[ -d .venv ] || $(MAKE) venv
+	. .venv/bin/activate && pip install -r requirements.txt
+
+
 
 # Show available targets
 help: ## show targets and their descriptions
