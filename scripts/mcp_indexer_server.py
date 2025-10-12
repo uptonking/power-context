@@ -506,28 +506,20 @@ async def repo_search(
     compact: Any = None,
     **kwargs,
 ) -> Dict[str, Any]:
-    """Zero-config code search over the mounted repo via Qdrant using hybrid_search defaults.
+    """Zero-config code search over the mounted repo via Qdrant hybrid search.
+
     Args:
       - query: string or list of strings
-      - limit: total number of results to return (default 10)
-      - per_path: cap of results per file path to diversify output (default 2)
-      - include_snippet/context_lines: embed code snippets near hit lines
-      - rerank_*: optional ONNX reranker via rerank_local.py; graceful timeout fallback
-      - highlight_snippet: emphasize matched tokens in snippet
+      - limit: total results (default 10)
+      - per_path: max results per file (default 2)
+      - include_snippet/context_lines: include snippet near hit lines
+      - rerank_*: optional ONNX reranker; timeouts fall back to hybrid
       - collection: override target collection (default env COLLECTION_NAME)
-      - language/under/kind/symbol: structured search filters (alternative to DSL tokens)
-    Notes:
-      - No filters required; uses existing environment defaults (COLLECTION_NAME, QDRANT_URL).
-      - You can also pass DSL tokens inside the query text, e.g. "lang:python file:scripts/".
-      - Returns structured results parsed from hybrid_search JSONL output when possible.
-    # Accept common alias keys from clients
-    if (limit is None or (isinstance(limit, str) and limit.strip() == "")) and ("top_k" in kwargs):
-        limit = kwargs.get("top_k")
-    if (query is None or (isinstance(query, str) and query.strip() == "")):
-        q_alt = kwargs.get("q") or kwargs.get("text")
-        if q_alt is not None:
-            query = q_alt
+      - language/under/kind/symbol/path_regex/path_glob/not_glob/ext/not_/case: optional filters
+      - compact: if true, return only path and line range
 
+    Returns:
+      - {"results": [...], "total": N}
     """
     # Accept common alias keys from clients (top-level)
     try:
@@ -693,11 +685,6 @@ async def repo_search(
             model_name = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
             model = _get_embedding_model(model_name)
             # In-process path_glob/not_glob accept a single string; reduce list inputs safely
-            def _first_or_none(lst):
-                try:
-                    return lst[0] if isinstance(lst, list) and lst else None
-                except Exception:
-                    return None
             items = run_hybrid_search(
                 queries=queries,
                 limit=int(limit),
@@ -710,8 +697,8 @@ async def repo_search(
                 not_filter=not_ or None,
                 case=case or None,
                 path_regex=path_regex or None,
-                path_glob=_first_or_none(path_globs),
-                not_glob=_first_or_none(not_globs),
+                path_glob=(path_globs or None),
+                not_glob=(not_globs or None),
                 expand=str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower() in {"1","true","yes","on"},
                 model=model,
             )
@@ -880,11 +867,11 @@ async def repo_search(
                 si = max(1, sl - max(1, int(context_lines)))
                 ei = min(len(lines), max(sl, el) + max(1, int(context_lines)))
                 snippet = "".join(lines[si-1:ei])
-                # Cap snippet size to avoid large payloads
-                if len(snippet) > SNIPPET_MAX_BYTES:
-                    snippet = snippet[:SNIPPET_MAX_BYTES] + "\n...[snippet truncated]"
                 if highlight_snippet:
                     snippet = _highlight_snippet(snippet, toks)
+                # Enforce strict size cap after highlighting
+                if len(snippet) > SNIPPET_MAX_BYTES:
+                    snippet = snippet[:SNIPPET_MAX_BYTES] + "\n...[snippet truncated]"
                 item["snippet"] = snippet
             except Exception:
                 item["snippet"] = ""

@@ -304,8 +304,8 @@ def run_hybrid_search(
     not_filter: str | None = None,
     case: str | None = None,
     path_regex: str | None = None,
-    path_glob: str | None = None,
-    not_glob: str | None = None,
+    path_glob: str | list[str] | None = None,
+    not_glob: str | list[str] | None = None,
     expand: bool = True,
     model: TextEmbedding | None = None,
 ) -> List[Dict[str, Any]]:
@@ -326,8 +326,20 @@ def run_hybrid_search(
     eff_case = case or dsl.get("case") or os.environ.get("HYBRID_CASE", "insensitive")
     eff_repo = dsl.get("repo")
     eff_path_regex = path_regex
-    eff_path_glob = path_glob
-    eff_not_glob = not_glob
+    def _to_list(x):
+        if x is None:
+            return []
+        if isinstance(x, (list, tuple)):
+            out = []
+            for e in x:
+                s = str(e).strip()
+                if s:
+                    out.append(s)
+            return out
+        s = str(x).strip()
+        return [s] if s else []
+    eff_path_globs = _to_list(path_glob)
+    eff_not_globs = _to_list(not_glob)
 
     # Normalize under
     def _norm_under(u: str | None) -> str | None:
@@ -479,7 +491,7 @@ def run_hybrid_search(
             return _fnm.fnmatchcase(path, pat)
         return _fnm.fnmatchcase(path.lower(), pat.lower())
 
-    if eff_not or eff_path_regex or eff_ext or eff_path_glob or eff_not_glob:
+    if eff_not or eff_path_regex or eff_ext or eff_path_globs or eff_not_globs:
         def _pass_filters(m: Dict[str, Any]) -> bool:
             md = (m["pt"].payload or {}).get("metadata") or {}
             path = str(md.get("path") or "")
@@ -490,7 +502,7 @@ def run_hybrid_search(
                 nn = eff_not if case_sensitive else eff_not.lower()
                 if nn in p_for_sub or nn in pp_for_sub:
                     return False
-            if eff_not_glob and _match_glob(eff_not_glob, path):
+            if eff_not_globs and any(_match_glob(g, path) for g in eff_not_globs):
                 return False
             if eff_ext:
                 ex = eff_ext.lower().lstrip('.')
@@ -503,7 +515,7 @@ def run_hybrid_search(
                         return False
                 except Exception:
                     pass
-            if eff_path_glob and not _match_glob(eff_path_glob, path):
+            if eff_path_globs and not any(_match_glob(g, path) for g in eff_path_globs):
                 return False
             return True
         ranked = [m for m in ranked if _pass_filters(m)]
