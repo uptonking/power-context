@@ -755,84 +755,140 @@ async def repo_search(
     # Optional rerank fallback path: if enabled, attempt; on timeout or error, keep hybrid
     used_rerank = False
     if rerank_enabled:
-        use_rerank_inproc = str(os.environ.get("RERANK_IN_PROCESS", "")).strip().lower() in {"1","true","yes","on"}
-        if use_rerank_inproc:
-            try:
-                from scripts.rerank_local import rerank_in_process  # type: ignore
-                model_name = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
-                model = _get_embedding_model(model_name)
+        # Prefer fusion-aware reranking over hybrid candidates when available
+        try:
+            if json_lines:
+                from scripts.rerank_local import rerank_local as _rr_local  # type: ignore
+                import concurrent.futures as _fut
                 rq = queries[0] if queries else ""
-                items = rerank_in_process(
-                    query=rq,
-                    topk=int(rerank_top_n),
-                    limit=int(rerank_return_m),
-                    language=language or None,
-                    under=under or None,
-                    model=model,
-                )
-                if items:
-                    results = items
+                # Prepare candidate docs from top-N hybrid hits (path+symbol + small snippet)
+                cand_objs = list(json_lines[: int(rerank_top_n)])
+                def _doc_for(obj: dict) -> str:
+                    path = str(obj.get("path") or "")
+                    symbol = str(obj.get("symbol") or "")
+                    header = f"{symbol} — {path}".strip()
+                    sl = int(obj.get("start_line") or 0)
+                    el = int(obj.get("end_line") or 0)
+                    if not path or not sl:
+                        return header
+                    try:
+                        p = path
+                        if not os.path.isabs(p):
+                            p = os.path.join("/work", p)
+                        realp = os.path.realpath(p)
+                        if not (realp == "/work" or realp.startswith("/work/")):
+                            return header
+                        with open(realp, "r", encoding="utf-8", errors="ignore") as f:
+                            lines = f.readlines()
+                        ctx = max(1, int(context_lines)) if 'context_lines' in locals() else 2
+                        si = max(1, sl - ctx)
+                        ei = min(len(lines), max(sl, el) + ctx)
+                        snippet = "".join(lines[si-1:ei]).strip()
+                        return (header + ("\n" + snippet if snippet else "")).strip()
+                    except Exception:
+                        return header
+                # Build docs concurrently
+                max_workers = min(8, (os.cpu_count() or 4) * 2)
+                with _fut.ThreadPoolExecutor(max_workers=max_workers) as ex:
+                    docs = list(ex.map(_doc_for, cand_objs))
+                pairs = [(rq, d) for d in docs]
+                scores = _rr_local(pairs)
+                ranked = sorted(zip(scores, cand_objs), key=lambda x: x[0], reverse=True)
+                tmp = []
+                for s, obj in ranked[: int(rerank_return_m)]:
+                    item = {
+                        "score": float(s),
+                        "path": obj.get("path", ""),
+                        "symbol": obj.get("symbol", ""),
+                        "start_line": int(obj.get("start_line") or 0),
+                        "end_line": int(obj.get("end_line") or 0),
+                        "why": obj.get("why", []) + [f"rerank_onnx:{float(s):.3f}"],
+                        "components": (obj.get("components") or {}) | {"rerank_onnx": float(s)},
+                    }
+                    tmp.append(item)
+                if tmp:
+                    results = tmp
                     used_rerank = True
-            except Exception:
-                use_rerank_inproc = False
-        if not use_rerank_inproc and not used_rerank:
-            try:
-                rq = queries[0] if queries else ""
-                rcmd = [
-                    "python", "/work/scripts/rerank_local.py",
-                    "--query", rq,
-                    "--topk", str(int(rerank_top_n)),
-                    "--limit", str(int(rerank_return_m)),
-                ]
-                if language:
-                    rcmd += ["--language", language]
-                if under:
-                    rcmd += ["--under", under]
-                if os.environ.get("MCP_DEBUG_RERANK", "").strip():
-                    try:
-                        print("RERANK_CMD:", " ".join(rcmd))
-                    except Exception:
-                        pass
-                # Effective rerank timeout with floor to avoid spurious cold starts
-                _floor_ms = int(os.environ.get("RERANK_TIMEOUT_FLOOR_MS", "1000"))
+        except Exception:
+            used_rerank = False
+        # Fallback paths (in-process reranker dense candidates, then subprocess)
+        if not used_rerank:
+            use_rerank_inproc = str(os.environ.get("RERANK_IN_PROCESS", "")).strip().lower() in {"1","true","yes","on"}
+            if use_rerank_inproc:
                 try:
-                    _req_ms = int(rerank_timeout_ms)
-                except Exception:
-                    _req_ms = _floor_ms
-                _eff_ms = max(_floor_ms, _req_ms)
-                _t_sec = max(0.1, _eff_ms / 1000.0)
-
-                rres = await _run_async(rcmd, env=env, timeout=_t_sec)
-                if os.environ.get("MCP_DEBUG_RERANK", "").strip():
-                    try:
-                        print("RERANK_RET:", rres.get("code"), "OUT_LEN:", len((rres.get("stdout") or "").strip()), "ERR_TAIL:", (rres.get("stderr") or "")[ -200: ])
-                    except Exception:
-                        pass
-                if rres.get("ok") and (rres.get("stdout") or "").strip():
-                    tmp = []
-                    for ln in (rres.get("stdout") or "").splitlines():
-                        parts = ln.strip().split("\t")
-                        if len(parts) != 4:
-                            continue
-                        score_s, path, symbol, range_s = parts
-                        try:
-                            start_s, end_s = range_s.split("-", 1)
-                            start_line = int(start_s); end_line = int(end_s)
-                        except Exception:
-                            start_line = 0; end_line = 0
-                        try:
-                            score = float(score_s)
-                        except Exception:
-                            score = 0.0
-                        item = {"score": score, "path": path, "symbol": symbol, "start_line": start_line, "end_line": end_line, "why": [f"rerank_onnx:{score:.3f}"]}
-                        tmp.append(item)
-                    if tmp:
-                        results = tmp
+                    from scripts.rerank_local import rerank_in_process  # type: ignore
+                    model_name = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
+                    model = _get_embedding_model(model_name)
+                    rq = queries[0] if queries else ""
+                    items = rerank_in_process(
+                        query=rq,
+                        topk=int(rerank_top_n),
+                        limit=int(rerank_return_m),
+                        language=language or None,
+                        under=under or None,
+                        model=model,
+                    )
+                    if items:
+                        results = items
                         used_rerank = True
-            except subprocess.TimeoutExpired:
-                used_rerank = False
-            except Exception:
-                used_rerank = False
+                except Exception:
+                    use_rerank_inproc = False
+            if not use_rerank_inproc and not used_rerank:
+                try:
+                    rq = queries[0] if queries else ""
+                    rcmd = [
+                        "python", "/work/scripts/rerank_local.py",
+                        "--query", rq,
+                        "--topk", str(int(rerank_top_n)),
+                        "--limit", str(int(rerank_return_m)),
+                    ]
+                    if language:
+                        rcmd += ["--language", language]
+                    if under:
+                        rcmd += ["--under", under]
+                    if os.environ.get("MCP_DEBUG_RERANK", "").strip():
+                        try:
+                            print("RERANK_CMD:", " ".join(rcmd))
+                        except Exception:
+                            pass
+                    _floor_ms = int(os.environ.get("RERANK_TIMEOUT_FLOOR_MS", "1000"))
+                    try:
+                        _req_ms = int(rerank_timeout_ms)
+                    except Exception:
+                        _req_ms = _floor_ms
+                    _eff_ms = max(_floor_ms, _req_ms)
+                    _t_sec = max(0.1, _eff_ms / 1000.0)
+                    rres = await _run_async(rcmd, env=env, timeout=_t_sec)
+                    if os.environ.get("MCP_DEBUG_RERANK", "").strip():
+                        try:
+                            print("RERANK_RET:", rres.get("code"), "OUT_LEN:", len((rres.get("stdout") or "").strip()), "ERR_TAIL:", (rres.get("stderr") or "")[ -200: ])
+                        except Exception:
+                            pass
+                    if rres.get("ok") and (rres.get("stdout") or "").strip():
+                        tmp = []
+                        for ln in (rres.get("stdout") or "").splitlines():
+                            parts = ln.strip().split("\t")
+                            if len(parts) != 4:
+                                continue
+                            score_s, path, symbol, range_s = parts
+                            try:
+                                start_s, end_s = range_s.split("-", 1)
+                                start_line = int(start_s); end_line = int(end_s)
+                            except Exception:
+                                start_line = 0; end_line = 0
+                            try:
+                                score = float(score_s)
+                            except Exception:
+                                score = 0.0
+                            item = {"score": score, "path": path, "symbol": symbol, "start_line": start_line, "end_line": end_line, "why": [f"rerank_onnx:{score:.3f}"]}
+                            tmp.append(item)
+                        if tmp:
+                            results = tmp
+                            used_rerank = True
+                except subprocess.TimeoutExpired:
+                    used_rerank = False
+                except Exception:
+                    used_rerank = False
 
     if not used_rerank:
         # Build results from hybrid JSON lines
