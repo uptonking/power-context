@@ -293,8 +293,9 @@ async def memory_store(information: str,
     try:
         from qdrant_client import QdrantClient, models  # type: ignore
         from fastembed import TextEmbedding  # type: ignore
-        import time, hashlib, re
+        import time, hashlib, re, math
         from scripts.utils import sanitize_vector_name
+        from scripts.ingest_code import ensure_collection as _ensure_collection  # type: ignore
     except Exception as e:  # pragma: no cover
         return {"error": f"deps: {e}"}
 
@@ -323,10 +324,15 @@ async def memory_store(information: str,
         if not text:
             return [0.0] * dim
         vec = [0.0] * dim
-        for t in _split_ident_lex(text):
+        toks = _split_ident_lex(text)
+        if not toks:
+            return vec
+        for t in toks:
             h = int(hashlib.md5(t.encode("utf-8", errors="ignore")).hexdigest()[:8], 16)
             vec[h % dim] += 1.0
-        return vec
+        # L2 normalize to align with ingest_code._lex_hash_vector
+        norm = (sum(v*v for v in vec) or 0.0) ** 0.5 or 1.0
+        return [v / norm for v in vec]
 
     # Build vectors (cached embedding model)
     model = _get_embedding_model(model_name)
@@ -337,10 +343,15 @@ async def memory_store(information: str,
     # Upsert
     try:
         client = QdrantClient(url=QDRANT_URL, api_key=os.environ.get("QDRANT_API_KEY"))
+        # Ensure collection and named vectors exist (dense + lexical)
+        try:
+            await asyncio.to_thread(lambda: _ensure_collection(client, coll, len(dense), vector_name))
+        except Exception:
+            pass
         pid = str(uuid.uuid4())
         payload = {"information": str(information), "metadata": metadata or {"kind": "memory", "source": "memory"}}
         point = models.PointStruct(id=pid, vector={vector_name: dense, LEX_VECTOR_NAME: lex}, payload=payload)
-        client.upsert(collection_name=coll, points=[point], wait=True)
+        await asyncio.to_thread(lambda: client.upsert(collection_name=coll, points=[point], wait=True))
         return {"ok": True, "id": pid, "collection": coll, "vector_name": vector_name}
     except Exception as e:
         return {"error": str(e)}
