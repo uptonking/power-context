@@ -137,3 +137,8 @@ reset-dev: ## full dev reset: qdrant -> wait -> init payload -> reindex -> bring
 	docker compose run --rm indexer --root /work --recreate
 	docker compose up -d mcp mcp_indexer watcher
 	docker compose ps
+
+
+quantize-reranker: ## Quantize reranker ONNX to INT8 (set RERANKER_ONNX_PATH, optional OUTPUT_ONNX_PATH)
+	@[ -n "$(RERANKER_ONNX_PATH)" ] || { echo "Set RERANKER_ONNX_PATH to your ONNX file"; exit 1; }
+	python3 scripts/quantize_reranker.py

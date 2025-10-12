@@ -907,30 +907,28 @@ async def repo_search(
     # Optionally add snippets (with highlighting)
     toks = _tokens_from_queries(queries)
     if include_snippet:
-        for item in results:
-            path = item.get("path")
-            sl = int(item.get("start_line") or 0)
-            el = int(item.get("end_line") or 0)
-            if not path or not sl:
-                continue
+        import concurrent.futures as _fut
+        def _read_snip(args):
+            i, item = args
             try:
-                # Enforce /work sandbox for snippet path
+                path = item.get("path")
+                sl = int(item.get("start_line") or 0)
+                el = int(item.get("end_line") or 0)
+                if not path or not sl:
+                    return (i, "")
                 raw_path = str(path)
-                p = raw_path
-                if not os.path.isabs(p):
-                    p = os.path.join("/work", p)
+                p = raw_path if os.path.isabs(raw_path) else os.path.join("/work", raw_path)
                 realp = os.path.realpath(p)
                 if not (realp == "/work" or realp.startswith("/work/")):
-                    item["snippet"] = ""
-                    continue
+                    return (i, "")
                 with open(realp, "r", encoding="utf-8", errors="ignore") as f:
                     lines = f.readlines()
-                si = max(1, sl - max(1, int(context_lines)))
-                ei = min(len(lines), max(sl, el) + max(1, int(context_lines)))
+                ctx = max(1, int(context_lines))
+                si = max(1, sl - ctx)
+                ei = min(len(lines), max(sl, el) + ctx)
                 snippet = "".join(lines[si-1:ei])
                 if highlight_snippet:
                     snippet = _highlight_snippet(snippet, toks)
-                # Enforce strict size cap after highlighting
                 if len(snippet.encode("utf-8", "ignore")) > SNIPPET_MAX_BYTES:
                     _suffix = "\n...[snippet truncated]"
                     _sb = _suffix.encode("utf-8")
@@ -938,9 +936,16 @@ async def repo_search(
                     _keep = max(0, SNIPPET_MAX_BYTES - len(_sb))
                     _trimmed = _bytes[:_keep]
                     snippet = _trimmed.decode("utf-8", "ignore") + _suffix
-                item["snippet"] = snippet
+                return (i, snippet)
             except Exception:
-                item["snippet"] = ""
+                return (i, "")
+        max_workers = min(8, (os.cpu_count() or 4) * 2)
+        with _fut.ThreadPoolExecutor(max_workers=max_workers) as ex:
+            for i, snip in ex.map(_read_snip, list(enumerate(results))):
+                try:
+                    results[i]["snippet"] = snip
+                except Exception:
+                    pass
 
     # Smart default: compact true for multi-query calls if compact not explicitly set
     if (len(queries) > 1) and (compact_raw is None or (isinstance(compact_raw, str) and compact_raw.strip() == "")):
