@@ -25,6 +25,9 @@ MCP server framework, keep the tool names and args stable.
 """
 from __future__ import annotations
 import json
+import asyncio
+import uuid
+
 import os
 import subprocess
 from typing import Any, Dict, Optional, List
@@ -69,6 +72,52 @@ def _run(cmd: list[str], env: Optional[Dict[str, str]] = None, timeout: int = 60
         "stderr": _cap_tail(proc.stderr),
     }
 
+# Async subprocess runner to avoid blocking event loop
+async def _run_async(cmd: list[str], env: Optional[Dict[str, str]] = None, timeout: int = 60) -> Dict[str, Any]:
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        try:
+            stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            code = proc.returncode
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            return {
+                "ok": False,
+                "code": -1,
+                "stdout": "",
+                "stderr": f"Command timed out after {timeout}s",
+            }
+        stdout = (stdout_b or b"").decode("utf-8", errors="ignore")
+        stderr = (stderr_b or b"").decode("utf-8", errors="ignore")
+        def _cap_tail(s: str) -> str:
+            if not s:
+                return s
+            return s if len(s) <= MAX_LOG_TAIL else s[-MAX_LOG_TAIL:]
+        return {"ok": code == 0, "code": code, "stdout": _cap_tail(stdout), "stderr": _cap_tail(stderr)}
+    except Exception as e:
+        return {"ok": False, "code": -2, "stdout": "", "stderr": str(e)}
+
+# Embedding model cache to avoid re-initialization costs
+_EMBED_MODEL_CACHE: Dict[str, Any] = {}
+
+def _get_embedding_model(model_name: str):
+    try:
+        from fastembed import TextEmbedding  # type: ignore
+    except Exception as e:
+        raise
+    m = _EMBED_MODEL_CACHE.get(model_name)
+    if m is None:
+        m = TextEmbedding(model_name=model_name)
+        _EMBED_MODEL_CACHE[model_name] = m
+    return m
 
 # Lenient argument normalization to tolerate buggy clients (e.g., JSON-in-kwargs, booleans where strings expected)
 from typing import Any as _Any, Dict as _Dict
@@ -211,7 +260,7 @@ async def qdrant_index_root(recreate: Optional[bool] = None,
     cmd = ["python", "/work/scripts/ingest_code.py", "--root", "/work"]
     if recreate:
         cmd.append("--recreate")
-    res = _run(cmd, env=env)
+    res = await _run_async(cmd, env=env)
     return {"args": {"root": "/work", "collection": coll, "recreate": recreate}, **res}
 
 @mcp.tool()
@@ -272,15 +321,16 @@ async def memory_store(information: str,
             vec[h % dim] += 1.0
         return vec
 
-    # Build vectors
-    model = TextEmbedding(model_name=model_name)
+    # Build vectors (cached embedding model)
+    model = _get_embedding_model(model_name)
     dense = next(model.embed([str(information)])).tolist()
+
     lex = _lex_hash_vector(str(information))
 
     # Upsert
     try:
         client = QdrantClient(url=QDRANT_URL, api_key=os.environ.get("QDRANT_API_KEY"))
-        pid = int(time.time_ns() % (2**31 - 1))
+        pid = str(uuid.uuid4())
         payload = {"information": str(information), "metadata": metadata or {"kind": "memory", "source": "memory"}}
         point = models.PointStruct(id=pid, vector={vector_name: dense, LEX_VECTOR_NAME: lex}, payload=payload)
         client.upsert(collection_name=coll, points=[point], wait=True)
@@ -409,7 +459,7 @@ async def qdrant_index(subdir: Optional[str] = None, recreate: Optional[bool] = 
     ]
     if recreate:
         cmd.append("--recreate")
-    res = _run(cmd, env=env)
+    res = await _run_async(cmd, env=env)
     return {"args": {"root": root, "collection": coll, "recreate": recreate}, **res}
 
 
@@ -419,7 +469,7 @@ async def qdrant_prune(**kwargs) -> Dict[str, Any]:
     env = os.environ.copy()
     env["PRUNE_ROOT"] = "/work"
     cmd = ["python", "/work/scripts/prune.py"]
-    res = _run(cmd, env=env)
+    res = await _run_async(cmd, env=env)
     return res
 
 @mcp.tool()
@@ -650,7 +700,7 @@ async def repo_search(
     for q in queries:
         cmd += ["--query", q]
 
-    res = _run(cmd, env=env)
+    res = await _run_async(cmd, env=env)
 
     results = []
     json_lines = []
@@ -684,15 +734,15 @@ async def repo_search(
                     print("RERANK_CMD:", " ".join(rcmd))
                 except Exception:
                     pass
-            r = subprocess.run(rcmd, capture_output=True, text=True, timeout=max(0.1, int(rerank_timeout_ms)/1000.0), env=env)
+            rres = await _run_async(rcmd, env=env, timeout=max(1, int(rerank_timeout_ms)/1000))
             if os.environ.get("MCP_DEBUG_RERANK", "").strip():
                 try:
-                    print("RERANK_RET:", r.returncode, "OUT_LEN:", len((r.stdout or "").strip()), "ERR_TAIL:", (r.stderr or "")[ -200: ])
+                    print("RERANK_RET:", rres.get("code"), "OUT_LEN:", len((rres.get("stdout") or "").strip()), "ERR_TAIL:", (rres.get("stderr") or "")[ -200: ])
                 except Exception:
                     pass
-            if r.returncode == 0 and r.stdout.strip():
+            if rres.get("ok") and (rres.get("stdout") or "").strip():
                 tmp = []
-                for ln in r.stdout.splitlines():
+                for ln in (rres.get("stdout") or "").splitlines():
                     parts = ln.strip().split("\t")
                     if len(parts) != 4:
                         continue
@@ -1091,7 +1141,7 @@ async def context_search(
             client = QdrantClient(url=QDRANT_URL, api_key=os.environ.get("QDRANT_API_KEY"))
             model_name = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
             vec_name = sanitize_vector_name(model_name)
-            model = TextEmbedding(model_name=model_name)
+            model = _get_embedding_model(model_name)
 
             qtext = " ".join([q for q in queries if q]).strip() or queries[0]
             v = next(model.embed([qtext])).tolist()
@@ -1268,6 +1318,24 @@ async def code_search(
 
 
 if __name__ == "__main__":
+
+    # Warmup: preload embedding model and (optionally) reranker to avoid cold-start latency
+    try:
+        _ = _get_embedding_model(os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5"))
+    except Exception:
+        pass
+    try:
+        rerank_default = str(os.environ.get("RERANKER_ENABLED", "")).strip().lower() in {"1","true","yes","on"}
+        if rerank_default:
+            # Fire a tiny warmup rerank once; ignore failures
+            _env = os.environ.copy()
+            _env["QDRANT_URL"] = QDRANT_URL
+            _env["COLLECTION_NAME"] = DEFAULT_COLLECTION
+            _cmd = ["python", "/work/scripts/rerank_local.py", "--query", "warmup", "--topk", "3", "--limit", "1"]
+            subprocess.run(_cmd, capture_output=True, text=True, env=_env, timeout=10)
+    except Exception:
+        pass
+
     transport = os.environ.get("FASTMCP_TRANSPORT", "sse").strip().lower()
     if transport == "stdio":
         # Run over stdio (for clients that don't support SSE)
