@@ -871,7 +871,9 @@ async def repo_search(
                     snippet = _highlight_snippet(snippet, toks)
                 # Enforce strict size cap after highlighting
                 if len(snippet) > SNIPPET_MAX_BYTES:
-                    snippet = snippet[:SNIPPET_MAX_BYTES] + "\n...[snippet truncated]"
+                    _suffix = "\n...[snippet truncated]"
+                    keep = max(0, SNIPPET_MAX_BYTES - len(_suffix))
+                    snippet = snippet[:keep] + _suffix
                 item["snippet"] = snippet
             except Exception:
                 item["snippet"] = ""
