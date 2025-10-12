@@ -870,10 +870,13 @@ async def repo_search(
                 if highlight_snippet:
                     snippet = _highlight_snippet(snippet, toks)
                 # Enforce strict size cap after highlighting
-                if len(snippet) > SNIPPET_MAX_BYTES:
+                if len(snippet.encode("utf-8", "ignore")) > SNIPPET_MAX_BYTES:
                     _suffix = "\n...[snippet truncated]"
-                    keep = max(0, SNIPPET_MAX_BYTES - len(_suffix))
-                    snippet = snippet[:keep] + _suffix
+                    _sb = _suffix.encode("utf-8")
+                    _bytes = snippet.encode("utf-8", "ignore")
+                    _keep = max(0, SNIPPET_MAX_BYTES - len(_sb))
+                    _trimmed = _bytes[:_keep]
+                    snippet = _trimmed.decode("utf-8", "ignore") + _suffix
                 item["snippet"] = snippet
             except Exception:
                 item["snippet"] = ""
