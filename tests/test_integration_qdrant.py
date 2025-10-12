@@ -75,7 +75,7 @@ def test_index_and_search_minirepo(tmp_path, monkeypatch, qdrant_container):
     (tmp_path / "pkg").mkdir()
     f1 = tmp_path / "pkg" / "a.py"
     f1.write_text("def f():\n    return 1\n")
-    f2 = tmp_path / "pkg" / "b.txt"
+    f2 = tmp_path / "pkg" / "b.md"
     f2.write_text("hello world\nthis is a test\n")
 
     # Index via function call (no shell)
@@ -121,7 +121,7 @@ def test_filters_language_and_path(tmp_path, monkeypatch, qdrant_container):
     # Create tiny repo again in this temp path
     (tmp_path / "pkg").mkdir()
     (tmp_path / "pkg" / "a.py").write_text("def f():\n    return 1\n")
-    (tmp_path / "pkg" / "b.txt").write_text("hello world\nthis is a test\n")
+    (tmp_path / "pkg" / "b.md").write_text("hello world\nthis is a test\n")
 
     # Ensure index exists from previous test; run a no-op ingest to be safe
     ing.index_repo(
@@ -134,7 +134,7 @@ def test_filters_language_and_path(tmp_path, monkeypatch, qdrant_container):
     )
 
     f_py = str(tmp_path / "pkg" / "a.py")
-    f_txt = str(tmp_path / "pkg" / "b.txt")
+    f_md = str(tmp_path / "pkg" / "b.md")
 
     # Filter by language=python should bias toward .py
     res1 = srv.asyncio.get_event_loop().run_until_complete(
@@ -144,9 +144,9 @@ def test_filters_language_and_path(tmp_path, monkeypatch, qdrant_container):
 
     # Filter by ext=txt should retrieve text file
     res2 = srv.asyncio.get_event_loop().run_until_complete(
-        srv.repo_search(queries=["hello"], limit=5, ext="txt", compact=False)
+        srv.repo_search(queries=["hello"], limit=5, ext="md", compact=False)
     )
-    assert any(f_txt in (r.get("path") or "") for r in res2.get("results", []))
+    assert any(f_md in (r.get("path") or "") for r in res2.get("results", []))
 
     # Path glob to only allow pkg/*.py
     res3 = srv.asyncio.get_event_loop().run_until_complete(

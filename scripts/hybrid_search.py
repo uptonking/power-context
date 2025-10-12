@@ -9,7 +9,8 @@ import re
 import json
 
 
-COLLECTION = os.environ.get("COLLECTION_NAME", "my-collection")
+def _collection() -> str:
+    return os.environ.get("COLLECTION_NAME", "my-collection")
 MODEL_NAME = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
 API_KEY = os.environ.get("QDRANT_API_KEY")
@@ -244,7 +245,7 @@ def lex_query(client: QdrantClient, v: List[float], flt, per_query: int) -> List
     try:
         ef = max(EF_SEARCH, 32 + 4*int(per_query))
         qp = client.query_points(
-            collection_name=COLLECTION,
+            collection_name=_collection(),
             query=v,
             using=LEX_VECTOR_NAME,
             query_filter=flt,
@@ -255,7 +256,7 @@ def lex_query(client: QdrantClient, v: List[float], flt, per_query: int) -> List
         return getattr(qp, "points", qp)
     except Exception:
         res = client.search(
-            collection_name=COLLECTION,
+            collection_name=_collection(),
             query_vector={"name": LEX_VECTOR_NAME, "vector": v},
             limit=per_query,
             with_payload=True,
@@ -268,7 +269,7 @@ def dense_query(client: QdrantClient, vec_name: str, v: List[float], flt, per_qu
     try:
         ef = max(EF_SEARCH, 32 + 4*int(per_query))
         qp = client.query_points(
-            collection_name=COLLECTION,
+            collection_name=_collection(),
             query=v,
             using=vec_name,
             query_filter=flt,
@@ -279,7 +280,7 @@ def dense_query(client: QdrantClient, vec_name: str, v: List[float], flt, per_qu
         return getattr(qp, "points", qp)
     except Exception:
         res = client.search(
-            collection_name=COLLECTION,
+            collection_name=_collection(),
             query_vector={"name": vec_name, "vector": v},
             limit=per_query,
             with_payload=True,
@@ -308,9 +309,10 @@ def run_hybrid_search(
     expand: bool = True,
     model: TextEmbedding | None = None,
 ) -> List[Dict[str, Any]]:
-    client = QdrantClient(url=QDRANT_URL, api_key=API_KEY)
-    _model = model or TextEmbedding(model_name=MODEL_NAME)
-    vec_name = _sanitize_vector_name(MODEL_NAME)
+    client = QdrantClient(url=os.environ.get("QDRANT_URL", QDRANT_URL), api_key=API_KEY)
+    model_name = os.environ.get("EMBEDDING_MODEL", MODEL_NAME)
+    _model = model or TextEmbedding(model_name=model_name)
+    vec_name = _sanitize_vector_name(model_name)
 
     # Parse Query DSL and merge with explicit args
     raw_queries = list(queries)

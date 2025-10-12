@@ -638,7 +638,7 @@ async def repo_search(
     rerank_return_m = _to_int(rerank_return_m, int(os.environ.get("RERANKER_RETURN_M", "12") or 12))
     rerank_timeout_ms = _to_int(rerank_timeout_ms, int(os.environ.get("RERANKER_TIMEOUT_MS", "120") or 120))
     highlight_snippet = _to_bool(highlight_snippet, True)
-    collection = (_to_str(collection, "").strip() or DEFAULT_COLLECTION)
+    collection = (_to_str(collection, "").strip() or os.environ.get("COLLECTION_NAME", DEFAULT_COLLECTION))
 
     language = _to_str(language, "").strip()
     under = _to_str(under, "").strip()
@@ -689,7 +689,7 @@ async def repo_search(
 
     env = os.environ.copy()
     env["QDRANT_URL"] = QDRANT_URL
-    env["COLLECTION_NAME"] = (collection or DEFAULT_COLLECTION)
+    env["COLLECTION_NAME"] = collection
 
     results = []
     json_lines = []
@@ -910,7 +910,7 @@ async def repo_search(
             "rerank_top_n": int(rerank_top_n),
             "rerank_return_m": int(rerank_return_m),
             "rerank_timeout_ms": int(rerank_timeout_ms),
-            "collection": (collection or DEFAULT_COLLECTION),
+            "collection": collection,
             "language": language,
             "under": under,
             "kind": kind,
