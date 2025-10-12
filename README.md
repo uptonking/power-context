@@ -1,4 +1,28 @@
 
+## Quickstart (ship-ready)
+
+Run everything with a single command, then wire your MCP client to the SSE endpoints.
+
+```bash
+HOST_INDEX_PATH="$(pwd)" FASTMCP_INDEXER_PORT=8001 docker compose up -d qdrant mcp mcp_indexer indexer
+```
+
+Endpoints
+
+| Component   | URL                          |
+|-------------|------------------------------|
+| Memory MCP  | http://localhost:8000/sse    |
+| Indexer MCP | http://localhost:8001/sse    |
+| Qdrant DB   | http://localhost:6333        |
+
+Quick verify
+
+```bash
+curl -sSf http://localhost:6333/readyz >/dev/null && echo "Qdrant OK"
+curl -sI http://localhost:8000/sse | head -n1
+curl -sI http://localhost:8001/sse | head -n1
+```
+
 ## Architecture overview
 
 - Agents connect via MCP over SSE:
