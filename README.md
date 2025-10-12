@@ -2,7 +2,7 @@
 ## Architecture overview
 
 - Agents connect via MCP over SSE:
-  - Search MCP: http://localhost:8000/sse
+  - Memory MCP: http://localhost:8000/sse
   - Indexer MCP: http://localhost:8001/sse
 - Both MCP servers talk to Qdrant inside Docker at http://qdrant:6333 (DB HTTP API)
 - Supporting jobs (indexer, watcher, init_payload) write to/read from Qdrant directly
@@ -18,6 +18,20 @@ flowchart LR
 ```
 
 ## Production-ready local development
+## One-line bring-up (ship-ready)
+
+Start Qdrant, the Memory MCP (8000), the Indexer MCP (8001), and run a fresh index of your current repo:
+
+```bash
+HOST_INDEX_PATH="$(pwd)" FASTMCP_INDEXER_PORT=8001 docker compose up -d qdrant mcp mcp_indexer indexer
+```
+
+Then wire your MCP-aware IDE/tooling to:
+- Memory MCP: http://localhost:8000/sse
+- Indexer MCP: http://localhost:8001/sse
+
+Tip: add `watcher` to the command if you want live reindex-on-save.
+
 ### SSE Memory Server (port 8000)
 
 - URL: http://localhost:8000/sse
@@ -161,8 +175,9 @@ Notes:
 # Qdrant API ping
 curl -s http://localhost:6333/ | jq .status
 
-# MCP SSE endpoint (should return 200 OK headers)
-curl -I http://localhost:8000/sse
+# MCP SSE endpoints (should return 200 OK headers)
+curl -I http://localhost:8000/sse   # Memory MCP
+curl -I http://localhost:8001/sse   # Indexer MCP
 ```
 
 ## Connect a client
