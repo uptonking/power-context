@@ -3,7 +3,6 @@ import json
 import uuid
 import importlib
 import pytest
-from pathlib import Path
 
 pytestmark = pytest.mark.integration
 
@@ -64,7 +63,14 @@ def test_index_and_search_minirepo(tmp_path, monkeypatch, qdrant_container):
     f2.write_text("hello world\nthis is a test\n")
 
     # Index via function call (no shell)
-    ing.index_repo(root=tmp_path, recreate=True)
+    ing.index_repo(
+        root=tmp_path,
+        qdrant_url=qdrant_container,
+        api_key="",
+        collection=os.environ["COLLECTION_NAME"],
+        model_name="fake",
+        recreate=True,
+    )
 
     # Search directly via async function
     res = srv.asyncio.get_event_loop().run_until_complete(

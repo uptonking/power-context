@@ -19,7 +19,9 @@ class FakeQdrant:
 @pytest.mark.service
 def test_qdrant_status_mocked(monkeypatch):
     monkeypatch.setenv("COLLECTION_NAME", "test")
-    monkeypatch.setattr(srv, "QdrantClient", lambda *a, **k: FakeQdrant())
+    # Patch the import site inside the function body by targeting the real module
+    import qdrant_client
+    monkeypatch.setattr(qdrant_client, "QdrantClient", lambda *a, **k: FakeQdrant())
 
     out = srv.asyncio.get_event_loop().run_until_complete(srv.qdrant_status())
     assert out["ok"] is True

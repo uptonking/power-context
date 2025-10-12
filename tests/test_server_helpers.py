@@ -1,7 +1,6 @@
 import json
 import types
 import importlib
-import pathlib
 
 srv = importlib.import_module("scripts.mcp_indexer_server")
 
@@ -18,16 +17,8 @@ def test_highlight_snippet_simple():
     assert "<<foo>>" in out and "<<bar>>" in out
 
 
-class FakeProc:
-    def __init__(self, text):
-        self._text = text
-
-    async def run(self, *args, **kwargs):
-        return types.SimpleNamespace(returncode=0, stdout=self._text, stderr="")
-
-
 def fake_async_run_factory(text):
-    async def _fake(cmd, timeout=None):
+    async def _fake(cmd, **kwargs):  # accept env/timeout/cwd
         return types.SimpleNamespace(returncode=0, stdout=text, stderr="")
     return _fake
 
@@ -57,6 +48,9 @@ def test_repo_search_arg_normalization(monkeypatch, tmp_path):
     monkeypatch.setattr(srv, "_run_async", fake_async_run_factory(jsonl))
     # Avoid model loading
     monkeypatch.setattr(srv, "_get_embedding_model", lambda *a, **k: None)
+
+    # Ensure in-process branch stays off
+    monkeypatch.delenv("HYBRID_IN_PROCESS", raising=False)
 
     res = srv.asyncio.get_event_loop().run_until_complete(
         _call_repo_search(
