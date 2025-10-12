@@ -692,6 +692,12 @@ async def repo_search(
             from scripts.hybrid_search import run_hybrid_search  # type: ignore
             model_name = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
             model = _get_embedding_model(model_name)
+            # In-process path_glob/not_glob accept a single string; reduce list inputs safely
+            def _first_or_none(lst):
+                try:
+                    return lst[0] if isinstance(lst, list) and lst else None
+                except Exception:
+                    return None
             items = run_hybrid_search(
                 queries=queries,
                 limit=int(limit),
@@ -704,8 +710,8 @@ async def repo_search(
                 not_filter=not_ or None,
                 case=case or None,
                 path_regex=path_regex or None,
-                path_glob=path_globs or None,
-                not_glob=not_globs or None,
+                path_glob=_first_or_none(path_globs),
+                not_glob=_first_or_none(not_globs),
                 expand=str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower() in {"1","true","yes","on"},
                 model=model,
             )
@@ -860,7 +866,16 @@ async def repo_search(
             if not path or not sl:
                 continue
             try:
-                with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                # Enforce /work sandbox for snippet path
+                raw_path = str(path)
+                p = raw_path
+                if not os.path.isabs(p):
+                    p = os.path.join("/work", p)
+                realp = os.path.realpath(p)
+                if not (realp == "/work" or realp.startswith("/work/")):
+                    item["snippet"] = ""
+                    continue
+                with open(realp, "r", encoding="utf-8", errors="ignore") as f:
                     lines = f.readlines()
                 si = max(1, sl - max(1, int(context_lines)))
                 ei = min(len(lines), max(sl, el) + max(1, int(context_lines)))
@@ -1104,6 +1119,7 @@ async def context_search(
 
     # Option A: Query the memory MCP server over SSE and blend results (real integration)
     mem_hits: List[Dict[str, Any]] = []
+    memory_note: str = ""
     if include_mem and mem_limit > 0 and queries and use_sse_memory:
         try:
             from fastmcp import Client  # use FastMCP client for SSE interop
@@ -1112,6 +1128,12 @@ async def context_search(
             base_url = os.environ.get("MEMORY_MCP_URL") or "http://mcp:8000/sse"
             async with Client(base_url) as c:
                 tools = await asyncio.wait_for(c.list_tools(), timeout=timeout)
+        except ImportError:
+            memory_note = "SSE memory disabled: fastmcp client not installed"
+            # fall through to local/fallback paths
+        except Exception:
+            # swallow and fall back
+            pass
                 tool_name = None
                 # Prefer canonical names
                 for t in tools:
@@ -1333,9 +1355,15 @@ async def context_search(
                     "source": "memory",
                     "content": (b.get("content") or "")[:500],
                 })
-        return {"results": compacted, "total": len(compacted)}
+        ret = {"results": compacted, "total": len(compacted)}
+        if memory_note:
+            ret["memory_note"] = memory_note
+        return ret
 
-    return {"results": blended, "total": len(blended)}
+    ret = {"results": blended, "total": len(blended)}
+    if memory_note:
+        ret["memory_note"] = memory_note
+    return ret
 
 @mcp.tool()
 async def code_search(
