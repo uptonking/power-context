@@ -277,7 +277,7 @@ async def memory_store(information: str,
         import time, hashlib, re, math
         from scripts.utils import sanitize_vector_name
         from scripts.ingest_code import ensure_collection as _ensure_collection  # type: ignore
-            from scripts.ingest_code import project_mini as _project_mini  # type: ignore
+        from scripts.ingest_code import project_mini as _project_mini  # type: ignore
 
     except Exception as e:  # pragma: no cover
         return {"error": f"deps: {e}"}
