@@ -277,6 +277,8 @@ async def memory_store(information: str,
         import time, hashlib, re, math
         from scripts.utils import sanitize_vector_name
         from scripts.ingest_code import ensure_collection as _ensure_collection  # type: ignore
+            from scripts.ingest_code import project_mini as _project_mini  # type: ignore
+
     except Exception as e:  # pragma: no cover
         return {"error": f"deps: {e}"}
 
@@ -331,7 +333,15 @@ async def memory_store(information: str,
             pass
         pid = str(uuid.uuid4())
         payload = {"information": str(information), "metadata": metadata or {"kind": "memory", "source": "memory"}}
-        point = models.PointStruct(id=pid, vector={vector_name: dense, LEX_VECTOR_NAME: lex}, payload=payload)
+        vecs = {vector_name: dense, LEX_VECTOR_NAME: lex}
+        try:
+            if str(os.environ.get("REFRAG_MODE", "")).strip().lower() in {"1","true","yes","on"}:
+                mini_name = os.environ.get("MINI_VECTOR_NAME", "mini")
+                mini = _project_mini(list(dense), int(os.environ.get("MINI_VEC_DIM", "64") or 64))
+                vecs[mini_name] = mini
+        except Exception:
+            pass
+        point = models.PointStruct(id=pid, vector=vecs, payload=payload)
         await asyncio.to_thread(lambda: client.upsert(collection_name=coll, points=[point], wait=True))
         return {"ok": True, "id": pid, "collection": coll, "vector_name": vector_name}
     except Exception as e:
