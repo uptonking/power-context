@@ -84,9 +84,46 @@ CODE_EXTS = {
 # --- Named vector config ---
 LEX_VECTOR_NAME = os.environ.get("LEX_VECTOR_NAME", "lex")
 LEX_VECTOR_DIM = int(os.environ.get("LEX_VECTOR_DIM", "4096") or 4096)
+# Optional mini vector (ReFRAG-style gating); conditionally created by REFRAG_MODE
+MINI_VECTOR_NAME = os.environ.get("MINI_VECTOR_NAME", "mini")
+MINI_VEC_DIM = int(os.environ.get("MINI_VEC_DIM", "64") or 64)
 
 # Lightweight hashing-trick sparse vector (fixed-size dense) for lexical signals
 _STOP = {"the","a","an","of","in","on","for","and","or","to","with","by","is","are","be","this","that"}
+
+# Random +/-1 projection (Gaussian-sign) for compact mini vectors; cached by (in_dim,out_dim,seed)
+_MINI_PROJ_CACHE: dict[tuple[int,int,int], list[list[float]]] = {}
+
+def _get_mini_proj(in_dim: int, out_dim: int, seed: int | None = None) -> list[list[float]]:
+    import math, random
+    s = int(os.environ.get("MINI_VEC_SEED", "1337")) if seed is None else int(seed)
+    key = (in_dim, out_dim, s)
+    M = _MINI_PROJ_CACHE.get(key)
+    if M is None:
+        rnd = random.Random(s)
+        scale = 1.0 / math.sqrt(out_dim)
+        # Dense Rademacher matrix (+/-1) scaled; good enough for fast gating
+        M = [[scale * (1.0 if rnd.random() < 0.5 else -1.0) for _ in range(out_dim)] for _ in range(in_dim)]
+        _MINI_PROJ_CACHE[key] = M
+    return M
+
+def project_mini(vec: list[float], out_dim: int | None = None) -> list[float]:
+    import math
+    if not vec:
+        return [0.0] * (int(out_dim or MINI_VEC_DIM))
+    od = int(out_dim or MINI_VEC_DIM)
+    M = _get_mini_proj(len(vec), od)
+    out = [0.0] * od
+    # y = x @ M
+    for i, val in enumerate(vec):
+        if val == 0.0:
+            continue
+        row = M[i]
+        for j in range(od):
+            out[j] += val * row[j]
+    # L2 normalize to keep scale consistent
+    norm = (sum(x*x for x in out) or 0.0) ** 0.5 or 1.0
+    return [x / norm for x in out]
 
 def _split_ident_lex(s: str):
     parts = re.split(r"[^A-Za-z0-9]+", s)
@@ -335,9 +372,9 @@ from scripts.utils import sanitize_vector_name as _sanitize_vector_name
 
 
 def ensure_collection(client: QdrantClient, name: str, dim: int, vector_name: str):
-    """Ensure collection exists with dual named vectors: dense and lexical (hashing).
-    - dense vector named by vector_name, size=dim
-    - lexical vector named by LEX_VECTOR_NAME, size=LEX_VECTOR_DIM
+    """Ensure collection exists with named vectors.
+    Always includes dense (vector_name) and lexical (LEX_VECTOR_NAME).
+    When REFRAG_MODE=1, also includes a compact mini vector (MINI_VECTOR_NAME).
     """
     try:
         client.get_collection(name)
@@ -356,6 +393,12 @@ def ensure_collection(client: QdrantClient, name: str, dim: int, vector_name: st
         vector_name: models.VectorParams(size=dim, distance=models.Distance.COSINE),
         LEX_VECTOR_NAME: models.VectorParams(size=LEX_VECTOR_DIM, distance=models.Distance.COSINE),
     }
+    # Conditionally add mini vector for ReFRAG gating
+    try:
+        if os.environ.get("REFRAG_MODE", "").strip().lower() in {"1","true","yes","on"}:
+            vectors_cfg[MINI_VECTOR_NAME] = models.VectorParams(size=int(os.environ.get("MINI_VEC_DIM", MINI_VEC_DIM) or MINI_VEC_DIM), distance=models.Distance.COSINE)
+    except Exception:
+        pass
     client.create_collection(
         collection_name=name,
         vectors_config=vectors_cfg,
@@ -364,7 +407,7 @@ def ensure_collection(client: QdrantClient, name: str, dim: int, vector_name: st
 
 
 def recreate_collection(client: QdrantClient, name: str, dim: int, vector_name: str):
-    """Drop and recreate collection with dual named vectors."""
+    """Drop and recreate collection with named vectors (dense + lex [+ mini when REFRAG_MODE=1])."""
     try:
         client.delete_collection(name)
     except Exception:
@@ -373,6 +416,11 @@ def recreate_collection(client: QdrantClient, name: str, dim: int, vector_name: 
         vector_name: models.VectorParams(size=dim, distance=models.Distance.COSINE),
         LEX_VECTOR_NAME: models.VectorParams(size=LEX_VECTOR_DIM, distance=models.Distance.COSINE),
     }
+    try:
+        if os.environ.get("REFRAG_MODE", "").strip().lower() in {"1","true","yes","on"}:
+            vectors_cfg[MINI_VECTOR_NAME] = models.VectorParams(size=int(os.environ.get("MINI_VEC_DIM", MINI_VEC_DIM) or MINI_VEC_DIM), distance=models.Distance.COSINE)
+    except Exception:
+        pass
     client.create_collection(
         collection_name=name,
         vectors_config=vectors_cfg,
@@ -990,7 +1038,13 @@ def index_single_file(client: QdrantClient, model: TextEmbedding, collection: st
 
     def make_point(pid, dense_vec, lex_vec, payload):
         if vector_name:
-            return models.PointStruct(id=pid, vector={vector_name: dense_vec, LEX_VECTOR_NAME: lex_vec}, payload=payload)
+            vecs = {vector_name: dense_vec, LEX_VECTOR_NAME: lex_vec}
+            try:
+                if os.environ.get("REFRAG_MODE", "").strip().lower() in {"1","true","yes","on"}:
+                    vecs[MINI_VECTOR_NAME] = project_mini(list(dense_vec), MINI_VEC_DIM)
+            except Exception:
+                pass
+            return models.PointStruct(id=pid, vector=vecs, payload=payload)
         else:
             # unnamed collection: store dense only
             return models.PointStruct(id=pid, vector=dense_vec, payload=payload)
@@ -1103,9 +1157,15 @@ def index_repo(root: Path, qdrant_url: str, api_key: str, collection: str, model
     points_indexed = 0
 
     def make_point(pid, dense_vec, lex_vec, payload):
-        # Use named vectors if collection has names: store dense + lexical
+        # Use named vectors if collection has names: store dense + lexical (+ mini if REFRAG_MODE)
         if vector_name:
-            return models.PointStruct(id=pid, vector={vector_name: dense_vec, LEX_VECTOR_NAME: lex_vec}, payload=payload)
+            vecs = {vector_name: dense_vec, LEX_VECTOR_NAME: lex_vec}
+            try:
+                if os.environ.get("REFRAG_MODE", "").strip().lower() in {"1","true","yes","on"}:
+                    vecs[MINI_VECTOR_NAME] = project_mini(list(dense_vec), MINI_VEC_DIM)
+            except Exception:
+                pass
+            return models.PointStruct(id=pid, vector=vecs, payload=payload)
         else:
             # unnamed collection: store dense only
             return models.PointStruct(id=pid, vector=dense_vec, payload=payload)

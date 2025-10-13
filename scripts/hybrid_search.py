@@ -18,6 +18,10 @@ API_KEY = os.environ.get("QDRANT_API_KEY")
 
 LEX_VECTOR_NAME = os.environ.get("LEX_VECTOR_NAME", "lex")
 LEX_VECTOR_DIM = int(os.environ.get("LEX_VECTOR_DIM", "4096") or 4096)
+# Optional mini vector (ReFRAG gating)
+MINI_VECTOR_NAME = os.environ.get("MINI_VECTOR_NAME", "mini")
+MINI_VEC_DIM = int(os.environ.get("MINI_VEC_DIM", "64") or 64)
+HYBRID_MINI_WEIGHT = float(os.environ.get("HYBRID_MINI_WEIGHT", "0.5") or 0.5)
 
 
 # Lightweight embedding cache for query embeddings (model_name, text) -> vector
@@ -60,6 +64,7 @@ if str(_ROOT) not in sys.path:
 
 from scripts.utils import sanitize_vector_name as _sanitize_vector_name
 from scripts.ingest_code import ensure_collection as _ensure_collection
+from scripts.ingest_code import project_mini as _project_mini
 
 
 RRF_K = int(os.environ.get("HYBRID_RRF_K", "60") or 60)
@@ -577,6 +582,24 @@ def run_hybrid_search(
     # Dense queries
     embedded = _embed_queries_cached(_model, qlist)
     result_sets: List[List[Any]] = [dense_query(client, vec_name, v, flt, max(24, limit)) for v in embedded]
+
+    # Optional ReFRAG-style mini-vector gating: add compact-vector RRF if enabled
+    try:
+        if os.environ.get("REFRAG_MODE", "").strip().lower() in {"1","true","yes","on"}:
+            try:
+                mini_queries = [_project_mini(list(v), MINI_VEC_DIM) for v in embedded]
+                mini_sets: List[List[Any]] = [dense_query(client, MINI_VECTOR_NAME, mv, flt, max(24, limit)) for mv in mini_queries]
+                for res in mini_sets:
+                    for rank, p in enumerate(res, 1):
+                        pid = str(p.id)
+                        score_map.setdefault(pid, {"pt": p, "s": 0.0, "d": 0.0, "lx": 0.0, "sym_sub": 0.0, "sym_eq": 0.0, "core": 0.0, "vendor": 0.0, "langb": 0.0, "rec": 0.0})
+                        dens = float(HYBRID_MINI_WEIGHT) * rrf(rank)
+                        score_map[pid]["d"] += dens
+                        score_map[pid]["s"] += dens
+            except Exception:
+                pass
+    except Exception:
+        pass
 
     # Pseudo-Relevance Feedback (default-on): mine top terms from current results and run a light second pass
     try:
