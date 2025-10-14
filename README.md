@@ -23,6 +23,31 @@ curl -sI http://localhost:8000/sse | head -n1
 curl -sI http://localhost:8001/sse | head -n1
 ```
 
+### Kiro Integration (workspace config)
+
+Add this to your workspace-level Kiro config at `.kiro/settings/mcp.json` (restart Kiro after saving):
+
+````json
+{
+  "mcpServers": {
+    "qdrant-indexer": { "command": "npx", "args": ["mcp-remote", "http://localhost:8001/sse", "--transport", "sse"] },
+    "qdrant": { "command": "npx", "args": ["mcp-remote", "http://localhost:8000/sse", "--transport", "sse"] }
+  }
+}
+````
+
+Notes:
+- Kiro expects command/args (stdio). `mcp-remote` bridges to remote SSE endpoints.
+- If `npx` prompts in your environment, add `-y` right after `npx`.
+- Workspace config overrides user-level config (`~/.kiro/settings/mcp.json`).
+
+Troubleshooting:
+- Error: “Enabled MCP Server <name> must specify a command, ignoring.”
+  - Fix: Use the `command`/`args` form above; do not use `type:url` in Kiro.
+- ImportError: `deps: No module named 'scripts'` when calling `memory_store` on the indexer MCP
+  - Fix applied: server now adds `/work` and `/app` to `sys.path`. Restart `mcp_indexer`.
+
+
 ## Architecture overview
 
 - Agents connect via MCP over SSE:

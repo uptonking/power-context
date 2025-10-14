@@ -34,12 +34,15 @@ import threading
 from typing import Any, Dict, Optional, List
 
 import sys
-# Ensure repo root is on sys.path so absolute imports like 'from scripts.x import y' work
-# when this file is executed directly (sys.path[0] = /work/scripts otherwise).
-_REPO_ROOT = os.environ.get("WORK_ROOT", "/work")
+# Ensure code roots are on sys.path so absolute imports like 'from scripts.x import y' work
+# when this file is executed directly (sys.path[0] may be /work/scripts).
+# Supports multiple roots via WORK_ROOTS env (comma-separated), defaults to /work and /app.
+_roots_env = os.environ.get("WORK_ROOTS", "")
+_roots = [p.strip() for p in _roots_env.split(",") if p.strip()] or ["/work", "/app"]
 try:
-    if _REPO_ROOT and _REPO_ROOT not in sys.path:
-        sys.path.insert(0, _REPO_ROOT)
+    for _root in _roots:
+        if _root and _root not in sys.path:
+            sys.path.insert(0, _root)
 except Exception:
     pass
 
@@ -133,7 +136,79 @@ def _maybe_parse_jsonish(obj: _Any):
     try:
         return json.loads("{" + s + "}")
     except Exception:
-        return None
+        pass
+# Extra parsing helpers for quirky clients that send stringified kwargs
+import urllib.parse as _urlparse, ast as _ast
+
+def _parse_kv_string(s: str) -> _Dict[str, _Any]:
+    """Parse non-JSON strings like "a=1&b=2" or "query=[\"a\",\"b\"]" into a dict.
+    Values are JSON-decoded when possible; else literal-eval; else kept as raw strings.
+    """
+    out: _Dict[str, _Any] = {}
+    try:
+        if not isinstance(s, str) or not s.strip():
+            return out
+        # Try query-string form first
+        if ("=" in s) and ("{" not in s) and (":" not in s):
+            qs = _urlparse.parse_qs(s, keep_blank_values=True)
+            for k, vals in qs.items():
+                v = vals[-1] if vals else ""
+                out[k] = _coerce_value_string(v)
+            return out
+        # Fallback: split on commas for simple "k=v,k2=v2" forms
+        if ("=" in s) and ("," in s):
+            for part in s.split(","):
+                if "=" not in part:
+                    continue
+                k, v = part.split("=", 1)
+                out[k.strip()] = _coerce_value_string(v.strip())
+            return out
+    except Exception:
+        return {}
+    return out
+
+def _coerce_value_string(v: str):
+    # Try JSON
+    try:
+        return json.loads(v)
+    except Exception:
+        pass
+    # Try Python literal (e.g., "['a','b']")
+    try:
+        return _ast.literal_eval(v)
+    except Exception:
+        pass
+    # As-is string
+    return v
+
+def _to_str_list_relaxed(x: _Any) -> list[str]:
+    """Coerce various inputs to list[str]. Accepts JSON strings like "[\"a\",\"b\"]"."""
+    if x is None:
+        return []
+    if isinstance(x, (list, tuple)):
+        return [str(e) for e in x if str(e).strip()]
+    if isinstance(x, str):
+        s = x.strip()
+        if not s:
+            return []
+        # Try JSON array or Python literal list
+        if s.startswith("[") and s.endswith("]"):
+            try:
+                arr = json.loads(s)
+                if isinstance(arr, list):
+                    return [str(e) for e in arr if str(e).strip()]
+            except Exception:
+                try:
+                    arr = _ast.literal_eval(s)
+                    if isinstance(arr, (list, tuple)):
+                        return [str(e) for e in arr if str(e).strip()]
+                except Exception:
+                    pass
+        # Comma-separated fallback
+        if "," in s:
+            return [t.strip() for t in s.split(",") if t.strip()]
+        return [s]
+    return [str(x)]
 
 def _extract_kwargs_payload(kwargs: _Any) -> _Dict[str, _Any]:
     try:
@@ -142,7 +217,14 @@ def _extract_kwargs_payload(kwargs: _Any) -> _Dict[str, _Any]:
             if isinstance(inner, dict):
                 return inner
             parsed = _maybe_parse_jsonish(inner)
-            return parsed if isinstance(parsed, dict) else {}
+            if isinstance(parsed, dict):
+                return parsed
+            # Fallback: accept query-string or k=v,k2=v2 strings
+            if isinstance(inner, str):
+                kv = _parse_kv_string(inner)
+                if isinstance(kv, dict) and kv:
+                    return kv
+            return {}
     except Exception:
         return {}
     return {}
@@ -667,26 +749,25 @@ async def repo_search(
     case = _to_str(case, "").strip()
     compact_raw = compact
     compact = _to_bool(compact, False)
+    # If snippets are requested, do not compact (we need snippet field in results)
+    if include_snippet:
+        compact = False
 
     # Accept top-level alias `queries` as a drop-in for `query`
     # Many clients send queries=[...] instead of query=[...]
     if "queries" in kwargs and kwargs.get("queries") is not None:
         query = kwargs.get("queries")
 
-    # Normalize queries to a list[str]
+    # Normalize queries to a list[str] (robust for JSON strings and arrays)
     queries: list[str] = []
-    if isinstance(query, str):
-        if query.strip():
-            queries = [query]
-    elif isinstance(query, (list, tuple)):
-        for q in query:
-            qs = str(q).strip()
-            if qs:
-                queries.append(qs)
-    else:
-        qs = str(query).strip()
-        if qs:
-            queries = [qs]
+    if isinstance(query, (list, tuple)):
+        queries = [str(q).strip() for q in query if str(q).strip()]
+    elif isinstance(query, str):
+        queries = _to_str_list_relaxed(query)
+    elif query is not None:
+        s = str(query).strip()
+        if s:
+            queries = [s]
 
     if not queries:
         return {"error": "query required"}
@@ -1110,9 +1191,11 @@ async def context_search(
         if q_alt is not None:
             query = q_alt
     if isinstance(query, (list, tuple)):
-        queries = [str(q) for q in query]
+        queries = [str(q).strip() for q in query if str(q).strip()]
+    elif isinstance(query, str):
+        queries = _to_str_list_relaxed(query)
     elif query is not None and str(query).strip() != "":
-        queries = [str(query)]
+        queries = [str(query).strip()]
 
     # Accept common alias keys and camelCase from clients
     if (limit is None or (isinstance(limit, str) and limit.strip() == "")) and ("top_k" in kwargs):
@@ -1129,6 +1212,10 @@ async def context_search(
     smart_compact = False
     if len(queries) > 1 and (compact_raw is None or (isinstance(compact_raw, str) and compact_raw.strip() == "")):
         smart_compact = True
+    # If snippets are requested, disable compact to preserve snippet field
+    if include_snippet and str(include_snippet).lower() not in ("", "false", "0", "no"):
+        smart_compact = False
+        compact_raw = False
     eff_compact = True if (smart_compact or (str(compact_raw).lower() == "true")) else False
 
     # Per-source limits
