@@ -33,6 +33,16 @@ import subprocess
 import threading
 from typing import Any, Dict, Optional, List
 
+import sys
+# Ensure repo root is on sys.path so absolute imports like 'from scripts.x import y' work
+# when this file is executed directly (sys.path[0] = /work/scripts otherwise).
+_REPO_ROOT = os.environ.get("WORK_ROOT", "/work")
+try:
+    if _REPO_ROOT and _REPO_ROOT not in sys.path:
+        sys.path.insert(0, _REPO_ROOT)
+except Exception:
+    pass
+
 try:
     # Official MCP Python SDK (FastMCP convenience server)
     from mcp.server.fastmcp import FastMCP
