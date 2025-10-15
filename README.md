@@ -391,6 +391,63 @@ make prune
   - Medium (100s–1k files): chunk 120–160, overlap ~20, batch-size 64–128
   - Large monorepos (1k+): start with defaults; consider `INDEX_PROGRESS_EVERY=200` for visibility and `INDEX_BATCH_SIZE=128` if RAM allows
 
+
+## ReFRAG micro-chunking (retrieval-side, production-ready)
+
+ReFRAG-lite is enabled in this repo and can be toggled via env. It provides:
+- Token-level micro-chunking at ingest (tiny k-token windows with stride)
+- Compact vector gating and optional gate-first candidate restriction
+- Span compaction and a global token budget at search time
+
+Enable and tune:
+
+````ini
+# Enable compressed retrieval with micro-chunks
+REFRAG_MODE=1
+INDEX_MICRO_CHUNKS=1
+
+# Micro windowing
+MICRO_CHUNK_TOKENS=16
+MICRO_CHUNK_STRIDE=8
+
+# Output shaping and budget
+MICRO_OUT_MAX_SPANS=3
+MICRO_MERGE_LINES=4
+MICRO_BUDGET_TOKENS=512
+MICRO_TOKENS_PER_LINE=32
+
+# Optional: gate-first using mini vectors to prefilter dense search
+REFRAG_GATE_FIRST=0
+REFRAG_CANDIDATES=200
+````
+
+Reindex after changing chunking:
+
+````bash
+# Recreate collection (safe for local dev)
+docker compose exec mcp_indexer python -c "from scripts.mcp_indexer_server import qdrant_index_root; qdrant_index_root(recreate=True)"
+````
+
+What results look like (context_search / code_search return shape):
+
+````json
+{
+  "score": 0.9234,
+  "path": "scripts/ingest_code.py",
+  "start_line": 120,
+  "end_line": 148,
+  "span_budgeted": true,
+  "budget_tokens_used": 224,
+  "components": { "dense": 0.78, "lex": 0.35, "mini": 0.81 },
+  "why": ["dense", "mini"]
+}
+````
+
+Notes:
+- span_budgeted=true indicates adjacent micro hits were merged and counted toward the global token budget.
+- Tune MICRO_* to control prompt footprint. Increase MICRO_MERGE_LINES to merge looser spans; reduce MICRO_OUT_MAX_SPANS for more file diversity.
+- Gate-first reduces dense search compute on large collections; keep off for tiny repos.
+
 ### MCP search filtering (language, path, kind)
 
 - The indexer creates payload indexes for efficient filtering.
