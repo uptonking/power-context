@@ -1,0 +1,18 @@
+# Optional: build llama.cpp server with default settings
+# Production note: choose a tiny GGUF model (e.g., tinyllama) in ./models/model.gguf
+FROM debian:bookworm-slim AS build
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git build-essential cmake curl ca-certificates && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+RUN git clone --depth=1 https://github.com/ggerganov/llama.cpp.git
+WORKDIR /src/llama.cpp
+RUN cmake -S . -B build -DLLAMA_BUILD_SERVER=ON && cmake --build build -j
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY --from=build /src/llama.cpp/build/bin/server /app/server
+EXPOSE 8080
+ENTRYPOINT ["/app/server", "--model", "/models/model.gguf", "--host", "0.0.0.0", "--port", "8080", "--no-warmup"]
+

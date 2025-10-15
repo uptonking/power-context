@@ -448,6 +448,46 @@ Notes:
 - Tune MICRO_* to control prompt footprint. Increase MICRO_MERGE_LINES to merge looser spans; reduce MICRO_OUT_MAX_SPANS for more file diversity.
 - Gate-first reduces dense search compute on large collections; keep off for tiny repos.
 
+
+## Decoder-path ReFRAG (feature-flagged)
+
+This stack ships a feature-flagged decoder integration path via a llama.cpp sidecar.
+It is production-safe by default (off) and can run in a fallback “prompt” mode
+that uses a compressed textual context. A future “soft” mode will inject projected
+chunk embeddings into a patched llama.cpp server.
+
+Enable (safe default is off):
+
+````ini
+REFRAG_DECODER=1
+REFRAG_RUNTIME=llamacpp
+LLAMACPP_URL=http://llamacpp:8080
+REFRAG_DECODER_MODE=prompt  # prompt|soft (soft requires patched llama.cpp)
+REFRAG_ENCODER_MODEL=BAAI/bge-base-en-v1.5
+REFRAG_PHI_PATH=/work/models/refrag_phi_768_to_dmodel.bin
+````
+
+Bring up llama.cpp sidecar (optional):
+
+````bash
+docker compose up -d llamacpp
+````
+
+Programmatic use:
+
+````python
+from scripts.refrag_llamacpp import LlamaCppRefragClient
+c = LlamaCppRefragClient()  # uses LLAMACPP_URL
+text = c.generate_with_soft_embeddings("Question: ...\n", soft_embeddings=None, max_tokens=128)
+````
+
+
+Notes:
+- φ file format: JSON 2D array with shape (d_in, d_model). See scripts/refrag_phi.py. Set REFRAG_PHI_PATH to your JSON file.
+
+- In prompt mode, the client calls /completion on the llama.cpp server with a compressed prompt.
+- In soft mode, the client will require a patched server to accept soft embeddings. The flag ensures no breakage.
+
 ### MCP search filtering (language, path, kind)
 
 - The indexer creates payload indexes for efficient filtering.
