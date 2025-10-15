@@ -315,7 +315,6 @@ Verification:
 - qdrant_list with no args
 - qdrant_prune with no args
 
-```
 
 Notes:
 - The indexer reads env from `.env` (QDRANT_URL, COLLECTION_NAME, EMBEDDING_MODEL).
