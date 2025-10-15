@@ -367,6 +367,92 @@ def chunk_semantic(text: str, language: str, max_lines: int = 120, overlap: int 
 
     return chunks
 
+# --- Token-based micro-chunking (ReFRAG-lite) ---
+# Produces tiny fixed-size token windows with stride, maps back to original line ranges.
+def chunk_by_tokens(text: str, k_tokens: int = None, stride_tokens: int = None) -> List[Dict]:
+    try:
+        from tokenizers import Tokenizer  # lightweight, already in requirements
+    except Exception:
+        # Fallback to line-based if tokenizers not available
+        return chunk_lines(text, max_lines=120, overlap=20)
+
+    try:
+        k = int(os.environ.get("MICRO_CHUNK_TOKENS", str(k_tokens or 16)) or 16)
+    except Exception:
+        k = 16
+    try:
+        s = int(os.environ.get("MICRO_CHUNK_STRIDE", str(stride_tokens or max(1, k // 2))) or max(1, k // 2))
+    except Exception:
+        s = max(1, k // 2)
+
+    # Load tokenizer; default to local model file if present
+    tok_path = os.environ.get("TOKENIZER_JSON", str((ROOT_DIR / "models" / "tokenizer.json")))
+    try:
+        tokenizer = Tokenizer.from_file(tok_path)
+    except Exception:
+        # As a fallback, still return line-based chunks
+        return chunk_lines(text, max_lines=120, overlap=20)
+
+    # Encode with offsets to map tokens back to character ranges
+    try:
+        enc = tokenizer.encode(text)
+    except Exception:
+        return chunk_lines(text, max_lines=120, overlap=20)
+
+    offsets = getattr(enc, "offsets", None) or []
+    if not offsets:
+        return chunk_lines(text, max_lines=120, overlap=20)
+
+    # Precompute line starts for fast char->line mapping
+    lines = text.splitlines(keepends=True)
+    line_starts = []
+    pos = 0
+    for ln in lines:
+        line_starts.append(pos)
+        pos += len(ln)
+    total_chars = len(text)
+
+    def char_to_line(c: int) -> int:
+        # Binary search line_starts to find 1-based line number
+        lo, hi = 0, len(line_starts) - 1
+        if c <= 0:
+            return 1
+        if c >= total_chars:
+            return len(lines)
+        ans = 0
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            if line_starts[mid] <= c:
+                ans = mid
+                lo = mid + 1
+            else:
+                hi = mid - 1
+        return ans + 1  # 1-based
+
+    chunks: List[Dict] = []
+    i = 0
+    n = len(offsets)
+    while i < n:
+        j = min(n, i + k)
+        start_char = offsets[i][0]
+        end_char = offsets[j - 1][1] if j - 1 < n else offsets[-1][1]
+        start_char = max(0, start_char)
+        end_char = min(total_chars, max(start_char, end_char))
+        chunk_text = text[start_char:end_char]
+        if chunk_text:
+            start_line = char_to_line(start_char)
+            end_line = char_to_line(end_char - 1) if end_char > start_char else start_line
+            chunks.append({
+                "text": chunk_text,
+                "start": start_line,
+                "end": end_line,
+            })
+        if j == n:
+            break
+        i = i + s if s > 0 else i + 1
+    return chunks
+
+
 
 from scripts.utils import sanitize_vector_name as _sanitize_vector_name
 
@@ -1025,9 +1111,12 @@ def index_single_file(client: QdrantClient, model: TextEmbedding, collection: st
 
     CHUNK_LINES = int(os.environ.get("INDEX_CHUNK_LINES", "120") or 120)
     CHUNK_OVERLAP = int(os.environ.get("INDEX_CHUNK_OVERLAP", "20") or 20)
-    # Use semantic chunking if enabled, fallback to line-based
+    # Micro-chunking (token-based) takes precedence; else semantic; else line-based
+    use_micro = os.environ.get("INDEX_MICRO_CHUNKS", "0").lower() in {"1","true","yes","on"}
     use_semantic = os.environ.get("INDEX_SEMANTIC_CHUNKS", "1").lower() in {"1", "true", "yes", "on"}
-    if use_semantic:
+    if use_micro:
+        chunks = chunk_by_tokens(text)
+    elif use_semantic:
         chunks = chunk_semantic(text, language, CHUNK_LINES, CHUNK_OVERLAP)
     else:
         chunks = chunk_lines(text, CHUNK_LINES, CHUNK_OVERLAP)
@@ -1198,8 +1287,11 @@ def index_repo(root: Path, qdrant_url: str, api_key: str, collection: str, model
         imports, calls = _get_imports_calls(language, text)
         last_mod, churn_count, author_count = _git_metadata(file_path)
 
-        # Use semantic chunking if enabled, fallback to line-based
-        if use_semantic:
+        # Micro-chunking (token-based) takes precedence; else semantic; else line-based
+        use_micro = os.environ.get("INDEX_MICRO_CHUNKS", "0").lower() in {"1","true","yes","on"}
+        if use_micro:
+            chunks = chunk_by_tokens(text)
+        elif use_semantic:
             chunks = chunk_semantic(text, language, CHUNK_LINES, CHUNK_OVERLAP)
         else:
             chunks = chunk_lines(text, CHUNK_LINES, CHUNK_OVERLAP)

@@ -581,7 +581,32 @@ def run_hybrid_search(
 
     # Dense queries
     embedded = _embed_queries_cached(_model, qlist)
-    result_sets: List[List[Any]] = [dense_query(client, vec_name, v, flt, max(24, limit)) for v in embedded]
+    # Optional gate-first using mini vectors to restrict dense search to candidates
+    flt_gated = flt
+    try:
+        gate_first = str(os.environ.get("REFRAG_GATE_FIRST", "0")).strip().lower() in {"1","true","yes","on"}
+        refrag_on = str(os.environ.get("REFRAG_MODE", "")).strip().lower() in {"1","true","yes","on"}
+        cand_n = int(os.environ.get("REFRAG_CANDIDATES", "200") or 200)
+    except Exception:
+        gate_first, refrag_on, cand_n = False, False, 200
+    if gate_first and refrag_on:
+        try:
+            mini_queries = [_project_mini(list(v), MINI_VEC_DIM) for v in embedded]
+            cand_ids: set[str] = set()
+            for mv in mini_queries:
+                res = dense_query(client, MINI_VECTOR_NAME, mv, flt, max(50, cand_n))
+                for p in res:
+                    cand_ids.add(str(p.id))
+            if cand_ids:
+                hid = models.HasIdCondition(has_id=list(cand_ids))
+                if flt and getattr(flt, "must", None):
+                    flt_gated = models.Filter(must=list(flt.must) + [hid])
+                else:
+                    flt_gated = models.Filter(must=[hid])
+        except Exception:
+            pass
+
+    result_sets: List[List[Any]] = [dense_query(client, vec_name, v, flt_gated, max(24, limit)) for v in embedded]
 
     # Optional ReFRAG-style mini-vector gating: add compact-vector RRF if enabled
     try:
