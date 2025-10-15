@@ -470,6 +470,36 @@ It is production-safe by default (off) and can run in a fallback “prompt” mo
 that uses a compressed textual context. A future “soft” mode will inject projected
 chunk embeddings into a patched llama.cpp server.
 
+
+### Decoder-path dataflow (compress → sense → expand)
+
+```mermaid
+flowchart LR
+  %% Retrieval side
+  Q[Query] --> R[Hybrid search + span budgeting]
+  R --> S[Selected micro-spans]
+
+  %% Projection (φ) and modes
+  S -->|project via φ| P[(Soft embeddings)]
+  S -. prompt compress .-> C[Compressed prompt]
+
+  %% Decoder service
+  subgraph Decoder
+    G[[llama.cpp :8080]]
+  end
+
+  %% Mode routing
+  P -->|soft mode| G
+  C -->|prompt mode| G
+
+  %% Output
+  G --> O[Completion]
+
+  %% Notes
+  classDef opt stroke-dasharray: 5 5
+  class C opt
+```
+
 Enable (safe default is off):
 
 ````ini
