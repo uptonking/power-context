@@ -78,6 +78,14 @@ warm: ## prime ANN/search caches with a few queries
 health: ## run health checks for collection/model settings
 	docker compose run --rm --entrypoint python indexer /work/scripts/health_check.py
 
+
+# Check llama.cpp decoder health on localhost:8080 (200 OK expected)
+decoder-health: ## ping llama.cpp server
+	@URL=$${LLAMACPP_HEALTH_URL:-http://localhost:8080}; \
+	CODE=$$(curl -s -o /dev/null -w "%{http_code}" $$URL); \
+	echo "llamacpp @ $$URL -> $$CODE"; \
+	[ "$$CODE" = "200" ] && echo "OK" || echo "WARN: non-200"
+
 env: ## create .env from example if missing
 	[ -f .env ] || cp .env.example .env
 
@@ -134,7 +142,9 @@ reset-dev: ## full dev reset: qdrant -> wait -> init payload -> reindex -> bring
 	docker compose up -d qdrant
 	./scripts/wait-for-qdrant.sh
 	docker compose run --rm init_payload || true
-	docker compose run --rm indexer --root /work --recreate
+	$(MAKE) tokenizer
+
+	docker compose run --rm -e INDEX_MICRO_CHUNKS -e MAX_MICRO_CHUNKS_PER_FILE -e TOKENIZER_PATH -e TOKENIZER_URL indexer --root /work --recreate
 	$(MAKE) llama-model
 	docker compose up -d mcp mcp_indexer watcher llamacpp
 	docker compose ps

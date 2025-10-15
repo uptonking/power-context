@@ -1141,7 +1141,12 @@ def index_single_file(client: QdrantClient, model: TextEmbedding, collection: st
         try:
             _cap = int(os.environ.get("MAX_MICRO_CHUNKS_PER_FILE", "2000") or 2000)
             if _cap > 0 and len(chunks) > _cap:
+                _before = len(chunks)
                 chunks = chunks[:_cap]
+                try:
+                    print(f"[ingest] micro-chunks capped path={file_path} count={_before}->{len(chunks)} cap={_cap}")
+                except Exception:
+                    pass
         except Exception:
             pass
     elif use_semantic:
@@ -1322,7 +1327,12 @@ def index_repo(root: Path, qdrant_url: str, api_key: str, collection: str, model
             try:
                 _cap = int(os.environ.get("MAX_MICRO_CHUNKS_PER_FILE", "2000") or 2000)
                 if _cap > 0 and len(chunks) > _cap:
+                    _before = len(chunks)
                     chunks = chunks[:_cap]
+                    try:
+                        print(f"[ingest] micro-chunks capped path={file_path} count={_before}->{len(chunks)} cap={_cap}")
+                    except Exception:
+                        pass
             except Exception:
                 pass
         elif use_semantic:

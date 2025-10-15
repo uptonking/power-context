@@ -10,6 +10,9 @@ Run everything with a single command, then wire your MCP client to the SSE endpo
 HOST_INDEX_PATH="$(pwd)" FASTMCP_INDEXER_PORT=8001 docker compose up -d qdrant mcp mcp_indexer indexer
 ```
 
+
+Note: `make reset-dev` provisions models/tokenizer.json and brings up the llama.cpp decoder sidecar by default, so ReFRAG micro‑chunking and the decoder path work out of the box.
+
 Endpoints
 
 | Component   | URL                          |

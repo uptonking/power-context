@@ -59,3 +59,22 @@ def lex_hash_vector_queries(phrases: list[str], dim: int = 4096) -> list[float]:
         vec[h % dim] += 1.0
     norm = math.sqrt(sum(v*v for v in vec)) or 1.0
     return [v / norm for v in vec]
+
+
+# Shared snippet highlighter used by servers and CLIs
+# Highlights tokens by wrapping matches with << >> (longest-first, case-insensitive)
+def highlight_snippet(snippet: str, tokens: list[str]) -> str:
+    if not snippet or not tokens:
+        return snippet
+    # longest first to avoid partial overlaps
+    toks = sorted(set(tokens), key=len, reverse=True)
+    import re as _re
+    def _repl(m):
+        return f"<<{m.group(0)}>>"
+    for t in toks:
+        try:
+            pat = _re.compile(_re.escape(t), _re.IGNORECASE)
+            snippet = pat.sub(_repl, snippet)
+        except Exception:
+            continue
+    return snippet

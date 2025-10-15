@@ -50,6 +50,13 @@ try:
 except Exception:
     pass
 
+
+# Shared utilities (lex hashing, snippet highlighter)
+try:
+    from scripts.utils import highlight_snippet as _do_highlight_snippet
+except Exception:
+    _do_highlight_snippet = None  # fallback guarded at call site
+
 try:
     # Official MCP Python SDK (FastMCP convenience server)
     from mcp.server.fastmcp import FastMCP
@@ -295,20 +302,6 @@ def _tokens_from_queries(qs):
             out.append(t); seen.add(t)
     return out
 
-def _highlight_snippet(snippet: str, tokens: list[str]) -> str:
-    if not snippet or not tokens:
-        return snippet
-    # longest first to avoid partial overlaps
-    toks = sorted(set(tokens), key=len, reverse=True)
-    def repl(m):
-        return f"<<{m.group(0)}>>"
-    for t in toks:
-        try:
-            pat = re.compile(re.escape(t), re.IGNORECASE)
-            snippet = pat.sub(repl, snippet)
-        except Exception:
-            continue
-    return snippet
 
 
 @mcp.tool()
@@ -864,6 +857,7 @@ async def repo_search(
 
     # Optional rerank fallback path: if enabled, attempt; on timeout or error, keep hybrid
     used_rerank = False
+    rerank_counters = {"inproc_hybrid": 0, "inproc_dense": 0, "subprocess": 0, "timeout": 0, "error": 0}
     if rerank_enabled:
         # Resolve in-process gating once and reuse
         use_rerank_inproc = str(os.environ.get("RERANK_IN_PROCESS", "")).strip().lower() in {"1","true","yes","on"}
@@ -922,6 +916,7 @@ async def repo_search(
                     if tmp:
                         results = tmp
                         used_rerank = True
+                        rerank_counters["inproc_hybrid"] += 1
             except Exception:
                 used_rerank = False
         # Fallback paths (in-process reranker dense candidates, then subprocess)
@@ -943,6 +938,7 @@ async def repo_search(
                     if items:
                         results = items
                         used_rerank = True
+                        rerank_counters["inproc_dense"] += 1
                 except Exception:
                     use_rerank_inproc = False
             if (not use_rerank_inproc) and (not used_rerank):
@@ -977,6 +973,7 @@ async def repo_search(
                         except Exception:
                             pass
                     if rres.get("ok") and (rres.get("stdout") or "").strip():
+                        rerank_counters["subprocess"] += 1
                         tmp = []
                         for ln in (rres.get("stdout") or "").splitlines():
                             parts = ln.strip().split("\t")
@@ -997,9 +994,12 @@ async def repo_search(
                         if tmp:
                             results = tmp
                             used_rerank = True
+                            rerank_counters["inproc_hybrid"] += 1
                 except subprocess.TimeoutExpired:
+                    rerank_counters["timeout"] += 1
                     used_rerank = False
                 except Exception:
+                    rerank_counters["error"] += 1
                     used_rerank = False
 
     if not used_rerank:
@@ -1040,7 +1040,7 @@ async def repo_search(
                 ei = min(len(lines), max(sl, el) + ctx)
                 snippet = "".join(lines[si-1:ei])
                 if highlight_snippet:
-                    snippet = _highlight_snippet(snippet, toks)
+                    snippet = _do_highlight_snippet(snippet, toks) if _do_highlight_snippet else snippet
                 if len(snippet.encode("utf-8", "ignore")) > SNIPPET_MAX_BYTES:
                     _suffix = "\n...[snippet truncated]"
                     _sb = _suffix.encode("utf-8")
@@ -1099,6 +1099,7 @@ async def repo_search(
             "compact": bool(compact),
         },
         "used_rerank": bool(used_rerank),
+        "rerank_counters": rerank_counters,
         "total": len(results),
         "results": results,
         **res,
