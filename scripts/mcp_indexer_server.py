@@ -350,7 +350,7 @@ async def qdrant_list(**kwargs) -> Dict[str, Any]:
     """List Qdrant collections (ignores any extra params)"""
     try:
         from qdrant_client import QdrantClient
-        client = QdrantClient(url=QDRANT_URL, api_key=os.environ.get("QDRANT_API_KEY"))
+        client = QdrantClient(url=QDRANT_URL, api_key=os.environ.get("QDRANT_API_KEY"), timeout=float(os.environ.get("QDRANT_TIMEOUT","20") or 20))
         cols_info = await asyncio.to_thread(client.get_collections)
         return {"collections": [c.name for c in cols_info.collections]}
     except ImportError:
@@ -426,7 +426,7 @@ async def memory_store(information: str,
 
     # Upsert
     try:
-        client = QdrantClient(url=QDRANT_URL, api_key=os.environ.get("QDRANT_API_KEY"))
+        client = QdrantClient(url=QDRANT_URL, api_key=os.environ.get("QDRANT_API_KEY"), timeout=float(os.environ.get("QDRANT_TIMEOUT","20") or 20))
         # Ensure collection and named vectors exist (dense + lexical)
         try:
             await asyncio.to_thread(lambda: _ensure_collection(client, coll, len(dense), vector_name))
@@ -472,7 +472,7 @@ async def qdrant_status(collection: Optional[str] = None, max_points: Optional[i
     try:
         from qdrant_client import QdrantClient
         import datetime as _dt
-        client = QdrantClient(url=QDRANT_URL, api_key=os.environ.get("QDRANT_API_KEY"))
+        client = QdrantClient(url=QDRANT_URL, api_key=os.environ.get("QDRANT_API_KEY"), timeout=float(os.environ.get("QDRANT_TIMEOUT","20") or 20))
         # Count points
         try:
             cnt_res = await asyncio.to_thread(lambda: client.count(collection_name=coll, exact=True))
@@ -1189,6 +1189,12 @@ async def context_search(
                     continue
             if best_name and best_hits > 0:
                 mcoll = best_name
+                try:
+                    import time
+                    _MEM_COLL_CACHE["name"] = best_name
+                    _MEM_COLL_CACHE["ts"] = time.time()
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -1416,7 +1422,7 @@ async def context_search(
 
             from scripts.utils import sanitize_vector_name  # local util
 
-            client = QdrantClient(url=QDRANT_URL, api_key=os.environ.get("QDRANT_API_KEY"))
+            client = QdrantClient(url=QDRANT_URL, api_key=os.environ.get("QDRANT_API_KEY"), timeout=float(os.environ.get("QDRANT_TIMEOUT","20") or 20))
             model_name = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
             vec_name = sanitize_vector_name(model_name)
             model = _get_embedding_model(model_name)
@@ -1455,7 +1461,7 @@ async def context_search(
     if include_mem and mem_limit > 0 and not mem_hits and queries:
         try:
             from qdrant_client import QdrantClient  # type: ignore
-            client = QdrantClient(url=QDRANT_URL, api_key=os.environ.get("QDRANT_API_KEY"))
+            client = QdrantClient(url=QDRANT_URL, api_key=os.environ.get("QDRANT_API_KEY"), timeout=float(os.environ.get("QDRANT_TIMEOUT","20") or 20))
             import re
             terms = [str(t).lower() for t in queries if t]
             tokens = set()

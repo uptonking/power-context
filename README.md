@@ -518,6 +518,15 @@ Notes:
 
 ```bash
 make rerank ARGS="--language python --under /work/scripts"
+
+### Operational safeguards and troubleshooting
+
+- Tokenizer for micro-chunking: set TOKENIZER_JSON to a valid tokenizer.json path (default: models/tokenizer.json). If missing, the indexer falls back to line-based chunking.
+- Cap micro-chunks per file: MAX_MICRO_CHUNKS_PER_FILE (default 2000) to prevent runaway chunk counts on very large files.
+- Qdrant client timeout: QDRANT_TIMEOUT (seconds, default 20) applies to all MCP Qdrant calls.
+- Memory auto-detect caching: MEMORY_AUTODETECT=1 by default with MEMORY_COLLECTION_TTL_SECS (default 300s) to avoid repeatedly sampling all collections.
+- Schema repair: ensure_collection now repairs missing named vectors (lex, and mini when REFRAG_MODE=1) on existing collections.
+
 ```
 
 - Direct Qdrant filter example is shown below; most MCP clients allow passing tool args that map to server-side filters. If your client supports adding structured args to `qdrant-find`, prefer these filters to reduce noise.

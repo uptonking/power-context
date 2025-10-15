@@ -128,15 +128,16 @@ up-nc: ## up with full no-cache rebuild
 restart-nc: ## down, no-cache rebuild, up
 	docker compose down && docker compose build --no-cache && docker compose up -d
 
-reset-dev: ## full dev reset: qdrant -> wait -> init payload -> reindex -> bring up services
+reset-dev: ## full dev reset: qdrant -> wait -> init payload -> reindex -> bring up services (incl. decoder)
 	docker compose down || true
 	docker compose build --no-cache
 	docker compose up -d qdrant
 	./scripts/wait-for-qdrant.sh
 	docker compose run --rm init_payload || true
 	docker compose run --rm indexer --root /work --recreate
-	docker compose up -d mcp mcp_indexer watcher
-	docker compose pshs
+	$(MAKE) llama-model
+	docker compose up -d mcp mcp_indexer watcher llamacpp
+	docker compose ps
 
 
 quantize-reranker: ## Quantize reranker ONNX to INT8 (set RERANKER_ONNX_PATH, optional OUTPUT_ONNX_PATH)
@@ -159,5 +160,15 @@ llamacpp-up: llama-model ## fetch tiny model (if missing) and start llama.cpp si
 # Optional: build a custom image that bakes the model into the image (no host volume needed)
 llamacpp-build-image: ## build custom llama.cpp image with baked model (override LLAMACPP_MODEL_URL)
 	docker build -f Dockerfile.llamacpp --build-arg MODEL_URL="$(LLAMACPP_MODEL_URL)" -t context-llamacpp:tiny .
+
+# Download a tokenizer.json for micro-chunking (default: BAAI/bge-base-en-v1.5)
+TOKENIZER_URL ?= https://huggingface.co/BAAI/bge-base-en-v1.5/resolve/main/tokenizer.json
+TOKENIZER_PATH ?= models/tokenizer.json
+
+tokenizer: ## download tokenizer.json to models/tokenizer.json (override with TOKENIZER_URL/TOKENIZER_PATH)
+	@mkdir -p $(dir $(TOKENIZER_PATH))
+	@echo "Downloading: $(TOKENIZER_URL) -> $(TOKENIZER_PATH)" && \
+	curl -L --fail --retry 3 -C - "$(TOKENIZER_URL)" -o "$(TOKENIZER_PATH)"
+
 
 
