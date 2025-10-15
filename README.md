@@ -33,8 +33,8 @@ Add this to your workspace-level Kiro config at `.kiro/settings/mcp.json` (resta
 ````json
 {
   "mcpServers": {
-    "qdrant-indexer": { "command": "npx", "args": ["mcp-remote", "http://localhost:8001/sse", "--transport", "sse"] },
-    "qdrant": { "command": "npx", "args": ["mcp-remote", "http://localhost:8000/sse", "--transport", "sse"] }
+    "qdrant-indexer": { "command": "npx", "args": ["mcp-remote", "http://localhost:8001/sse", "--transport", "sse-only"] },
+    "qdrant": { "command": "npx", "args": ["mcp-remote", "http://localhost:8000/sse", "--transport", "sse-only"] }
   }
 }
 ````
@@ -171,150 +171,6 @@ make warm
 
 
 
-## Legacy (deprecated): command-based mcp-server-qdrant
-
-This folder spins up a local Qdrant (vector DB) and a Model Context Protocol server that stores/finds memories in Qdrant.
-
-- Qdrant available at: http://localhost:6333
-- MCP (SSE) available at: http://localhost:8000/sse
-
-## Quick start
-
-```bash
-# build and start
-make up
-
-# follow logs
-make logs
-
-# stop
-make down
-```
-
-## Configuration (.env)
-
-The `.env` file configures both services. Defaults:
-
-- `QDRANT_URL=http://qdrant:6333` (internal Docker network)
-- `COLLECTION_NAME=my-collection` (auto-created by the server)
-- `EMBEDDING_MODEL=BAAI/bge-base-en-v1.5`
-- `FASTMCP_HOST=0.0.0.0`, `FASTMCP_PORT=8000`
-
-Optional:
-- `TOOL_STORE_DESCRIPTION` / `TOOL_FIND_DESCRIPTION` to tailor how clients use the tools.
-- `REPO_NAME` to tag each point's payload with a repository label (metadata.repo) for filtering.
-
-> Do not set `QDRANT_LOCAL_PATH` when `QDRANT_URL` is set.
-### Reranker and warmup flags
-
-- RERANKER_ENABLED: 0/1 to enable ONNX cross-encoder re-ranking in the indexer search path
-- RERANKER_TOPN, RERANKER_RETURN_M, RERANKER_TIMEOUT_MS: tuning knobs
-- RERANK_TIMEOUT_FLOOR_MS: minimum timeout floor (ms) applied to reranker calls to prevent spurious cold-start timeouts (default 1000)
-- EMBEDDING_WARMUP: 0/1 to preload the embedding model at startup (default 0)
-- RERANK_WARMUP: 0/1 to run a tiny rerank warmup at startup when RERANKER_ENABLED=1 (default 0)
-
-- HYBRID_IN_PROCESS: 0/1 to call hybrid search in-process (default 1). Falls back to subprocess if import fails.
-- RERANK_IN_PROCESS: 0/1 to call reranker in-process with cached ONNX session/tokenizer (default 1). Falls back to subprocess if import/session init fails.
-
-Notes:
-- Effective rerank timeout = max(RERANK_TIMEOUT_FLOOR_MS, RERANKER_TIMEOUT_MS)
-- Warmups are optional; enable when you want the very first query to be warm at the cost of slightly slower container readiness on a fresh image.
-
-
-## Verify services
-
-```bash
-# Qdrant API ping
-curl -s http://localhost:6333/ | jq .status
-
-# MCP SSE endpoints (should return 200 OK headers)
-curl -I http://localhost:8000/sse   # Memory MCP
-curl -I http://localhost:8001/sse   # Indexer MCP
-```
-
-## Connect a client
-
-- Claude Desktop: configure an MCP server entry pointing to this running SSE server, or use command-based config to run `mcp-server-qdrant` with the same env.
-- Cursor/Windsurf: add a custom MCP server pointing to `http://localhost:8000/sse`.
-- VS Code MCP extensions: point to the SSE endpoint or run via command.
-
-
-### Known-good full config block (with mcpServers)
-
-```json
-{
-  "mcpServers": {
-    "qdrant": {
-      "command": "uvx",
-      "args": ["mcp-server-qdrant"],
-      "env": {
-        "QDRANT_URL": "http://localhost:6333",
-        "COLLECTION_NAME": "my-collection",
-        "EMBEDDING_MODEL": "BAAI/bge-base-en-v1.5"
-      }
-    }
-  }
-}
-```
-
-Windsurf:
-
-```json
-{
-  "mcpServers": {
-    "qdrant": {
-      "command": "uvx",
-      "args": ["mcp-server-qdrant"],
-      "env": {
-        "QDRANT_URL": "http://localhost:6333",
-        "COLLECTION_NAME": "my-collection",
-        "EMBEDDING_MODEL": "BAAI/bge-base-en-v1.5"
-      },
-      "disabled": false
-    },
-    "qdrant-indexer": {
-      "type": "sse",
-      "url": "http://localhost:8001/sse",
-      "disabled": false
-    }
-  }
-}
-```
-
-
-Augment
-
-Indexer MCP (SSE):
-
-```json
-{
-  "mcpServers": {
-    "qdrant-indexer": {
-      "type": "sse",
-      "url": "http://localhost:8001/sse",
-      "disabled": false
-    }
-  }
-}
-```
-
-Search MCP (default via uvx/stdio):
-
-```json
-{
-  "mcpServers": {
-    "qdrant": {
-      "command": "uvx",
-      "args": ["mcp-server-qdrant"],
-      "env": {
-        "QDRANT_URL": "http://localhost:6333",
-        "COLLECTION_NAME": "my-collection",
-        "EMBEDDING_MODEL": "BAAI/bge-base-en-v1.5"
-      }
-    }
-  }
-}
-```
 
 
 
@@ -431,7 +287,11 @@ For each tool, use this format:
   - Structured fields supported (parity with DSL): language, under, kind, symbol, ext, not_, case, path_regex, path_glob, not_glob
   - Response shaping: compact (bool) returns only path/start_line/end_line
   - Smart default: compact=true when query is an array with multiple queries (unless explicitly set)
+  - If include_snippet is true, compact is forced off so snippet fields are returned
+
   - Glob fields accept a single string or an array; you can also pass a comma-separated string which will be split
+  - Query parsing: accepts query or queries; JSON arrays, JSON-stringified arrays, comma-separated strings; also supports q/text aliases
+
   - Parity note: path_glob/not_glob list handling works in both modes — in-process and subprocess — with OR semantics for path_glob and reject-on-any for not_glob.
   - Examples:
     - {"query": "semantic chunking"}
@@ -447,12 +307,13 @@ For each tool, use this format:
 
 
 Verification:
-- You should see tools from both servers (e.g., `qdrant-find`, `qdrant-store`, `qdrant-list`, `qdrant-index`, `qdrant-prune`).
-- Call `qdrant-list` to confirm Qdrant connectivity.
-- Call `qdrant-index` with arguments like `{ "subdir": "scripts", "recreate": true }` to (re)index the mounted repo.
+- You should see tools from both servers (e.g., `store`, `find`, `repo_search`, `code_search`, `context_search`, `qdrant_list`, `qdrant_index`, `qdrant_prune`, `qdrant_status`).
+- Call `qdrant_list` to confirm Qdrant connectivity.
+- Call `qdrant_index` with args like `{ "subdir": "scripts", "recreate": true }` to (re)index the mounted repo.
+- Call `context_search` with `{ "include_memories": true }` to blend memory+code (requires enabling MEMORY_SSE_ENABLED on the indexer service).
 
-- qdrant-list with no args
-- qdrant-prune with no args
+- qdrant_list with no args
+- qdrant_prune with no args
 
 ```
 
@@ -583,7 +444,7 @@ Client tips:
 
 ## Troubleshooting
 
-- If `mcp-server-qdrant` can’t reach Qdrant, confirm both containers are up: `make ps`.
+- If the MCP servers can’t reach Qdrant, confirm both containers are up: `make ps`.
 - If the SSE port collides, change `FASTMCP_PORT` in `.env` and the mapped port in `docker-compose.yml`.
 - If you customize tool descriptions, restart: `make restart`.
 
