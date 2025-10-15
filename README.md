@@ -1,5 +1,8 @@
 
 ## Quickstart (ship-ready)
+ReFRag article:
+
+https://arxiv.org/abs/2509.01092
 
 Run everything with a single command, then wire your MCP client to the SSE endpoints.
 
