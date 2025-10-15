@@ -80,6 +80,110 @@ SYMBOL_EQUALITY_BOOST = float(os.environ.get("HYBRID_SYMBOL_EQUALITY_BOOST", "0.
 VENDOR_PENALTY = float(os.environ.get("HYBRID_VENDOR_PENALTY", "0.05") or 0.05)
 LANG_MATCH_BOOST = float(os.environ.get("HYBRID_LANG_MATCH_BOOST", "0.05") or 0.05)
 CLUSTER_LINES = int(os.environ.get("HYBRID_CLUSTER_LINES", "15") or 15)
+# Micro-span compaction and budgeting (ReFRAG-lite output shaping)
+MICRO_OUT_MAX_SPANS = int(os.environ.get("MICRO_OUT_MAX_SPANS", "3") or 3)
+MICRO_MERGE_LINES = int(os.environ.get("MICRO_MERGE_LINES", "4") or 4)
+MICRO_BUDGET_TOKENS = int(os.environ.get("MICRO_BUDGET_TOKENS", "512") or 512)
+MICRO_TOKENS_PER_LINE = int(os.environ.get("MICRO_TOKENS_PER_LINE", "32") or 32)
+
+
+def _merge_and_budget_spans(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Given ranked items with metadata path/start_line/end_line, merge nearby spans
+    per path and enforce a token budget using a simple tokens-per-line estimate.
+    Returns a filtered/merged list preserving score order as much as possible.
+    """
+    # Read dynamic knobs at call-time so tests/env can override without reload
+    try:
+        merge_lines = int(os.environ.get("MICRO_MERGE_LINES", str(MICRO_MERGE_LINES)) or MICRO_MERGE_LINES)
+    except Exception:
+        merge_lines = MICRO_MERGE_LINES
+    try:
+        budget_tokens = int(os.environ.get("MICRO_BUDGET_TOKENS", str(MICRO_BUDGET_TOKENS)) or MICRO_BUDGET_TOKENS)
+    except Exception:
+        budget_tokens = MICRO_BUDGET_TOKENS
+    try:
+        tokens_per_line = int(os.environ.get("MICRO_TOKENS_PER_LINE", str(MICRO_TOKENS_PER_LINE)) or MICRO_TOKENS_PER_LINE)
+    except Exception:
+        tokens_per_line = MICRO_TOKENS_PER_LINE
+    try:
+        out_max_spans = int(os.environ.get("MICRO_OUT_MAX_SPANS", str(MICRO_OUT_MAX_SPANS)) or MICRO_OUT_MAX_SPANS)
+    except Exception:
+        out_max_spans = MICRO_OUT_MAX_SPANS
+
+    # First cluster adjacent by path using a tighter merge gap for micro spans
+    clusters: Dict[str, List[Dict[str, Any]]] = {}
+    for m in items:
+        md = (m.get("pt", {}).payload or {}).get("metadata") or {}
+        path = str(md.get("path") or "")
+        start_line = int(md.get("start_line") or 0)
+        end_line = int(md.get("end_line") or 0)
+        lst = clusters.setdefault(path, [])
+        merged = False
+        for c in lst:
+            if start_line <= c["end"] + merge_lines and end_line >= c["start"] - merge_lines:
+                # expand bounds; keep higher-score rep
+                if float(m.get("s", 0.0)) > float(c["m"].get("s", 0.0)):
+                    c["m"] = m
+                c["start"] = min(c["start"], start_line)
+                c["end"] = max(c["end"], end_line)
+                merged = True
+                break
+        if not merged:
+            lst.append({"start": start_line, "end": end_line, "m": m, "p": path})
+
+    # Now budget per path with a global token budget
+    budget = budget_tokens
+    out: List[Dict[str, Any]] = []
+    per_path_counts: Dict[str, int] = {}
+
+    def _line_tokens(s: int, e: int) -> int:
+        return max(1, (e - s + 1) * tokens_per_line)
+
+    # Flatten clusters preserving original score order
+    flattened = []
+    for lst in clusters.values():
+        for c in lst:
+            flattened.append(c)
+    def _flat_key(c):
+        m = c.get("m", {})
+        md = (m.get("pt", {}).payload or {}).get("metadata") if hasattr(m.get("pt", {}), "payload") else {}
+        path = str((md or {}).get("path") or "")
+        start = int((md or {}).get("start_line") or 0)
+        return (-float(m.get("s", 0.0)), path, start)
+    flattened.sort(key=_flat_key)
+
+    for c in flattened:
+        m = c["m"]
+        # Prefer path from cluster key to avoid payload shape differences in tests
+        path = str(c.get("p") or "")
+        if not path:
+            md = (m.get("pt", {}).payload or {}).get("metadata") if hasattr(m.get("pt", {}), "payload") else {}
+            path = str((md or {}).get("path") or "")
+        # per-path cap
+        if per_path_counts.get(path, 0) >= out_max_spans:
+            continue
+        need = _line_tokens(c["start"], c["end"])
+        if need <= budget:
+            budget -= need
+            per_path_counts[path] = per_path_counts.get(path, 0) + 1
+            # rewrite start/end in the representative's metadata clone for emission
+            # (we do not mutate original payloads coming from Qdrant objects)
+            out.append({"m": m, "start": c["start"], "end": c["end"], "need_tokens": need})
+        if budget <= 0:
+            break
+
+    # Map back to the same structure expected downstream: keep representative m
+    # and expose start_line/end_line from our merged span via components
+    result: List[Dict[str, Any]] = []
+    for c in out:
+        m = c["m"]
+        # Attach merged bounds for the downstream emitter to read
+        m["_merged_start"] = c["start"]
+        m["_merged_end"] = c["end"]
+        m["_budget_tokens"] = c["need_tokens"]
+        result.append(m)
+    return result
+
 
 # Core file patterns (prioritize implementation over tests/docs)
 CORE_FILE_PATTERNS = [
@@ -815,6 +919,13 @@ def run_hybrid_search(
             return True
         ranked = [m for m in ranked if _pass_filters(m)]
 
+    # ReFRAG-lite span compaction and budgeting (applied after filters)
+    try:
+        if str(os.environ.get("REFRAG_MODE", "")).strip().lower() in {"1","true","yes","on"}:
+            ranked = _merge_and_budget_spans(ranked)
+    except Exception:
+        pass
+
     if per_path and per_path > 0:
         counts: Dict[str, int] = {}
         merged: List[Dict[str, Any]] = []
@@ -834,6 +945,9 @@ def run_hybrid_search(
     items: List[Dict[str, Any]] = []
     for m in merged:
         md = (m["pt"].payload or {}).get("metadata") or {}
+        # Prefer merged bounds if present
+        start_line = m.get("_merged_start") or md.get("start_line")
+        end_line = m.get("_merged_end") or md.get("end_line")
         comp = {
             "dense_rrf": round(float(m.get("d", 0.0)), 4),
             "lexical": round(float(m.get("lx", 0.0)), 4),
@@ -858,10 +972,12 @@ def run_hybrid_search(
             "score": round(float(m["s"]), 4),
             "path": md.get("path"),
             "symbol": md.get("symbol_path") or md.get("symbol") or "",
-            "start_line": md.get("start_line"),
-            "end_line": md.get("end_line"),
+            "start_line": start_line,
+            "end_line": end_line,
             "components": comp,
             "why": why,
+            "span_budgeted": bool(m.get("_merged_start") is not None),
+            "budget_tokens_used": m.get("_budget_tokens"),
         })
     return items
 
