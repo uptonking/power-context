@@ -108,6 +108,44 @@ Blended search:
 - Call `context_search` on :8001 with `{ "include_memories": true }` to return both memory and code results.
 
 
+### Enable memory blending (for context_search)
+
+1) Ensure the Memory MCP is running on :8000 (default in compose).
+2) Enable SSE memory blending on the Indexer MCP by setting these env vars for the mcp_indexer service (docker-compose.yml):
+
+<augment_code_snippet mode="EXCERPT">
+````yaml
+services:
+  mcp_indexer:
+    environment:
+      - MEMORY_SSE_ENABLED=true
+      - MEMORY_MCP_URL=http://mcp:8000/sse
+      - MEMORY_MCP_TIMEOUT=6
+````
+</augment_code_snippet>
+
+3) Restart the indexer service:
+
+<augment_code_snippet mode="EXCERPT">
+````bash
+docker compose up -d mcp_indexer
+````
+</augment_code_snippet>
+
+4) Validate by calling context_search with include_memories=true for a query that matches a stored memory:
+
+<augment_code_snippet mode="EXCERPT">
+````json
+{
+  "query": "your test memory text",
+  "include_memories": true,
+  "limit": 5
+}
+````
+</augment_code_snippet>
+
+Expected: non-zero results with blended items; memory hits will have memory-like payloads (e.g., metadata.kind = "memory").
+
 
 - Idempotent + incremental indexing out of the box:
   - Skips unchanged files automatically using a file content hash stored in payload (metadata.file_hash)
