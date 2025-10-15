@@ -455,6 +455,7 @@ def chunk_by_tokens(text: str, k_tokens: int = None, stride_tokens: int = None) 
 
 
 from scripts.utils import sanitize_vector_name as _sanitize_vector_name
+from scripts.utils import lex_hash_vector_text as _lex_hash_vector_text
 
 
 def ensure_collection(client: QdrantClient, name: str, dim: int, vector_name: str):
@@ -463,13 +464,34 @@ def ensure_collection(client: QdrantClient, name: str, dim: int, vector_name: st
     When REFRAG_MODE=1, also includes a compact mini vector (MINI_VECTOR_NAME).
     """
     try:
-        client.get_collection(name)
+        info = client.get_collection(name)
         # Ensure HNSW tuned params even if the collection already existed
         try:
             client.update_collection(
                 collection_name=name,
                 hnsw_config=models.HnswConfigDiff(m=16, ef_construct=256),
             )
+        except Exception:
+            pass
+        # Schema repair: add missing named vectors on existing collections
+        try:
+            cfg = getattr(info.config.params, "vectors", None)
+            if isinstance(cfg, dict):
+                missing = {}
+                if LEX_VECTOR_NAME not in cfg:
+                    missing[LEX_VECTOR_NAME] = models.VectorParams(size=LEX_VECTOR_DIM, distance=models.Distance.COSINE)
+                try:
+                    refrag_on = os.environ.get("REFRAG_MODE", "").strip().lower() in {"1","true","yes","on"}
+                except Exception:
+                    refrag_on = False
+                if refrag_on and MINI_VECTOR_NAME not in cfg:
+                    missing[MINI_VECTOR_NAME] = models.VectorParams(size=int(os.environ.get("MINI_VEC_DIM", MINI_VEC_DIM) or MINI_VEC_DIM), distance=models.Distance.COSINE)
+                if missing:
+                    try:
+                        client.update_collection(collection_name=name, vectors_config=missing)
+                    except Exception:
+                        # Best-effort; if server doesn't support adding vectors, leave to recreate path
+                        pass
         except Exception:
             pass
         return
@@ -1116,6 +1138,12 @@ def index_single_file(client: QdrantClient, model: TextEmbedding, collection: st
     use_semantic = os.environ.get("INDEX_SEMANTIC_CHUNKS", "1").lower() in {"1", "true", "yes", "on"}
     if use_micro:
         chunks = chunk_by_tokens(text)
+        try:
+            _cap = int(os.environ.get("MAX_MICRO_CHUNKS_PER_FILE", "2000") or 2000)
+            if _cap > 0 and len(chunks) > _cap:
+                chunks = chunks[:_cap]
+        except Exception:
+            pass
     elif use_semantic:
         chunks = chunk_semantic(text, language, CHUNK_LINES, CHUNK_OVERLAP)
     else:
@@ -1175,7 +1203,7 @@ def index_single_file(client: QdrantClient, model: TextEmbedding, collection: st
         batch_texts.append(info)
         batch_meta.append(payload)
         batch_ids.append(hash_id(ch["text"], str(file_path), ch["start"], ch["end"]))
-        batch_lex.append(_lex_hash_vector(ch.get("text") or ""))
+        batch_lex.append(_lex_hash_vector_text(ch.get("text") or ""))
 
     if batch_texts:
         vectors = embed_batch(model, batch_texts)
@@ -1291,6 +1319,12 @@ def index_repo(root: Path, qdrant_url: str, api_key: str, collection: str, model
         use_micro = os.environ.get("INDEX_MICRO_CHUNKS", "0").lower() in {"1","true","yes","on"}
         if use_micro:
             chunks = chunk_by_tokens(text)
+            try:
+                _cap = int(os.environ.get("MAX_MICRO_CHUNKS_PER_FILE", "2000") or 2000)
+                if _cap > 0 and len(chunks) > _cap:
+                    chunks = chunks[:_cap]
+            except Exception:
+                pass
         elif use_semantic:
             chunks = chunk_semantic(text, language, CHUNK_LINES, CHUNK_OVERLAP)
         else:
@@ -1331,7 +1365,7 @@ def index_repo(root: Path, qdrant_url: str, api_key: str, collection: str, model
             batch_texts.append(info)
             batch_meta.append(payload)
             batch_ids.append(hash_id(ch["text"], str(file_path), ch["start"], ch["end"]))
-            batch_lex.append(_lex_hash_vector(ch.get("text") or ""))
+            batch_lex.append(_lex_hash_vector_text(ch.get("text") or ""))
             points_indexed += 1
             if len(batch_texts) >= BATCH_SIZE:
                 vectors = embed_batch(model, batch_texts)

@@ -38,6 +38,10 @@ import sys
 # when this file is executed directly (sys.path[0] may be /work/scripts).
 # Supports multiple roots via WORK_ROOTS env (comma-separated), defaults to /work and /app.
 _roots_env = os.environ.get("WORK_ROOTS", "")
+
+# Cache for memory collection autodetection (name + timestamp)
+_MEM_COLL_CACHE = {"name": None, "ts": 0.0}
+
 _roots = [p.strip() for p in _roots_env.split(",") if p.strip()] or ["/work", "/app"]
 try:
     for _root in _roots:
@@ -396,18 +400,23 @@ async def memory_store(information: str,
         return [x.lower() for x in out if x]
 
     def _lex_hash_vector(text: str, dim: int = LEX_VECTOR_DIM) -> list[float]:
-        if not text:
-            return [0.0] * dim
-        vec = [0.0] * dim
-        toks = _split_ident_lex(text)
-        if not toks:
-            return vec
-        for t in toks:
-            h = int(hashlib.md5(t.encode("utf-8", errors="ignore")).hexdigest()[:8], 16)
-            vec[h % dim] += 1.0
-        # L2 normalize to align with ingest_code._lex_hash_vector
-        norm = (sum(v*v for v in vec) or 0.0) ** 0.5 or 1.0
-        return [v / norm for v in vec]
+        # Delegate to shared utility for consistency
+        try:
+            from scripts.utils import lex_hash_vector_text
+            return lex_hash_vector_text(text, dim)
+        except Exception:
+            # Fallback: minimal hashing
+            if not text:
+                return [0.0] * dim
+            vec = [0.0] * dim
+            toks = _split_ident_lex(text)
+            if not toks:
+                return vec
+            for t in toks:
+                h = int(hashlib.md5(t.encode("utf-8", errors="ignore")).hexdigest()[:8], 16)
+                vec[h % dim] += 1.0
+            norm = (sum(v*v for v in vec) or 0.0) ** 0.5 or 1.0
+            return [v / norm for v in vec]
 
     # Build vectors (cached embedding model)
     model = _get_embedding_model(model_name)
@@ -1146,7 +1155,15 @@ async def context_search(
     if include_memories and not os.environ.get("MEMORY_COLLECTION_NAME"):
         try:
             from qdrant_client import QdrantClient  # type: ignore
-            client = QdrantClient(url=QDRANT_URL, api_key=os.environ.get("QDRANT_API_KEY"))
+            # Optional: disable auto-detect and/or use cached result
+            if str(os.environ.get("MEMORY_AUTODETECT", "1")).lower() not in ("1","true","yes","on"):
+                raise RuntimeError("auto-detect disabled")
+            import time
+            ttl = float(os.environ.get("MEMORY_COLLECTION_TTL_SECS", "300") or 300)
+            if _MEM_COLL_CACHE["name"] and (time.time() - float(_MEM_COLL_CACHE["ts"] or 0.0)) < ttl:
+                mcoll = _MEM_COLL_CACHE["name"]
+                raise RuntimeError("use cache")
+            client = QdrantClient(url=QDRANT_URL, api_key=os.environ.get("QDRANT_API_KEY"), timeout=float(os.environ.get("QDRANT_TIMEOUT","20") or 20))
             info = await asyncio.to_thread(client.get_collections)
             best_name = None
             best_hits = -1

@@ -511,19 +511,10 @@ def _split_ident_lex(s: str) -> List[str]:
     return [x.lower() for x in out if x and x.lower() not in _STOP]
 
 
+from scripts.utils import lex_hash_vector_queries as _lex_hash_vector_queries
+
 def lex_hash_vector(phrases: List[str], dim: int = LEX_VECTOR_DIM) -> List[float]:
-    import hashlib, math
-    toks: List[str] = []
-    for ph in phrases:
-        toks.extend(_split_ident_lex(ph))
-    if not toks:
-        return [0.0] * dim
-    vec = [0.0] * dim
-    for t in toks:
-        h = int(hashlib.md5(t.encode("utf-8", errors="ignore")).hexdigest()[:8], 16)
-        vec[h % dim] += 1.0
-    norm = math.sqrt(sum(v*v for v in vec)) or 1.0
-    return [v / norm for v in vec]
+    return _lex_hash_vector_queries(phrases, dim)
 
 
 def lex_query(client: QdrantClient, v: List[float], flt, per_query: int) -> List[Any]:

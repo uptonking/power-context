@@ -19,3 +19,43 @@ def sanitize_vector_name(model_name: str) -> str:
     # Fallback: compact name
     return name.replace("/", "-").replace("_", "-")[:64]
 
+
+
+# Shared lexical hashing utilities to keep ingest/search/memory consistent
+import re, hashlib, math
+
+def _split_ident_lex(s: str) -> list[str]:
+    parts = re.split(r"[^A-Za-z0-9]+", s)
+    out: list[str] = []
+    for p in parts:
+        if not p:
+            continue
+        segs = re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|\d+", p)
+        out.extend([x for x in segs if x])
+    return [x.lower() for x in out if x]
+
+def lex_hash_vector_text(text: str, dim: int = 4096) -> list[float]:
+    if not text:
+        return [0.0] * dim
+    toks = _split_ident_lex(text)
+    if not toks:
+        return [0.0] * dim
+    vec = [0.0] * dim
+    for t in toks:
+        h = int(hashlib.md5(t.encode("utf-8", errors="ignore")).hexdigest()[:8], 16)
+        vec[h % dim] += 1.0
+    norm = math.sqrt(sum(v*v for v in vec)) or 1.0
+    return [v / norm for v in vec]
+
+def lex_hash_vector_queries(phrases: list[str], dim: int = 4096) -> list[float]:
+    toks: list[str] = []
+    for ph in phrases or []:
+        toks.extend(_split_ident_lex(str(ph)))
+    if not toks:
+        return [0.0] * dim
+    vec = [0.0] * dim
+    for t in toks:
+        h = int(hashlib.md5(t.encode("utf-8", errors="ignore")).hexdigest()[:8], 16)
+        vec[h % dim] += 1.0
+    norm = math.sqrt(sum(v*v for v in vec)) or 1.0
+    return [v / norm for v in vec]
