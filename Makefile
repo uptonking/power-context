@@ -136,9 +136,28 @@ reset-dev: ## full dev reset: qdrant -> wait -> init payload -> reindex -> bring
 	docker compose run --rm init_payload || true
 	docker compose run --rm indexer --root /work --recreate
 	docker compose up -d mcp mcp_indexer watcher
-	docker compose ps
+	docker compose pshs
 
 
 quantize-reranker: ## Quantize reranker ONNX to INT8 (set RERANKER_ONNX_PATH, optional OUTPUT_ONNX_PATH)
 	@[ -n "$(RERANKER_ONNX_PATH)" ] || { echo "Set RERANKER_ONNX_PATH to your ONNX file"; exit 1; }
 	python3 scripts/quantize_reranker.py
+
+
+# --- llama.cpp tiny model provisioning ---
+LLAMACPP_MODEL_URL ?= https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf
+LLAMACPP_MODEL_PATH ?= models/model.gguf
+
+llama-model: ## download tiny GGUF model into ./models/model.gguf (override with LLAMACPP_MODEL_URL/LLAMACPP_MODEL_PATH)
+	@mkdir -p $(dir $(LLAMACPP_MODEL_PATH))
+	@echo "Downloading: $(LLAMACPP_MODEL_URL) -> $(LLAMACPP_MODEL_PATH)" && \
+	curl -L --fail --retry 3 -C - "$(LLAMACPP_MODEL_URL)" -o "$(LLAMACPP_MODEL_PATH)"
+
+llamacpp-up: llama-model ## fetch tiny model (if missing) and start llama.cpp sidecar
+	docker compose up -d llamacpp && sleep 2 && curl -sI http://localhost:8080 | head -n1 || true
+
+# Optional: build a custom image that bakes the model into the image (no host volume needed)
+llamacpp-build-image: ## build custom llama.cpp image with baked model (override LLAMACPP_MODEL_URL)
+	docker build -f Dockerfile.llamacpp --build-arg MODEL_URL="$(LLAMACPP_MODEL_URL)" -t context-llamacpp:tiny .
+
+

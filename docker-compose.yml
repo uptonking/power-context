@@ -68,7 +68,8 @@ services:
       - "8080:8080"
     volumes:
       - ./models:/models:ro
-    command: ["./server", "--model", "/models/model.gguf", "--host", "0.0.0.0", "--port", "8080", "--no-warmup"]
+    # The server image's entrypoint is already the server binary; pass args only
+    command: ["--model", "/models/model.gguf", "--host", "0.0.0.0", "--port", "8080", "--no-warmup"]
 
 
   indexer:

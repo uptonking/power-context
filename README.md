@@ -473,6 +473,25 @@ Bring up llama.cpp sidecar (optional):
 docker compose up -d llamacpp
 ````
 
+Make-based provisioning (recommended):
+
+````bash
+# downloads a tiny GGUF to ./models/model.gguf (override URL via LLAMACPP_MODEL_URL)
+make llamacpp-up
+# or just fetch the model without starting the service
+make llama-model
+````
+
+Optional: bake the model into the image (no host volume required):
+
+````bash
+# builds an image that includes the model specified by MODEL_URL
+make llamacpp-build-image LLAMACPP_MODEL_URL=https://huggingface.co/.../tiny.gguf
+# then in docker-compose.yml, either remove the ./models volume for llamacpp
+# or override the service to use image: context-llamacpp:tiny
+````
+
+
 Programmatic use:
 
 ````python
