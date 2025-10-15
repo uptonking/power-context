@@ -61,12 +61,26 @@ Troubleshooting:
 
 ```mermaid
 flowchart LR
-  A[IDE Agents] -- SSE /sse --> B(MCP Search :8000)
-  A -- SSE /sse --> C(MCP Indexer :8001)
-  B -- HTTP 6333 --> D[Qdrant DB]
+  subgraph Host/IDE
+    A[IDE Agents]
+  end
+  subgraph Docker Network
+    B(MCP Search :8000)
+    C(MCP Indexer :8001)
+    D[Qdrant DB :6333]
+    G[[llama.cpp Decoder :8080]]
+    E[(One-shot Indexer)]
+    F[(Watcher)]
+  end
+  A -- SSE /sse --> B
+  A -- SSE /sse --> C
+  B -- HTTP 6333 --> D
   C -- HTTP 6333 --> D
-  E[(One-shot Indexer)] -- HTTP 6333 --> D
-  F[(Watcher)] -- HTTP 6333 --> D
+  E -- HTTP 6333 --> D
+  F -- HTTP 6333 --> D
+  C -. HTTP 8080 .-> G
+  classDef opt stroke-dasharray: 5 5
+  class G opt
 ```
 
 ## Production-ready local development
