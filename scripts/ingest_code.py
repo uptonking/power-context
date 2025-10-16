@@ -673,7 +673,45 @@ def embed_batch(model: TextEmbedding, texts: List[str]) -> List[List[float]]:
 def upsert_points(client: QdrantClient, collection: str, points: List[models.PointStruct]):
     if not points:
         return
-    client.upsert(collection_name=collection, points=points, wait=True)
+    # Safer upsert for large payloads: chunk + retry with backoff
+    try:
+        bsz = int(os.environ.get("INDEX_UPSERT_BATCH", "256") or 256)
+    except Exception:
+        bsz = 256
+    try:
+        retries = int(os.environ.get("INDEX_UPSERT_RETRIES", "3") or 3)
+    except Exception:
+        retries = 3
+    try:
+        backoff = float(os.environ.get("INDEX_UPSERT_BACKOFF", "0.5") or 0.5)
+    except Exception:
+        backoff = 0.5
+
+    for i in range(0, len(points), max(1, bsz)):
+        batch = points[i:i + max(1, bsz)]
+        attempt = 0
+        while True:
+            try:
+                client.upsert(collection_name=collection, points=batch, wait=True)
+                break
+            except Exception:
+                attempt += 1
+                if attempt >= retries:
+                    # Last-resort: try smaller sub-batches to avoid dropping updates entirely
+                    sub_size = max(1, bsz // 4)
+                    for j in range(0, len(batch), sub_size):
+                        sub = batch[j:j + sub_size]
+                        try:
+                            client.upsert(collection_name=collection, points=sub, wait=True)
+                        except Exception:
+                            # Give up on this tiny sub-batch; continue with the rest
+                            pass
+                    break
+                else:
+                    try:
+                        time.sleep(backoff * attempt)
+                    except Exception:
+                        pass
 
 
 def detect_language(path: Path) -> str:
@@ -1223,7 +1261,7 @@ def index_repo(root: Path, qdrant_url: str, api_key: str, collection: str, model
     # Determine embedding dimension
     dim = len(next(model.embed(["dimension probe"])) )
 
-    client = QdrantClient(url=qdrant_url, api_key=api_key or None)
+    client = QdrantClient(url=qdrant_url, api_key=api_key or None, timeout=int(os.environ.get("QDRANT_TIMEOUT", "20") or 20))
 
     # Determine vector name
     if recreate:

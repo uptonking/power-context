@@ -104,7 +104,7 @@ class IndexHandler(FileSystemEventHandler):
 def main():
     print(f"Watch mode: root={ROOT} qdrant={QDRANT_URL} collection={COLLECTION} model={MODEL}")
 
-    client = QdrantClient(url=QDRANT_URL)
+    client = QdrantClient(url=QDRANT_URL, timeout=int(os.environ.get("QDRANT_TIMEOUT", "20") or 20))
 
     # Compute embedding dimension first (for deterministic dense vector selection)
     model = TextEmbedding(model_name=MODEL)
