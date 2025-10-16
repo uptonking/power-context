@@ -518,8 +518,9 @@ def lex_hash_vector(phrases: List[str], dim: int = LEX_VECTOR_DIM) -> List[float
 
 
 def lex_query(client: QdrantClient, v: List[float], flt, per_query: int) -> List[Any]:
+    ef = max(EF_SEARCH, 32 + 4*int(per_query))
+    # Prefer modern API; handle kwarg rename between client versions (query_filter -> filter)
     try:
-        ef = max(EF_SEARCH, 32 + 4*int(per_query))
         qp = client.query_points(
             collection_name=_collection(),
             query=v,
@@ -530,20 +531,32 @@ def lex_query(client: QdrantClient, v: List[float], flt, per_query: int) -> List
             with_payload=True,
         )
         return getattr(qp, "points", qp)
-    except Exception:
-        res = client.search(
+    except TypeError:
+        # Older/newer client may expect 'filter' kw
+        qp = client.query_points(
+            collection_name=_collection(),
+            query=v,
+            using=LEX_VECTOR_NAME,
+            filter=flt,
+            search_params=models.SearchParams(hnsw_ef=ef),
+            limit=per_query,
+            with_payload=True,
+        )
+        return getattr(qp, "points", qp)
+    except AttributeError:
+        # Very old client without query_points: last-resort deprecated path
+        return client.search(
             collection_name=_collection(),
             query_vector={"name": LEX_VECTOR_NAME, "vector": v},
             limit=per_query,
             with_payload=True,
             query_filter=flt,
         )
-        return res
 
 
 def dense_query(client: QdrantClient, vec_name: str, v: List[float], flt, per_query: int) -> List[Any]:
+    ef = max(EF_SEARCH, 32 + 4*int(per_query))
     try:
-        ef = max(EF_SEARCH, 32 + 4*int(per_query))
         qp = client.query_points(
             collection_name=_collection(),
             query=v,
@@ -554,15 +567,25 @@ def dense_query(client: QdrantClient, vec_name: str, v: List[float], flt, per_qu
             with_payload=True,
         )
         return getattr(qp, "points", qp)
-    except Exception:
-        res = client.search(
+    except TypeError:
+        qp = client.query_points(
+            collection_name=_collection(),
+            query=v,
+            using=vec_name,
+            filter=flt,
+            search_params=models.SearchParams(hnsw_ef=ef),
+            limit=per_query,
+            with_payload=True,
+        )
+        return getattr(qp, "points", qp)
+    except AttributeError:
+        return client.search(
             collection_name=_collection(),
             query_vector={"name": vec_name, "vector": v},
             limit=per_query,
             with_payload=True,
             query_filter=flt,
         )
-        return res
 
 
 # In-process API: run hybrid search and return structured items list

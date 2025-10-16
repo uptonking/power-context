@@ -101,9 +101,18 @@ def find(
     # Harmonize alias: top_k -> limit
     lim = int(limit or top_k or 5)
 
-    # Two searches then simple RRF-like merge
-    res_dense = client.search(collection_name=coll, query_vector=(VECTOR_NAME, dense), limit=max(10, lim))
-    res_lex = client.search(collection_name=coll, query_vector=(LEX_VECTOR_NAME, lex), limit=max(10, lim))
+    # Two searches (prefer query_points) then simple RRF-like merge
+    try:
+        qp_dense = client.query_points(collection_name=coll, query=dense, using=VECTOR_NAME, limit=max(10, lim), with_payload=True)
+        res_dense = getattr(qp_dense, "points", qp_dense)
+    except AttributeError:
+        res_dense = client.search(collection_name=coll, query_vector=(VECTOR_NAME, dense), limit=max(10, lim), with_payload=True)
+
+    try:
+        qp_lex = client.query_points(collection_name=coll, query=lex, using=LEX_VECTOR_NAME, limit=max(10, lim), with_payload=True)
+        res_lex = getattr(qp_lex, "points", qp_lex)
+    except AttributeError:
+        res_lex = client.search(collection_name=coll, query_vector=(LEX_VECTOR_NAME, lex), limit=max(10, lim), with_payload=True)
 
     def is_memory_like(payload: Dict[str, Any]) -> bool:
         md = (payload or {}).get("metadata") or {}
