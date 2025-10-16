@@ -5,7 +5,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
 # Install FastMCP + Qdrant client + FastEmbed for embeddings
-RUN pip install --no-cache-dir --upgrade fastmcp==2.12.4 qdrant-client fastembed
+RUN pip install --no-cache-dir --upgrade mcp fastmcp==2.12.4 qdrant-client fastembed
 
 # Expose SSE port
 EXPOSE 8000

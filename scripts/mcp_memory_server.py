@@ -2,7 +2,7 @@ import os
 import time
 from typing import Any, Dict, Optional, List
 
-from fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP
 from qdrant_client import QdrantClient, models
 
 # Env
@@ -53,8 +53,7 @@ def _ensure_collection(name: str):
         pass
     # Derive dense vector dimension from embedding model to avoid mismatch
     try:
-        _model = TextEmbedding(model_name=EMBEDDING_MODEL)
-        _dense_dim = len(next(_model.embed(["__dim_probe__"])).tolist())
+        _dense_dim = int(os.environ.get("EMBED_DIM", "768") or 768)
     except Exception:
         _dense_dim = 768
     vectors_cfg = {
