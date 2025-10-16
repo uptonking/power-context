@@ -61,6 +61,22 @@ Notes:
 - Indexing feels stuck on very large files:
   - Use MAX_MICRO_CHUNKS_PER_FILE=500 (default in code) or lower (e.g., 200) during dev runs.
 
+
+- Watcher timeouts (-9) or Qdrant "ResponseHandlingException: timed out":
+  - Set watcher-safe defaults to reduce payload size and add headroom during upserts:
+
+  ````ini
+  # Watcher-safe defaults (compose already applies these to the watcher service)
+  QDRANT_TIMEOUT=60
+  MAX_MICRO_CHUNKS_PER_FILE=200
+  INDEX_UPSERT_BATCH=128
+  INDEX_UPSERT_RETRIES=5
+  INDEX_UPSERT_BACKOFF=0.5
+  WATCH_DEBOUNCE_SECS=1.5
+  ````
+
+  - If issues persist, try lowering INDEX_UPSERT_BATCH to 96 or raising QDRANT_TIMEOUT to 90.
+
 ReFRAG background: https://arxiv.org/abs/2509.01092
 
 Endpoints
