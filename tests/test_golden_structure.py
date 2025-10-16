@@ -41,4 +41,3 @@ def test_repo_search_compact_golden_subset(monkeypatch):
         want = json.load(f)
 
     assert got == want
-

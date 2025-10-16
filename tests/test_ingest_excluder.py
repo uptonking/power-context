@@ -37,4 +37,3 @@ def test_excluder_env_overrides(tmp_path, monkeypatch):
     excl = ing._Excluder(root)
     assert not excl.exclude_dir("/.git")  # defaults off
     assert excl.exclude_file("a/file.tmp")
-

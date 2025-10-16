@@ -7,13 +7,19 @@ Notes:
 - Actual soft-embedding / KV injection requires a patched llama.cpp build;
   wiring will be added behind this adapter once the runtime is available.
 """
+
 from __future__ import annotations
 import os
 from typing import Any, Dict, Optional
 
 
 def _bool_env(name: str, default: str = "0") -> bool:
-    return str(os.environ.get(name, default)).strip().lower() in {"1", "true", "yes", "on"}
+    return str(os.environ.get(name, default)).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def is_decoder_enabled() -> bool:
@@ -45,13 +51,18 @@ class LlamaCppRefragClient:
     """
 
     def __init__(self, base_url: Optional[str] = None) -> None:
-        self.base_url = base_url or os.environ.get("LLAMACPP_URL", "http://localhost:8080")
+        self.base_url = base_url or os.environ.get(
+            "LLAMACPP_URL", "http://localhost:8080"
+        )
         if get_runtime_kind() != "llamacpp":
-            raise ValueError("REFRAG_RUNTIME must be 'llamacpp' for LlamaCppRefragClient")
+            raise ValueError(
+                "REFRAG_RUNTIME must be 'llamacpp' for LlamaCppRefragClient"
+            )
 
     def _post(self, path: str, json_payload: Dict[str, Any]) -> Dict[str, Any]:
         import json as _json
         from urllib import request
+
         req = request.Request(self.base_url.rstrip("/") + path, method="POST")
         req.add_header("Content-Type", "application/json")
         data = _json.dumps(json_payload).encode("utf-8")
@@ -59,7 +70,13 @@ class LlamaCppRefragClient:
             body = resp.read()
         return _json.loads(body.decode("utf-8"))
 
-    def generate_with_soft_embeddings(self, prompt: str, soft_embeddings: Optional[list[list[float]]] = None, max_tokens: int = 256, **gen_kwargs: Any) -> str:
+    def generate_with_soft_embeddings(
+        self,
+        prompt: str,
+        soft_embeddings: Optional[list[list[float]]] = None,
+        max_tokens: int = 256,
+        **gen_kwargs: Any,
+    ) -> str:
         if not is_decoder_enabled():
             raise RuntimeError("Decoder path disabled: set REFRAG_DECODER=1 to enable")
         mode = os.environ.get("REFRAG_DECODER_MODE", "prompt").strip().lower()
@@ -98,4 +115,3 @@ class LlamaCppRefragClient:
         # llama.cpp server returns { 'content': '...' } or { 'token': ... } streams; we expect non-stream
         txt = (res.get("content") or res.get("generation") or "").strip()
         return txt
-

@@ -1,4 +1,9 @@
-from scripts.refrag_llamacpp import is_decoder_enabled, get_runtime_kind, LlamaCppRefragClient
+from scripts.refrag_llamacpp import (
+    is_decoder_enabled,
+    get_runtime_kind,
+    LlamaCppRefragClient,
+)
+
 
 def test_decoder_disabled_by_default(monkeypatch):
     # Default: off
@@ -19,8 +24,7 @@ def test_generate_guard_raises_when_disabled(monkeypatch):
     monkeypatch.setenv("REFRAG_RUNTIME", "llamacpp")
     c = LlamaCppRefragClient()
     try:
-        c.generate_with_soft_embeddings("hello", soft_embeddings=[[0.0]*10])
+        c.generate_with_soft_embeddings("hello", soft_embeddings=[[0.0] * 10])
         assert False, "should have raised"
     except RuntimeError as e:
         assert "disabled" in str(e).lower()
-

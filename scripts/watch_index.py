@@ -14,6 +14,7 @@ from watchdog.events import FileSystemEventHandler
 
 # Ensure project root is on sys.path when run as a script (so 'scripts' can be imported)
 import sys
+
 ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
@@ -60,7 +61,6 @@ class IndexHandler(FileSystemEventHandler):
         self.queue = queue
         self.excl = idx._Excluder(root)
 
-
     def _maybe_enqueue(self, src_path: str):
         p = Path(src_path)
         try:
@@ -100,15 +100,18 @@ class IndexHandler(FileSystemEventHandler):
             self._maybe_enqueue(event.src_path)
 
 
-
 def main():
-    print(f"Watch mode: root={ROOT} qdrant={QDRANT_URL} collection={COLLECTION} model={MODEL}")
+    print(
+        f"Watch mode: root={ROOT} qdrant={QDRANT_URL} collection={COLLECTION} model={MODEL}"
+    )
 
-    client = QdrantClient(url=QDRANT_URL, timeout=int(os.environ.get("QDRANT_TIMEOUT", "20") or 20))
+    client = QdrantClient(
+        url=QDRANT_URL, timeout=int(os.environ.get("QDRANT_TIMEOUT", "20") or 20)
+    )
 
     # Compute embedding dimension first (for deterministic dense vector selection)
     model = TextEmbedding(model_name=MODEL)
-    dim = len(next(model.embed(["dimension probe"])) )
+    dim = len(next(model.embed(["dimension probe"])))
 
     # Determine dense vector name deterministically
     try:
@@ -123,7 +126,7 @@ def main():
                     vector_name = name
                     break
             # If LEX vector exists, pick a different name as dense
-            if vector_name is None and getattr(idx, 'LEX_VECTOR_NAME', None) in cfg:
+            if vector_name is None and getattr(idx, "LEX_VECTOR_NAME", None) in cfg:
                 for name in cfg.keys():
                     if name != idx.LEX_VECTOR_NAME:
                         vector_name = name
@@ -167,13 +170,15 @@ def _process_paths(paths, client, model, vector_name: str):
         # Lazily instantiate model if needed
         if model is None:
             from fastembed import TextEmbedding
+
             mname = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
             model = TextEmbedding(model_name=mname)
-        ok = idx.index_single_file(client, model, COLLECTION, vector_name, p, dedupe=True, skip_unchanged=False)
+        ok = idx.index_single_file(
+            client, model, COLLECTION, vector_name, p, dedupe=True, skip_unchanged=False
+        )
         status = "indexed" if ok else "skipped"
         print(f"[{status}] {p}")
 
 
 if __name__ == "__main__":
     main()
-

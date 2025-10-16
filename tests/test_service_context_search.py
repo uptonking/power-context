@@ -13,8 +13,10 @@ class FakePoint:
 class FakeQdrantMem:
     def __init__(self, items):
         self._items = items
+
     def search(self, **kwargs):
         return self._items
+
     def scroll(self, **kwargs):
         return (self._items, None)
 
@@ -23,6 +25,7 @@ class FakeEmbed:
     class _Vec:
         def tolist(self):
             return [0.1] * 8
+
     def embed(self, texts):
         # return an iterator of vector-like objects with .tolist()
         for _ in texts:
@@ -39,6 +42,7 @@ def test_context_search_blend_compact(monkeypatch):
                 {"score": 0.6, "path": "/x/b.py", "start_line": 5, "end_line": 9},
             ]
         }
+
     monkeypatch.setattr(srv, "repo_search", fake_repo_search)
     monkeypatch.setattr(srv, "_get_embedding_model", lambda *a, **k: FakeEmbed())
 
@@ -48,7 +52,10 @@ def test_context_search_blend_compact(monkeypatch):
         FakePoint(0.2, {"content": "bar note two", "metadata": {}}),
     ]
     import qdrant_client
-    monkeypatch.setattr(qdrant_client, "QdrantClient", lambda *a, **k: FakeQdrantMem(mem_items))
+
+    monkeypatch.setattr(
+        qdrant_client, "QdrantClient", lambda *a, **k: FakeQdrantMem(mem_items)
+    )
 
     res = srv.asyncio.get_event_loop().run_until_complete(
         srv.context_search(
@@ -74,25 +81,44 @@ def test_context_search_blend_compact(monkeypatch):
 def test_context_search_weight_scaling(monkeypatch):
     # repo_search returns one code hit (async stub)
     async def fake_repo_search(**kwargs):
-        return {"results": [{"score": 0.5, "path": "/x/a.py", "start_line": 1, "end_line": 3}]}
+        return {
+            "results": [
+                {"score": 0.5, "path": "/x/a.py", "start_line": 1, "end_line": 3}
+            ]
+        }
+
     monkeypatch.setattr(srv, "repo_search", fake_repo_search)
 
     # Force SSE memory path with a fake FastMCP client
     monkeypatch.setenv("MEMORY_SSE_ENABLED", "1")
 
     class T:
-        def __init__(self, name): self.name = name
+        def __init__(self, name):
+            self.name = name
+
     class Item:
-        def __init__(self, text): self.text = text
+        def __init__(self, text):
+            self.text = text
+
     class Resp:
-        def __init__(self): self.content = [Item("foo note")]
+        def __init__(self):
+            self.content = [Item("foo note")]
+
     class FakeClient:
-        async def __aenter__(self): return self
-        async def __aexit__(self, exc_type, exc, tb): return False
-        async def list_tools(self): return [T("find")]
-        async def call_tool(self, *a, **k): return Resp()
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def list_tools(self):
+            return [T("find")]
+
+        async def call_tool(self, *a, **k):
+            return Resp()
 
     import fastmcp
+
     monkeypatch.setattr(fastmcp, "Client", lambda *a, **k: FakeClient())
 
     res = srv.asyncio.get_event_loop().run_until_complete(
@@ -111,4 +137,3 @@ def test_context_search_weight_scaling(monkeypatch):
     assert mem_scores, "expected at least one memory result"
     assert code_scores, "expected at least one code result"
     assert max(mem_scores) > max(code_scores)
-

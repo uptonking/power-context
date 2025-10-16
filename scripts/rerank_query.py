@@ -25,7 +25,10 @@ CODE_SYNONYMS = {
     "create": ["init", "initialize", "construct"],
 }
 
-def expand_queries(queries: List[str], language: str | None = None, max_extra: int = 2) -> List[str]:
+
+def expand_queries(
+    queries: List[str], language: str | None = None, max_extra: int = 2
+) -> List[str]:
     out: List[str] = list(queries)
     for q in list(queries):
         ql = q.lower()
@@ -43,6 +46,7 @@ def _env_truthy(val: str | None, default: bool) -> bool:
         return default
     return val.strip().lower() in {"1", "true", "yes", "on"}
 
+
 def derive_vector_name(model_name: str) -> str:
     name = model_name.strip().lower()
     if "bge-base-en-v1.5" in name:
@@ -57,7 +61,9 @@ def derive_vector_name(model_name: str) -> str:
     return name
 
 
-def score_candidate(base_score: float, count: int, md: Dict[str, Any], want_lang: str, want_prefix: str) -> float:
+def score_candidate(
+    base_score: float, count: int, md: Dict[str, Any], want_lang: str, want_prefix: str
+) -> float:
     s = base_score
     # Encourage consensus across multiple phrasings
     s += 0.02 * max(0, count - 1)
@@ -72,16 +78,54 @@ def score_candidate(base_score: float, count: int, md: Dict[str, Any], want_lang
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Multi-query re-ranker for Qdrant code search (no new deps)")
-    parser.add_argument("--query", "-q", action="append", required=True, help="Query text; repeat flag to add variants")
-    parser.add_argument("--limit", type=int, default=8, help="Final top-N to print after re-ranking")
-    parser.add_argument("--per-query", type=int, default=12, help="How many results to pull per query before fusing")
-    parser.add_argument("--language", type=str, default="", help="Preferred language (boost)")
-    parser.add_argument("--under", type=str, default="", help="Preferred path_prefix (boost), e.g. /work/scripts")
-    parser.add_argument("--symbol", type=str, default="", help="Optional server-side symbol filter (exact)")
+    parser = argparse.ArgumentParser(
+        description="Multi-query re-ranker for Qdrant code search (no new deps)"
+    )
+    parser.add_argument(
+        "--query",
+        "-q",
+        action="append",
+        required=True,
+        help="Query text; repeat flag to add variants",
+    )
+    parser.add_argument(
+        "--limit", type=int, default=8, help="Final top-N to print after re-ranking"
+    )
+    parser.add_argument(
+        "--per-query",
+        type=int,
+        default=12,
+        help="How many results to pull per query before fusing",
+    )
+    parser.add_argument(
+        "--language", type=str, default="", help="Preferred language (boost)"
+    )
+    parser.add_argument(
+        "--under",
+        type=str,
+        default="",
+        help="Preferred path_prefix (boost), e.g. /work/scripts",
+    )
+    parser.add_argument(
+        "--symbol",
+        type=str,
+        default="",
+        help="Optional server-side symbol filter (exact)",
+    )
     # Expansion enabled by default; allow disabling via --no-expand or RERANK_EXPAND=0
-    parser.add_argument("--expand", dest="expand", action="store_true", default=_env_truthy(os.environ.get("RERANK_EXPAND"), True), help="Enable simple query expansion")
-    parser.add_argument("--no-expand", dest="expand", action="store_false", help="Disable query expansion")
+    parser.add_argument(
+        "--expand",
+        dest="expand",
+        action="store_true",
+        default=_env_truthy(os.environ.get("RERANK_EXPAND"), True),
+        help="Enable simple query expansion",
+    )
+    parser.add_argument(
+        "--no-expand",
+        dest="expand",
+        action="store_false",
+        help="Disable query expansion",
+    )
 
     args = parser.parse_args()
 
@@ -104,11 +148,26 @@ def main():
         if args.language or args.under or args.symbol:
             must = []
             if args.language:
-                must.append(models.FieldCondition(key="metadata.language", match=models.MatchValue(value=args.language)))
+                must.append(
+                    models.FieldCondition(
+                        key="metadata.language",
+                        match=models.MatchValue(value=args.language),
+                    )
+                )
             if args.under:
-                must.append(models.FieldCondition(key="metadata.path_prefix", match=models.MatchValue(value=args.under)))
+                must.append(
+                    models.FieldCondition(
+                        key="metadata.path_prefix",
+                        match=models.MatchValue(value=args.under),
+                    )
+                )
             if args.symbol:
-                must.append(models.FieldCondition(key="metadata.symbol", match=models.MatchValue(value=args.symbol)))
+                must.append(
+                    models.FieldCondition(
+                        key="metadata.symbol",
+                        match=models.MatchValue(value=args.symbol),
+                    )
+                )
             flt = models.Filter(must=must)
 
         # Prefer modern query_points API with 'using' for named vector
@@ -168,13 +227,17 @@ def main():
     fused = []
     for pid, data in cand.items():
         md = (data["payload"] or {}).get("metadata") or {}
-        final = score_candidate(data["base_score"], counts[pid], md, want_lang, args.under)
+        final = score_candidate(
+            data["base_score"], counts[pid], md, want_lang, args.under
+        )
         # Symbol/path match boost using expanded queries
-        sym_text = " ".join([str(md.get("symbol") or ""), str(md.get("symbol_path") or "")]).lower()
+        sym_text = " ".join(
+            [str(md.get("symbol") or ""), str(md.get("symbol_path") or "")]
+        ).lower()
         if any((q.lower() in sym_text) for q in queries):
             final += SYMBOL_BOOST
         # Recency bump (normalized)
-        if 'span' in locals() and has_ts:
+        if "span" in locals() and has_ts:
             ts = md.get("ingested_at")
             if isinstance(ts, int):
                 norm = (ts - tmin) / span if span else 0.0
@@ -186,18 +249,21 @@ def main():
     print(f"Multi-query rerank: queries={len(args.query)} model={MODEL} vec={vec_name}")
     for i, (final, pid, data) in enumerate(fused[: args.limit], 1):
         md = (data["payload"] or {}).get("metadata") or {}
-        info = (data["payload"] or {}).get("information") or (data["payload"] or {}).get("document")
+        info = (data["payload"] or {}).get("information") or (
+            data["payload"] or {}
+        ).get("document")
         path = md.get("path")
         lang = md.get("language")
-        print({
-            "rank": i,
-            "score": round(final, 4),
-            "path": path,
-            "language": lang,
-            "information": info,
-        })
+        print(
+            {
+                "rank": i,
+                "score": round(final, 4),
+                "path": path,
+                "language": lang,
+                "information": info,
+            }
+        )
 
 
 if __name__ == "__main__":
     main()
-

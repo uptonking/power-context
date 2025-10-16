@@ -15,6 +15,7 @@ Notes:
 import os
 import sys
 
+
 def main():
     try:
         from onnxruntime.quantization import quantize_dynamic, QuantType  # type: ignore
@@ -28,7 +29,9 @@ def main():
         sys.exit(2)
 
     out_path = os.environ.get("OUTPUT_ONNX_PATH", "").strip() or (
-        in_path[:-5] + "_int8.onnx" if in_path.endswith(".onnx") else in_path + ".int8.onnx"
+        in_path[:-5] + "_int8.onnx"
+        if in_path.endswith(".onnx")
+        else in_path + ".int8.onnx"
     )
 
     try:
@@ -48,6 +51,6 @@ def main():
         print(f"ERROR: quantization failed: {e}")
         sys.exit(1)
 
+
 if __name__ == "__main__":
     main()
-

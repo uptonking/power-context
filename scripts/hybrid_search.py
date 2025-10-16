@@ -11,6 +11,8 @@ import json
 
 def _collection() -> str:
     return os.environ.get("COLLECTION_NAME", "my-collection")
+
+
 MODEL_NAME = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
 API_KEY = os.environ.get("QDRANT_API_KEY")
@@ -26,15 +28,21 @@ HYBRID_MINI_WEIGHT = float(os.environ.get("HYBRID_MINI_WEIGHT", "0.5") or 0.5)
 
 # Lightweight embedding cache for query embeddings (model_name, text) -> vector
 from threading import Lock as _Lock
+
 _EMBED_QUERY_CACHE: Dict[tuple[str, str], List[float]] = {}
 _EMBED_LOCK = _Lock()
 
-def _embed_queries_cached(model: TextEmbedding, queries: List[str]) -> List[List[float]]:
+
+def _embed_queries_cached(
+    model: TextEmbedding, queries: List[str]
+) -> List[List[float]]:
     """Cache dense query embeddings to avoid repeated compute across expansions/retries."""
     out: List[List[float]] = []
     try:
         # Best-effort model name extraction; fall back to env
-        name = getattr(model, "model_name", None) or os.environ.get("EMBEDDING_MODEL", MODEL_NAME)
+        name = getattr(model, "model_name", None) or os.environ.get(
+            "EMBEDDING_MODEL", MODEL_NAME
+        )
     except Exception:
         name = os.environ.get("EMBEDDING_MODEL", MODEL_NAME)
     for q in queries:
@@ -58,6 +66,7 @@ def _embed_queries_cached(model: TextEmbedding, queries: List[str]) -> List[List
 # Ensure project root is on sys.path when run as a script (so 'scripts' package imports work)
 import sys
 from pathlib import Path as _P
+
 _ROOT = _P(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
@@ -70,13 +79,17 @@ from scripts.ingest_code import project_mini as _project_mini
 RRF_K = int(os.environ.get("HYBRID_RRF_K", "60") or 60)
 DENSE_WEIGHT = float(os.environ.get("HYBRID_DENSE_WEIGHT", "1.0") or 1.0)
 LEXICAL_WEIGHT = float(os.environ.get("HYBRID_LEXICAL_WEIGHT", "0.25") or 0.25)
-LEX_VECTOR_WEIGHT = float(os.environ.get("HYBRID_LEX_VECTOR_WEIGHT", str(LEXICAL_WEIGHT)) or LEXICAL_WEIGHT)
+LEX_VECTOR_WEIGHT = float(
+    os.environ.get("HYBRID_LEX_VECTOR_WEIGHT", str(LEXICAL_WEIGHT)) or LEXICAL_WEIGHT
+)
 EF_SEARCH = int(os.environ.get("QDRANT_EF_SEARCH", "128") or 128)
 # Lightweight, configurable boosts
 SYMBOL_BOOST = float(os.environ.get("HYBRID_SYMBOL_BOOST", "0.15") or 0.15)
 RECENCY_WEIGHT = float(os.environ.get("HYBRID_RECENCY_WEIGHT", "0.1") or 0.1)
 CORE_FILE_BOOST = float(os.environ.get("HYBRID_CORE_FILE_BOOST", "0.1") or 0.1)
-SYMBOL_EQUALITY_BOOST = float(os.environ.get("HYBRID_SYMBOL_EQUALITY_BOOST", "0.25") or 0.25)
+SYMBOL_EQUALITY_BOOST = float(
+    os.environ.get("HYBRID_SYMBOL_EQUALITY_BOOST", "0.25") or 0.25
+)
 VENDOR_PENALTY = float(os.environ.get("HYBRID_VENDOR_PENALTY", "0.05") or 0.05)
 LANG_MATCH_BOOST = float(os.environ.get("HYBRID_LANG_MATCH_BOOST", "0.05") or 0.05)
 CLUSTER_LINES = int(os.environ.get("HYBRID_CLUSTER_LINES", "15") or 15)
@@ -94,19 +107,31 @@ def _merge_and_budget_spans(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     """
     # Read dynamic knobs at call-time so tests/env can override without reload
     try:
-        merge_lines = int(os.environ.get("MICRO_MERGE_LINES", str(MICRO_MERGE_LINES)) or MICRO_MERGE_LINES)
+        merge_lines = int(
+            os.environ.get("MICRO_MERGE_LINES", str(MICRO_MERGE_LINES))
+            or MICRO_MERGE_LINES
+        )
     except Exception:
         merge_lines = MICRO_MERGE_LINES
     try:
-        budget_tokens = int(os.environ.get("MICRO_BUDGET_TOKENS", str(MICRO_BUDGET_TOKENS)) or MICRO_BUDGET_TOKENS)
+        budget_tokens = int(
+            os.environ.get("MICRO_BUDGET_TOKENS", str(MICRO_BUDGET_TOKENS))
+            or MICRO_BUDGET_TOKENS
+        )
     except Exception:
         budget_tokens = MICRO_BUDGET_TOKENS
     try:
-        tokens_per_line = int(os.environ.get("MICRO_TOKENS_PER_LINE", str(MICRO_TOKENS_PER_LINE)) or MICRO_TOKENS_PER_LINE)
+        tokens_per_line = int(
+            os.environ.get("MICRO_TOKENS_PER_LINE", str(MICRO_TOKENS_PER_LINE))
+            or MICRO_TOKENS_PER_LINE
+        )
     except Exception:
         tokens_per_line = MICRO_TOKENS_PER_LINE
     try:
-        out_max_spans = int(os.environ.get("MICRO_OUT_MAX_SPANS", str(MICRO_OUT_MAX_SPANS)) or MICRO_OUT_MAX_SPANS)
+        out_max_spans = int(
+            os.environ.get("MICRO_OUT_MAX_SPANS", str(MICRO_OUT_MAX_SPANS))
+            or MICRO_OUT_MAX_SPANS
+        )
     except Exception:
         out_max_spans = MICRO_OUT_MAX_SPANS
 
@@ -120,7 +145,10 @@ def _merge_and_budget_spans(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]
         lst = clusters.setdefault(path, [])
         merged = False
         for c in lst:
-            if start_line <= c["end"] + merge_lines and end_line >= c["start"] - merge_lines:
+            if (
+                start_line <= c["end"] + merge_lines
+                and end_line >= c["start"] - merge_lines
+            ):
                 # expand bounds; keep higher-score rep
                 if float(m.get("s", 0.0)) > float(c["m"].get("s", 0.0)):
                     c["m"] = m
@@ -144,12 +172,18 @@ def _merge_and_budget_spans(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     for lst in clusters.values():
         for c in lst:
             flattened.append(c)
+
     def _flat_key(c):
         m = c.get("m", {})
-        md = (m.get("pt", {}).payload or {}).get("metadata") if hasattr(m.get("pt", {}), "payload") else {}
+        md = (
+            (m.get("pt", {}).payload or {}).get("metadata")
+            if hasattr(m.get("pt", {}), "payload")
+            else {}
+        )
         path = str((md or {}).get("path") or "")
         start = int((md or {}).get("start_line") or 0)
         return (-float(m.get("s", 0.0)), path, start)
+
     flattened.sort(key=_flat_key)
 
     for c in flattened:
@@ -157,7 +191,11 @@ def _merge_and_budget_spans(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]
         # Prefer path from cluster key to avoid payload shape differences in tests
         path = str(c.get("p") or "")
         if not path:
-            md = (m.get("pt", {}).payload or {}).get("metadata") if hasattr(m.get("pt", {}), "payload") else {}
+            md = (
+                (m.get("pt", {}).payload or {}).get("metadata")
+                if hasattr(m.get("pt", {}), "payload")
+                else {}
+            )
             path = str((md or {}).get("path") or "")
         # per-path cap
         if per_path_counts.get(path, 0) >= out_max_spans:
@@ -168,7 +206,9 @@ def _merge_and_budget_spans(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]
             per_path_counts[path] = per_path_counts.get(path, 0) + 1
             # rewrite start/end in the representative's metadata clone for emission
             # (we do not mutate original payloads coming from Qdrant objects)
-            out.append({"m": m, "start": c["start"], "end": c["end"], "need_tokens": need})
+            out.append(
+                {"m": m, "start": c["start"], "end": c["end"], "need_tokens": need}
+            )
         if budget <= 0:
             break
 
@@ -187,16 +227,39 @@ def _merge_and_budget_spans(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]
 
 # Core file patterns (prioritize implementation over tests/docs)
 CORE_FILE_PATTERNS = [
-    r"\.py$", r"\.js$", r"\.ts$", r"\.tsx$", r"\.jsx$", r"\.go$", r"\.rs$", r"\.java$", r"\.cpp$", r"\.c$", r"\.h$"
+    r"\.py$",
+    r"\.js$",
+    r"\.ts$",
+    r"\.tsx$",
+    r"\.jsx$",
+    r"\.go$",
+    r"\.rs$",
+    r"\.java$",
+    r"\.cpp$",
+    r"\.c$",
+    r"\.h$",
 ]
 NON_CORE_PATTERNS = [
-    r"test", r"spec", r"__test__", r"\.test\.", r"\.spec\.", r"_test\.py$", r"_spec\.py$",
-    r"docs?/", r"documentation/", r"\.md$", r"\.txt$", r"README", r"CHANGELOG"
+    r"test",
+    r"spec",
+    r"__test__",
+    r"\.test\.",
+    r"\.spec\.",
+    r"_test\.py$",
+    r"_spec\.py$",
+    r"docs?/",
+    r"documentation/",
+    r"\.md$",
+    r"\.txt$",
+    r"README",
+    r"CHANGELOG",
 ]
+
 
 def is_core_file(path: str) -> bool:
     """Check if file is core implementation (not test/doc)"""
     import re
+
     path_lower = path.lower()
     # Skip non-core files
     for pattern in NON_CORE_PATTERNS:
@@ -208,14 +271,25 @@ def is_core_file(path: str) -> bool:
             return True
     return False
 
+
 # Vendor/third-party detection
 VENDOR_PATTERNS = [
-    "vendor/", "third_party/", "node_modules/", "/dist/", "/build/", ".generated/", "generated/", "autogen/", "target/"
+    "vendor/",
+    "third_party/",
+    "node_modules/",
+    "/dist/",
+    "/build/",
+    ".generated/",
+    "generated/",
+    "autogen/",
+    "target/",
 ]
+
 
 def is_vendor_path(path: str) -> bool:
     p = path.lower()
     return any(s in p for s in VENDOR_PATTERNS)
+
 
 # Language extension mapping and checks
 LANG_EXTS: Dict[str, List[str]] = {
@@ -229,6 +303,7 @@ LANG_EXTS: Dict[str, List[str]] = {
     "c": [".c", ".h"],
 }
 
+
 def lang_matches_path(lang: str, path: str) -> bool:
     if not lang:
         return False
@@ -236,11 +311,15 @@ def lang_matches_path(lang: str, path: str) -> bool:
     pl = path.lower()
     return any(pl.endswith(ext) for ext in exts)
 
+
 # --- Query DSL parsing (lang:, file:/path, path:, under:, kind:, symbol:) ---
 def parse_query_dsl(queries: List[str]) -> Tuple[List[str], Dict[str, str]]:
     clean: List[str] = []
     extracted: Dict[str, str] = {}
-    token_re = re.compile(r"\b(?:(lang|language|file|path|under|kind|symbol|ext|not|case|repo))\s*:\s*([^\s]+)", re.IGNORECASE)
+    token_re = re.compile(
+        r"\b(?:(lang|language|file|path|under|kind|symbol|ext|not|case|repo))\s*:\s*([^\s]+)",
+        re.IGNORECASE,
+    )
     for q in queries:
         parts = []
         last = 0
@@ -261,7 +340,7 @@ def parse_query_dsl(queries: List[str]) -> Tuple[List[str], Dict[str, str]]:
                 extracted["repo"] = val
             else:
                 extracted[key] = val
-            parts.append(q[last:m.start()].strip())
+            parts.append(q[last : m.start()].strip())
             last = m.end()
         parts.append(q[last:].strip())
         remaining = " ".join([p for p in parts if p])
@@ -272,8 +351,28 @@ def parse_query_dsl(queries: List[str]) -> Tuple[List[str], Dict[str, str]]:
         clean = [""]
     return clean, extracted
 
+
 # --- Tokenization helpers for smarter lexical ---
-_STOP = {"the","a","an","of","in","on","for","and","or","to","with","by","is","are","be","this","that"}
+_STOP = {
+    "the",
+    "a",
+    "an",
+    "of",
+    "in",
+    "on",
+    "for",
+    "and",
+    "or",
+    "to",
+    "with",
+    "by",
+    "is",
+    "are",
+    "be",
+    "this",
+    "that",
+}
+
 
 def _split_ident(s: str) -> List[str]:
     # split snake_case and camelCase
@@ -287,6 +386,7 @@ def _split_ident(s: str) -> List[str]:
         out.extend([x for x in segs if x])
     return [x.lower() for x in out if x and x.lower() not in _STOP]
 
+
 def tokenize_queries(phrases: List[str]) -> List[str]:
     toks: List[str] = []
     for ph in phrases:
@@ -296,8 +396,10 @@ def tokenize_queries(phrases: List[str]) -> List[str]:
     out: List[str] = []
     for t in toks:
         if t not in seen:
-            out.append(t); seen.add(t)
+            out.append(t)
+            seen.add(t)
     return out
+
 
 # Minimal code-aware query expansion (quick win)
 CODE_SYNONYMS = {
@@ -308,7 +410,10 @@ CODE_SYNONYMS = {
     "set": ["assign", "update"],
 }
 
-def expand_queries(queries: List[str], language: str | None = None, max_extra: int = 2) -> List[str]:
+
+def expand_queries(
+    queries: List[str], language: str | None = None, max_extra: int = 2
+) -> List[str]:
     out: List[str] = list(queries)
     for q in list(queries):
         ql = q.lower()
@@ -320,8 +425,11 @@ def expand_queries(queries: List[str], language: str | None = None, max_extra: i
                         out.append(exp)
     return out[: max(8, len(queries))]
 
+
 # --- LLM-assisted expansion (optional if configured) and PRF (default-on) ---
-def _llm_expand_queries(queries: List[str], language: str | None = None, max_new: int = 4) -> List[str]:
+def _llm_expand_queries(
+    queries: List[str], language: str | None = None, max_new: int = 4
+) -> List[str]:
     """Best-effort LLM expansion with preference for a local runtime (Ollama).
     Providers (by env):
       - LLM_PROVIDER=ollama (preferred if OLLAMA_HOST set; default http://localhost:11434)
@@ -329,6 +437,7 @@ def _llm_expand_queries(queries: List[str], language: str | None = None, max_new
     On any error or if not configured, returns []."""
     import json
     import urllib.request
+
     model = os.environ.get("LLM_EXPAND_MODEL", "glm4")
     prompt = (
         "You are a code search expert. Given one or more short queries, suggest up to "
@@ -338,7 +447,10 @@ def _llm_expand_queries(queries: List[str], language: str | None = None, max_new
 
     # 1) Prefer local Ollama
     prov = (os.environ.get("LLM_PROVIDER") or "").strip().lower()
-    ollama_host = os.environ.get("OLLAMA_HOST", "http://localhost:11434").strip() or "http://localhost:11434"
+    ollama_host = (
+        os.environ.get("OLLAMA_HOST", "http://localhost:11434").strip()
+        or "http://localhost:11434"
+    )
     if prov in {"", "ollama"}:  # default to ollama if reachable
         try:
             payload = {
@@ -346,7 +458,7 @@ def _llm_expand_queries(queries: List[str], language: str | None = None, max_new
                 "prompt": prompt,
                 "stream": False,
                 "format": "json",
-                "options": {"temperature": 0.2, "num_predict": 128}
+                "options": {"temperature": 0.2, "num_predict": 128},
             }
             req = urllib.request.Request(
                 ollama_host.rstrip("/") + "/api/generate",
@@ -356,9 +468,11 @@ def _llm_expand_queries(queries: List[str], language: str | None = None, max_new
             with urllib.request.urlopen(req, timeout=8) as resp:
                 body = json.loads(resp.read().decode("utf-8", "ignore"))
             txt = body.get("response", "")
+
             def _parse_list(t: str):
                 t = t.strip().strip("`")
                 import re, json as _json
+
                 try:
                     v = _json.loads(t)
                     if isinstance(v, list):
@@ -376,6 +490,7 @@ def _llm_expand_queries(queries: List[str], language: str | None = None, max_new
                     except Exception:
                         pass
                 return None
+
             arr = _parse_list(txt)
             if isinstance(arr, list):
                 return [str(x) for x in arr[:max_new] if str(x).strip()]
@@ -411,9 +526,11 @@ def _llm_expand_queries(queries: List[str], language: str | None = None, max_new
         with urllib.request.urlopen(req, timeout=6) as resp:
             body = json.loads(resp.read().decode("utf-8", "ignore"))
         txt = body.get("choices", [{}])[0].get("message", {}).get("content", "")
+
         def _parse_list(t: str):
             t = t.strip().strip("`")
             import re, json as _json
+
             try:
                 v = _json.loads(t)
                 if isinstance(v, list):
@@ -431,6 +548,7 @@ def _llm_expand_queries(queries: List[str], language: str | None = None, max_new
                 except Exception:
                     pass
             return None
+
         arr = _parse_list(txt)
         if isinstance(arr, list):
             return [str(x) for x in arr[:max_new] if str(x).strip()]
@@ -446,10 +564,14 @@ def _llm_expand_queries(queries: List[str], language: str | None = None, max_new
         return []
 
 
-def _prf_terms_from_results(score_map: Dict[str, Dict[str, Any]], top_docs: int = 8, max_terms: int = 6) -> List[str]:
+def _prf_terms_from_results(
+    score_map: Dict[str, Dict[str, Any]], top_docs: int = 8, max_terms: int = 6
+) -> List[str]:
     """Extract pseudo-relevant feedback terms from top documents' metadata."""
     # Rank by current fused score 's'
-    ranked = sorted(score_map.values(), key=lambda r: r.get("s", 0.0), reverse=True)[: max(1, top_docs)]
+    ranked = sorted(score_map.values(), key=lambda r: r.get("s", 0.0), reverse=True)[
+        : max(1, top_docs)
+    ]
     freq: Dict[str, int] = {}
     for rec in ranked:
         md = (rec.get("pt").payload or {}).get("metadata") or {}
@@ -461,7 +583,7 @@ def _prf_terms_from_results(score_map: Dict[str, Dict[str, Any]], top_docs: int 
                 freq[tok] = freq.get(tok, 0) + 1
     # sort by frequency desc
     terms = sorted(freq.items(), key=lambda kv: kv[1], reverse=True)
-    return [t for t, _ in terms[:max(1, max_terms)]]
+    return [t for t, _ in terms[: max(1, max_terms)]]
 
 
 def _env_truthy(val: str | None, default: bool) -> bool:
@@ -498,7 +620,6 @@ def lexical_score(phrases: List[str], md: Dict[str, Any]) -> float:
     return s
 
 
-
 # --- Lexical vector (hashing trick) for server-side hybrid ---
 def _split_ident_lex(s: str) -> List[str]:
     parts = re.split(r"[^A-Za-z0-9]+", s)
@@ -513,12 +634,13 @@ def _split_ident_lex(s: str) -> List[str]:
 
 from scripts.utils import lex_hash_vector_queries as _lex_hash_vector_queries
 
+
 def lex_hash_vector(phrases: List[str], dim: int = LEX_VECTOR_DIM) -> List[float]:
     return _lex_hash_vector_queries(phrases, dim)
 
 
 def lex_query(client: QdrantClient, v: List[float], flt, per_query: int) -> List[Any]:
-    ef = max(EF_SEARCH, 32 + 4*int(per_query))
+    ef = max(EF_SEARCH, 32 + 4 * int(per_query))
     # Prefer modern API; handle kwarg rename between client versions (query_filter -> filter)
     try:
         qp = client.query_points(
@@ -554,8 +676,10 @@ def lex_query(client: QdrantClient, v: List[float], flt, per_query: int) -> List
         )
 
 
-def dense_query(client: QdrantClient, vec_name: str, v: List[float], flt, per_query: int) -> List[Any]:
-    ef = max(EF_SEARCH, 32 + 4*int(per_query))
+def dense_query(
+    client: QdrantClient, vec_name: str, v: List[float], flt, per_query: int
+) -> List[Any]:
+    ef = max(EF_SEARCH, 32 + 4 * int(per_query))
     try:
         qp = client.query_points(
             collection_name=_collection(),
@@ -591,6 +715,7 @@ def dense_query(client: QdrantClient, vec_name: str, v: List[float], flt, per_qu
 # In-process API: run hybrid search and return structured items list
 # Optional: pass an existing TextEmbedding instance via model to reuse cache
 
+
 def run_hybrid_search(
     queries: List[str],
     limit: int = 10,
@@ -625,6 +750,7 @@ def run_hybrid_search(
     eff_case = case or dsl.get("case") or os.environ.get("HYBRID_CASE", "insensitive")
     eff_repo = dsl.get("repo")
     eff_path_regex = path_regex
+
     def _to_list(x):
         if x is None:
             return []
@@ -637,6 +763,7 @@ def run_hybrid_search(
             return out
         s = str(x).strip()
         return [s] if s else []
+
     eff_path_globs = _to_list(path_glob)
     eff_not_globs = _to_list(not_glob)
 
@@ -653,21 +780,42 @@ def run_hybrid_search(
         else:
             v = "/work/" + u.lstrip("/") if not u.startswith("/work/") else u
         return v
+
     eff_under = _norm_under(eff_under)
 
     # Build optional filter
     flt = None
     must = []
     if eff_language:
-        must.append(models.FieldCondition(key="metadata.language", match=models.MatchValue(value=eff_language)))
+        must.append(
+            models.FieldCondition(
+                key="metadata.language", match=models.MatchValue(value=eff_language)
+            )
+        )
     if eff_repo:
-        must.append(models.FieldCondition(key="metadata.repo", match=models.MatchValue(value=eff_repo)))
+        must.append(
+            models.FieldCondition(
+                key="metadata.repo", match=models.MatchValue(value=eff_repo)
+            )
+        )
     if eff_under:
-        must.append(models.FieldCondition(key="metadata.path_prefix", match=models.MatchValue(value=eff_under)))
+        must.append(
+            models.FieldCondition(
+                key="metadata.path_prefix", match=models.MatchValue(value=eff_under)
+            )
+        )
     if eff_kind:
-        must.append(models.FieldCondition(key="metadata.kind", match=models.MatchValue(value=eff_kind)))
+        must.append(
+            models.FieldCondition(
+                key="metadata.kind", match=models.MatchValue(value=eff_kind)
+            )
+        )
     if eff_symbol:
-        must.append(models.FieldCondition(key="metadata.symbol", match=models.MatchValue(value=eff_symbol)))
+        must.append(
+            models.FieldCondition(
+                key="metadata.symbol", match=models.MatchValue(value=eff_symbol)
+            )
+        )
     flt = models.Filter(must=must) if must else None
 
     # Build query list (LLM-assisted first, then synonym expansion)
@@ -692,7 +840,21 @@ def run_hybrid_search(
         lex_results = []
     for rank, p in enumerate(lex_results, 1):
         pid = str(p.id)
-        score_map.setdefault(pid, {"pt": p, "s": 0.0, "d": 0.0, "lx": 0.0, "sym_sub": 0.0, "sym_eq": 0.0, "core": 0.0, "vendor": 0.0, "langb": 0.0, "rec": 0.0})
+        score_map.setdefault(
+            pid,
+            {
+                "pt": p,
+                "s": 0.0,
+                "d": 0.0,
+                "lx": 0.0,
+                "sym_sub": 0.0,
+                "sym_eq": 0.0,
+                "core": 0.0,
+                "vendor": 0.0,
+                "langb": 0.0,
+                "rec": 0.0,
+            },
+        )
         lxs = LEX_VECTOR_WEIGHT * rrf(rank)
         score_map[pid]["lx"] += lxs
         score_map[pid]["s"] += lxs
@@ -702,8 +864,18 @@ def run_hybrid_search(
     # Optional gate-first using mini vectors to restrict dense search to candidates
     flt_gated = flt
     try:
-        gate_first = str(os.environ.get("REFRAG_GATE_FIRST", "0")).strip().lower() in {"1","true","yes","on"}
-        refrag_on = str(os.environ.get("REFRAG_MODE", "")).strip().lower() in {"1","true","yes","on"}
+        gate_first = str(os.environ.get("REFRAG_GATE_FIRST", "0")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        refrag_on = str(os.environ.get("REFRAG_MODE", "")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
         cand_n = int(os.environ.get("REFRAG_CANDIDATES", "200") or 200)
     except Exception:
         gate_first, refrag_on, cand_n = False, False, 200
@@ -724,18 +896,42 @@ def run_hybrid_search(
         except Exception:
             pass
 
-    result_sets: List[List[Any]] = [dense_query(client, vec_name, v, flt_gated, max(24, limit)) for v in embedded]
+    result_sets: List[List[Any]] = [
+        dense_query(client, vec_name, v, flt_gated, max(24, limit)) for v in embedded
+    ]
 
     # Optional ReFRAG-style mini-vector gating: add compact-vector RRF if enabled
     try:
-        if os.environ.get("REFRAG_MODE", "").strip().lower() in {"1","true","yes","on"}:
+        if os.environ.get("REFRAG_MODE", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }:
             try:
                 mini_queries = [_project_mini(list(v), MINI_VEC_DIM) for v in embedded]
-                mini_sets: List[List[Any]] = [dense_query(client, MINI_VECTOR_NAME, mv, flt, max(24, limit)) for mv in mini_queries]
+                mini_sets: List[List[Any]] = [
+                    dense_query(client, MINI_VECTOR_NAME, mv, flt, max(24, limit))
+                    for mv in mini_queries
+                ]
                 for res in mini_sets:
                     for rank, p in enumerate(res, 1):
                         pid = str(p.id)
-                        score_map.setdefault(pid, {"pt": p, "s": 0.0, "d": 0.0, "lx": 0.0, "sym_sub": 0.0, "sym_eq": 0.0, "core": 0.0, "vendor": 0.0, "langb": 0.0, "rec": 0.0})
+                        score_map.setdefault(
+                            pid,
+                            {
+                                "pt": p,
+                                "s": 0.0,
+                                "d": 0.0,
+                                "lx": 0.0,
+                                "sym_sub": 0.0,
+                                "sym_eq": 0.0,
+                                "core": 0.0,
+                                "vendor": 0.0,
+                                "langb": 0.0,
+                                "rec": 0.0,
+                            },
+                        )
                         dens = float(HYBRID_MINI_WEIGHT) * rrf(rank)
                         score_map[pid]["d"] += dens
                         score_map[pid]["s"] += dens
@@ -770,8 +966,10 @@ def run_hybrid_search(
             prf_lw = float(os.environ.get("PRF_LEX_WEIGHT", "0.6") or 0.6)
         except Exception:
             prf_lw = 0.6
-        terms = _prf_terms_from_results(score_map, top_docs=top_docs, max_terms=max_terms)
-        base = (clean_queries[0] if clean_queries else (qlist[0] if qlist else ""))
+        terms = _prf_terms_from_results(
+            score_map, top_docs=top_docs, max_terms=max_terms
+        )
+        base = clean_queries[0] if clean_queries else (qlist[0] if qlist else "")
         prf_qs: List[str] = []
         for t in terms:
             cand = (base + " " + t).strip()
@@ -783,23 +981,56 @@ def run_hybrid_search(
             # Lexical PRF pass
             try:
                 lex_vec2 = lex_hash_vector(prf_qs)
-                lex_results2 = lex_query(client, lex_vec2, flt, max(12, limit // 2 or 6))
+                lex_results2 = lex_query(
+                    client, lex_vec2, flt, max(12, limit // 2 or 6)
+                )
             except Exception:
                 lex_results2 = []
             for rank, p in enumerate(lex_results2, 1):
                 pid = str(p.id)
-                score_map.setdefault(pid, {"pt": p, "s": 0.0, "d": 0.0, "lx": 0.0, "sym_sub": 0.0, "sym_eq": 0.0, "core": 0.0, "vendor": 0.0, "langb": 0.0, "rec": 0.0})
+                score_map.setdefault(
+                    pid,
+                    {
+                        "pt": p,
+                        "s": 0.0,
+                        "d": 0.0,
+                        "lx": 0.0,
+                        "sym_sub": 0.0,
+                        "sym_eq": 0.0,
+                        "core": 0.0,
+                        "vendor": 0.0,
+                        "langb": 0.0,
+                        "rec": 0.0,
+                    },
+                )
                 lxs = prf_lw * rrf(rank)
                 score_map[pid]["lx"] += lxs
                 score_map[pid]["s"] += lxs
             # Dense PRF pass
             try:
                 embedded2 = _embed_queries_cached(_model, prf_qs)
-                result_sets2: List[List[Any]] = [dense_query(client, vec_name, v, flt, max(12, limit // 2 or 6)) for v in embedded2]
+                result_sets2: List[List[Any]] = [
+                    dense_query(client, vec_name, v, flt, max(12, limit // 2 or 6))
+                    for v in embedded2
+                ]
                 for res2 in result_sets2:
                     for rank, p in enumerate(res2, 1):
                         pid = str(p.id)
-                        score_map.setdefault(pid, {"pt": p, "s": 0.0, "d": 0.0, "lx": 0.0, "sym_sub": 0.0, "sym_eq": 0.0, "core": 0.0, "vendor": 0.0, "langb": 0.0, "rec": 0.0})
+                        score_map.setdefault(
+                            pid,
+                            {
+                                "pt": p,
+                                "s": 0.0,
+                                "d": 0.0,
+                                "lx": 0.0,
+                                "sym_sub": 0.0,
+                                "sym_eq": 0.0,
+                                "core": 0.0,
+                                "vendor": 0.0,
+                                "langb": 0.0,
+                                "rec": 0.0,
+                            },
+                        )
                         dens = prf_dw * rrf(rank)
                         score_map[pid]["d"] += dens
                         score_map[pid]["s"] += dens
@@ -809,7 +1040,21 @@ def run_hybrid_search(
     for res in result_sets:
         for rank, p in enumerate(res, 1):
             pid = str(p.id)
-            score_map.setdefault(pid, {"pt": p, "s": 0.0, "d": 0.0, "lx": 0.0, "sym_sub": 0.0, "sym_eq": 0.0, "core": 0.0, "vendor": 0.0, "langb": 0.0, "rec": 0.0})
+            score_map.setdefault(
+                pid,
+                {
+                    "pt": p,
+                    "s": 0.0,
+                    "d": 0.0,
+                    "lx": 0.0,
+                    "sym_sub": 0.0,
+                    "sym_eq": 0.0,
+                    "core": 0.0,
+                    "vendor": 0.0,
+                    "langb": 0.0,
+                    "rec": 0.0,
+                },
+            )
             dens = DENSE_WEIGHT * rrf(rank)
             score_map[pid]["d"] += dens
             score_map[pid]["s"] += dens
@@ -882,7 +1127,10 @@ def run_hybrid_search(
         lst = clusters.setdefault(path, [])
         merged_flag = False
         for c in lst:
-            if start_line <= c["end"] + CLUSTER_LINES and end_line >= c["start"] - CLUSTER_LINES:
+            if (
+                start_line <= c["end"] + CLUSTER_LINES
+                and end_line >= c["start"] - CLUSTER_LINES
+            ):
                 if float(m["s"]) > float(c["m"]["s"]):
                     c["m"] = m
                 c["start"] = min(c["start"], start_line)
@@ -896,7 +1144,9 @@ def run_hybrid_search(
 
     # Client-side filters and per-path diversification
     import re as _re, fnmatch as _fnm
-    case_sensitive = (str(eff_case or "").lower() == "sensitive")
+
+    case_sensitive = str(eff_case or "").lower() == "sensitive"
+
     def _match_glob(pat: str, path: str) -> bool:
         if not pat:
             return True
@@ -905,6 +1155,7 @@ def run_hybrid_search(
         return _fnm.fnmatchcase(path.lower(), pat.lower())
 
     if eff_not or eff_path_regex or eff_ext or eff_path_globs or eff_not_globs:
+
         def _pass_filters(m: Dict[str, Any]) -> bool:
             md = (m["pt"].payload or {}).get("metadata") or {}
             path = str(md.get("path") or "")
@@ -918,8 +1169,8 @@ def run_hybrid_search(
             if eff_not_globs and any(_match_glob(g, path) for g in eff_not_globs):
                 return False
             if eff_ext:
-                ex = eff_ext.lower().lstrip('.')
-                if not path.lower().endswith('.' + ex):
+                ex = eff_ext.lower().lstrip(".")
+                if not path.lower().endswith("." + ex):
                     return False
             if eff_path_regex:
                 flags = 0 if case_sensitive else _re.IGNORECASE
@@ -931,11 +1182,17 @@ def run_hybrid_search(
             if eff_path_globs and not any(_match_glob(g, path) for g in eff_path_globs):
                 return False
             return True
+
         ranked = [m for m in ranked if _pass_filters(m)]
 
     # ReFRAG-lite span compaction and budgeting (applied after filters)
     try:
-        if str(os.environ.get("REFRAG_MODE", "")).strip().lower() in {"1","true","yes","on"}:
+        if str(os.environ.get("REFRAG_MODE", "")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }:
             ranked = _merge_and_budget_spans(ranked)
     except Exception:
         pass
@@ -953,7 +1210,7 @@ def run_hybrid_search(
             if len(merged) >= limit:
                 break
     else:
-        merged = ranked[: limit]
+        merged = ranked[:limit]
 
     # Emit structured items
     items: List[Dict[str, Any]] = []
@@ -975,47 +1232,87 @@ def run_hybrid_search(
         why = []
         if comp["dense_rrf"]:
             why.append(f"dense_rrf:{comp['dense_rrf']}")
-        for k in ("lexical","symbol_substr","symbol_exact","core_boost","lang_boost"):
+        for k in (
+            "lexical",
+            "symbol_substr",
+            "symbol_exact",
+            "core_boost",
+            "lang_boost",
+        ):
             if comp[k]:
                 why.append(f"{k}:{comp[k]}")
         if comp["vendor_penalty"]:
             why.append(f"vendor_penalty:{comp['vendor_penalty']}")
         if comp["recency"]:
             why.append(f"recency:{comp['recency']}")
-        items.append({
-            "score": round(float(m["s"]), 4),
-            "path": md.get("path"),
-            "symbol": md.get("symbol_path") or md.get("symbol") or "",
-            "start_line": start_line,
-            "end_line": end_line,
-            "components": comp,
-            "why": why,
-            "span_budgeted": bool(m.get("_merged_start") is not None),
-            "budget_tokens_used": m.get("_budget_tokens"),
-        })
+        items.append(
+            {
+                "score": round(float(m["s"]), 4),
+                "path": md.get("path"),
+                "symbol": md.get("symbol_path") or md.get("symbol") or "",
+                "start_line": start_line,
+                "end_line": end_line,
+                "components": comp,
+                "why": why,
+                "span_budgeted": bool(m.get("_merged_start") is not None),
+                "budget_tokens_used": m.get("_budget_tokens"),
+            }
+        )
     return items
 
 
 def main():
     ap = argparse.ArgumentParser(description="Hybrid search: dense + lexical RRF")
-    ap.add_argument("--query", "-q", action="append", required=True, help="One or more query strings (multi-query)")
+    ap.add_argument(
+        "--query",
+        "-q",
+        action="append",
+        required=True,
+        help="One or more query strings (multi-query)",
+    )
     ap.add_argument("--language", type=str, default=None)
     ap.add_argument("--under", type=str, default=None)
     ap.add_argument("--kind", type=str, default=None)
     ap.add_argument("--symbol", type=str, default=None)
     # Expansion enabled by default; allow disabling via --no-expand or HYBRID_EXPAND=0
-    ap.add_argument("--expand", dest="expand", action="store_true", default=_env_truthy(os.environ.get("HYBRID_EXPAND"), True), help="Enable simple query expansion")
-    ap.add_argument("--no-expand", dest="expand", action="store_false", help="Disable query expansion")
+    ap.add_argument(
+        "--expand",
+        dest="expand",
+        action="store_true",
+        default=_env_truthy(os.environ.get("HYBRID_EXPAND"), True),
+        help="Enable simple query expansion",
+    )
+    ap.add_argument(
+        "--no-expand",
+        dest="expand",
+        action="store_false",
+        help="Disable query expansion",
+    )
     # Per-path diversification enabled by default (1) unless overridden by env/flag
-    ap.add_argument("--per-path", type=int, default=int(os.environ.get("HYBRID_PER_PATH", "1") or 1), help="Cap results per file path to diversify (0=off)")
+    ap.add_argument(
+        "--per-path",
+        type=int,
+        default=int(os.environ.get("HYBRID_PER_PATH", "1") or 1),
+        help="Cap results per file path to diversify (0=off)",
+    )
 
     ap.add_argument("--limit", type=int, default=10)
     ap.add_argument("--per-query", type=int, default=24)
-    ap.add_argument("--json", dest="json", action="store_true", help="Emit JSON lines with score breakdown")
+    ap.add_argument(
+        "--json",
+        dest="json",
+        action="store_true",
+        help="Emit JSON lines with score breakdown",
+    )
     # Structured filters to mirror MCP tool fields
     ap.add_argument("--ext", type=str, default=None)
     ap.add_argument("--not", dest="not_filter", type=str, default=None)
-    ap.add_argument("--case", type=str, choices=["sensitive", "insensitive"], default=os.environ.get("HYBRID_CASE", "insensitive"))
+    ap.add_argument(
+        "--case",
+        type=str,
+        choices=["sensitive", "insensitive"],
+        default=os.environ.get("HYBRID_CASE", "insensitive"),
+    )
     ap.add_argument("--path-regex", dest="path_regex", type=str, default=None)
     ap.add_argument("--path-glob", dest="path_glob", type=str, default=None)
     ap.add_argument("--not-glob", dest="not_glob", type=str, default=None)
@@ -1069,6 +1366,7 @@ def main():
         # If the normalized path points to a real file under /work, use its parent directory as prefix
         try:
             from pathlib import Path as _P
+
             p = _P(v)
             # If it's an existing file, use its parent directory as the prefix
             if p.is_file():
@@ -1088,23 +1386,43 @@ def main():
     flt = None
     must = []
     if eff_language:
-        must.append(models.FieldCondition(key="metadata.language", match=models.MatchValue(value=eff_language)))
+        must.append(
+            models.FieldCondition(
+                key="metadata.language", match=models.MatchValue(value=eff_language)
+            )
+        )
     if eff_repo:
-        must.append(models.FieldCondition(key="metadata.repo", match=models.MatchValue(value=eff_repo)))
+        must.append(
+            models.FieldCondition(
+                key="metadata.repo", match=models.MatchValue(value=eff_repo)
+            )
+        )
     if eff_under:
-        must.append(models.FieldCondition(key="metadata.path_prefix", match=models.MatchValue(value=eff_under)))
+        must.append(
+            models.FieldCondition(
+                key="metadata.path_prefix", match=models.MatchValue(value=eff_under)
+            )
+        )
     # If ext: was provided without an explicit language, infer language from extension
     if eff_ext and not eff_language:
-        ex = eff_ext.lower().lstrip('.')
+        ex = eff_ext.lower().lstrip(".")
         for lang, exts in LANG_EXTS.items():
-            if any(ex == e.lstrip('.').lower() for e in exts):
+            if any(ex == e.lstrip(".").lower() for e in exts):
                 eff_language = lang
                 break
 
     if eff_kind:
-        must.append(models.FieldCondition(key="metadata.kind", match=models.MatchValue(value=eff_kind)))
+        must.append(
+            models.FieldCondition(
+                key="metadata.kind", match=models.MatchValue(value=eff_kind)
+            )
+        )
     if eff_symbol:
-        must.append(models.FieldCondition(key="metadata.symbol", match=models.MatchValue(value=eff_symbol)))
+        must.append(
+            models.FieldCondition(
+                key="metadata.symbol", match=models.MatchValue(value=eff_symbol)
+            )
+        )
     flt = models.Filter(must=must) if must else None
 
     # Build query set (optionally expanded)
@@ -1124,19 +1442,49 @@ def main():
     # Add server-side lexical vector ranking into fusion
     for rank, p in enumerate(lex_results, 1):
         pid = str(p.id)
-        score_map.setdefault(pid, {"pt": p, "s": 0.0, "d": 0.0, "lx": 0.0, "sym_sub": 0.0, "sym_eq": 0.0, "core": 0.0, "vendor": 0.0, "langb": 0.0, "rec": 0.0})
+        score_map.setdefault(
+            pid,
+            {
+                "pt": p,
+                "s": 0.0,
+                "d": 0.0,
+                "lx": 0.0,
+                "sym_sub": 0.0,
+                "sym_eq": 0.0,
+                "core": 0.0,
+                "vendor": 0.0,
+                "langb": 0.0,
+                "rec": 0.0,
+            },
+        )
         lxs = LEX_VECTOR_WEIGHT * rrf(rank)
         score_map[pid]["lx"] += lxs
         score_map[pid]["s"] += lxs
 
     embedded = _embed_queries_cached(model, queries)
-    result_sets: List[List[Any]] = [dense_query(client, vec_name, v, flt, args.per_query) for v in embedded]
+    result_sets: List[List[Any]] = [
+        dense_query(client, vec_name, v, flt, args.per_query) for v in embedded
+    ]
 
     # RRF fusion (weighted)
     for res in result_sets:
         for rank, p in enumerate(res, 1):
             pid = str(p.id)
-            score_map.setdefault(pid, {"pt": p, "s": 0.0, "d": 0.0, "lx": 0.0, "sym_sub": 0.0, "sym_eq": 0.0, "core": 0.0, "vendor": 0.0, "langb": 0.0, "rec": 0.0})
+            score_map.setdefault(
+                pid,
+                {
+                    "pt": p,
+                    "s": 0.0,
+                    "d": 0.0,
+                    "lx": 0.0,
+                    "sym_sub": 0.0,
+                    "sym_eq": 0.0,
+                    "core": 0.0,
+                    "vendor": 0.0,
+                    "langb": 0.0,
+                    "rec": 0.0,
+                },
+            )
             dens = DENSE_WEIGHT * rrf(rank)
             score_map[pid]["d"] += dens
             score_map[pid]["s"] += dens
@@ -1179,7 +1527,11 @@ def main():
             rec["s"] -= VENDOR_PENALTY
 
         # Language match boost if requested
-        if LANG_MATCH_BOOST > 0.0 and path and (eff_language or getattr(args, "language", None)):
+        if (
+            LANG_MATCH_BOOST > 0.0
+            and path
+            and (eff_language or getattr(args, "language", None))
+        ):
             lang = str((eff_language or args.language or "")).lower()
             md_lang = str((md.get("language") or "")).lower()
             if (lang and md_lang and md_lang == lang) or lang_matches_path(lang, path):
@@ -1198,6 +1550,7 @@ def main():
                 rec_comp = RECENCY_WEIGHT * norm
                 rec["rec"] += rec_comp
                 rec["s"] += rec_comp
+
     # Rank with deterministic tie-breakers
     def _tie_key(m: Dict[str, Any]):
         md = (m["pt"].payload or {}).get("metadata") or {}
@@ -1218,7 +1571,10 @@ def main():
         lst = clusters.setdefault(path, [])
         merged_flag = False
         for c in lst:
-            if start_line <= c["end"] + CLUSTER_LINES and end_line >= c["start"] - CLUSTER_LINES:
+            if (
+                start_line <= c["end"] + CLUSTER_LINES
+                and end_line >= c["start"] - CLUSTER_LINES
+            ):
                 # Near/overlapping: keep the higher-scoring rep and expand bounds
                 if float(m["s"]) > float(c["m"]["s"]):
                     c["m"] = m
@@ -1233,14 +1589,17 @@ def main():
 
     # Apply client-side filters: NOT substring, path regex, glob, and ext
     import re as _re, fnmatch as _fnm
-    case_sensitive = (str(eff_case or "").lower() == "sensitive")
+
+    case_sensitive = str(eff_case or "").lower() == "sensitive"
     if eff_not or eff_path_regex or eff_ext or eff_path_glob or eff_not_glob:
+
         def _match_glob(pat: str, path: str) -> bool:
             if not pat:
                 return True
             if case_sensitive:
                 return _fnm.fnmatchcase(path, pat)
             return _fnm.fnmatchcase(path.lower(), pat.lower())
+
         def _pass_filters(m: Dict[str, Any]) -> bool:
             md = (m["pt"].payload or {}).get("metadata") or {}
             path = str(md.get("path") or "")
@@ -1257,8 +1616,8 @@ def main():
                 return False
             # Extension filter (normalize to .ext)
             if eff_ext:
-                ex = eff_ext.lower().lstrip('.')
-                if not path.lower().endswith('.' + ex):
+                ex = eff_ext.lower().lstrip(".")
+                if not path.lower().endswith("." + ex):
                     return False
             # Path regex filter
             if eff_path_regex:
@@ -1273,6 +1632,7 @@ def main():
             if eff_path_glob and not _match_glob(eff_path_glob, path):
                 return False
             return True
+
         ranked = [m for m in ranked if _pass_filters(m)]
 
     # Optional diversification by path
@@ -1315,7 +1675,13 @@ def main():
             why = []
             if item["components"]["dense_rrf"]:
                 why.append(f"dense_rrf:{item['components']['dense_rrf']}")
-            for k in ("lexical","symbol_substr","symbol_exact","core_boost","lang_boost"):
+            for k in (
+                "lexical",
+                "symbol_substr",
+                "symbol_exact",
+                "core_boost",
+                "lang_boost",
+            ):
                 if item["components"][k]:
                     why.append(f"{k}:{item['components'][k]}")
             if item["components"]["vendor_penalty"]:
@@ -1325,9 +1691,10 @@ def main():
             item["why"] = why
             print(json.dumps(item))
         else:
-            print(f"{m['s']:.3f}\t{md.get('path')}\t{md.get('symbol_path') or md.get('symbol') or ''}\t{md.get('start_line')}-{md.get('end_line')}")
+            print(
+                f"{m['s']:.3f}\t{md.get('path')}\t{md.get('symbol_path') or md.get('symbol') or ''}\t{md.get('start_line')}-{md.get('end_line')}"
+            )
 
 
 if __name__ == "__main__":
     main()
-

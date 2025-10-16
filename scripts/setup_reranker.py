@@ -28,19 +28,35 @@ def upsert_env_line(path: Path, key: str, value: str):
 
 
 def main():
-    p = argparse.ArgumentParser(description="Download ONNX cross-encoder + tokenizer and set .env paths")
+    p = argparse.ArgumentParser(
+        description="Download ONNX cross-encoder + tokenizer and set .env paths"
+    )
     p.add_argument("--onnx-url", required=True, help="Direct URL to .onnx model file")
-    p.add_argument("--tokenizer-url", required=True, help="Direct URL to tokenizer.json file")
-    p.add_argument("--dest", default="models", help="Destination directory under repo root (default: models)")
-    p.add_argument("--onnx-filename", default=None, help="Optional override for ONNX filename")
-    p.add_argument("--tokenizer-filename", default=None, help="Optional override for tokenizer filename")
+    p.add_argument(
+        "--tokenizer-url", required=True, help="Direct URL to tokenizer.json file"
+    )
+    p.add_argument(
+        "--dest",
+        default="models",
+        help="Destination directory under repo root (default: models)",
+    )
+    p.add_argument(
+        "--onnx-filename", default=None, help="Optional override for ONNX filename"
+    )
+    p.add_argument(
+        "--tokenizer-filename",
+        default=None,
+        help="Optional override for tokenizer filename",
+    )
     args = p.parse_args()
 
     dest_dir = ROOT / args.dest
     dest_dir.mkdir(parents=True, exist_ok=True)
 
     onnx_name = args.onnx_filename or Path(args.onnx_url).name or "reranker.onnx"
-    tok_name = args.tokenizer_filename or Path(args.tokenizer_url).name or "tokenizer.json"
+    tok_name = (
+        args.tokenizer_filename or Path(args.tokenizer_url).name or "tokenizer.json"
+    )
 
     onnx_path = dest_dir / onnx_name
     tok_path = dest_dir / tok_name
@@ -71,4 +87,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

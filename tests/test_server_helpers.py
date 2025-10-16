@@ -20,6 +20,7 @@ def test_highlight_snippet_simple():
 def fake_async_run_factory(text):
     async def _fake(cmd, **kwargs):  # accept env/timeout/cwd
         return {"ok": True, "code": 0, "stdout": text, "stderr": ""}
+
     return _fake
 
 
@@ -40,7 +41,7 @@ def test_repo_search_arg_normalization(monkeypatch, tmp_path):
         "start_line": 1,
         "end_line": 2,
         "components": ["a.py"],
-        "why": "test"
+        "why": "test",
     }
     jsonl = json.dumps(item) + "\n"
 
@@ -81,4 +82,3 @@ def test_repo_search_arg_normalization(monkeypatch, tmp_path):
     # snippet highlighting applied
     if res["results"][0].get("snippet"):
         assert "<<" in res["results"][0]["snippet"]
-

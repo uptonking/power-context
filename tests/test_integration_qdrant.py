@@ -13,10 +13,17 @@ srv = importlib.import_module("scripts.mcp_indexer_server")
 class FakeEmbedder:
     def __init__(self, model_name: str = "fake"):
         self.model_name = model_name
+
     class _Vec:
-        def __init__(self, arr): self._arr = arr
-        def tolist(self): return self._arr
-        def __len__(self): return len(self._arr)
+        def __init__(self, arr):
+            self._arr = arr
+
+        def tolist(self):
+            return self._arr
+
+        def __len__(self):
+            return len(self._arr)
+
     def embed(self, texts):
         # Deterministic small vector by hashing; yields objects with .tolist()
         for t in texts:
@@ -69,7 +76,9 @@ def test_index_and_search_minirepo(tmp_path, monkeypatch, qdrant_container):
 
     # Stub embeddings everywhere
     monkeypatch.setattr(ing, "TextEmbedding", lambda *a, **k: FakeEmbedder("fake"))
-    monkeypatch.setattr(srv, "_get_embedding_model", lambda *a, **k: FakeEmbedder("fake"))
+    monkeypatch.setattr(
+        srv, "_get_embedding_model", lambda *a, **k: FakeEmbedder("fake")
+    )
 
     # Create tiny repo
     (tmp_path / "pkg").mkdir()
@@ -103,8 +112,6 @@ def test_index_and_search_minirepo(tmp_path, monkeypatch, qdrant_container):
     assert any(str(f1) in (r.get("path") or "") for r in res.get("results", []))
 
 
-
-
 @pytest.mark.integration
 def test_filters_language_and_path(tmp_path, monkeypatch, qdrant_container):
     # Reuse container; set env
@@ -116,7 +123,9 @@ def test_filters_language_and_path(tmp_path, monkeypatch, qdrant_container):
 
     # Stub embeddings
     monkeypatch.setattr(ing, "TextEmbedding", lambda *a, **k: FakeEmbedder("fake"))
-    monkeypatch.setattr(srv, "_get_embedding_model", lambda *a, **k: FakeEmbedder("fake"))
+    monkeypatch.setattr(
+        srv, "_get_embedding_model", lambda *a, **k: FakeEmbedder("fake")
+    )
 
     # Create tiny repo again in this temp path
     (tmp_path / "pkg").mkdir()
@@ -150,6 +159,14 @@ def test_filters_language_and_path(tmp_path, monkeypatch, qdrant_container):
 
     # Path glob to only allow pkg/*.py
     res3 = srv.asyncio.get_event_loop().run_until_complete(
-        srv.repo_search(queries=["def"], limit=5, path_glob=str(tmp_path / "pkg" / "*.py"), compact=False)
+        srv.repo_search(
+            queries=["def"],
+            limit=5,
+            path_glob=str(tmp_path / "pkg" / "*.py"),
+            compact=False,
+        )
     )
-    assert all("/pkg/" in (r.get("path") or "") and r.get("path", "").endswith(".py") for r in res3.get("results", []))
+    assert all(
+        "/pkg/" in (r.get("path") or "") and r.get("path", "").endswith(".py")
+        for r in res3.get("results", [])
+    )

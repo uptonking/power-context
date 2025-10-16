@@ -34,6 +34,7 @@ import threading
 from typing import Any, Dict, Optional, List
 
 import sys
+
 # Ensure code roots are on sys.path so absolute imports like 'from scripts.x import y' work
 # when this file is executed directly (sys.path[0] may be /work/scripts).
 # Supports multiple roots via WORK_ROOTS env (comma-separated), defaults to /work and /app.
@@ -56,6 +57,16 @@ try:
     from scripts.utils import highlight_snippet as _do_highlight_snippet
 except Exception:
     _do_highlight_snippet = None  # fallback guarded at call site
+
+
+# Back-compat shim for tests expecting _highlight_snippet in this module
+# Delegates to scripts.utils.highlight_snippet when available
+try:
+    def _highlight_snippet(snippet, tokens):  # type: ignore
+        return _do_highlight_snippet(snippet, tokens) if _do_highlight_snippet else snippet
+except Exception:
+    def _highlight_snippet(snippet, tokens):  # type: ignore
+        return snippet
 
 try:
     # Official MCP Python SDK (FastMCP convenience server)
@@ -81,9 +92,11 @@ try:
 except Exception:
     HEALTH_PORT = 18001
 
+
 def _start_readyz_server():
     try:
         from http.server import BaseHTTPRequestHandler, HTTPServer
+
         class H(BaseHTTPRequestHandler):
             def do_GET(self):
                 try:
@@ -102,9 +115,11 @@ def _start_readyz_server():
                         self.end_headers()
                     except Exception:
                         pass
+
             def log_message(self, *args, **kwargs):
                 # Quiet health server logs
                 return
+
         srv = HTTPServer((HOST, HEALTH_PORT), H)
         th = threading.Thread(target=srv.serve_forever, daemon=True)
         th.start()
@@ -113,10 +128,10 @@ def _start_readyz_server():
         return False
 
 
-
-
 # Async subprocess runner to avoid blocking event loop
-async def _run_async(cmd: list[str], env: Optional[Dict[str, str]] = None, timeout: int = 60) -> Dict[str, Any]:
+async def _run_async(
+    cmd: list[str], env: Optional[Dict[str, str]] = None, timeout: int = 60
+) -> Dict[str, Any]:
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -125,7 +140,9 @@ async def _run_async(cmd: list[str], env: Optional[Dict[str, str]] = None, timeo
             env=env,
         )
         try:
-            stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            stdout_b, stderr_b = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout
+            )
             code = proc.returncode
         except asyncio.TimeoutError:
             try:
@@ -140,17 +157,30 @@ async def _run_async(cmd: list[str], env: Optional[Dict[str, str]] = None, timeo
             }
         stdout = (stdout_b or b"").decode("utf-8", errors="ignore")
         stderr = (stderr_b or b"").decode("utf-8", errors="ignore")
+
         def _cap_tail(s: str) -> str:
             if not s:
                 return s
-            return s if len(s) <= MAX_LOG_TAIL else ("...[tail truncated]\n" + s[-MAX_LOG_TAIL:])
-        return {"ok": code == 0, "code": code, "stdout": _cap_tail(stdout), "stderr": _cap_tail(stderr)}
+            return (
+                s
+                if len(s) <= MAX_LOG_TAIL
+                else ("...[tail truncated]\n" + s[-MAX_LOG_TAIL:])
+            )
+
+        return {
+            "ok": code == 0,
+            "code": code,
+            "stdout": _cap_tail(stdout),
+            "stderr": _cap_tail(stderr),
+        }
     except Exception as e:
         return {"ok": False, "code": -2, "stdout": "", "stderr": str(e)}
+
 
 # Embedding model cache to avoid re-initialization costs
 _EMBED_MODEL_CACHE: Dict[str, Any] = {}
 _EMBED_MODEL_LOCKS: Dict[str, threading.Lock] = {}
+
 
 def _get_embedding_model(model_name: str):
     try:
@@ -168,8 +198,10 @@ def _get_embedding_model(model_name: str):
                 _EMBED_MODEL_CACHE[model_name] = m
     return m
 
+
 # Lenient argument normalization to tolerate buggy clients (e.g., JSON-in-kwargs, booleans where strings expected)
 from typing import Any as _Any, Dict as _Dict
+
 
 def _maybe_parse_jsonish(obj: _Any):
     if isinstance(obj, dict):
@@ -187,8 +219,11 @@ def _maybe_parse_jsonish(obj: _Any):
         return json.loads("{" + s + "}")
     except Exception:
         pass
+
+
 # Extra parsing helpers for quirky clients that send stringified kwargs
 import urllib.parse as _urlparse, ast as _ast
+
 
 def _parse_kv_string(s: str) -> _Dict[str, _Any]:
     """Parse non-JSON strings like "a=1&b=2" or "query=[\"a\",\"b\"]" into a dict.
@@ -217,6 +252,7 @@ def _parse_kv_string(s: str) -> _Dict[str, _Any]:
         return {}
     return out
 
+
 def _coerce_value_string(v: str):
     # Try JSON
     try:
@@ -230,6 +266,7 @@ def _coerce_value_string(v: str):
         pass
     # As-is string
     return v
+
 
 def _to_str_list_relaxed(x: _Any) -> list[str]:
     """Coerce various inputs to list[str]. Accepts JSON strings like "[\"a\",\"b\"]"."""
@@ -260,6 +297,7 @@ def _to_str_list_relaxed(x: _Any) -> list[str]:
         return [s]
     return [str(x)]
 
+
 def _extract_kwargs_payload(kwargs: _Any) -> _Dict[str, _Any]:
     try:
         if isinstance(kwargs, dict) and "kwargs" in kwargs:
@@ -279,6 +317,7 @@ def _extract_kwargs_payload(kwargs: _Any) -> _Dict[str, _Any]:
         return {}
     return {}
 
+
 def _looks_jsonish_string(s: _Any) -> bool:
     if not isinstance(s, str):
         return False
@@ -292,6 +331,7 @@ def _looks_jsonish_string(s: _Any) -> bool:
     # quick heuristics for comma/colon pairs often seen when args are concatenated
     return ("," in t and ":" in t) or ('":' in t)
 
+
 def _coerce_bool(x, default=False):
     if isinstance(x, bool):
         return x
@@ -304,6 +344,7 @@ def _coerce_bool(x, default=False):
         return False
     return default
 
+
 def _coerce_int(x, default=0):
     try:
         if x is None or (isinstance(x, str) and x.strip() == ""):
@@ -312,14 +353,36 @@ def _coerce_int(x, default=0):
     except Exception:
         return default
 
+
 def _coerce_str(x, default=""):
     if x is None:
         return default
     return str(x)
 
+
 # Lightweight tokenizer and snippet highlighter
 import re
-_STOP = {"the","a","an","of","in","on","for","and","or","to","with","by","is","are","be","this","that"}
+
+_STOP = {
+    "the",
+    "a",
+    "an",
+    "of",
+    "in",
+    "on",
+    "for",
+    "and",
+    "or",
+    "to",
+    "with",
+    "by",
+    "is",
+    "are",
+    "be",
+    "this",
+    "that",
+}
+
 
 def _split_ident(s: str):
     parts = re.split(r"[^A-Za-z0-9]+", s)
@@ -331,21 +394,24 @@ def _split_ident(s: str):
         out.extend([x for x in segs if x])
     return [x.lower() for x in out if x and x.lower() not in _STOP]
 
+
 def _tokens_from_queries(qs):
     toks = []
     for q in qs:
         toks.extend(_split_ident(q))
-    seen = set(); out = []
+    seen = set()
+    out = []
     for t in toks:
         if t not in seen:
-            out.append(t); seen.add(t)
+            out.append(t)
+            seen.add(t)
     return out
 
 
-
 @mcp.tool()
-async def qdrant_index_root(recreate: Optional[bool] = None,
-                            collection: Optional[str] = None) -> Dict[str, Any]:
+async def qdrant_index_root(
+    recreate: Optional[bool] = None, collection: Optional[str] = None
+) -> Dict[str, Any]:
     """Index the mounted root path (/work) with zero-arg safe defaults.
     Notes for IDE agents (Cursor/Windsurf/Augment):
     - Prefer this tool when you want to index the repo root without specifying params.
@@ -377,12 +443,18 @@ async def qdrant_index_root(recreate: Optional[bool] = None,
     res = await _run_async(cmd, env=env)
     return {"args": {"root": "/work", "collection": coll, "recreate": recreate}, **res}
 
+
 @mcp.tool()
 async def qdrant_list(**kwargs) -> Dict[str, Any]:
     """List Qdrant collections (ignores any extra params)"""
     try:
         from qdrant_client import QdrantClient
-        client = QdrantClient(url=QDRANT_URL, api_key=os.environ.get("QDRANT_API_KEY"), timeout=float(os.environ.get("QDRANT_TIMEOUT","20") or 20))
+
+        client = QdrantClient(
+            url=QDRANT_URL,
+            api_key=os.environ.get("QDRANT_API_KEY"),
+            timeout=float(os.environ.get("QDRANT_TIMEOUT", "20") or 20),
+        )
         cols_info = await asyncio.to_thread(client.get_collections)
         return {"collections": [c.name for c in cols_info.collections]}
     except ImportError:
@@ -390,10 +462,13 @@ async def qdrant_list(**kwargs) -> Dict[str, Any]:
     except Exception as e:
         return {"error": str(e)}
 
+
 @mcp.tool()
-async def memory_store(information: str,
-                       metadata: Optional[Dict[str, Any]] = None,
-                       collection: Optional[str] = None) -> Dict[str, Any]:
+async def memory_store(
+    information: str,
+    metadata: Optional[Dict[str, Any]] = None,
+    collection: Optional[str] = None,
+) -> Dict[str, Any]:
     """Store a memory-like entry directly into Qdrant using the default collection.
     - information: free-form text to remember
     - metadata: optional tags (e.g., {"kind":"preference","source":"memory"})
@@ -435,6 +510,7 @@ async def memory_store(information: str,
         # Delegate to shared utility for consistency
         try:
             from scripts.utils import lex_hash_vector_text
+
             return lex_hash_vector_text(text, dim)
         except Exception:
             # Fallback: minimal hashing
@@ -445,9 +521,11 @@ async def memory_store(information: str,
             if not toks:
                 return vec
             for t in toks:
-                h = int(hashlib.md5(t.encode("utf-8", errors="ignore")).hexdigest()[:8], 16)
+                h = int(
+                    hashlib.md5(t.encode("utf-8", errors="ignore")).hexdigest()[:8], 16
+                )
                 vec[h % dim] += 1.0
-            norm = (sum(v*v for v in vec) or 0.0) ** 0.5 or 1.0
+            norm = (sum(v * v for v in vec) or 0.0) ** 0.5 or 1.0
             return [v / norm for v in vec]
 
     # Build vectors (cached embedding model)
@@ -458,31 +536,54 @@ async def memory_store(information: str,
 
     # Upsert
     try:
-        client = QdrantClient(url=QDRANT_URL, api_key=os.environ.get("QDRANT_API_KEY"), timeout=float(os.environ.get("QDRANT_TIMEOUT","20") or 20))
+        client = QdrantClient(
+            url=QDRANT_URL,
+            api_key=os.environ.get("QDRANT_API_KEY"),
+            timeout=float(os.environ.get("QDRANT_TIMEOUT", "20") or 20),
+        )
         # Ensure collection and named vectors exist (dense + lexical)
         try:
-            await asyncio.to_thread(lambda: _ensure_collection(client, coll, len(dense), vector_name))
+            await asyncio.to_thread(
+                lambda: _ensure_collection(client, coll, len(dense), vector_name)
+            )
         except Exception:
             pass
         pid = str(uuid.uuid4())
-        payload = {"information": str(information), "metadata": metadata or {"kind": "memory", "source": "memory"}}
+        payload = {
+            "information": str(information),
+            "metadata": metadata or {"kind": "memory", "source": "memory"},
+        }
         vecs = {vector_name: dense, LEX_VECTOR_NAME: lex}
         try:
-            if str(os.environ.get("REFRAG_MODE", "")).strip().lower() in {"1","true","yes","on"}:
+            if str(os.environ.get("REFRAG_MODE", "")).strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }:
                 mini_name = os.environ.get("MINI_VECTOR_NAME", "mini")
-                mini = _project_mini(list(dense), int(os.environ.get("MINI_VEC_DIM", "64") or 64))
+                mini = _project_mini(
+                    list(dense), int(os.environ.get("MINI_VEC_DIM", "64") or 64)
+                )
                 vecs[mini_name] = mini
         except Exception:
             pass
         point = models.PointStruct(id=pid, vector=vecs, payload=payload)
-        await asyncio.to_thread(lambda: client.upsert(collection_name=coll, points=[point], wait=True))
+        await asyncio.to_thread(
+            lambda: client.upsert(collection_name=coll, points=[point], wait=True)
+        )
         return {"ok": True, "id": pid, "collection": coll, "vector_name": vector_name}
     except Exception as e:
         return {"error": str(e)}
 
 
 @mcp.tool()
-async def qdrant_status(collection: Optional[str] = None, max_points: Optional[int] = None, batch: Optional[int] = None, **kwargs) -> Dict[str, Any]:
+async def qdrant_status(
+    collection: Optional[str] = None,
+    max_points: Optional[int] = None,
+    batch: Optional[int] = None,
+    **kwargs,
+) -> Dict[str, Any]:
     """Report collection size and approximate last index times. Extra params are ignored.
     Args:
       - collection: override collection name (defaults to env COLLECTION_NAME)
@@ -504,15 +605,26 @@ async def qdrant_status(collection: Optional[str] = None, max_points: Optional[i
     try:
         from qdrant_client import QdrantClient
         import datetime as _dt
-        client = QdrantClient(url=QDRANT_URL, api_key=os.environ.get("QDRANT_API_KEY"), timeout=float(os.environ.get("QDRANT_TIMEOUT","20") or 20))
+
+        client = QdrantClient(
+            url=QDRANT_URL,
+            api_key=os.environ.get("QDRANT_API_KEY"),
+            timeout=float(os.environ.get("QDRANT_TIMEOUT", "20") or 20),
+        )
         # Count points
         try:
-            cnt_res = await asyncio.to_thread(lambda: client.count(collection_name=coll, exact=True))
+            cnt_res = await asyncio.to_thread(
+                lambda: client.count(collection_name=coll, exact=True)
+            )
             total = int(getattr(cnt_res, "count", 0))
         except Exception:
             total = 0
         # Scan a limited number of points to estimate last timestamps
-        max_points = int(max_points) if max_points not in (None, "") else int(os.environ.get("MCP_STATUS_MAX_POINTS", "5000"))
+        max_points = (
+            int(max_points)
+            if max_points not in (None, "")
+            else int(os.environ.get("MCP_STATUS_MAX_POINTS", "5000"))
+        )
         batch = int(batch) if batch not in (None, "") else 1000
         scanned = 0
         last_ing = None
@@ -521,10 +633,25 @@ async def qdrant_status(collection: Optional[str] = None, max_points: Optional[i
         while scanned < max_points:
             limit = min(batch, max_points - scanned)
             try:
-                pts, next_page = await asyncio.to_thread(lambda: client.scroll(collection_name=coll, limit=limit, offset=next_page, with_payload=True, with_vectors=False))
+                pts, next_page = await asyncio.to_thread(
+                    lambda: client.scroll(
+                        collection_name=coll,
+                        limit=limit,
+                        offset=next_page,
+                        with_payload=True,
+                        with_vectors=False,
+                    )
+                )
             except Exception:
                 # Fallback without offset keyword (older clients)
-                pts, next_page = await asyncio.to_thread(lambda: client.scroll(collection_name=coll, limit=limit, with_payload=True, with_vectors=False))
+                pts, next_page = await asyncio.to_thread(
+                    lambda: client.scroll(
+                        collection_name=coll,
+                        limit=limit,
+                        with_payload=True,
+                        with_vectors=False,
+                    )
+                )
             if not pts:
                 break
             scanned += len(pts)
@@ -538,6 +665,7 @@ async def qdrant_status(collection: Optional[str] = None, max_points: Optional[i
                     last_mod = tm if last_mod is None else max(last_mod, tm)
             if not next_page:
                 break
+
         def _iso(ts):
             if isinstance(ts, int) and ts > 0:
                 try:
@@ -545,6 +673,7 @@ async def qdrant_status(collection: Optional[str] = None, max_points: Optional[i
                 except Exception:
                     return ""
             return ""
+
         return {
             "collection": coll,
             "count": total,
@@ -556,10 +685,12 @@ async def qdrant_status(collection: Optional[str] = None, max_points: Optional[i
         return {"collection": coll, "error": str(e)}
 
 
-
 @mcp.tool()
-async def qdrant_index(subdir: Optional[str] = None, recreate: Optional[bool] = None,
-                 collection: Optional[str] = None) -> Dict[str, Any]:
+async def qdrant_index(
+    subdir: Optional[str] = None,
+    recreate: Optional[bool] = None,
+    collection: Optional[str] = None,
+) -> Dict[str, Any]:
     """Index the mounted path (/work) or a subdirectory.
     Important for IDE agents (Cursor/Windsurf/Augment):
     - Do NOT pass null values; omit a field or pass empty string "".
@@ -602,7 +733,10 @@ async def qdrant_index(subdir: Optional[str] = None, recreate: Optional[bool] = 
     env["COLLECTION_NAME"] = coll
 
     cmd = [
-        "python", "/work/scripts/ingest_code.py", "--root", root,
+        "python",
+        "/work/scripts/ingest_code.py",
+        "--root",
+        root,
     ]
     if recreate:
         cmd.append("--recreate")
@@ -619,6 +753,7 @@ async def qdrant_prune(**kwargs) -> Dict[str, Any]:
     cmd = ["python", "/work/scripts/prune.py"]
     res = await _run_async(cmd, env=env)
     return res
+
 
 @mcp.tool()
 async def repo_search(
@@ -666,9 +801,11 @@ async def repo_search(
     """
     # Accept common alias keys from clients (top-level)
     try:
-        if (limit is None or (isinstance(limit, str) and str(limit).strip() == "")) and ("top_k" in kwargs):
+        if (
+            limit is None or (isinstance(limit, str) and str(limit).strip() == "")
+        ) and ("top_k" in kwargs):
             limit = kwargs.get("top_k")
-        if (query is None or (isinstance(query, str) and str(query).strip() == "")):
+        if query is None or (isinstance(query, str) and str(query).strip() == ""):
             q_alt = kwargs.get("q") or kwargs.get("text")
             if q_alt is not None:
                 query = q_alt
@@ -679,47 +816,83 @@ async def repo_search(
     try:
         _extra = _extract_kwargs_payload(kwargs)
         if _extra:
-            if (query is None or (isinstance(query, str) and query.strip() == "")):
+            if query is None or (isinstance(query, str) and query.strip() == ""):
                 query = _extra.get("query") or _extra.get("queries")
             if limit in (None, "") and _extra.get("limit") is not None:
                 limit = _extra.get("limit")
             if per_path in (None, "") and _extra.get("per_path") is not None:
                 per_path = _extra.get("per_path")
-            if include_snippet in (None, "") and _extra.get("include_snippet") is not None:
+            if (
+                include_snippet in (None, "")
+                and _extra.get("include_snippet") is not None
+            ):
                 include_snippet = _extra.get("include_snippet")
             if context_lines in (None, "") and _extra.get("context_lines") is not None:
                 context_lines = _extra.get("context_lines")
-            if rerank_enabled in (None, "") and _extra.get("rerank_enabled") is not None:
+            if (
+                rerank_enabled in (None, "")
+                and _extra.get("rerank_enabled") is not None
+            ):
                 rerank_enabled = _extra.get("rerank_enabled")
             if rerank_top_n in (None, "") and _extra.get("rerank_top_n") is not None:
                 rerank_top_n = _extra.get("rerank_top_n")
-            if rerank_return_m in (None, "") and _extra.get("rerank_return_m") is not None:
+            if (
+                rerank_return_m in (None, "")
+                and _extra.get("rerank_return_m") is not None
+            ):
                 rerank_return_m = _extra.get("rerank_return_m")
-            if rerank_timeout_ms in (None, "") and _extra.get("rerank_timeout_ms") is not None:
+            if (
+                rerank_timeout_ms in (None, "")
+                and _extra.get("rerank_timeout_ms") is not None
+            ):
                 rerank_timeout_ms = _extra.get("rerank_timeout_ms")
-            if highlight_snippet in (None, "") and _extra.get("highlight_snippet") is not None:
+            if (
+                highlight_snippet in (None, "")
+                and _extra.get("highlight_snippet") is not None
+            ):
                 highlight_snippet = _extra.get("highlight_snippet")
-            if (collection is None or (isinstance(collection, str) and collection.strip() == "")) and _extra.get("collection"):
+            if (
+                collection is None
+                or (isinstance(collection, str) and collection.strip() == "")
+            ) and _extra.get("collection"):
                 collection = _extra.get("collection")
-            if (language is None or (isinstance(language, str) and language.strip() == "")) and _extra.get("language"):
+            if (
+                language is None
+                or (isinstance(language, str) and language.strip() == "")
+            ) and _extra.get("language"):
                 language = _extra.get("language")
-            if (under is None or (isinstance(under, str) and under.strip() == "")) and _extra.get("under"):
+            if (
+                under is None or (isinstance(under, str) and under.strip() == "")
+            ) and _extra.get("under"):
                 under = _extra.get("under")
-            if (kind is None or (isinstance(kind, str) and kind.strip() == "")) and _extra.get("kind"):
+            if (
+                kind is None or (isinstance(kind, str) and kind.strip() == "")
+            ) and _extra.get("kind"):
                 kind = _extra.get("kind")
-            if (symbol is None or (isinstance(symbol, str) and symbol.strip() == "")) and _extra.get("symbol"):
+            if (
+                symbol is None or (isinstance(symbol, str) and symbol.strip() == "")
+            ) and _extra.get("symbol"):
                 symbol = _extra.get("symbol")
-            if (path_regex is None or (isinstance(path_regex, str) and path_regex.strip() == "")) and _extra.get("path_regex"):
+            if (
+                path_regex is None
+                or (isinstance(path_regex, str) and path_regex.strip() == "")
+            ) and _extra.get("path_regex"):
                 path_regex = _extra.get("path_regex")
             if path_glob in (None, "") and _extra.get("path_glob") is not None:
                 path_glob = _extra.get("path_glob")
             if not_glob in (None, "") and _extra.get("not_glob") is not None:
                 not_glob = _extra.get("not_glob")
-            if (ext is None or (isinstance(ext, str) and ext.strip() == "")) and _extra.get("ext"):
+            if (
+                ext is None or (isinstance(ext, str) and ext.strip() == "")
+            ) and _extra.get("ext"):
                 ext = _extra.get("ext")
-            if (not_ is None or (isinstance(not_, str) and not_.strip() == "")) and (_extra.get("not") or _extra.get("not_")):
+            if (not_ is None or (isinstance(not_, str) and not_.strip() == "")) and (
+                _extra.get("not") or _extra.get("not_")
+            ):
                 not_ = _extra.get("not") or _extra.get("not_")
-            if (case is None or (isinstance(case, str) and case.strip() == "")) and _extra.get("case"):
+            if (
+                case is None or (isinstance(case, str) and case.strip() == "")
+            ) and _extra.get("case"):
                 case = _extra.get("case")
             if compact in (None, "") and _extra.get("compact") is not None:
                 compact = _extra.get("compact")
@@ -734,15 +907,19 @@ async def repo_search(
             return int(x)
         except Exception:
             return default
+
     def _to_bool(x, default):
         if x is None or (isinstance(x, str) and x.strip() == ""):
             return default
         if isinstance(x, bool):
             return x
         s = str(x).strip().lower()
-        if s in {"1","true","yes","on"}: return True
-        if s in {"0","false","no","off"}: return False
+        if s in {"1", "true", "yes", "on"}:
+            return True
+        if s in {"0", "false", "no", "off"}:
+            return False
         return default
+
     def _to_str(x, default=""):
         if x is None:
             return default
@@ -754,19 +931,30 @@ async def repo_search(
     include_snippet = _to_bool(include_snippet, False)
     context_lines = _to_int(context_lines, 2)
     # Reranker: allow env-defaults to enable without client args
-    rerank_env_default = str(os.environ.get("RERANKER_ENABLED", "")).strip().lower() in {"1","true","yes","on"}
+    rerank_env_default = str(
+        os.environ.get("RERANKER_ENABLED", "")
+    ).strip().lower() in {"1", "true", "yes", "on"}
     rerank_enabled = _to_bool(rerank_enabled, rerank_env_default)
-    rerank_top_n = _to_int(rerank_top_n, int(os.environ.get("RERANKER_TOPN", "50") or 50))
-    rerank_return_m = _to_int(rerank_return_m, int(os.environ.get("RERANKER_RETURN_M", "12") or 12))
-    rerank_timeout_ms = _to_int(rerank_timeout_ms, int(os.environ.get("RERANKER_TIMEOUT_MS", "120") or 120))
+    rerank_top_n = _to_int(
+        rerank_top_n, int(os.environ.get("RERANKER_TOPN", "50") or 50)
+    )
+    rerank_return_m = _to_int(
+        rerank_return_m, int(os.environ.get("RERANKER_RETURN_M", "12") or 12)
+    )
+    rerank_timeout_ms = _to_int(
+        rerank_timeout_ms, int(os.environ.get("RERANKER_TIMEOUT_MS", "120") or 120)
+    )
     highlight_snippet = _to_bool(highlight_snippet, True)
-    collection = (_to_str(collection, "").strip() or os.environ.get("COLLECTION_NAME", DEFAULT_COLLECTION))
+    collection = _to_str(collection, "").strip() or os.environ.get(
+        "COLLECTION_NAME", DEFAULT_COLLECTION
+    )
 
     language = _to_str(language, "").strip()
     under = _to_str(under, "").strip()
     kind = _to_str(kind, "").strip()
     symbol = _to_str(symbol, "").strip()
     path_regex = _to_str(path_regex, "").strip()
+
     # Normalize globs to lists (accept string or list)
     def _to_str_list(x):
         if x is None:
@@ -783,6 +971,7 @@ async def repo_search(
             return []
         # support comma-separated shorthand
         return [t.strip() for t in s.split(",") if t.strip()]
+
     path_globs = _to_str_list(path_glob)
     not_globs = _to_str_list(not_glob)
     ext = _to_str(ext, "").strip()
@@ -825,10 +1014,13 @@ async def repo_search(
     # Default subprocess result placeholder (for consistent response shape)
     res = {"ok": True, "code": 0, "stdout": "", "stderr": ""}
 
-    use_hybrid_inproc = str(os.environ.get("HYBRID_IN_PROCESS", "")).strip().lower() in {"1","true","yes","on"}
+    use_hybrid_inproc = str(
+        os.environ.get("HYBRID_IN_PROCESS", "")
+    ).strip().lower() in {"1", "true", "yes", "on"}
     if use_hybrid_inproc:
         try:
             from scripts.hybrid_search import run_hybrid_search  # type: ignore
+
             model_name = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
             model = _get_embedding_model(model_name)
             # In-process path_glob/not_glob accept a single string; reduce list inputs safely
@@ -846,7 +1038,8 @@ async def repo_search(
                 path_regex=path_regex or None,
                 path_glob=(path_globs or None),
                 not_glob=(not_globs or None),
-                expand=str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower() in {"1","true","yes","on"},
+                expand=str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower()
+                in {"1", "true", "yes", "on"},
                 model=model,
             )
             # items are already in structured dict form
@@ -857,7 +1050,13 @@ async def repo_search(
 
     if not use_hybrid_inproc:
         # Try hybrid search via subprocess (JSONL output)
-        cmd = ["python", "/work/scripts/hybrid_search.py", "--limit", str(int(limit)), "--json"]
+        cmd = [
+            "python",
+            "/work/scripts/hybrid_search.py",
+            "--limit",
+            str(int(limit)),
+            "--json",
+        ]
         if per_path and int(per_path) > 0:
             cmd += ["--per-path", str(int(per_path))]
         if language:
@@ -896,19 +1095,29 @@ async def repo_search(
 
     # Optional rerank fallback path: if enabled, attempt; on timeout or error, keep hybrid
     used_rerank = False
-    rerank_counters = {"inproc_hybrid": 0, "inproc_dense": 0, "subprocess": 0, "timeout": 0, "error": 0}
+    rerank_counters = {
+        "inproc_hybrid": 0,
+        "inproc_dense": 0,
+        "subprocess": 0,
+        "timeout": 0,
+        "error": 0,
+    }
     if rerank_enabled:
         # Resolve in-process gating once and reuse
-        use_rerank_inproc = str(os.environ.get("RERANK_IN_PROCESS", "")).strip().lower() in {"1","true","yes","on"}
+        use_rerank_inproc = str(
+            os.environ.get("RERANK_IN_PROCESS", "")
+        ).strip().lower() in {"1", "true", "yes", "on"}
         # Prefer fusion-aware reranking over hybrid candidates when available, but only if in-process reranker is enabled
         if use_rerank_inproc:
             try:
                 if json_lines:
                     from scripts.rerank_local import rerank_local as _rr_local  # type: ignore
                     import concurrent.futures as _fut
+
                     rq = queries[0] if queries else ""
                     # Prepare candidate docs from top-N hybrid hits (path+symbol + small snippet)
                     cand_objs = list(json_lines[: int(rerank_top_n)])
+
                     def _doc_for(obj: dict) -> str:
                         path = str(obj.get("path") or "")
                         symbol = str(obj.get("symbol") or "")
@@ -924,22 +1133,33 @@ async def repo_search(
                             realp = os.path.realpath(p)
                             if not (realp == "/work" or realp.startswith("/work/")):
                                 return header
-                            with open(realp, "r", encoding="utf-8", errors="ignore") as f:
+                            with open(
+                                realp, "r", encoding="utf-8", errors="ignore"
+                            ) as f:
                                 lines = f.readlines()
-                            ctx = max(1, int(context_lines)) if 'context_lines' in locals() else 2
+                            ctx = (
+                                max(1, int(context_lines))
+                                if "context_lines" in locals()
+                                else 2
+                            )
                             si = max(1, sl - ctx)
                             ei = min(len(lines), max(sl, el) + ctx)
-                            snippet = "".join(lines[si-1:ei]).strip()
-                            return (header + ("\n" + snippet if snippet else "")).strip()
+                            snippet = "".join(lines[si - 1 : ei]).strip()
+                            return (
+                                header + ("\n" + snippet if snippet else "")
+                            ).strip()
                         except Exception:
                             return header
+
                     # Build docs concurrently
                     max_workers = min(8, (os.cpu_count() or 4) * 2)
                     with _fut.ThreadPoolExecutor(max_workers=max_workers) as ex:
                         docs = list(ex.map(_doc_for, cand_objs))
                     pairs = [(rq, d) for d in docs]
                     scores = _rr_local(pairs)
-                    ranked = sorted(zip(scores, cand_objs), key=lambda x: x[0], reverse=True)
+                    ranked = sorted(
+                        zip(scores, cand_objs), key=lambda x: x[0], reverse=True
+                    )
                     tmp = []
                     for s, obj in ranked[: int(rerank_return_m)]:
                         item = {
@@ -949,7 +1169,8 @@ async def repo_search(
                             "start_line": int(obj.get("start_line") or 0),
                             "end_line": int(obj.get("end_line") or 0),
                             "why": obj.get("why", []) + [f"rerank_onnx:{float(s):.3f}"],
-                            "components": (obj.get("components") or {}) | {"rerank_onnx": float(s)},
+                            "components": (obj.get("components") or {})
+                            | {"rerank_onnx": float(s)},
                         }
                         tmp.append(item)
                     if tmp:
@@ -963,7 +1184,10 @@ async def repo_search(
             if use_rerank_inproc:
                 try:
                     from scripts.rerank_local import rerank_in_process  # type: ignore
-                    model_name = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
+
+                    model_name = os.environ.get(
+                        "EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5"
+                    )
                     model = _get_embedding_model(model_name)
                     rq = queries[0] if queries else ""
                     items = rerank_in_process(
@@ -984,10 +1208,14 @@ async def repo_search(
                 try:
                     rq = queries[0] if queries else ""
                     rcmd = [
-                        "python", "/work/scripts/rerank_local.py",
-                        "--query", rq,
-                        "--topk", str(int(rerank_top_n)),
-                        "--limit", str(int(rerank_return_m)),
+                        "python",
+                        "/work/scripts/rerank_local.py",
+                        "--query",
+                        rq,
+                        "--topk",
+                        str(int(rerank_top_n)),
+                        "--limit",
+                        str(int(rerank_return_m)),
                     ]
                     if language:
                         rcmd += ["--language", language]
@@ -1008,7 +1236,14 @@ async def repo_search(
                     rres = await _run_async(rcmd, env=env, timeout=_t_sec)
                     if os.environ.get("MCP_DEBUG_RERANK", "").strip():
                         try:
-                            print("RERANK_RET:", rres.get("code"), "OUT_LEN:", len((rres.get("stdout") or "").strip()), "ERR_TAIL:", (rres.get("stderr") or "")[ -200: ])
+                            print(
+                                "RERANK_RET:",
+                                rres.get("code"),
+                                "OUT_LEN:",
+                                len((rres.get("stdout") or "").strip()),
+                                "ERR_TAIL:",
+                                (rres.get("stderr") or "")[-200:],
+                            )
                         except Exception:
                             pass
                     if rres.get("ok") and (rres.get("stdout") or "").strip():
@@ -1021,14 +1256,23 @@ async def repo_search(
                             score_s, path, symbol, range_s = parts
                             try:
                                 start_s, end_s = range_s.split("-", 1)
-                                start_line = int(start_s); end_line = int(end_s)
+                                start_line = int(start_s)
+                                end_line = int(end_s)
                             except Exception:
-                                start_line = 0; end_line = 0
+                                start_line = 0
+                                end_line = 0
                             try:
                                 score = float(score_s)
                             except Exception:
                                 score = 0.0
-                            item = {"score": score, "path": path, "symbol": symbol, "start_line": start_line, "end_line": end_line, "why": [f"rerank_onnx:{score:.3f}"]}
+                            item = {
+                                "score": score,
+                                "path": path,
+                                "symbol": symbol,
+                                "start_line": start_line,
+                                "end_line": end_line,
+                                "why": [f"rerank_onnx:{score:.3f}"],
+                            }
                             tmp.append(item)
                         if tmp:
                             results = tmp
@@ -1059,6 +1303,7 @@ async def repo_search(
     toks = _tokens_from_queries(queries)
     if include_snippet:
         import concurrent.futures as _fut
+
         def _read_snip(args):
             i, item = args
             try:
@@ -1068,7 +1313,11 @@ async def repo_search(
                 if not path or not sl:
                     return (i, "")
                 raw_path = str(path)
-                p = raw_path if os.path.isabs(raw_path) else os.path.join("/work", raw_path)
+                p = (
+                    raw_path
+                    if os.path.isabs(raw_path)
+                    else os.path.join("/work", raw_path)
+                )
                 realp = os.path.realpath(p)
                 if not (realp == "/work" or realp.startswith("/work/")):
                     return (i, "")
@@ -1077,9 +1326,13 @@ async def repo_search(
                 ctx = max(1, int(context_lines))
                 si = max(1, sl - ctx)
                 ei = min(len(lines), max(sl, el) + ctx)
-                snippet = "".join(lines[si-1:ei])
+                snippet = "".join(lines[si - 1 : ei])
                 if highlight_snippet:
-                    snippet = _do_highlight_snippet(snippet, toks) if _do_highlight_snippet else snippet
+                    snippet = (
+                        _do_highlight_snippet(snippet, toks)
+                        if _do_highlight_snippet
+                        else snippet
+                    )
                 if len(snippet.encode("utf-8", "ignore")) > SNIPPET_MAX_BYTES:
                     _suffix = "\n...[snippet truncated]"
                     _sb = _suffix.encode("utf-8")
@@ -1090,6 +1343,7 @@ async def repo_search(
                 return (i, snippet)
             except Exception:
                 return (i, "")
+
         max_workers = min(8, (os.cpu_count() or 4) * 2)
         with _fut.ThreadPoolExecutor(max_workers=max_workers) as ex:
             for i, snip in ex.map(_read_snip, list(enumerate(results))):
@@ -1099,7 +1353,10 @@ async def repo_search(
                     pass
 
     # Smart default: compact true for multi-query calls if compact not explicitly set
-    if (len(queries) > 1) and (compact_raw is None or (isinstance(compact_raw, str) and compact_raw.strip() == "")):
+    if (len(queries) > 1) and (
+        compact_raw is None
+        or (isinstance(compact_raw, str) and compact_raw.strip() == "")
+    ):
         compact = True
 
     # Compact mode: return only path and line range
@@ -1135,7 +1392,8 @@ async def repo_search(
             "path_regex": path_regex,
             "path_glob": path_globs,
             "not_glob": not_globs,
-            "compact": bool(compact),
+            # Echo the user-provided compact flag in args, even if we disabled it for snippets
+            "compact": (bool(compact_raw) if (compact_raw is not None and str(compact_raw) != "") else bool(compact)),
         },
         "used_rerank": bool(used_rerank),
         "rerank_counters": rerank_counters,
@@ -1143,7 +1401,6 @@ async def repo_search(
         "results": results,
         **res,
     }
-
 
 
 @mcp.tool()
@@ -1190,20 +1447,38 @@ async def context_search(
     # Normalize inputs
     coll = (collection or DEFAULT_COLLECTION) or ""
     mcoll = (os.environ.get("MEMORY_COLLECTION_NAME") or coll) or ""
-    use_sse_memory = str(os.environ.get("MEMORY_SSE_ENABLED", "false")).lower() in ("1","true","yes")
+    use_sse_memory = str(os.environ.get("MEMORY_SSE_ENABLED", "false")).lower() in (
+        "1",
+        "true",
+        "yes",
+    )
     # Auto-detect memory collection if not explicitly set
     if include_memories and not os.environ.get("MEMORY_COLLECTION_NAME"):
         try:
             from qdrant_client import QdrantClient  # type: ignore
+
             # Optional: disable auto-detect and/or use cached result
-            if str(os.environ.get("MEMORY_AUTODETECT", "1")).lower() not in ("1","true","yes","on"):
+            if str(os.environ.get("MEMORY_AUTODETECT", "1")).lower() not in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            ):
                 raise RuntimeError("auto-detect disabled")
             import time
+
             ttl = float(os.environ.get("MEMORY_COLLECTION_TTL_SECS", "300") or 300)
-            if _MEM_COLL_CACHE["name"] and (time.time() - float(_MEM_COLL_CACHE["ts"] or 0.0)) < ttl:
+            if (
+                _MEM_COLL_CACHE["name"]
+                and (time.time() - float(_MEM_COLL_CACHE["ts"] or 0.0)) < ttl
+            ):
                 mcoll = _MEM_COLL_CACHE["name"]
                 raise RuntimeError("use cache")
-            client = QdrantClient(url=QDRANT_URL, api_key=os.environ.get("QDRANT_API_KEY"), timeout=float(os.environ.get("QDRANT_TIMEOUT","20") or 20))
+            client = QdrantClient(
+                url=QDRANT_URL,
+                api_key=os.environ.get("QDRANT_API_KEY"),
+                timeout=float(os.environ.get("QDRANT_TIMEOUT", "20") or 20),
+            )
             info = await asyncio.to_thread(client.get_collections)
             best_name = None
             best_hits = -1
@@ -1213,13 +1488,25 @@ async def context_search(
                     continue
                 # Sample a small page for memory-like payloads
                 try:
-                    pts, _ = await asyncio.to_thread(lambda: client.scroll(collection_name=name, with_payload=True, with_vectors=False, limit=300))
+                    pts, _ = await asyncio.to_thread(
+                        lambda: client.scroll(
+                            collection_name=name,
+                            with_payload=True,
+                            with_vectors=False,
+                            limit=300,
+                        )
+                    )
                     hits = 0
                     for pt in pts:
-                        pl = (getattr(pt, "payload", {}) or {})
+                        pl = getattr(pt, "payload", {}) or {}
                         md = pl.get("metadata") or {}
                         path = md.get("path")
-                        content = pl.get("content") or pl.get("text") or pl.get("information") or md.get("information")
+                        content = (
+                            pl.get("content")
+                            or pl.get("text")
+                            or pl.get("information")
+                            or md.get("information")
+                        )
                         if not path and content:
                             hits += 1
                     if hits > best_hits:
@@ -1231,6 +1518,7 @@ async def context_search(
                 mcoll = best_name
                 try:
                     import time
+
                     _MEM_COLL_CACHE["name"] = best_name
                     _MEM_COLL_CACHE["ts"] = time.time()
                 except Exception:
@@ -1243,13 +1531,17 @@ async def context_search(
     except Exception:
         lim = 10
     try:
-        per_path_val = int(per_path) if (per_path is not None and str(per_path).strip() != "") else 1
+        per_path_val = (
+            int(per_path)
+            if (per_path is not None and str(per_path).strip() != "")
+            else 1
+        )
     except Exception:
         per_path_val = 1
 
     # Normalize queries to list (accept q/text aliases)
     queries: List[str] = []
-    if (query is None or (isinstance(query, str) and query.strip() == "")):
+    if query is None or (isinstance(query, str) and query.strip() == ""):
         q_alt = kwargs.get("q") or kwargs.get("text")
         if q_alt is not None:
             query = q_alt
@@ -1261,7 +1553,9 @@ async def context_search(
         queries = [str(query).strip()]
 
     # Accept common alias keys and camelCase from clients
-    if (limit is None or (isinstance(limit, str) and limit.strip() == "")) and ("top_k" in kwargs):
+    if (limit is None or (isinstance(limit, str) and limit.strip() == "")) and (
+        "top_k" in kwargs
+    ):
         limit = kwargs.get("top_k")
     if include_memories is None and ("includeMemories" in kwargs):
         include_memories = kwargs.get("includeMemories")
@@ -1273,19 +1567,28 @@ async def context_search(
     # Smart defaults inspired by stored preferences, but without external calls
     compact_raw = compact
     smart_compact = False
-    if len(queries) > 1 and (compact_raw is None or (isinstance(compact_raw, str) and compact_raw.strip() == "")):
+    if len(queries) > 1 and (
+        compact_raw is None
+        or (isinstance(compact_raw, str) and compact_raw.strip() == "")
+    ):
         smart_compact = True
     # If snippets are requested, disable compact to preserve snippet field
     if include_snippet and str(include_snippet).lower() not in ("", "false", "0", "no"):
         smart_compact = False
         compact_raw = False
-    eff_compact = True if (smart_compact or (str(compact_raw).lower() == "true")) else False
+    eff_compact = (
+        True if (smart_compact or (str(compact_raw).lower() == "true")) else False
+    )
 
     # Per-source limits
     code_limit = lim
     mem_limit = 0
     include_mem = False
-    if include_memories is not None and str(include_memories).lower() in ("true", "1", "yes"):  # opt-in
+    if include_memories is not None and str(include_memories).lower() in (
+        "true",
+        "1",
+        "yes",
+    ):  # opt-in
         include_mem = True
         # Parse per_source_limits if provided
         code_limit = lim
@@ -1346,7 +1649,6 @@ async def context_search(
                 }
                 code_hits.append(ch)
 
-
     # Option A: Query the memory MCP server over SSE and blend results (real integration)
     mem_hits: List[Dict[str, Any]] = []
     memory_note: str = ""
@@ -1359,19 +1661,28 @@ async def context_search(
                 memory_note = "SSE memory disabled: fastmcp client not installed"
                 raise
             import asyncio
+
             timeout = float(os.environ.get("MEMORY_MCP_TIMEOUT", "6"))
             base_url = os.environ.get("MEMORY_MCP_URL") or "http://mcp:8000/sse"
             # Best-effort: poll memory MCP /readyz on its health port to avoid init race
             try:
                 from urllib.parse import urlparse
                 import urllib.request, time
-                ready_attempts = int(os.environ.get("MEMORY_MCP_READY_RETRIES", "5") or 5)
-                ready_backoff = float(os.environ.get("MEMORY_MCP_READY_BACKOFF", "0.2") or 0.2)
-                health_port = int(os.environ.get("MEMORY_MCP_HEALTH_PORT", "18000") or 18000)
+
+                ready_attempts = int(
+                    os.environ.get("MEMORY_MCP_READY_RETRIES", "5") or 5
+                )
+                ready_backoff = float(
+                    os.environ.get("MEMORY_MCP_READY_BACKOFF", "0.2") or 0.2
+                )
+                health_port = int(
+                    os.environ.get("MEMORY_MCP_HEALTH_PORT", "18000") or 18000
+                )
                 pu = urlparse(base_url)
                 host = pu.hostname or "mcp"
                 scheme = pu.scheme or "http"
                 readyz = f"{scheme}://{host}:{health_port}/readyz"
+
                 def _poll_ready():
                     for i in range(max(1, ready_attempts)):
                         try:
@@ -1381,6 +1692,7 @@ async def context_search(
                         except Exception:
                             time.sleep(ready_backoff * (i + 1))
                     return False
+
                 try:
                     await asyncio.to_thread(_poll_ready)
                 except Exception:
@@ -1405,7 +1717,9 @@ async def context_search(
                         except Exception:
                             pass
                 if tools is None:
-                    raise last_err or RuntimeError("list_tools failed before initialization")
+                    raise last_err or RuntimeError(
+                        "list_tools failed before initialization"
+                    )
                 tool_name = None
                 # Prefer canonical names
                 for t in tools:
@@ -1430,7 +1744,9 @@ async def context_search(
                     res_obj = None
                     for args in arg_variants:
                         try:
-                            res_obj = await asyncio.wait_for(c.call_tool(tool_name, args), timeout=timeout)
+                            res_obj = await asyncio.wait_for(
+                                c.call_tool(tool_name, args), timeout=timeout
+                            )
                             break
                         except Exception:
                             continue
@@ -1444,23 +1760,33 @@ async def context_search(
                                     rd["content"].append({"type": "text", "text": txt})
                         except Exception:
                             rd = {}
+
                         # Parse common MCP tool result shapes
-                        def push_text(txt: str, md: Dict[str, Any] | None = None, score: float | int | None = None):
+                        def push_text(
+                            txt: str,
+                            md: Dict[str, Any] | None = None,
+                            score: float | int | None = None,
+                        ):
                             if not txt:
                                 return
-                            mem_hits.append({
-                                "source": "memory",
-                                "score": float(score or 1.0),
-                                "content": txt,
-                                "metadata": (md or {}),
-                            })
+                            mem_hits.append(
+                                {
+                                    "source": "memory",
+                                    "score": float(score or 1.0),
+                                    "content": txt,
+                                    "metadata": (md or {}),
+                                }
+                            )
+
                         if isinstance(rd, dict):
                             cont = rd.get("content")
                             if isinstance(cont, list):
                                 for c in cont:
                                     try:
                                         ctype = c.get("type")
-                                        if ctype == "text" and isinstance(c.get("text"), str):
+                                        if ctype == "text" and isinstance(
+                                            c.get("text"), str
+                                        ):
                                             push_text(c["text"], {})
                                         elif ctype == "json":
                                             j = c.get("json")
@@ -1468,18 +1794,36 @@ async def context_search(
                                                 for it in j:
                                                     if isinstance(it, dict):
                                                         push_text(
-                                                            str(it.get("text") or it.get("content") or it.get("information") or ""),
+                                                            str(
+                                                                it.get("text")
+                                                                or it.get("content")
+                                                                or it.get("information")
+                                                                or ""
+                                                            ),
                                                             it.get("metadata") or {},
                                                             it.get("score") or 1.0,
                                                         )
                                             elif isinstance(j, dict):
-                                                items = j.get("results") or j.get("items") or j.get("memories") or j.get("data")
+                                                items = (
+                                                    j.get("results")
+                                                    or j.get("items")
+                                                    or j.get("memories")
+                                                    or j.get("data")
+                                                )
                                                 if isinstance(items, list):
                                                     for it in items:
                                                         if isinstance(it, dict):
                                                             push_text(
-                                                                str(it.get("text") or it.get("content") or it.get("information") or ""),
-                                                                it.get("metadata") or {},
+                                                                str(
+                                                                    it.get("text")
+                                                                    or it.get("content")
+                                                                    or it.get(
+                                                                        "information"
+                                                                    )
+                                                                    or ""
+                                                                ),
+                                                                it.get("metadata")
+                                                                or {},
                                                                 it.get("score") or 1.0,
                                                             )
                                     except Exception:
@@ -1491,7 +1835,12 @@ async def context_search(
                                     for it in items:
                                         if isinstance(it, dict):
                                             push_text(
-                                                str(it.get("text") or it.get("content") or it.get("information") or ""),
+                                                str(
+                                                    it.get("text")
+                                                    or it.get("content")
+                                                    or it.get("information")
+                                                    or ""
+                                                ),
                                                 it.get("metadata") or {},
                                                 it.get("score") or 1.0,
                                             )
@@ -1505,7 +1854,11 @@ async def context_search(
 
             from scripts.utils import sanitize_vector_name  # local util
 
-            client = QdrantClient(url=QDRANT_URL, api_key=os.environ.get("QDRANT_API_KEY"), timeout=float(os.environ.get("QDRANT_TIMEOUT","20") or 20))
+            client = QdrantClient(
+                url=QDRANT_URL,
+                api_key=os.environ.get("QDRANT_API_KEY"),
+                timeout=float(os.environ.get("QDRANT_TIMEOUT", "20") or 20),
+            )
             model_name = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
             vec_name = sanitize_vector_name(model_name)
             model = _get_embedding_model(model_name)
@@ -1513,30 +1866,50 @@ async def context_search(
             qtext = " ".join([q for q in queries if q]).strip() or queries[0]
             v = next(model.embed([qtext])).tolist()
             k = max(mem_limit, 5)
-            res = await asyncio.to_thread(lambda: client.search(
-                collection_name=mcoll,
-                query_vector={"name": vec_name, "vector": v},
-                limit=k,
-                with_payload=True,
-            ))
+            res = await asyncio.to_thread(
+                lambda: client.search(
+                    collection_name=mcoll,
+                    query_vector={"name": vec_name, "vector": v},
+                    limit=k,
+                    with_payload=True,
+                )
+            )
             for pt in res:
-                payload = (getattr(pt, "payload", {}) or {})
+                payload = getattr(pt, "payload", {}) or {}
                 md = payload.get("metadata") or {}
                 path = str(md.get("path") or "")
                 start_line = md.get("start_line")
                 end_line = md.get("end_line")
-                content = payload.get("content") or payload.get("text") or payload.get("information") or md.get("information")
+                content = (
+                    payload.get("content")
+                    or payload.get("text")
+                    or payload.get("information")
+                    or md.get("information")
+                )
                 kind = (md.get("kind") or payload.get("kind") or "").lower()
                 source_tag = (md.get("source") or payload.get("source") or "").lower()
-                flagged = kind in ("memory","preference","note","policy","infra","chat") or source_tag in ("memory","chat")
-                is_memory_like = (not path) or (start_line in (None, 0) and end_line in (None, 0)) or flagged
+                flagged = kind in (
+                    "memory",
+                    "preference",
+                    "note",
+                    "policy",
+                    "infra",
+                    "chat",
+                ) or source_tag in ("memory", "chat")
+                is_memory_like = (
+                    (not path)
+                    or (start_line in (None, 0) and end_line in (None, 0))
+                    or flagged
+                )
                 if is_memory_like and content:
-                    mem_hits.append({
-                        "source": "memory",
-                        "score": float(getattr(pt, "score", 0.0) or 0.0),
-                        "content": content,
-                        "metadata": md,
-                    })
+                    mem_hits.append(
+                        {
+                            "source": "memory",
+                            "score": float(getattr(pt, "score", 0.0) or 0.0),
+                            "content": content,
+                            "metadata": md,
+                        }
+                    )
         except Exception:  # pragma: no cover
             pass
 
@@ -1544,8 +1917,14 @@ async def context_search(
     if include_mem and mem_limit > 0 and not mem_hits and queries:
         try:
             from qdrant_client import QdrantClient  # type: ignore
-            client = QdrantClient(url=QDRANT_URL, api_key=os.environ.get("QDRANT_API_KEY"), timeout=float(os.environ.get("QDRANT_TIMEOUT","20") or 20))
+
+            client = QdrantClient(
+                url=QDRANT_URL,
+                api_key=os.environ.get("QDRANT_API_KEY"),
+                timeout=float(os.environ.get("QDRANT_TIMEOUT", "20") or 20),
+            )
             import re
+
             terms = [str(t).lower() for t in queries if t]
             tokens = set()
             for t in terms:
@@ -1568,36 +1947,59 @@ async def context_search(
                 if not sc:
                     break
                 for pt in sc:
-                    payload = (getattr(pt, "payload", {}) or {})
+                    payload = getattr(pt, "payload", {}) or {}
                     md = payload.get("metadata") or {}
                     path = str(md.get("path") or "")
                     start_line = md.get("start_line")
                     end_line = md.get("end_line")
-                    content = payload.get("content") or payload.get("text") or payload.get("information") or md.get("information")
+                    content = (
+                        payload.get("content")
+                        or payload.get("text")
+                        or payload.get("information")
+                        or md.get("information")
+                    )
                     kind = (md.get("kind") or payload.get("kind") or "").lower()
-                    source_tag = (md.get("source") or payload.get("source") or "").lower()
-                    flagged = kind in ("memory","preference","note","policy","infra","chat") or source_tag in ("memory","chat")
-                    is_memory_like = (not path) or (start_line in (None, 0) and end_line in (None, 0)) or flagged
+                    source_tag = (
+                        md.get("source") or payload.get("source") or ""
+                    ).lower()
+                    flagged = kind in (
+                        "memory",
+                        "preference",
+                        "note",
+                        "policy",
+                        "infra",
+                        "chat",
+                    ) or source_tag in ("memory", "chat")
+                    is_memory_like = (
+                        (not path)
+                        or (start_line in (None, 0) and end_line in (None, 0))
+                        or flagged
+                    )
                     if not (is_memory_like and content):
                         continue
                     low = str(content).lower()
                     if any(tok in low for tok in tokens):
-                        mem_hits.append({
-                            "source": "memory",
-                            "score": 0.5,  # nominal score for substring match; blended via memory_weight
-                            "content": content,
-                            "metadata": md,
-                        })
+                        mem_hits.append(
+                            {
+                                "source": "memory",
+                                "score": 0.5,  # nominal score for substring match; blended via memory_weight
+                                "content": content,
+                                "metadata": md,
+                            }
+                        )
                         if len(mem_hits) >= mem_limit:
                             break
                 checked += len(sc)
         except Exception:
             pass
 
-
     # Blend results
     try:
-        mw = float(memory_weight) if (memory_weight is not None and str(memory_weight).strip() != "") else 0.3
+        mw = (
+            float(memory_weight)
+            if (memory_weight is not None and str(memory_weight).strip() != "")
+            else 0.3
+        )
     except Exception:
         mw = 0.3
 
@@ -1608,7 +2010,13 @@ async def context_search(
         blended.append({**h, "score": float(h.get("score", 0.0)) * mw})
 
     # Sort by score descending and truncate to limit
-    blended.sort(key=lambda x: (-float(x.get("score", 0.0)), x.get("source", ""), str(x.get("path", ""))))
+    blended.sort(
+        key=lambda x: (
+            -float(x.get("score", 0.0)),
+            x.get("source", ""),
+            str(x.get("path", "")),
+        )
+    )
     blended = blended[:lim]
 
     # Compact shaping if requested
@@ -1616,17 +2024,21 @@ async def context_search(
         compacted: List[Dict[str, Any]] = []
         for b in blended:
             if b.get("source") == "code":
-                compacted.append({
-                    "source": "code",
-                    "path": b.get("path"),
-                    "start_line": b.get("start_line") or 0,
-                    "end_line": b.get("end_line") or 0,
-                })
+                compacted.append(
+                    {
+                        "source": "code",
+                        "path": b.get("path"),
+                        "start_line": b.get("start_line") or 0,
+                        "end_line": b.get("end_line") or 0,
+                    }
+                )
             else:
-                compacted.append({
-                    "source": "memory",
-                    "content": (b.get("content") or "")[:500],
-                })
+                compacted.append(
+                    {
+                        "source": "memory",
+                        "content": (b.get("content") or "")[:500],
+                    }
+                )
         ret = {"results": compacted, "total": len(compacted)}
         if memory_note:
             ret["memory_note"] = memory_note
@@ -1636,6 +2048,7 @@ async def context_search(
     if memory_note:
         ret["memory_note"] = memory_note
     return ret
+
 
 @mcp.tool()
 async def code_search(
@@ -1665,7 +2078,6 @@ async def code_search(
 ) -> Dict[str, Any]:
     """Alias of repo_search with the same arguments; provided for better discoverability."""
     return await repo_search(
-
         query=query,
         limit=limit,
         per_path=per_path,
@@ -1692,21 +2104,42 @@ async def code_search(
     )
 
 
-
 if __name__ == "__main__":
 
     # Optional warmups: gated by env flags to avoid delaying readiness on fresh containers
     try:
-        if str(os.environ.get("EMBEDDING_WARMUP", "")).strip().lower() in {"1","true","yes","on"}:
-            _ = _get_embedding_model(os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5"))
+        if str(os.environ.get("EMBEDDING_WARMUP", "")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }:
+            _ = _get_embedding_model(
+                os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
+            )
     except Exception:
         pass
     try:
-        if str(os.environ.get("RERANK_WARMUP", "")).strip().lower() in {"1","true","yes","on"} and \
-           str(os.environ.get("RERANKER_ENABLED", "")).strip().lower() in {"1","true","yes","on"}:
-            if str(os.environ.get("RERANK_IN_PROCESS", "")).strip().lower() in {"1","true","yes","on"}:
+        if str(os.environ.get("RERANK_WARMUP", "")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        } and str(os.environ.get("RERANKER_ENABLED", "")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }:
+            if str(os.environ.get("RERANK_IN_PROCESS", "")).strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }:
                 try:
                     from scripts.rerank_local import _get_rerank_session  # type: ignore
+
                     _ = _get_rerank_session()
                 except Exception:
                     pass
@@ -1715,8 +2148,19 @@ if __name__ == "__main__":
                 _env = os.environ.copy()
                 _env["QDRANT_URL"] = QDRANT_URL
                 _env["COLLECTION_NAME"] = DEFAULT_COLLECTION
-                _cmd = ["python", "/work/scripts/rerank_local.py", "--query", "warmup", "--topk", "3", "--limit", "1"]
-                subprocess.run(_cmd, capture_output=True, text=True, env=_env, timeout=10)
+                _cmd = [
+                    "python",
+                    "/work/scripts/rerank_local.py",
+                    "--query",
+                    "warmup",
+                    "--topk",
+                    "3",
+                    "--limit",
+                    "1",
+                ]
+                subprocess.run(
+                    _cmd, capture_output=True, text=True, env=_env, timeout=10
+                )
     except Exception:
         pass
 
@@ -1735,4 +2179,3 @@ if __name__ == "__main__":
         mcp.settings.host = HOST
         mcp.settings.port = PORT
         mcp.run(transport="sse")
-

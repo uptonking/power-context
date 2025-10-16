@@ -22,4 +22,3 @@ def test_sanitize_vector_name_fallback_rules():
     assert "_" not in out
     assert len(out) <= 64
     assert re.match(r"^[a-z0-9\-]+$", out)
-

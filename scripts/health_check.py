@@ -34,7 +34,7 @@ def main():
 
     # Init embedding to derive dimension and test embedding
     model = TextEmbedding(model_name=model_name)
-    dim = len(next(model.embed(["health dim probe"])) )
+    dim = len(next(model.embed(["health dim probe"])))
     vec_name_expect = sanitize_vector_name(model_name)
 
     client = QdrantClient(url=qdrant_url, api_key=api_key or None)
@@ -53,7 +53,9 @@ def main():
     else:
         present_names = ["<unnamed>"]
         got_dim = cfg.size
-    assert_true(got_dim == dim, f"Vector dimension matches embedding ({got_dim} == {dim})")
+    assert_true(
+        got_dim == dim, f"Vector dimension matches embedding ({got_dim} == {dim})"
+    )
 
     # 2) HNSW tuned params (best effort; allow >= thresholds)
     hcfg = info.config.hnsw_config
@@ -83,10 +85,16 @@ def main():
     assert_true(isinstance(res_points, list), "query_points returns a list of points")
 
     # Filtered by language + kind (should not error; may return 0 results if dataset sparse)
-    flt = models.Filter(must=[
-        models.FieldCondition(key="metadata.language", match=models.MatchValue(value="python")),
-        models.FieldCondition(key="metadata.kind", match=models.MatchValue(value="function")),
-    ])
+    flt = models.Filter(
+        must=[
+            models.FieldCondition(
+                key="metadata.language", match=models.MatchValue(value="python")
+            ),
+            models.FieldCondition(
+                key="metadata.kind", match=models.MatchValue(value="function")
+            ),
+        ]
+    )
     qp2 = client.query_points(
         collection_name=collection,
         query=probe_vec,
@@ -99,7 +107,10 @@ def main():
     # If results exist, ensure payload has kind/symbol keys
     if res2:
         md: Dict[str, Any] = (res2[0].payload or {}).get("metadata") or {}
-        assert_true("kind" in md and "symbol" in md, "payload includes metadata.kind and metadata.symbol")
+        assert_true(
+            "kind" in md and "symbol" in md,
+            "payload includes metadata.kind and metadata.symbol",
+        )
     else:
         print("[OK] Filtered query ran (no results is acceptable depending on data)")
 
@@ -108,4 +119,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

@@ -22,14 +22,18 @@ from scripts.utils import sanitize_vector_name as _sanitize_vector_name
 
 
 def run(cmd: str) -> str:
-    p = subprocess.run(shlex.split(cmd), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    p = subprocess.run(
+        shlex.split(cmd), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
     if p.returncode != 0:
         raise RuntimeError(f"Command failed: {cmd}\n{p.stderr}")
     return p.stdout
 
 
 def try_run(cmd: str) -> subprocess.CompletedProcess:
-    return subprocess.run(shlex.split(cmd), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    return subprocess.run(
+        shlex.split(cmd), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
 
 
 def ensure_base_ref(args) -> str:
@@ -74,7 +78,10 @@ def list_commits(args) -> List[str]:
 
 
 def _redact_emails(text: str) -> str:
-    return re.sub(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", "<redacted>", text or "")
+    return re.sub(
+        r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", "<redacted>", text or ""
+    )
+
 
 def commit_metadata(commit: str) -> Dict[str, Any]:
     fmt = "%H%x1f%an%x1f%ae%x1f%ad%x1f%s%x1f%b"
@@ -101,28 +108,50 @@ def stable_id(commit_id: str) -> int:
     return int(h[:16], 16)
 
 
-def build_text(md: Dict[str, Any], max_files: int = 200, include_body: bool = True) -> str:
+def build_text(
+    md: Dict[str, Any], max_files: int = 200, include_body: bool = True
+) -> str:
     msg = md.get("message", "")
     files = md.get("files", [])
     if not include_body:
         msg = msg.splitlines()[0] if msg else ""
     head = msg.strip()
-    files_part = "\n".join(files[: max_files])
+    files_part = "\n".join(files[:max_files])
     return (head + "\n\nFiles:\n" + files_part).strip()
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Ingest Git history into Qdrant deterministically")
-    ap.add_argument("--since", type=str, default=None, help="e.g., '2 years ago' or '2023-01-01'")
+    ap = argparse.ArgumentParser(
+        description="Ingest Git history into Qdrant deterministically"
+    )
+    ap.add_argument(
+        "--since", type=str, default=None, help="e.g., '2 years ago' or '2023-01-01'"
+    )
     ap.add_argument("--until", type=str, default=None)
     ap.add_argument("--author", type=str, default=None)
-    ap.add_argument("--grep", type=str, default=None, help="Filter commit messages by regex")
-    ap.add_argument("--path", type=str, default=None, help="Limit history to a path subtree")
+    ap.add_argument(
+        "--grep", type=str, default=None, help="Filter commit messages by regex"
+    )
+    ap.add_argument(
+        "--path", type=str, default=None, help="Limit history to a path subtree"
+    )
     ap.add_argument("--max-commits", type=int, default=500)
     ap.add_argument("--per-batch", type=int, default=128)
-    ap.add_argument("--include-body", action="store_true", help="Include full body in text to embed")
-    ap.add_argument("--remote", type=str, default="origin", help="Remote to fetch from if no local HEAD is present")
-    ap.add_argument("--fetch-depth", type=int, default=1000, help="Shallow fetch depth for history, when needed")
+    ap.add_argument(
+        "--include-body", action="store_true", help="Include full body in text to embed"
+    )
+    ap.add_argument(
+        "--remote",
+        type=str,
+        default="origin",
+        help="Remote to fetch from if no local HEAD is present",
+    )
+    ap.add_argument(
+        "--fetch-depth",
+        type=int,
+        default=1000,
+        help="Shallow fetch depth for history, when needed",
+    )
     args = ap.parse_args()
 
     model = TextEmbedding(model_name=MODEL_NAME)
@@ -140,7 +169,11 @@ def main():
         text = build_text(md, include_body=args.include_body)
         vec = next(model.embed([text])).tolist()
         payload = {
-            "document": md.get("message", "").splitlines()[0] if md.get("message") else md["commit_id"],
+            "document": (
+                md.get("message", "").splitlines()[0]
+                if md.get("message")
+                else md["commit_id"]
+            ),
             "information": text[:512],
             "metadata": {
                 "language": "git",
@@ -171,4 +204,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

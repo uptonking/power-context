@@ -21,5 +21,6 @@ def test_prompt_mode_routes_and_builds_payload(monkeypatch):
     out = c.generate_with_soft_embeddings("Hello")
     assert out == "ok"
     assert called["path"] == "/completion"
-    assert "prompt" in called["payload"] and called["payload"]["prompt"].startswith("Hello")
-
+    assert "prompt" in called["payload"] and called["payload"]["prompt"].startswith(
+        "Hello"
+    )

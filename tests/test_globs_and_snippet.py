@@ -29,9 +29,11 @@ class _QP:
 class FakeQdrant:
     def __init__(self, points):
         self._points = points
+
     # dense_query tries query_points first, then search on exception
     def query_points(self, **kwargs):
         return _QP(self._points)
+
     def search(self, **kwargs):
         return self._points
 
@@ -40,8 +42,10 @@ class FakeEmbed:
     class _Vec:
         def __init__(self):
             self._v = [0.01] * 8
+
         def tolist(self):
             return self._v
+
     def embed(self, texts):
         for _ in texts:
             yield FakeEmbed._Vec()
@@ -84,15 +88,19 @@ def test_repo_search_snippet_strict_cap_after_highlight(monkeypatch):
     # Stub run_hybrid_search to emit a single result with a known path and range
     async def fake_run(**kwargs):
         return {"results": [{"path": "/work/f.txt", "start_line": 1, "end_line": 1}]}
+
     # Force in-process shaping to trigger snippet code path
     monkeypatch.setenv("HYBRID_IN_PROCESS", "1")
 
     # Monkeypatch srv.hybrid_search.run_hybrid_search result pathing via repo_search flow
-    monkeypatch.setattr(srv, "_tokens_from_queries", lambda q: ["foo"])  # ensure highlight runs
+    monkeypatch.setattr(
+        srv, "_tokens_from_queries", lambda q: ["foo"]
+    )  # ensure highlight runs
 
     # Fake open for the specific /work path
     big_line = "foo " * 1000  # large content to exceed cap
     _orig_open = builtins.open
+
     def fake_open(path, *a, **k):
         if path == "/work/f.txt":
             return types.SimpleNamespace(readlines=lambda: [big_line])
@@ -105,19 +113,26 @@ def test_repo_search_snippet_strict_cap_after_highlight(monkeypatch):
 
     # Stub hybrid_search.run_hybrid_search to return a single item
     import sys
+
     class HS:
         @staticmethod
         def run_hybrid_search(**kwargs):
-            return [{"path": "/work/f.txt", "start_line": 1, "end_line": 1, "score": 1.0}]
+            return [
+                {"path": "/work/f.txt", "start_line": 1, "end_line": 1, "score": 1.0}
+            ]
+
     monkeypatch.setitem(sys.modules, "scripts.hybrid_search", HS)
 
     import io
+
     # Patch open builtin used by server
     monkeypatch.setattr(builtins, "open", fake_open)
 
     # Execute
     res = srv.asyncio.get_event_loop().run_until_complete(
-        srv.repo_search(query="foo", include_snippet=True, highlight_snippet=True, context_lines=0)
+        srv.repo_search(
+            query="foo", include_snippet=True, highlight_snippet=True, context_lines=0
+        )
     )
     snip = res["results"][0].get("snippet", "")
     # Strict cap: final length must be <= cap (64)
@@ -130,4 +145,3 @@ def test_repo_search_docstring_clean():
     assert doc and "Zero-config code search" in doc
     # Ensure stray inline pseudo-code is not embedded in docstring
     assert "Accept common alias keys from clients" not in doc
-

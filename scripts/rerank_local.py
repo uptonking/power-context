@@ -28,6 +28,7 @@ EF_SEARCH = int(os.environ.get("EF_SEARCH", "128") or 128)
 # Ensure project root is on sys.path when run as a script (so 'scripts' package imports work)
 import sys
 from pathlib import Path as _P
+
 _ROOT = _P(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
@@ -38,6 +39,7 @@ import threading
 _RERANK_SESSION = None
 _RERANK_TOKENIZER = None
 _RERANK_LOCK = threading.Lock()
+
 
 def _get_rerank_session():
     global _RERANK_SESSION, _RERANK_TOKENIZER
@@ -62,25 +64,39 @@ def _get_rerank_session():
                     avail = set(ort.get_available_providers()) if ort else set()
                 except Exception:
                     avail = set()
-                use_trt = str(os.environ.get("RERANK_USE_TRT", "")).strip().lower() in {"1","true","yes","on"}
+                use_trt = str(os.environ.get("RERANK_USE_TRT", "")).strip().lower() in {
+                    "1",
+                    "true",
+                    "yes",
+                    "on",
+                }
                 if use_trt and "TensorrtExecutionProvider" in avail:
                     providers = ["TensorrtExecutionProvider"]
                     if "CUDAExecutionProvider" in avail:
                         providers.append("CUDAExecutionProvider")
                     providers.append("CPUExecutionProvider")
                 else:
-                    providers = (["CUDAExecutionProvider"] if "CUDAExecutionProvider" in avail else []) + ["CPUExecutionProvider"]
+                    providers = (
+                        ["CUDAExecutionProvider"]
+                        if "CUDAExecutionProvider" in avail
+                        else []
+                    ) + ["CPUExecutionProvider"]
             # Session options with full graph optimizations
             so = ort.SessionOptions()
             try:
-                so.graph_optimization_level = getattr(ort.GraphOptimizationLevel, "ORT_ENABLE_ALL", 99)
+                so.graph_optimization_level = getattr(
+                    ort.GraphOptimizationLevel, "ORT_ENABLE_ALL", 99
+                )
             except Exception:
                 pass
-            sess = ort.InferenceSession(RERANKER_ONNX_PATH, sess_options=so, providers=providers)
+            sess = ort.InferenceSession(
+                RERANKER_ONNX_PATH, sess_options=so, providers=providers
+            )
         except Exception:
             sess = None
         _RERANK_SESSION, _RERANK_TOKENIZER = sess, tok
         return _RERANK_SESSION, _RERANK_TOKENIZER
+
 
 from scripts.utils import sanitize_vector_name as _sanitize_vector_name
 
@@ -99,7 +115,9 @@ def _norm_under(u: str | None) -> str | None:
     return u
 
 
-def _select_dense_vector_name(client: QdrantClient, collection: str, model: TextEmbedding, dim: int) -> str:
+def _select_dense_vector_name(
+    client: QdrantClient, collection: str, model: TextEmbedding, dim: int
+) -> str:
     try:
         info = client.get_collection(collection)
         cfg = info.config.params.vectors
@@ -121,7 +139,14 @@ def _select_dense_vector_name(client: QdrantClient, collection: str, model: Text
     return _sanitize_vector_name(MODEL_NAME)
 
 
-def dense_results(client: QdrantClient, model: TextEmbedding, vec_name: str, query: str, flt, topk: int) -> List[Any]:
+def dense_results(
+    client: QdrantClient,
+    model: TextEmbedding,
+    vec_name: str,
+    query: str,
+    flt,
+    topk: int,
+) -> List[Any]:
     vec = next(model.embed([query])).tolist()
     try:
         qp = client.query_points(
@@ -172,12 +197,16 @@ def rerank_local(pairs: List[tuple[str, str]]) -> List[float]:
     input_ids = [e.ids for e in enc]
     attn = [e.attention_mask for e in enc]
     max_len = max((len(ids) for ids in input_ids), default=0)
+
     def pad(seq, pad_id=0):
         return seq + [pad_id] * (max_len - len(seq))
+
     input_ids = [pad(s) for s in input_ids]
     attn = [pad(s) for s in attn]
     input_names = [i.name for i in sess.get_inputs()]
-    token_type_ids = [[0] * max_len for _ in input_ids] if "token_type_ids" in input_names else None
+    token_type_ids = (
+        [[0] * max_len for _ in input_ids] if "token_type_ids" in input_names else None
+    )
     feeds = {}
     if "input_ids" in input_names:
         feeds["input_ids"] = input_ids
@@ -209,7 +238,15 @@ def rerank_local(pairs: List[tuple[str, str]]) -> List[float]:
 # In-process API: rerank using local ONNX; returns structured items
 # Optional: pass an existing TextEmbedding instance via model to reuse cache
 
-def rerank_in_process(query: str, topk: int = 50, limit: int = 12, language: str | None = None, under: str | None = None, model: TextEmbedding | None = None) -> List[Dict[str, Any]]:
+
+def rerank_in_process(
+    query: str,
+    topk: int = 50,
+    limit: int = 12,
+    language: str | None = None,
+    under: str | None = None,
+    model: TextEmbedding | None = None,
+) -> List[Dict[str, Any]]:
     client = QdrantClient(url=QDRANT_URL, api_key=API_KEY or None)
     _model = model or TextEmbedding(model_name=MODEL_NAME)
     dim = len(next(_model.embed(["dimension probe"])))
@@ -217,10 +254,18 @@ def rerank_in_process(query: str, topk: int = 50, limit: int = 12, language: str
 
     must = []
     if language:
-        must.append(models.FieldCondition(key="metadata.language", match=models.MatchValue(value=language)))
+        must.append(
+            models.FieldCondition(
+                key="metadata.language", match=models.MatchValue(value=language)
+            )
+        )
     eff_under = _norm_under(under)
     if eff_under:
-        must.append(models.FieldCondition(key="metadata.path_prefix", match=models.MatchValue(value=eff_under)))
+        must.append(
+            models.FieldCondition(
+                key="metadata.path_prefix", match=models.MatchValue(value=eff_under)
+            )
+        )
     flt = models.Filter(must=must) if must else None
 
     pts = dense_results(client, _model, vec_name, query, flt, topk)
@@ -236,14 +281,16 @@ def rerank_in_process(query: str, topk: int = 50, limit: int = 12, language: str
     items: List[Dict[str, Any]] = []
     for s, p in ranked[: max(0, int(limit))]:
         md = (p.payload or {}).get("metadata") or {}
-        items.append({
-            "score": float(s),
-            "path": md.get("path"),
-            "symbol": md.get("symbol_path") or md.get("symbol") or "",
-            "start_line": md.get("start_line"),
-            "end_line": md.get("end_line"),
-            "components": {"rerank_onnx": float(s)},
-        })
+        items.append(
+            {
+                "score": float(s),
+                "path": md.get("path"),
+                "symbol": md.get("symbol_path") or md.get("symbol") or "",
+                "start_line": md.get("start_line"),
+                "end_line": md.get("end_line"),
+                "components": {"rerank_onnx": float(s)},
+            }
+        )
     return items
 
 
@@ -264,10 +311,18 @@ def main():
 
     must = []
     if args.language:
-        must.append(models.FieldCondition(key="metadata.language", match=models.MatchValue(value=args.language)))
+        must.append(
+            models.FieldCondition(
+                key="metadata.language", match=models.MatchValue(value=args.language)
+            )
+        )
     eff_under = _norm_under(args.under)
     if eff_under:
-        must.append(models.FieldCondition(key="metadata.path_prefix", match=models.MatchValue(value=eff_under)))
+        must.append(
+            models.FieldCondition(
+                key="metadata.path_prefix", match=models.MatchValue(value=eff_under)
+            )
+        )
     flt = models.Filter(must=must) if must else None
 
     pts = dense_results(client, model, vec_name, args.query, flt, args.topk)
@@ -282,9 +337,10 @@ def main():
     ranked.sort(key=lambda x: x[0], reverse=True)
     for s, p in ranked[: args.limit]:
         md = (p.payload or {}).get("metadata") or {}
-        print(f"{s:.3f}\t{md.get('path')}\t{md.get('symbol_path') or md.get('symbol') or ''}\t{md.get('start_line')}-{md.get('end_line')}")
+        print(
+            f"{s:.3f}\t{md.get('path')}\t{md.get('symbol_path') or md.get('symbol') or ''}\t{md.get('start_line')}-{md.get('end_line')}"
+        )
 
 
 if __name__ == "__main__":
     main()
-

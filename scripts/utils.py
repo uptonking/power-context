@@ -4,6 +4,7 @@ from __future__ import annotations
 # Canonical vector-name sanitizer used by both ingest and search paths
 # Keeps mapping consistent across the codebase
 
+
 def sanitize_vector_name(model_name: str) -> str:
     name = (model_name or "").strip().lower()
     # Common fastembed alias mapping for MiniLM
@@ -20,9 +21,9 @@ def sanitize_vector_name(model_name: str) -> str:
     return name.replace("/", "-").replace("_", "-")[:64]
 
 
-
 # Shared lexical hashing utilities to keep ingest/search/memory consistent
 import re, hashlib, math
+
 
 def _split_ident_lex(s: str) -> list[str]:
     parts = re.split(r"[^A-Za-z0-9]+", s)
@@ -34,6 +35,7 @@ def _split_ident_lex(s: str) -> list[str]:
         out.extend([x for x in segs if x])
     return [x.lower() for x in out if x]
 
+
 def lex_hash_vector_text(text: str, dim: int = 4096) -> list[float]:
     if not text:
         return [0.0] * dim
@@ -44,8 +46,9 @@ def lex_hash_vector_text(text: str, dim: int = 4096) -> list[float]:
     for t in toks:
         h = int(hashlib.md5(t.encode("utf-8", errors="ignore")).hexdigest()[:8], 16)
         vec[h % dim] += 1.0
-    norm = math.sqrt(sum(v*v for v in vec)) or 1.0
+    norm = math.sqrt(sum(v * v for v in vec)) or 1.0
     return [v / norm for v in vec]
+
 
 def lex_hash_vector_queries(phrases: list[str], dim: int = 4096) -> list[float]:
     toks: list[str] = []
@@ -57,7 +60,7 @@ def lex_hash_vector_queries(phrases: list[str], dim: int = 4096) -> list[float]:
     for t in toks:
         h = int(hashlib.md5(t.encode("utf-8", errors="ignore")).hexdigest()[:8], 16)
         vec[h % dim] += 1.0
-    norm = math.sqrt(sum(v*v for v in vec)) or 1.0
+    norm = math.sqrt(sum(v * v for v in vec)) or 1.0
     return [v / norm for v in vec]
 
 
@@ -69,8 +72,10 @@ def highlight_snippet(snippet: str, tokens: list[str]) -> str:
     # longest first to avoid partial overlaps
     toks = sorted(set(tokens), key=len, reverse=True)
     import re as _re
+
     def _repl(m):
         return f"<<{m.group(0)}>>"
+
     for t in toks:
         try:
             pat = _re.compile(_re.escape(t), _re.IGNORECASE)

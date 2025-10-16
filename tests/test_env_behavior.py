@@ -23,10 +23,20 @@ def test_rerank_timeout_floor_and_env_defaults(monkeypatch):
         # Distinguish hybrid vs rerank by script name
         if any("rerank_local.py" in str(x) for x in cmd):
             # Return something that looks like rerank stdout
-            return {"ok": True, "stdout": "0.9\t/path.py\t\t1-3\n", "stderr": "", "code": 0}
+            return {
+                "ok": True,
+                "stdout": "0.9\t/path.py\t\t1-3\n",
+                "stderr": "",
+                "code": 0,
+            }
         else:
             # Hybrid JSONL minimal
-            return {"ok": True, "stdout": "{\"score\": 0.1, \"path\": \"/p\", \"start_line\": 1, \"end_line\": 2}\n", "stderr": "", "code": 0}
+            return {
+                "ok": True,
+                "stdout": '{"score": 0.1, "path": "/p", "start_line": 1, "end_line": 2}\n',
+                "stderr": "",
+                "code": 0,
+            }
 
     monkeypatch.setattr(srv, "_run_async", fake_run)
 
@@ -35,9 +45,10 @@ def test_rerank_timeout_floor_and_env_defaults(monkeypatch):
         srv.repo_search(query="foo", limit=3, per_path=1)
     )
 
-    assert any("rerank_local.py" in " ".join(map(str, c["cmd"])) for c in calls), "rerank subprocess should be invoked"
+    assert any(
+        "rerank_local.py" in " ".join(map(str, c["cmd"])) for c in calls
+    ), "rerank subprocess should be invoked"
     # find rerank call
     rc = next(c for c in calls if any("rerank_local.py" in str(x) for x in c["cmd"]))
     assert rc["timeout"] >= 1.5 and rc["timeout"] <= 2.0
     assert res["used_rerank"] is True
-

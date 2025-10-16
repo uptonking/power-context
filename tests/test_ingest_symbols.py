@@ -104,4 +104,3 @@ def test_symbols_terraform_basic():
     syms = ing._extract_symbols("terraform", code)
     kinds = {s.kind for s in syms}
     assert {"resource", "data", "module", "variable", "output"}.issubset(kinds)
-

@@ -28,4 +28,3 @@ async def test_repo_search_concurrent(monkeypatch):
 
     # Ensure no event-loop blocking under moderate concurrency
     await asyncio.wait_for(asyncio.gather(*[one() for _ in range(25)]), timeout=3)
-

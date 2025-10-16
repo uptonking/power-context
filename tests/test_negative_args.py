@@ -11,6 +11,7 @@ def test_repo_search_conflicting_filters_empty_ok(monkeypatch):
     monkeypatch.setattr(srv, "_get_embedding_model", lambda *a, **k: object())
 
     import scripts.hybrid_search as hy
+
     monkeypatch.setattr(hy, "run_hybrid_search", lambda *a, **k: [])
 
     res = srv.asyncio.get_event_loop().run_until_complete(
@@ -19,4 +20,3 @@ def test_repo_search_conflicting_filters_empty_ok(monkeypatch):
 
     assert res.get("ok") is True
     assert res.get("results") == []
-

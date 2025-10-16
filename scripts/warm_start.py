@@ -7,6 +7,7 @@ from fastembed import TextEmbedding
 # Warm start: load embedding model and warm Qdrant HNSW search path with a small query
 # Useful to reduce first-query latency and set a higher runtime ef for quality
 
+
 def derive_vector_name(model_name: str) -> str:
     name = model_name.strip().lower()
     if "bge-base-en-v1.5" in name:
@@ -22,16 +23,27 @@ def derive_vector_name(model_name: str) -> str:
 
 def main():
     parser = argparse.ArgumentParser(description="Warm start embeddings + Qdrant HNSW")
-    parser.add_argument("--query", "-q", default="warm start probe", help="Probe text to embed and search")
-    parser.add_argument("--ef", type=int, default=256, help="HNSW ef (search) to warm caches")
-    parser.add_argument("--limit", type=int, default=3, help="Number of points to request")
+    parser.add_argument(
+        "--query",
+        "-q",
+        default="warm start probe",
+        help="Probe text to embed and search",
+    )
+    parser.add_argument(
+        "--ef", type=int, default=256, help="HNSW ef (search) to warm caches"
+    )
+    parser.add_argument(
+        "--limit", type=int, default=3, help="Number of points to request"
+    )
     args = parser.parse_args()
 
     QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
     COLLECTION = os.environ.get("COLLECTION_NAME", "my-collection")
     MODEL = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
 
-    print(f"Warm start: qdrant={QDRANT_URL} collection={COLLECTION} model={MODEL} ef={args.ef}")
+    print(
+        f"Warm start: qdrant={QDRANT_URL} collection={COLLECTION} model={MODEL} ef={args.ef}"
+    )
 
     client = QdrantClient(url=QDRANT_URL)
     model = TextEmbedding(model_name=MODEL)
@@ -71,4 +83,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

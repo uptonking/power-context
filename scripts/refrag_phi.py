@@ -5,6 +5,7 @@ Projection φ utilities for decoder-path ReFRAG.
 - Operation: y = x @ φ  (x: length d_in)
 - No numpy dependency (pure Python) for portability.
 """
+
 from __future__ import annotations
 import json
 from typing import List
@@ -42,4 +43,3 @@ def project(vec: List[float], phi: Matrix) -> List[float]:
 
 def project_batch(vectors: List[List[float]], phi: Matrix) -> List[List[float]]:
     return [project(v, phi) for v in vectors]
-

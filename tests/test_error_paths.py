@@ -55,4 +55,3 @@ def test_repo_search_inproc_qdrant_failure_fallback_and_fail(monkeypatch):
     assert res.get("ok") is False
     assert res.get("code", 0) != 0
     assert "stderr" in res or res.get("error")
-

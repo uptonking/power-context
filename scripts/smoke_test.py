@@ -3,20 +3,20 @@ import os
 from fastembed import TextEmbedding
 from qdrant_client import QdrantClient
 
-QDRANT_URL = os.environ.get('QDRANT_URL','http://qdrant:6333')
-COLLECTION = os.environ.get('COLLECTION_NAME','my-collection')
-MODEL = os.environ.get('EMBEDDING_MODEL','BAAI/bge-base-en-v1.5')
+QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
+COLLECTION = os.environ.get("COLLECTION_NAME", "my-collection")
+MODEL = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
 
 # Derive the named vector consistently with ingest_code
-vn = os.environ.get('VECTOR_NAME')
+vn = os.environ.get("VECTOR_NAME")
 if not vn:
     name = MODEL.strip().lower()
-    if 'bge-base-en-v1.5' in name:
-        vn = 'fast-bge-base-en-v1.5'
-    elif 'minilm' in name:
-        vn = 'fast-all-minilm-l6-v2'
+    if "bge-base-en-v1.5" in name:
+        vn = "fast-bge-base-en-v1.5"
+    elif "minilm" in name:
+        vn = "fast-all-minilm-l6-v2"
     else:
-        vn = name.replace('/', '-').replace('.', '-').replace(' ', '-')
+        vn = name.replace("/", "-").replace(".", "-").replace(" ", "-")
 VEC_NAME = vn
 
 client = QdrantClient(url=QDRANT_URL)
@@ -29,20 +29,26 @@ except Exception:
 
 # Prepare query embedding
 model = TextEmbedding(model_name=MODEL)
-query = 'python code indexer for qdrant'
+query = "python code indexer for qdrant"
 vec = next(model.embed([query]))
 
 # Search top 3
-res = client.search(collection_name=COLLECTION, query_vector={"name": VEC_NAME, "vector": vec.tolist()}, limit=3, with_payload=True)
+res = client.search(
+    collection_name=COLLECTION,
+    query_vector={"name": VEC_NAME, "vector": vec.tolist()},
+    limit=3,
+    with_payload=True,
+)
 
-print('Smoke test:')
-print(f'- Qdrant URL: {QDRANT_URL}')
-print(f'- Collection: {COLLECTION}')
-print(f'- Embedding model: {MODEL}')
-print(f'- Vector name: {VEC_NAME}')
-print(f'- Count (exact): {count}')
-print('Top hits:')
+print("Smoke test:")
+print(f"- Qdrant URL: {QDRANT_URL}")
+print(f"- Collection: {COLLECTION}")
+print(f"- Embedding model: {MODEL}")
+print(f"- Vector name: {VEC_NAME}")
+print(f"- Count (exact): {count}")
+print("Top hits:")
 for p in res:
-    md = (p.payload or {}).get('metadata', {})
-    print(f"  score={p.score:.4f} path={md.get('path')} lines={md.get('start_line')}-{md.get('end_line')}")
-
+    md = (p.payload or {}).get("metadata", {})
+    print(
+        f"  score={p.score:.4f} path={md.get('path')} lines={md.get('start_line')}-{md.get('end_line')}"
+    )

@@ -23,4 +23,3 @@ def test_soft_mode_posts_soft_embeddings(monkeypatch):
     assert called["path"] == "/soft_completion"
     assert called["payload"]["soft_embeddings"] == soft
     assert called["payload"]["scale"] == 1.25
-

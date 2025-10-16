@@ -21,22 +21,26 @@ from fastembed import TextEmbedding
 # Simple hashing trick for lexical vector to match indexer
 import hashlib
 
+
 def _lex_hash_vector(text: str, dim: int = LEX_VECTOR_DIM) -> List[float]:
     v = [0.0] * dim
     for tok in (text or "").lower().split():
         h = int(hashlib.md5(tok.encode()).hexdigest(), 16) % dim
         v[h] += 1.0
     # L2 normalize
-    norm = sum(x*x for x in v) ** 0.5 or 1.0
+    norm = sum(x * x for x in v) ** 0.5 or 1.0
     return [x / norm for x in v]
 
+
 # Map model to named vector used in indexer
+
 
 def _sanitize_vector_name(model_name: str) -> str:
     name = (model_name or "").strip().lower()
     if "bge-base-en-v1.5" in name:
         return "fast-bge-base-en-v1.5"
     return name.replace("/", "-").replace("_", "-")[:64]
+
 
 VECTOR_NAME = _sanitize_vector_name(EMBEDDING_MODEL)
 
@@ -50,9 +54,11 @@ try:
 except Exception:
     HEALTH_PORT = 18000
 
+
 def _start_readyz_server():
     try:
         from http.server import BaseHTTPRequestHandler, HTTPServer
+
         class H(BaseHTTPRequestHandler):
             def do_GET(self):
                 try:
@@ -71,8 +77,10 @@ def _start_readyz_server():
                         self.end_headers()
                     except Exception:
                         pass
+
             def log_message(self, *args, **kwargs):
                 return
+
         srv = HTTPServer((HOST, HEALTH_PORT), H)
         th = threading.Thread(target=srv.serve_forever, daemon=True)
         th.start()
@@ -80,9 +88,11 @@ def _start_readyz_server():
     except Exception:
         return False
 
+
 client = QdrantClient(url=QDRANT_URL, api_key=os.environ.get("QDRANT_API_KEY"))
 
 # Ensure collection exists with dual vectors
+
 
 def _ensure_collection(name: str):
     try:
@@ -96,13 +106,19 @@ def _ensure_collection(name: str):
     except Exception:
         _dense_dim = 768
     vectors_cfg = {
-        VECTOR_NAME: models.VectorParams(size=int(_dense_dim or 768), distance=models.Distance.COSINE),
-        LEX_VECTOR_NAME: models.VectorParams(size=LEX_VECTOR_DIM, distance=models.Distance.COSINE),
+        VECTOR_NAME: models.VectorParams(
+            size=int(_dense_dim or 768), distance=models.Distance.COSINE
+        ),
+        LEX_VECTOR_NAME: models.VectorParams(
+            size=LEX_VECTOR_DIM, distance=models.Distance.COSINE
+        ),
     }
     client.create_collection(collection_name=name, vectors_config=vectors_cfg)
     return True
 
+
 _ensure_collection(DEFAULT_COLLECTION)
+
 
 @mcp.tool()
 def store(
@@ -120,9 +136,12 @@ def store(
         "information": str(information),
         "metadata": metadata or {"kind": "memory", "source": "memory"},
     }
-    point = models.PointStruct(id=pid, vector={VECTOR_NAME: dense, LEX_VECTOR_NAME: lex}, payload=payload)
+    point = models.PointStruct(
+        id=pid, vector={VECTOR_NAME: dense, LEX_VECTOR_NAME: lex}, payload=payload
+    )
     client.upsert(collection_name=coll, points=[point], wait=True)
     return {"ok": True, "id": pid, "collection": coll, "vector": VECTOR_NAME}
+
 
 @mcp.tool()
 def find(
@@ -142,23 +161,49 @@ def find(
 
     # Two searches (prefer query_points) then simple RRF-like merge
     try:
-        qp_dense = client.query_points(collection_name=coll, query=dense, using=VECTOR_NAME, limit=max(10, lim), with_payload=True)
+        qp_dense = client.query_points(
+            collection_name=coll,
+            query=dense,
+            using=VECTOR_NAME,
+            limit=max(10, lim),
+            with_payload=True,
+        )
         res_dense = getattr(qp_dense, "points", qp_dense)
     except AttributeError:
-        res_dense = client.search(collection_name=coll, query_vector=(VECTOR_NAME, dense), limit=max(10, lim), with_payload=True)
+        res_dense = client.search(
+            collection_name=coll,
+            query_vector=(VECTOR_NAME, dense),
+            limit=max(10, lim),
+            with_payload=True,
+        )
 
     try:
-        qp_lex = client.query_points(collection_name=coll, query=lex, using=LEX_VECTOR_NAME, limit=max(10, lim), with_payload=True)
+        qp_lex = client.query_points(
+            collection_name=coll,
+            query=lex,
+            using=LEX_VECTOR_NAME,
+            limit=max(10, lim),
+            with_payload=True,
+        )
         res_lex = getattr(qp_lex, "points", qp_lex)
     except AttributeError:
-        res_lex = client.search(collection_name=coll, query_vector=(LEX_VECTOR_NAME, lex), limit=max(10, lim), with_payload=True)
+        res_lex = client.search(
+            collection_name=coll,
+            query_vector=(LEX_VECTOR_NAME, lex),
+            limit=max(10, lim),
+            with_payload=True,
+        )
 
     def is_memory_like(payload: Dict[str, Any]) -> bool:
         md = (payload or {}).get("metadata") or {}
         path = md.get("path")
         kind = (md.get("kind") or "").lower()
         source = (md.get("source") or "").lower()
-        return (not path) or (kind in {"memory", "preference", "note", "policy", "chat"}) or (source in {"memory", "chat"})
+        return (
+            (not path)
+            or (kind in {"memory", "preference", "note", "policy", "chat"})
+            or (source in {"memory", "chat"})
+        )
 
     scores: Dict[str, float] = {}
     items: Dict[str, Dict[str, Any]] = {}
@@ -171,19 +216,26 @@ def find(
             pl = getattr(r, "payload", {}) or {}
             if not is_memory_like(pl):
                 continue
-            scores[pid] = scores.get(pid, 0.0) + weight / (1.0 + getattr(r, "score", 0.0))
+            scores[pid] = scores.get(pid, 0.0) + weight / (
+                1.0 + getattr(r, "score", 0.0)
+            )
             items[pid] = {
                 "id": getattr(r, "id", None),
                 "score": getattr(r, "score", None),
-                "information": pl.get("information") or pl.get("content") or pl.get("text"),
+                "information": pl.get("information")
+                or pl.get("content")
+                or pl.get("text"),
                 "metadata": pl.get("metadata") or {},
             }
 
     add_hits(res_dense, 1.0)
     add_hits(res_lex, 0.9)
 
-    ordered = sorted(items.values(), key=lambda x: scores.get(str(x["id"]), 0.0), reverse=True)[:limit]
+    ordered = sorted(
+        items.values(), key=lambda x: scores.get(str(x["id"]), 0.0), reverse=True
+    )[:limit]
     return {"ok": True, "results": ordered, "count": len(ordered)}
+
 
 if __name__ == "__main__":
     transport = os.environ.get("FASTMCP_TRANSPORT", "sse").strip().lower()
@@ -199,4 +251,3 @@ if __name__ == "__main__":
         mcp.settings.host = HOST
         mcp.settings.port = PORT
         mcp.run(transport="sse")
-

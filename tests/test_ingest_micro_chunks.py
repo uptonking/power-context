@@ -2,8 +2,12 @@ import os
 import pytest
 
 import sys, types, importlib
+
 # Stub heavy optional deps to allow importing ingest_code in a minimal test env
-sys.modules.setdefault("qdrant_client", types.SimpleNamespace(QdrantClient=object, models=types.SimpleNamespace()))
+sys.modules.setdefault(
+    "qdrant_client",
+    types.SimpleNamespace(QdrantClient=object, models=types.SimpleNamespace()),
+)
 sys.modules.setdefault("fastembed", types.SimpleNamespace(TextEmbedding=object))
 from scripts.ingest_code import chunk_by_tokens
 
@@ -54,4 +58,3 @@ def test_chunk_by_tokens_basic_overlap_and_bounds(monkeypatch):
         if a["end"] >= b["start"]:
             overlaps += 1
     assert overlaps >= 1
-

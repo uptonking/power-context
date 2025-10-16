@@ -21,9 +21,18 @@ def sha1_file(path: Path) -> str:
 
 
 def delete_by_path(client: QdrantClient, path_str: str) -> int:
-    flt = models.Filter(must=[models.FieldCondition(key="metadata.path", match=models.MatchValue(value=path_str))])
+    flt = models.Filter(
+        must=[
+            models.FieldCondition(
+                key="metadata.path", match=models.MatchValue(value=path_str)
+            )
+        ]
+    )
     try:
-        res = client.delete(collection_name=COLLECTION, points_selector=models.FilterSelector(filter=flt))
+        res = client.delete(
+            collection_name=COLLECTION,
+            points_selector=models.FilterSelector(filter=flt),
+        )
         return 1
     except Exception:
         return 0
@@ -54,7 +63,11 @@ def main():
             if not path_str or path_str in seen:
                 continue
             seen.add(path_str)
-            abs_path = ROOT / Path(path_str).relative_to("/work") if path_str.startswith("/work/") else ROOT / path_str
+            abs_path = (
+                ROOT / Path(path_str).relative_to("/work")
+                if path_str.startswith("/work/")
+                else ROOT / path_str
+            )
             if not abs_path.exists():
                 removed_missing += delete_by_path(client, path_str)
                 print(f"[prune] removed missing file points: {path_str}")
@@ -67,9 +80,10 @@ def main():
         if next_page is None:
             break
 
-    print(f"Prune complete. removed_missing={removed_missing}, removed_mismatch={removed_mismatch}")
+    print(
+        f"Prune complete. removed_missing={removed_missing}, removed_mismatch={removed_mismatch}"
+    )
 
 
 if __name__ == "__main__":
     main()
-

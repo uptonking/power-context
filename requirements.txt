@@ -4,8 +4,8 @@ fastembed
 watchdog
 onnxruntime
 tokenizers
-tree_sitter
-tree_sitter_languages
+tree_sitter>=0.25.2
+tree_sitter_languages; python_version < "3.13"
 mcp==1.17.0
 fastmcp==2.12.4
 
@@ -14,4 +14,3 @@ pytest
 pytest-asyncio
 anyio
 testcontainers
-
