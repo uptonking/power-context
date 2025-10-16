@@ -164,6 +164,99 @@ IDE/Agent config (recommended):
 ```
 
 Blended search:
+
+## Memory usage patterns (how to get the most from memories)
+
+### When to use memories vs code search
+- Use memories when the information isn’t in your repository or is transient/user-authored: conventions, runbooks, decisions, links, known issues, FAQs, “how we do X here”.
+- Use code search for facts that live in the repo: APIs, functions/classes, configuration, and cross-file relationships.
+- Blend both for tasks like “how to run E2E tests” where instructions (memory) reference scripts in the repo (code).
+- Rule of thumb: if you’d write it in a team wiki or ticket comment, store it as a memory; if you’d grep for it, use code search.
+
+### Recommended metadata schema (best practices)
+We store memory entries as points in Qdrant with a small, consistent payload. Recommended keys:
+- kind: "memory" (string) – required. Enables filtering and blending.
+- topic: short category string (e.g., "dev-env", "release-process").
+- tags: list of strings (e.g., ["qdrant", "indexing", "prod"]).
+- source: where this came from (e.g., "chat", "manual", "tool", "issue-123").
+- author: who added it (e.g., username or email).
+- created_at: ISO8601 timestamp (UTC).
+- expires_at: ISO8601 timestamp if this memory should be pruned later.
+- repo: optional repo identifier if sharing a Qdrant instance across repos.
+- link: optional URL to docs, tickets, or dashboards.
+- priority: 0.0–1.0 weight that clients can use to bias ranking when blending.
+
+Notes:
+- Keep values small (short strings, small lists). Don’t store large blobs in payload; put details in the `information` text.
+- Use lowercase snake_case keys for consistency.
+- For secrets/PII: do not store plaintext. Store references or vault paths instead.
+
+### Example memory operations
+Store a memory (via MCP Memory server tool `store` – use your MCP client):
+```
+{
+  "information": "Run full reset: INDEX_MICRO_CHUNKS=1 MAX_MICRO_CHUNKS_PER_FILE=500 make reset-dev",
+  "metadata": {
+    "kind": "memory",
+    "topic": "dev-env",
+    "tags": ["make", "reset"],
+    "source": "chat"
+  }
+}
+```
+
+Find memories (via MCP Memory server tool `find`):
+```
+{
+  "query": "reset-dev",
+  "limit": 5
+}
+```
+
+Blend memories into code search (Indexer MCP `context_search`):
+```
+{
+  "query": "async file watcher",
+  "include_memories": true,
+  "limit": 5,
+  "include_snippet": true
+}
+```
+
+Tips:
+- Use precise queries (2–5 tokens). Add a couple synonyms if needed; the server supports multiple phrasings.
+- Combine `topic`/`tags` in your memory text to make them easier to find (they also live in payload for filtering).
+
+### Migrating and backing up memories
+Memories are normal Qdrant points (often in the same collection as code). Back them up or migrate using one of these patterns:
+
+1) Snapshot the collection (fastest, whole collection)
+- Create snapshot via Qdrant HTTP API, then download the file and store it safely.
+  - POST /collections/{collection}/snapshots
+  - GET  /collections/{collection}/snapshots/{snapshot}
+- Restore by placing the snapshot in Qdrant’s snapshots dir and calling the restore API (see Qdrant docs).
+
+2) Export only memory entries (portable, selective)
+- Use qdrant-client to scroll all points where `metadata.kind == "memory"` and write NDJSON; later upsert into another instance.
+- Pseudocode:
+```
+from qdrant_client import QdrantClient, models
+c = QdrantClient(url="http://localhost:6333")
+filt = models.Filter(must=[models.FieldCondition(key="metadata.kind", match=models.MatchValue(value="memory"))])
+# scroll/export all matching points and write to NDJSON; then upsert to import
+```
+
+3) Volume-level backup (Docker)
+- Archive the Qdrant volume for a full-instance backup:
+```
+docker run --rm -v qdrant_storage:/data -v "$PWD":/backup alpine sh -c "tar czf /backup/qdrant_storage.tgz /data"
+```
+
+Operational notes:
+- Collection name comes from `COLLECTION_NAME` (see .env). This stack defaults to a single collection for both code and memories; filtering uses `metadata.kind`.
+- If you switch to a dedicated memory collection, update the MCP Memory server and the Indexer’s memory blending env to point at it.
+- Consider pruning expired memories by filtering `expires_at < now`.
+
 - Call `context_search` on :8001 with `{ "include_memories": true }` to return both memory and code results.
 
 
