@@ -1361,6 +1361,33 @@ async def context_search(
             import asyncio
             timeout = float(os.environ.get("MEMORY_MCP_TIMEOUT", "6"))
             base_url = os.environ.get("MEMORY_MCP_URL") or "http://mcp:8000/sse"
+            # Best-effort: poll memory MCP /readyz on its health port to avoid init race
+            try:
+                from urllib.parse import urlparse
+                import urllib.request, time
+                ready_attempts = int(os.environ.get("MEMORY_MCP_READY_RETRIES", "5") or 5)
+                ready_backoff = float(os.environ.get("MEMORY_MCP_READY_BACKOFF", "0.2") or 0.2)
+                health_port = int(os.environ.get("MEMORY_MCP_HEALTH_PORT", "18000") or 18000)
+                pu = urlparse(base_url)
+                host = pu.hostname or "mcp"
+                scheme = pu.scheme or "http"
+                readyz = f"{scheme}://{host}:{health_port}/readyz"
+                def _poll_ready():
+                    for i in range(max(1, ready_attempts)):
+                        try:
+                            with urllib.request.urlopen(readyz, timeout=1.5) as r:
+                                if getattr(r, "status", 200) == 200:
+                                    return True
+                        except Exception:
+                            time.sleep(ready_backoff * (i + 1))
+                    return False
+                try:
+                    await asyncio.to_thread(_poll_ready)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
             async with Client(base_url) as c:
                 tools = None
                 attempts = int(os.environ.get("MEMORY_MCP_LIST_RETRIES", "3") or 3)

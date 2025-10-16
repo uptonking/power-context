@@ -52,16 +52,16 @@ services:
     environment:
       - FASTMCP_HEALTH_PORT=18001
 
-      - "18001:18001"
-
       - FASTMCP_HOST=${FASTMCP_HOST}
       - FASTMCP_INDEXER_PORT=${FASTMCP_INDEXER_PORT}
       - QDRANT_URL=${QDRANT_URL}
     # SSE endpoint for IDE agents at http://localhost:${FASTMCP_INDEXER_PORT:-8001}/sse
     ports:
       - "${FASTMCP_INDEXER_PORT:-8001}:8001"
+      - "18001:18001"
     volumes:
       - ${HOST_INDEX_PATH:-.}:/work
+
   llamacpp:
     image: ghcr.io/ggerganov/llama.cpp:server
     container_name: llama-decoder
