@@ -65,7 +65,7 @@ def _ensure_collection(name: str):
 
 _ensure_collection(DEFAULT_COLLECTION)
 
-@mcp.tool
+@mcp.tool()
 def store(
     information: str,
     metadata: Optional[Dict[str, Any]] = None,
@@ -85,7 +85,7 @@ def store(
     client.upsert(collection_name=coll, points=[point], wait=True)
     return {"ok": True, "id": pid, "collection": coll, "vector": VECTOR_NAME}
 
-@mcp.tool
+@mcp.tool()
 def find(
     query: str,
     limit: int = 5,
@@ -138,5 +138,11 @@ def find(
     return {"ok": True, "results": ordered, "count": len(ordered)}
 
 if __name__ == "__main__":
-    mcp.run(transport="sse", host=HOST, port=PORT)
+    transport = os.environ.get("FASTMCP_TRANSPORT", "sse").strip().lower()
+    if transport == "stdio":
+        mcp.run(transport="stdio")
+    else:
+        mcp.settings.host = HOST
+        mcp.settings.port = PORT
+        mcp.run(transport="sse")
 

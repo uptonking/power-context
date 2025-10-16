@@ -1,17 +1,67 @@
 
-## Quickstart (ship-ready)
-ReFRag article:
+## Quick Start Guide (5 minutes)
 
-https://arxiv.org/abs/2509.01092
+This gets you from zero to “search works” in under five minutes.
 
-Run everything with a single command, then wire your MCP client to the SSE endpoints.
+1) Prereqs
+- Docker + Docker Compose
+- make (optional but recommended)
+- Node/npm if you want to use mcp-remote (optional)
 
+2) One command (recommended)
+```bash
+# Provisions tokenizer.json, downloads a tiny llama.cpp model, reindexes, and brings all services up
+INDEX_MICRO_CHUNKS=1 MAX_MICRO_CHUNKS_PER_FILE=500 make reset-dev
+```
+- Default ports: Memory MCP :8000, Indexer MCP :8001, Qdrant :6333, llama.cpp :8080
+- You can skip the decoder; it’s feature-flagged off by default.
+
+Alternative (compose only)
 ```bash
 HOST_INDEX_PATH="$(pwd)" FASTMCP_INDEXER_PORT=8001 docker compose up -d qdrant mcp mcp_indexer indexer
 ```
 
+3) Verify endpoints
+```bash
+curl -sSf http://localhost:6333/readyz >/dev/null && echo "Qdrant OK"
+curl -sI http://localhost:8000/sse | head -n1
+curl -sI http://localhost:8001/sse | head -n1
+```
 
-Note: `make reset-dev` provisions models/tokenizer.json and brings up the llama.cpp decoder sidecar by default, so ReFRAG micro‑chunking and the decoder path work out of the box.
+4) Single command to index + search
+```bash
+# Fresh index of your repo and a quick hybrid example
+make reindex
+make hybrid ARGS="--query 'async file watcher' --limit 5 --include-snippet"
+```
+
+5) Example MCP client configuration (Kiro)
+Create .kiro/settings/mcp.json in your workspace:
+````json
+{
+  "mcpServers": {
+    "qdrant-indexer": { "command": "npx", "args": ["mcp-remote", "http://localhost:8001/sse", "--transport", "sse-only"] },
+    "qdrant": { "command": "npx", "args": ["mcp-remote", "http://localhost:8000/sse", "--transport", "sse-only"] }
+  }
+}
+````
+Notes:
+- Kiro expects command/args (stdio). mcp-remote bridges to remote SSE endpoints.
+- If npx prompts, add -y right after npx.
+
+6) Common troubleshooting
+- Tree-sitter not found or parser errors:
+  - Feature is optional. If you set USE_TREE_SITTER=1 and see errors, unset it or install tree-sitter deps, then reindex.
+- Tokenizer missing for micro-chunks:
+  - Run make tokenizer or set TOKENIZER_JSON to a valid tokenizer.json; otherwise we fall back to line-based chunking.
+- SSE “Invalid session ID” when POSTing /messages directly:
+  - Expected if you didn’t initiate an SSE session first. Use an MCP client (e.g., mcp-remote) to handle the handshake.
+- llama.cpp platform warning on Apple Silicon:
+  - Safe to ignore for local dev, or set platform: linux/amd64 for the service, or build a native image.
+- Indexing feels stuck on very large files:
+  - Use MAX_MICRO_CHUNKS_PER_FILE=500 (default in code) or lower (e.g., 200) during dev runs.
+
+ReFRAG background: https://arxiv.org/abs/2509.01092
 
 Endpoints
 
@@ -20,14 +70,6 @@ Endpoints
 | Memory MCP  | http://localhost:8000/sse    |
 | Indexer MCP | http://localhost:8001/sse    |
 | Qdrant DB   | http://localhost:6333        |
-
-Quick verify
-
-```bash
-curl -sSf http://localhost:6333/readyz >/dev/null && echo "Qdrant OK"
-curl -sI http://localhost:8000/sse | head -n1
-curl -sI http://localhost:8001/sse | head -n1
-```
 
 ### Kiro Integration (workspace config)
 
