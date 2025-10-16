@@ -29,8 +29,12 @@ services:
       - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER}
       - TOOL_STORE_DESCRIPTION=${TOOL_STORE_DESCRIPTION}
       - TOOL_FIND_DESCRIPTION=${TOOL_FIND_DESCRIPTION}
+      - FASTMCP_HEALTH_PORT=18000
+
     # SSE endpoint for IDE agents at http://localhost:8000/sse
     ports:
+      - "18000:18000"
+
       - "8000:8000"
 
     volumes:
@@ -46,6 +50,10 @@ services:
     env_file:
       - .env
     environment:
+      - FASTMCP_HEALTH_PORT=18001
+
+      - "18001:18001"
+
       - FASTMCP_HOST=${FASTMCP_HOST}
       - FASTMCP_INDEXER_PORT=${FASTMCP_INDEXER_PORT}
       - QDRANT_URL=${QDRANT_URL}

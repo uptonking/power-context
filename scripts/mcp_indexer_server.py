@@ -74,6 +74,45 @@ SNIPPET_MAX_BYTES = int(os.environ.get("MCP_SNIPPET_MAX_BYTES", "8192") or 8192)
 
 mcp = FastMCP(APP_NAME)
 
+# Lightweight readiness endpoint on a separate health port (non-MCP), optional
+# Exposes GET /readyz returning {ok: true, app: <name>} once process is up.
+try:
+    HEALTH_PORT = int(os.environ.get("FASTMCP_HEALTH_PORT", "18001") or 18001)
+except Exception:
+    HEALTH_PORT = 18001
+
+def _start_readyz_server():
+    try:
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        class H(BaseHTTPRequestHandler):
+            def do_GET(self):
+                try:
+                    if self.path == "/readyz":
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/json")
+                        self.end_headers()
+                        payload = {"ok": True, "app": APP_NAME}
+                        self.wfile.write((json.dumps(payload)).encode("utf-8"))
+                    else:
+                        self.send_response(404)
+                        self.end_headers()
+                except Exception:
+                    try:
+                        self.send_response(500)
+                        self.end_headers()
+                    except Exception:
+                        pass
+            def log_message(self, *args, **kwargs):
+                # Quiet health server logs
+                return
+        srv = HTTPServer((HOST, HEALTH_PORT), H)
+        th = threading.Thread(target=srv.serve_forever, daemon=True)
+        th.start()
+        return True
+    except Exception:
+        return False
+
+
 
 
 # Async subprocess runner to avoid blocking event loop
@@ -1323,7 +1362,23 @@ async def context_search(
             timeout = float(os.environ.get("MEMORY_MCP_TIMEOUT", "6"))
             base_url = os.environ.get("MEMORY_MCP_URL") or "http://mcp:8000/sse"
             async with Client(base_url) as c:
-                tools = await asyncio.wait_for(c.list_tools(), timeout=timeout)
+                tools = None
+                attempts = int(os.environ.get("MEMORY_MCP_LIST_RETRIES", "3") or 3)
+                backoff = float(os.environ.get("MEMORY_MCP_LIST_BACKOFF", "0.2") or 0.2)
+                last_err = None
+                for i in range(max(1, attempts)):
+                    try:
+                        tools = await asyncio.wait_for(c.list_tools(), timeout=timeout)
+                        if tools:
+                            break
+                    except Exception as e:
+                        last_err = e
+                        try:
+                            await asyncio.sleep(backoff * (i + 1))
+                        except Exception:
+                            pass
+                if tools is None:
+                    raise last_err or RuntimeError("list_tools failed before initialization")
                 tool_name = None
                 # Prefer canonical names
                 for t in tools:
@@ -1583,6 +1638,7 @@ async def code_search(
 ) -> Dict[str, Any]:
     """Alias of repo_search with the same arguments; provided for better discoverability."""
     return await repo_search(
+
         query=query,
         limit=limit,
         per_path=per_path,
@@ -1634,6 +1690,12 @@ if __name__ == "__main__":
                 _env["COLLECTION_NAME"] = DEFAULT_COLLECTION
                 _cmd = ["python", "/work/scripts/rerank_local.py", "--query", "warmup", "--topk", "3", "--limit", "1"]
                 subprocess.run(_cmd, capture_output=True, text=True, env=_env, timeout=10)
+    except Exception:
+        pass
+
+    # Start lightweight /readyz health endpoint in background (best-effort)
+    try:
+        _start_readyz_server()
     except Exception:
         pass
 

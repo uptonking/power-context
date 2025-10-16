@@ -41,6 +41,42 @@ mcp = FastMCP(name="memory-server")
 HOST = os.environ.get("FASTMCP_HOST", "0.0.0.0")
 PORT = int(os.environ.get("FASTMCP_PORT", "8000") or 8000)
 
+# Lightweight readiness endpoint on a separate health port (non-MCP), optional
+try:
+    HEALTH_PORT = int(os.environ.get("FASTMCP_HEALTH_PORT", "18000") or 18000)
+except Exception:
+    HEALTH_PORT = 18000
+
+def _start_readyz_server():
+    try:
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        class H(BaseHTTPRequestHandler):
+            def do_GET(self):
+                try:
+                    if self.path == "/readyz":
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/json")
+                        self.end_headers()
+                        payload = {"ok": True, "app": "memory-server"}
+                        self.wfile.write((json.dumps(payload)).encode("utf-8"))
+                    else:
+                        self.send_response(404)
+                        self.end_headers()
+                except Exception:
+                    try:
+                        self.send_response(500)
+                        self.end_headers()
+                    except Exception:
+                        pass
+            def log_message(self, *args, **kwargs):
+                return
+        srv = HTTPServer((HOST, HEALTH_PORT), H)
+        th = threading.Thread(target=srv.serve_forever, daemon=True)
+        th.start()
+        return True
+    except Exception:
+        return False
+
 client = QdrantClient(url=QDRANT_URL, api_key=os.environ.get("QDRANT_API_KEY"))
 
 # Ensure collection exists with dual vectors
@@ -148,6 +184,12 @@ def find(
 
 if __name__ == "__main__":
     transport = os.environ.get("FASTMCP_TRANSPORT", "sse").strip().lower()
+    # Start lightweight /readyz health endpoint in background (best-effort)
+    try:
+        _start_readyz_server()
+    except Exception:
+        pass
+
     if transport == "stdio":
         mcp.run(transport="stdio")
     else:
