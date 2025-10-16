@@ -102,6 +102,12 @@ services:
       - COLLECTION_NAME=${COLLECTION_NAME}
       - EMBEDDING_MODEL=${EMBEDDING_MODEL}
       - WATCH_ROOT=/work
+      # Watcher-specific backpressure & timeouts (safer defaults)
+      - QDRANT_TIMEOUT=60
+      - MAX_MICRO_CHUNKS_PER_FILE=200
+      - INDEX_UPSERT_BATCH=128
+      - INDEX_UPSERT_RETRIES=5
+      - WATCH_DEBOUNCE_SECS=1.5
     working_dir: /work
     volumes:
       - ${HOST_INDEX_PATH:-.}:/work:ro
