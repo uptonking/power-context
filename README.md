@@ -18,7 +18,7 @@ INDEX_MICRO_CHUNKS=1 MAX_MICRO_CHUNKS_PER_FILE=500 make reset-dev
 
 Alternative (compose only)
 ```bash
-HOST_INDEX_PATH="$(pwd)" FASTMCP_INDEXER_PORT=8001 docker compose up -d qdrant mcp mcp_indexer indexer
+HOST_INDEX_PATH="$(pwd)" FASTMCP_INDEXER_PORT=8001 docker compose up -d qdrant mcp mcp_indexer indexer watcher
 ```
 
 3) Verify endpoints
@@ -150,7 +150,7 @@ flowchart LR
 Start Qdrant, the Memory MCP (8000), the Indexer MCP (8001), and run a fresh index of your current repo:
 
 ```bash
-HOST_INDEX_PATH="$(pwd)" FASTMCP_INDEXER_PORT=8001 docker compose up -d qdrant mcp mcp_indexer indexer
+HOST_INDEX_PATH="$(pwd)" FASTMCP_INDEXER_PORT=8001 docker compose up -d qdrant mcp mcp_indexer indexer watcher
 ```
 
 Then wire your MCP-aware IDE/tooling to:
@@ -438,11 +438,6 @@ Windsurf/Cursor (stdio for search + SSE for indexer):
         "COLLECTION_NAME": "my-collection",
         "EMBEDDING_MODEL": "BAAI/bge-base-en-v1.5"
       },
-      "disabled": false
-    },
-    "qdrant-indexer": {
-      "type": "sse",
-      "url": "http://localhost:8001/sse",
       "disabled": false
     }
   }
