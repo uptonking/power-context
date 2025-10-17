@@ -52,7 +52,7 @@ index-path: ## index an arbitrary repo: make index-path REPO_PATH=/abs/path [REC
 	@NAME=$${REPO_NAME:-$$(basename "$(REPO_PATH)")}; \
 	COLL=$${COLLECTION:-$$NAME}; \
 	HOST_INDEX_PATH="$(REPO_PATH)" COLLECTION_NAME="$$COLL" REPO_NAME="$$NAME" \
-	docker compose run --rm indexer --root /work $${RECREATE:+--recreate}
+	docker compose run --rm -v "$$PWD":/app:ro --entrypoint python indexer /app/scripts/ingest_code.py --root /work $${RECREATE:+--recreate}
 
 # Index the current working directory quickly
 index-here: ## index the current directory: make index-here [RECREATE=1] [REPO_NAME=name] [COLLECTION=name]
