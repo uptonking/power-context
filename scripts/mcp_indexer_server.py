@@ -932,9 +932,9 @@ async def repo_search(
     per_path = _to_int(per_path, 2)
     include_snippet = _to_bool(include_snippet, False)
     context_lines = _to_int(context_lines, 2)
-    # Reranker: allow env-defaults to enable without client args
+    # Reranker: default ON; can be disabled via env or client args
     rerank_env_default = str(
-        os.environ.get("RERANKER_ENABLED", "")
+        os.environ.get("RERANKER_ENABLED", "1")
     ).strip().lower() in {"1", "true", "yes", "on"}
     rerank_enabled = _to_bool(rerank_enabled, rerank_env_default)
     rerank_top_n = _to_int(

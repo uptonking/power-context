@@ -54,6 +54,47 @@ HOST_INDEX_PATH="$(pwd)" FASTMCP_INDEXER_PORT=8001 docker compose up -d qdrant m
 - Augment (SSE): simple JSON configs for both servers
 
 3) Verify endpoints
+## Configuration reference (env vars)
+
+Core
+- COLLECTION_NAME: Qdrant collection to use (defaults to repo name if unset in some flows)
+- REPO_NAME: Logical name for the indexed repo; stored in payload for filtering
+- HOST_INDEX_PATH: Absolute host path to index (mounted to /work in containers)
+
+Indexing / micro-chunks
+- INDEX_MICRO_CHUNKS: 1 to enable micro‑chunking; off falls back to line chunks
+- MAX_MICRO_CHUNKS_PER_FILE: Cap micro‑chunks per file (e.g., 500 default)
+- TOKENIZER_URL, TOKENIZER_PATH: Hugging Face tokenizer.json URL and local path
+- USE_TREE_SITTER: 1 to enable tree-sitter parsing (optional; off by default)
+
+Watcher
+- WATCH_DEBOUNCE_SECS: Debounce between change events (e.g., 1.5)
+- INDEX_UPSERT_BATCH / INDEX_UPSERT_RETRIES / INDEX_UPSERT_BACKOFF: Upsert tuning
+- QDRANT_TIMEOUT: Request timeout in seconds for upserts/queries (e.g., 60–90)
+
+Reranker
+- RERANKER_ONNX_PATH, RERANKER_TOKENIZER_PATH: Paths for local ONNX cross‑encoder
+- RERANKER_ENABLED: 1/true to enable, 0/false to disable; default is enabled in server
+  - Timeouts/failures automatically fall back to hybrid results
+
+Ports
+- FASTMCP_PORT (SSE/RMCP): Override Memory MCP ports (defaults: 8000/8002)
+- FASTMCP_INDEXER_PORT (SSE/RMCP): Override Indexer MCP ports (defaults: 8001/8003)
+
+## Language support
+- Python, JavaScript/TypeScript, Go, Java, Rust, Shell, Terraform, PowerShell, YAML, C#, PHP
+
+## Watcher behavior and tips
+- Handles delete and move: removes/migrates points to avoid stale entries
+- Live reloads ignore patterns: changes to .qdrantignore are applied without restart
+- path_glob matches against relative paths (e.g., src/**/*.py), not absolute /work paths
+- If upserts time out, lower INDEX_UPSERT_BATCH (e.g., 96) or raise QDRANT_TIMEOUT (e.g., 90)
+- For very large files, reduce MAX_MICRO_CHUNKS_PER_FILE (e.g., 200) during dev
+
+## Expected HTTP behaviors
+- GET /mcp may return 400 (normal): the RMCP endpoint is POST-only for JSON-RPC
+- SSE requires a session handshake; raw POST /messages without it will error (expected)
+
 ```bash
 curl -sSf http://localhost:6333/readyz >/dev/null && echo "Qdrant OK"
 curl -sI http://localhost:8000/sse | head -n1
@@ -190,7 +231,7 @@ Indexer/Search MCP (8001 SSE, 8003 RMCP):
 
 Notes:
 - Most search tools accept filters like language, under, path_glob, kind, symbol, ext.
-- Reranker can be enabled; timeouts fall back to hybrid results.
+- Reranker enabled by default; timeouts fall back to hybrid results.
 
 ### Qodo Integration (RMCP config)
 
