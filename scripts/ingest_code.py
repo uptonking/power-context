@@ -775,6 +775,20 @@ def _extract_imports(language: str, text: str) -> list:
             if m:
                 imps.append(m.group(1))
                 continue
+    elif language == "php":
+        for ln in lines:
+            # Namespaced uses: use Foo\Bar; use function Foo\bar; use const Foo\BAR;
+            m = re.match(r"^\s*use\s+(?:function\s+|const\s+)?([A-Za-z_][A-Za-z0-9_\\\\]*)\s*;", ln)
+            if m:
+                imps.append(m.group(1).replace("\\\\", "\\"))
+                continue
+        for ln in lines:
+            # include/require path-like imports
+            m = re.match(r"^\s*(?:include|include_once|require|require_once)\s*\(?\s*['\"]([^'\"]+)['\"]\s*\)?\s*;", ln)
+            if m:
+                imps.append(m.group(1))
+                continue
+
     elif language == "rust":
         for ln in lines:
             m = re.match(r"^\s*use\s+([^;]+);", ln)
@@ -1109,6 +1123,44 @@ def _extract_symbols_csharp(text: str) -> List[_Sym]:
     for i in range(len(syms)):
         syms[i]["end"] = (syms[i + 1].start - 1) if (i + 1 < len(syms)) else len(lines)
     return syms
+
+
+def _extract_symbols_php(text: str) -> List[_Sym]:
+    lines = text.splitlines()
+    syms: List[_Sym] = []
+    current_type = None
+    depth = 0
+    for idx, line in enumerate(lines, 1):
+        # track simple brace depth to reset current_type when leaving class
+        depth += line.count("{")
+        depth -= line.count("}")
+        if depth <= 0:
+            current_type = None
+        # namespace declaration (optional informational anchor)
+        m = re.match(r"^\s*namespace\s+([A-Za-z_][A-Za-z0-9_\\\\]*)\s*;", line)
+        if m:
+            ns = m.group(1).replace("\\\\", "\\")
+            syms.append(_Sym(kind="namespace", name=ns, start=idx, end=idx))
+            continue
+        # class/interface/trait
+        m = re.match(r"^\s*(?:final\s+|abstract\s+)?(class|interface|trait)\s+([A-Za-z_][\w]*)\b", line)
+        if m:
+            kind, name = m.group(1), m.group(2)
+            current_type = name
+            syms.append(_Sym(kind=kind, name=name, start=idx, end=idx))
+            continue
+        # methods or functions
+        m = re.match(r"^\s*(?:public|private|protected)?\s*(?:static\s+)?function\s+([A-Za-z_][\w]*)\s*\(", line)
+        if m:
+            name = m.group(1)
+            path = f"{current_type}.{name}" if current_type else name
+            syms.append(_Sym(kind="method" if current_type else "function", name=name, path=path, start=idx, end=idx))
+            continue
+    syms.sort(key=lambda s: s.start)
+    for i in range(len(syms)):
+        syms[i]["end"] = (syms[i + 1].start - 1) if (i + 1 < len(syms)) else len(lines)
+    return syms
+
 
 
 def _extract_symbols_shell(text: str) -> List[_Sym]:
@@ -1462,6 +1514,8 @@ def _extract_symbols(language: str, text: str) -> List[_Sym]:
         return _extract_symbols_powershell(text)
     if language == "csharp":
         return _extract_symbols_csharp(text)
+    if language == "php":
+        return _extract_symbols_php(text)
     return []
 
 
