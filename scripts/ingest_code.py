@@ -763,16 +763,15 @@ def _extract_imports(language: str, text: str) -> list:
                 imps.append(m.group(1))
                 continue
     elif language == "java":
+        for ln in lines:
+            m = re.match(r"^\s*import\s+([\w\.\*]+);", ln)
+            if m:
+                imps.append(m.group(1))
+                continue
     elif language == "csharp":
         for ln in lines:
             # using Namespace.Sub; using static System.Math; using Alias = Namespace.Type;
             m = re.match(r"^\s*using\s+(?:static\s+)?([A-Za-z_][\w\._]*)(?:\s*;|\s*=)", ln)
-            if m:
-                imps.append(m.group(1))
-                continue
-
-        for ln in lines:
-            m = re.match(r"^\s*import\s+([\w\.\*]+);", ln)
             if m:
                 imps.append(m.group(1))
                 continue
@@ -1077,6 +1076,33 @@ def _extract_symbols_java(text: str) -> List[_Sym]:
         if m:
             name = m.group(1)
             path = f"{current_class}.{name}" if current_class else name
+            syms.append(_Sym(kind="method", name=name, path=path, start=idx, end=idx))
+            continue
+    syms.sort(key=lambda s: s.start)
+    for i in range(len(syms)):
+        syms[i]["end"] = (syms[i + 1].start - 1) if (i + 1 < len(syms)) else len(lines)
+    return syms
+
+
+
+def _extract_symbols_csharp(text: str) -> List[_Sym]:
+    lines = text.splitlines()
+    syms: List[_Sym] = []
+    current_type = None
+    for idx, line in enumerate(lines, 1):
+        # class / interface / struct / enum
+        m = re.match(r"^\s*(?:public|protected|private|internal)?\s*(?:abstract\s+|sealed\s+|static\s+)?(class|interface|struct|enum)\s+([A-Za-z_][\w]*)\b", line)
+        if m:
+            kind, name = m.group(1), m.group(2)
+            current_type = name
+            kind_map = {"class": "class", "interface": "interface", "struct": "struct", "enum": "enum"}
+            syms.append(_Sym(kind=kind_map.get(kind, "type"), name=name, start=idx, end=idx))
+            continue
+        # method (very heuristic)
+        m = re.match(r"^\s*(?:public|protected|private|internal)?\s*(?:static\s+|virtual\s+|override\s+|async\s+)?[A-Za-z_<>,\[\]\.]+\s+([A-Za-z_][\w]*)\s*\(", line)
+        if m:
+            name = m.group(1)
+            path = f"{current_type}.{name}" if current_type else name
             syms.append(_Sym(kind="method", name=name, path=path, start=idx, end=idx))
             continue
     syms.sort(key=lambda s: s.start)
@@ -1434,6 +1460,8 @@ def _extract_symbols(language: str, text: str) -> List[_Sym]:
         return _extract_symbols_yaml(text)
     if language == "powershell":
         return _extract_symbols_powershell(text)
+    if language == "csharp":
+        return _extract_symbols_csharp(text)
     return []
 
 
