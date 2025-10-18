@@ -55,7 +55,7 @@ Create `.kiro/settings/mcp.json` in your workspace:
 {
   "mcpServers": {
     "qdrant-indexer": { "command": "npx", "args": ["mcp-remote", "http://localhost:8001/sse", "--transport", "sse-only"] },
-    "qdrant": { "command": "npx", "args": ["mcp-remote", "http://localhost:8000/sse", "--transport", "sse-only"] }
+    "memory": { "command": "npx", "args": ["mcp-remote", "http://localhost:8000/sse", "--transport", "sse-only"] }
   }
 }
 ````
@@ -113,10 +113,10 @@ OpenAI Codex config (RMCP client):
 ````toml
 experimental_use_rmcp_client = true
 
-[mcp_servers.qdrant_memory_http]
+[mcp_servers.memory_http]
 url = "http://127.0.0.1:8002/mcp"
 
-[mcp_servers.qdrant_indexer_http/mcp]
+[mcp_servers.qdrant_indexer_http]
 url = "http://127.0.0.1:8003/mcp"
 ````
 
@@ -129,7 +129,7 @@ Add this to your workspace-level Kiro config at `.kiro/settings/mcp.json` (resta
 {
   "mcpServers": {
     "qdrant-indexer": { "command": "npx", "args": ["mcp-remote", "http://localhost:8001/sse", "--transport", "sse-only"] },
-    "qdrant": { "command": "npx", "args": ["mcp-remote", "http://localhost:8000/sse", "--transport", "sse-only"] }
+    "memory": { "command": "npx", "args": ["mcp-remote", "http://localhost:8000/sse", "--transport", "sse-only"] }
   }
 }
 ````
@@ -175,7 +175,7 @@ flowchart LR
     A[IDE Agents]
   end
   subgraph Docker Network
-    B(MCP Search :8000)
+    B(Memory MCP :8000)
     C(MCP Indexer :8001)
     D[Qdrant DB :6333]
     G[[llama.cpp Decoder :8080]]
@@ -322,7 +322,7 @@ Operational notes:
 - If you switch to a dedicated memory collection, update the MCP Memory server and the Indexer’s memory blending env to point at it.
 - Consider pruning expired memories by filtering `expires_at < now`.
 
-- Call `context_search` on :8001 with `{ "include_memories": true }` to return both memory and code results.
+- Call `context_search` on :8001 (SSE) or :8003 (RMCP) with `{ "include_memories": true }` to return both memory and code results.
 
 
 ### Enable memory blending (for context_search)
@@ -431,9 +431,9 @@ make warm
 
 Or, since this stack already exposes SSE, you can configure the client to use `http://localhost:8000/sse` directly (recommended for Cursor/Windsurf).
 
-### MCP `qdrant-find` optional filters
+### Search filters (repo_search/context_search)
 
-Most MCP clients let you pass structured tool arguments. The Qdrant MCP server supports applying server-side filters when these keys are present:
+Most MCP clients let you pass structured tool arguments. The Indexer/search MCP supports applying server-side filters in repo_search/context_search when these keys are present:
 - `language`: value matches `metadata.language`
 - `path_prefix`: value matches `metadata.path_prefix` (e.g., `/work/src`)
 - `kind`: value matches `metadata.kind` (e.g., `function`, `class`, `method`)
@@ -497,29 +497,29 @@ Augment (SSE for both servers – recommended):
 ```json
 {
   "mcpServers": {
-    "qdrant": { "type": "sse", "url": "http://localhost:8000/sse", "disabled": false },
+    "memory": { "type": "sse", "url": "http://localhost:8000/sse", "disabled": false },
     "qdrant-indexer": { "type": "sse", "url": "http://localhost:8001/sse", "disabled": false }
   }
 }
 ```
 
-Qodo (Remote MCPs use simplified format - add each tool individually):
+Qodo (RMCP; add each tool individually):
 
 **Note**: In Qodo, you must add each MCP tool separately through the UI, not as a single JSON config.
 
 For each tool, use this format:
 
-**Tool 1 - qdrant:**
+**Tool 1 - memory:**
 ```json
 {
-  "qdrant": { "url": "http://localhost:8000/sse" }
+  "memory": { "url": "http://localhost:8002/mcp" }
 }
 ```
 
 **Tool 2 - qdrant-indexer:**
 ```json
 {
-  "qdrant-indexer": { "url": "http://localhost:8001/sse" }
+  "qdrant-indexer": { "url": "http://localhost:8003/mcp" }
 }
 ```
 
