@@ -1299,6 +1299,15 @@ async def repo_search(
                 "why": obj.get("why", []),
                 "components": obj.get("components", {}),
             }
+            # Pass-through optional relation hints
+            if obj.get("relations"):
+                item["relations"] = obj.get("relations")
+            if obj.get("related_paths"):
+                item["related_paths"] = obj.get("related_paths")
+            if obj.get("span_budgeted") is not None:
+                item["span_budgeted"] = bool(obj.get("span_budgeted"))
+            if obj.get("budget_tokens_used") is not None:
+                item["budget_tokens_used"] = int(obj.get("budget_tokens_used"))
             results.append(item)
 
     # Optionally add snippets (with highlighting)
@@ -1403,6 +1412,241 @@ async def repo_search(
         "results": results,
         **res,
     }
+
+
+@mcp.tool()
+async def repo_search_compat(**arguments) -> Dict[str, Any]:
+    """Compatibility wrapper for repo_search.
+
+    Accepts loose client payloads (queries/q/text/top_k and friends), normalizes
+    them, and forwards to repo_search. Prevents -32602 from clients that send
+    unexpected keys by only exposing **arguments here.
+    """
+    try:
+        args = arguments or {}
+        # Core query: prefer explicit query, else q/text; allow queries list passthrough
+        query = args.get("query") or args.get("q") or args.get("text")
+        queries = args.get("queries")
+        # top_k alias for limit
+        limit = args.get("limit")
+        if (limit is None or (isinstance(limit, str) and str(limit).strip() == "")) and ("top_k" in args):
+            limit = args.get("top_k")
+        # not/ not_ normalization
+        not_value = args.get("not_") if ("not_" in args) else args.get("not")
+
+        # Build forward kwargs; pass alias keys too so repo_search's leniency picks them up
+        forward = {
+            "query": query,
+            "limit": limit,
+            "per_path": args.get("per_path"),
+            "include_snippet": args.get("include_snippet"),
+            "context_lines": args.get("context_lines"),
+            "rerank_enabled": args.get("rerank_enabled"),
+            "rerank_top_n": args.get("rerank_top_n"),
+            "rerank_return_m": args.get("rerank_return_m"),
+            "rerank_timeout_ms": args.get("rerank_timeout_ms"),
+            "highlight_snippet": args.get("highlight_snippet"),
+            "collection": args.get("collection"),
+            "language": args.get("language"),
+            "under": args.get("under"),
+            "kind": args.get("kind"),
+            "symbol": args.get("symbol"),
+            "path_regex": args.get("path_regex"),
+            "path_glob": args.get("path_glob"),
+            "not_glob": args.get("not_glob"),
+            "ext": args.get("ext"),
+            "not_": not_value,
+            "case": args.get("case"),
+            "compact": args.get("compact"),
+            # Alias passthroughs captured by repo_search(**kwargs)
+            "queries": queries,
+            "q": args.get("q"),
+            "text": args.get("text"),
+            "top_k": args.get("top_k"),
+        }
+        # Drop Nones to avoid overriding repo_search defaults unnecessarily
+        clean = {k: v for k, v in forward.items() if v is not None}
+        return await repo_search(**clean)
+    except Exception as e:
+        return {"error": f"repo_search_compat failed: {e}"}
+
+
+
+@mcp.tool()
+async def search_tests_for(
+    query: Any = None,
+    limit: Any = None,
+    include_snippet: Any = None,
+    context_lines: Any = None,
+    under: Any = None,
+    language: Any = None,
+    compact: Any = None,
+    **kwargs,
+) -> Dict[str, Any]:
+    """Intent-specific wrapper to search for tests related to a query.
+    Presets globs for common test locations and filenames across ecosystems.
+    """
+    globs = [
+        "tests/**",
+        "test/**",
+        "**/*test*.*",
+        "**/*_test.*",
+        "**/Test*/**",
+    ]
+    # Allow caller to add more with path_glob kwarg
+    extra_glob = kwargs.get("path_glob")
+    if extra_glob:
+        if isinstance(extra_glob, (list, tuple)):
+            globs.extend([str(x) for x in extra_glob])
+        else:
+            globs.append(str(extra_glob))
+    return await repo_search(
+        query=query,
+        limit=limit,
+        include_snippet=include_snippet,
+        context_lines=context_lines,
+        under=under,
+        language=language,
+        path_glob=globs,
+        compact=compact,
+        **{k: v for k, v in kwargs.items() if k not in {"path_glob"}}
+    )
+
+
+@mcp.tool()
+async def search_config_for(
+    query: Any = None,
+    limit: Any = None,
+    include_snippet: Any = None,
+    context_lines: Any = None,
+    under: Any = None,
+    compact: Any = None,
+    **kwargs,
+) -> Dict[str, Any]:
+    """Intent-specific wrapper to search likely configuration files for a service/query."""
+    globs = [
+        "**/*.yml",
+        "**/*.yaml",
+        "**/*.json",
+        "**/*.toml",
+        "**/*.ini",
+        "**/*.env",
+        "**/*.config",
+        "**/*.conf",
+        "**/*.properties",
+        "**/*.csproj",
+        "**/*.props",
+        "**/*.targets",
+        "**/*.xml",
+        "**/appsettings*.json",
+    ]
+    extra_glob = kwargs.get("path_glob")
+    if extra_glob:
+        if isinstance(extra_glob, (list, tuple)):
+            globs.extend([str(x) for x in extra_glob])
+        else:
+            globs.append(str(extra_glob))
+    return await repo_search(
+        query=query,
+        limit=limit,
+        include_snippet=include_snippet,
+        context_lines=context_lines,
+        under=under,
+        path_glob=globs,
+        compact=compact,
+        **{k: v for k, v in kwargs.items() if k not in {"path_glob"}}
+    )
+
+
+@mcp.tool()
+async def search_callers_for(
+    query: Any = None,
+    limit: Any = None,
+    language: Any = None,
+    **kwargs,
+) -> Dict[str, Any]:
+    """Heuristic: find likely callers/usages of a symbol.
+    Currently a thin wrapper over repo_search; future versions may expand using
+    relation hints to prioritize files that reference the symbol.
+    """
+    return await repo_search(
+        query=query,
+        limit=limit,
+        language=language,
+        **kwargs,
+    )
+
+
+@mcp.tool()
+async def change_history_for_path(
+    path: Any,
+    collection: Any = None,
+    max_points: Any = None,
+) -> Dict[str, Any]:
+    """Summarize recent changes for a file path using stored metadata.
+    Returns counts, timestamps, churn, and distinct file_hashes. Best-effort.
+    """
+    p = str(path or "").strip()
+    if not p:
+        return {"error": "path required"}
+    coll = str(collection or "").strip() or os.environ.get("COLLECTION_NAME", DEFAULT_COLLECTION)
+    try:
+        mcap = int(max_points) if max_points not in (None, "") else 200
+    except Exception:
+        mcap = 200
+    try:
+        from qdrant_client import QdrantClient  # type: ignore
+        from qdrant_client import models as qmodels  # type: ignore
+        client = QdrantClient(
+            url=QDRANT_URL,
+            api_key=os.environ.get("QDRANT_API_KEY"),
+            timeout=float(os.environ.get("QDRANT_TIMEOUT", "20") or 20),
+        )
+        filt = qmodels.Filter(
+            must=[qmodels.FieldCondition(key="metadata.path", match=qmodels.MatchValue(value=p))]
+        )
+        page = None
+        total = 0
+        hashes = set()
+        last_mods = []
+        ingested = []
+        churns = []
+        while total < mcap:
+            sc, page = await asyncio.to_thread(
+                lambda: client.scroll(collection_name=coll, with_payload=True, with_vectors=False, limit=200, offset=page, scroll_filter=filt)
+            )
+            if not sc:
+                break
+            for pt in sc:
+                md = (getattr(pt, "payload", {}) or {}).get("metadata") or {}
+                fh = md.get("file_hash")
+                if fh:
+                    hashes.add(str(fh))
+                lm = md.get("last_modified_at")
+                ia = md.get("ingested_at")
+                ch = md.get("churn_count")
+                if lm is not None:
+                    last_mods.append(int(lm))
+                if ia is not None:
+                    ingested.append(int(ia))
+                if ch is not None:
+                    churns.append(int(ch))
+                total += 1
+                if total >= mcap:
+                    break
+        summary = {
+            "path": p,
+            "points_scanned": total,
+            "distinct_hashes": len(hashes),
+            "last_modified_min": min(last_mods) if last_mods else None,
+            "last_modified_max": max(last_mods) if last_mods else None,
+            "ingested_min": min(ingested) if ingested else None,
+            "ingested_max": max(ingested) if ingested else None,
+            "churn_count_max": max(churns) if churns else None,
+        }
+        return {"ok": True, "summary": summary}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "path": p}
 
 
 @mcp.tool()
@@ -1592,13 +1836,19 @@ async def context_search(
         "yes",
     ):  # opt-in
         include_mem = True
-        # Parse per_source_limits if provided
+        # Parse per_source_limits if provided; accept JSON-ish strings as well
         code_limit = lim
         mem_limit = min(3, lim)  # sensible default
         try:
-            if isinstance(per_source_limits, dict):
-                code_limit = int(per_source_limits.get("code", code_limit))
-                mem_limit = int(per_source_limits.get("memory", mem_limit))
+            psl = per_source_limits
+            # Some clients stringify payloads; parse if JSON-ish
+            if isinstance(psl, str) and _looks_jsonish_string(psl):
+                _ps = _maybe_parse_jsonish(psl)
+                if isinstance(_ps, dict):
+                    psl = _ps
+            if isinstance(psl, dict):
+                code_limit = int(psl.get("code", code_limit))
+                mem_limit = int(psl.get("memory", mem_limit))
         except Exception:
             pass
 
@@ -2005,21 +2255,37 @@ async def context_search(
     except Exception:
         mw = 0.3
 
-    blended: List[Dict[str, Any]] = []
-    for h in code_hits:
-        blended.append({**h, "score": float(h.get("score", 0.0))})
-    for h in mem_hits:
-        blended.append({**h, "score": float(h.get("score", 0.0)) * mw})
+    # Build per-source lists with adjusted scores
+    code_scored = [{**h, "score": float(h.get("score", 0.0))} for h in code_hits]
+    mem_scored = [{**h, "score": float(h.get("score", 0.0)) * mw} for h in mem_hits]
 
-    # Sort by score descending and truncate to limit
-    blended.sort(
-        key=lambda x: (
-            -float(x.get("score", 0.0)),
-            x.get("source", ""),
-            str(x.get("path", "")),
+    # Enforce per-source limits before final slice so callers actually get memory hits
+    if include_mem and mem_limit > 0:
+        code_scored.sort(key=lambda x: -float(x.get("score", 0.0)))
+        mem_scored.sort(key=lambda x: -float(x.get("score", 0.0)))
+        m_keep = min(len(mem_scored), mem_limit, lim)
+        sel_mem = mem_scored[:m_keep]
+        c_keep = max(0, min(len(code_scored), code_limit, lim - m_keep))
+        sel_code = code_scored[:c_keep]
+        blended = sel_code + sel_mem
+        blended.sort(
+            key=lambda x: (
+                -float(x.get("score", 0.0)),
+                x.get("source", ""),
+                str(x.get("path", "")),
+            )
         )
-    )
-    blended = blended[:lim]
+        # No need to slice again; sel_code+sel_mem already <= lim
+    else:
+        blended = code_scored
+        blended.sort(
+            key=lambda x: (
+                -float(x.get("score", 0.0)),
+                x.get("source", ""),
+                str(x.get("path", "")),
+            )
+        )
+        blended = blended[:lim]
 
     # Compact shaping if requested
     if eff_compact:

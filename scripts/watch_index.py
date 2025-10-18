@@ -55,13 +55,41 @@ class ChangeQueue:
 
 
 class IndexHandler(FileSystemEventHandler):
-    def __init__(self, root: Path, queue: ChangeQueue):
+    def __init__(self, root: Path, queue: ChangeQueue, client: QdrantClient, collection: str):
         super().__init__()
         self.root = root
         self.queue = queue
+        self.client = client
+        self.collection = collection
         self.excl = idx._Excluder(root)
+        # Track ignore file for live reloads
+        try:
+            ig_name = os.environ.get("QDRANT_IGNORE_FILE", ".qdrantignore")
+            self._ignore_path = (self.root / ig_name).resolve()
+        except Exception:
+            self._ignore_path = None
+        self._ignore_mtime = (
+            (self._ignore_path.stat().st_mtime if self._ignore_path and self._ignore_path.exists() else 0.0)
+        )
+
+    def _maybe_reload_excluder(self):
+        try:
+            if not self._ignore_path:
+                return
+            cur = self._ignore_path.stat().st_mtime if self._ignore_path.exists() else 0.0
+            if cur != self._ignore_mtime:
+                self.excl = idx._Excluder(self.root)
+                self._ignore_mtime = cur
+                try:
+                    print(f"[ignore_reload] reloaded patterns from {self._ignore_path}")
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def _maybe_enqueue(self, src_path: str):
+        # Refresh ignore patterns if the file changed
+        self._maybe_reload_excluder()
         p = Path(src_path)
         try:
             # normalize to absolute within root
@@ -99,6 +127,41 @@ class IndexHandler(FileSystemEventHandler):
         if not event.is_directory:
             self._maybe_enqueue(event.src_path)
 
+    def on_deleted(self, event):
+        if event.is_directory:
+            return
+        try:
+            p = Path(event.src_path).resolve()
+        except Exception:
+            return
+        # Only attempt deletion for code files we would have indexed
+        if p.suffix.lower() not in idx.CODE_EXTS:
+            return
+        try:
+            idx.delete_points_by_path(self.client, self.collection, str(p))
+            print(f"[deleted] {p}")
+        except Exception as e:
+            try:
+                print(f"[delete_error] {p}: {e}")
+            except Exception:
+                pass
+
+    def on_moved(self, event):
+        if event.is_directory:
+            return
+        # Delete old path
+        try:
+            src = Path(event.src_path).resolve()
+            if src.suffix.lower() in idx.CODE_EXTS:
+                idx.delete_points_by_path(self.client, self.collection, str(src))
+                print(f"[moved:deleted_src] {src}")
+        except Exception:
+            pass
+        # Enqueue new destination for re-index
+        try:
+            self._maybe_enqueue(event.dest_path)
+        except Exception:
+            pass
 
 def main():
     print(
@@ -146,7 +209,7 @@ def main():
     idx.ensure_payload_indexes(client, COLLECTION)
 
     q = ChangeQueue(lambda paths: _process_paths(paths, client, model, vector_name))
-    handler = IndexHandler(ROOT, q)
+    handler = IndexHandler(ROOT, q, client, COLLECTION)
 
     obs = Observer()
     obs.schedule(handler, str(ROOT), recursive=True)
@@ -166,6 +229,12 @@ def _process_paths(paths, client, model, vector_name: str):
     # De-duplicate and index each path
     for p in sorted(set(Path(x) for x in paths)):
         if not p.exists():
+            # File was removed; ensure its points are deleted
+            try:
+                idx.delete_points_by_path(client, COLLECTION, str(p))
+                print(f"[deleted] {p}")
+            except Exception:
+                pass
             continue
         # Lazily instantiate model if needed
         if model is None:

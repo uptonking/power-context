@@ -770,6 +770,34 @@ def run_hybrid_search(
     eff_path_globs = _to_list(path_glob)
     eff_not_globs = _to_list(not_glob)
 
+    # Normalize glob patterns: allow repo-relative (e.g., "src/*.py") to match
+    # stored absolute paths (e.g., "/work/src/..."). We keep both original and
+    # absolute-prefixed variants for matching.
+    def _normalize_globs(globs: list[str]) -> list[str]:
+        out: list[str] = []
+        try:
+            for g in (globs or []):
+                s = str(g).strip().replace("\\", "/")
+                if not s:
+                    continue
+                out.append(s)
+                if not s.startswith("/"):
+                    out.append("/work/" + s.lstrip("/"))
+        except Exception:
+            pass
+        # Dedup while preserving order
+        seen = set()
+        dedup: list[str] = []
+        for g in out:
+            if g not in seen:
+                dedup.append(g)
+                seen.add(g)
+        return dedup
+
+    eff_path_globs_norm = _normalize_globs(eff_path_globs)
+    eff_not_globs_norm = _normalize_globs(eff_not_globs)
+
+
     # Normalize under
     def _norm_under(u: str | None) -> str | None:
         if not u:
@@ -1162,6 +1190,7 @@ def run_hybrid_search(
         def _pass_filters(m: Dict[str, Any]) -> bool:
             md = (m["pt"].payload or {}).get("metadata") or {}
             path = str(md.get("path") or "")
+            rel = path[6:] if path.startswith("/work/") else path
             pp = str(md.get("path_prefix") or "")
             p_for_sub = path if case_sensitive else path.lower()
             pp_for_sub = pp if case_sensitive else pp.lower()
@@ -1169,7 +1198,7 @@ def run_hybrid_search(
                 nn = eff_not if case_sensitive else eff_not.lower()
                 if nn in p_for_sub or nn in pp_for_sub:
                     return False
-            if eff_not_globs and any(_match_glob(g, path) for g in eff_not_globs):
+            if eff_not_globs_norm and any(_match_glob(g, path) or _match_glob(g, rel) for g in eff_not_globs_norm):
                 return False
             if eff_ext:
                 ex = eff_ext.lower().lstrip(".")
@@ -1182,7 +1211,7 @@ def run_hybrid_search(
                         return False
                 except Exception:
                     pass
-            if eff_path_globs and not any(_match_glob(g, path) for g in eff_path_globs):
+            if eff_path_globs_norm and not any(_match_glob(g, path) or _match_glob(g, rel) for g in eff_path_globs_norm):
                 return False
             return True
 
@@ -1216,6 +1245,18 @@ def run_hybrid_search(
         merged = ranked[:limit]
 
     # Emit structured items
+    # Build directory  paths map for related hints (same dir siblings)
+    dir_to_paths: Dict[str, set] = {}
+    try:
+        for _m in merged:
+            _md = (_m["pt"].payload or {}).get("metadata") or {}
+            _pp = str(_md.get("path_prefix") or "")
+            _p = str(_md.get("path") or "")
+            if _pp and _p:
+                dir_to_paths.setdefault(_pp, set()).add(_p)
+    except Exception:
+        dir_to_paths = {}
+
     items: List[Dict[str, Any]] = []
     for m in merged:
         md = (m["pt"].payload or {}).get("metadata") or {}
@@ -1248,15 +1289,28 @@ def run_hybrid_search(
             why.append(f"vendor_penalty:{comp['vendor_penalty']}")
         if comp["recency"]:
             why.append(f"recency:{comp['recency']}")
+        # Related hints
+        _imports = md.get("imports") or []
+        _calls = md.get("calls") or []
+        _symp = md.get("symbol_path") or md.get("symbol") or ""
+        _pp = str(md.get("path_prefix") or "")
+        _related = []
+        try:
+            if _pp in dir_to_paths:
+                _related = [p for p in sorted(dir_to_paths[_pp]) if p != md.get("path")][:5]
+        except Exception:
+            _related = []
         items.append(
             {
                 "score": round(float(m["s"]), 4),
                 "path": md.get("path"),
-                "symbol": md.get("symbol_path") or md.get("symbol") or "",
+                "symbol": _symp,
                 "start_line": start_line,
                 "end_line": end_line,
                 "components": comp,
                 "why": why,
+                "relations": {"imports": _imports, "calls": _calls, "symbol_path": _symp},
+                "related_paths": _related,
                 "span_budgeted": bool(m.get("_merged_start") is not None),
                 "budget_tokens_used": m.get("_budget_tokens"),
             }
@@ -1606,6 +1660,7 @@ def main():
         def _pass_filters(m: Dict[str, Any]) -> bool:
             md = (m["pt"].payload or {}).get("metadata") or {}
             path = str(md.get("path") or "")
+            rel = path[6:] if path.startswith("/work/") else path
             pp = str(md.get("path_prefix") or "")
             p_for_sub = path if case_sensitive else path.lower()
             pp_for_sub = pp if case_sensitive else pp.lower()
@@ -1615,7 +1670,11 @@ def main():
                 if nn in p_for_sub or nn in pp_for_sub:
                     return False
             # not_glob exclusion
-            if eff_not_glob and _match_glob(eff_not_glob, path):
+            if eff_not_glob and (
+                _match_glob(eff_not_glob, path)
+                or _match_glob(eff_not_glob, rel)
+                or (not str(eff_not_glob).startswith("/") and _match_glob("/work/" + str(eff_not_glob).lstrip("/"), path))
+            ):
                 return False
             # Extension filter (normalize to .ext)
             if eff_ext:
@@ -1632,7 +1691,11 @@ def main():
                     # Ignore invalid regex
                     pass
             # path_glob inclusion
-            if eff_path_glob and not _match_glob(eff_path_glob, path):
+            if eff_path_glob and not (
+                _match_glob(eff_path_glob, path)
+                or _match_glob(eff_path_glob, rel)
+                or (not str(eff_path_glob).startswith("/") and _match_glob("/work/" + str(eff_path_glob).lstrip("/"), path))
+            ):
                 return False
             return True
 
@@ -1649,18 +1712,41 @@ def main():
             if c < args.per_path:
                 merged.append(m)
                 counts[path] = c + 1
-            if len(merged) >= args.limit:
-                break
+                if len(merged) >= args.limit:
+                    break
+    # Build directory → paths map for related path hints
+    dir_to_paths: Dict[str, set] = {}
+    try:
+        for m in merged:
+            md = (m["pt"].payload or {}).get("metadata") or {}
+            pp = str(md.get("path_prefix") or "")
+            p = str(md.get("path") or "")
+            if pp and p:
+                dir_to_paths.setdefault(pp, set()).add(p)
+    except Exception:
+        dir_to_paths = {}
+
     else:
         merged = ranked[: args.limit]
 
     for m in merged:
         md = (m["pt"].payload or {}).get("metadata") or {}
         if getattr(args, "json", False):
+            # Related hints
+            _imports = md.get("imports") or []
+            _calls = md.get("calls") or []
+            _symp = md.get("symbol_path") or md.get("symbol") or ""
+            _pp = str(md.get("path_prefix") or "")
+            _related = []
+            try:
+                if _pp in dir_to_paths:
+                    _related = [p for p in sorted(dir_to_paths[_pp]) if p != md.get("path")][:5]
+            except Exception:
+                _related = []
             item = {
                 "score": round(float(m["s"]), 4),
                 "path": md.get("path"),
-                "symbol": md.get("symbol_path") or md.get("symbol") or "",
+                "symbol": _symp,
                 "start_line": md.get("start_line"),
                 "end_line": md.get("end_line"),
                 "components": {
@@ -1673,6 +1759,8 @@ def main():
                     "lang_boost": round(float(m.get("langb", 0.0)), 4),
                     "recency": round(float(m.get("rec", 0.0)), 4),
                 },
+                "relations": {"imports": _imports, "calls": _calls, "symbol_path": _symp},
+                "related_paths": _related,
             }
             # Build a human friendly why list
             why = []
