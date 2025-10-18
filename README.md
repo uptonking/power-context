@@ -47,8 +47,10 @@ make reindex
 make hybrid ARGS="--query 'async file watcher' --limit 5 --include-snippet"
 ```
 
-5) Example MCP client configuration (Kiro)
-Create .kiro/settings/mcp.json in your workspace:
+5) Example MCP client configurations
+
+Kiro (SSE):
+Create `.kiro/settings/mcp.json` in your workspace:
 ````json
 {
   "mcpServers": {
@@ -60,6 +62,7 @@ Create .kiro/settings/mcp.json in your workspace:
 Notes:
 - Kiro expects command/args (stdio). mcp-remote bridges to remote SSE endpoints.
 - If npx prompts, add -y right after npx.
+- For Qodo (RMCP) clients, see "Qodo Integration (RMCP config)" below for the direct `url`-based snippet.
 
 6) Common troubleshooting
 - Tree-sitter not found or parser errors:
