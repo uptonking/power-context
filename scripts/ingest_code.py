@@ -114,6 +114,13 @@ CODE_EXTS = {
     ".ini": "ini",
     ".json": "json",
     ".tf": "terraform",
+    ".csx": "csharp",
+    ".cshtml": "razor",
+    ".razor": "razor",
+    ".csproj": "xml",
+    ".config": "xml",
+    ".resx": "xml",
+
 }
 
 # --- Named vector config ---
@@ -262,12 +269,18 @@ def _git_metadata(file_path: Path) -> tuple[int, int, int]:
 # Defaults can be overridden by .qdrantignore, env, or CLI
 _DEFAULT_EXCLUDE_DIRS = [
     "/models",
+    "/.vs",
+
     "/node_modules",
     "/dist",
     "/build",
     "/.venv",
     "/venv",
     "/__pycache__",
+    "bin",
+    "obj",
+    "TestResults",
+
     "/.git",
 ]
 _DEFAULT_EXCLUDE_FILES = [

@@ -301,6 +301,9 @@ LANG_EXTS: Dict[str, List[str]] = {
     "java": [".java"],
     "cpp": [".cpp", ".cc", ".cxx", ".hpp", ".h"],
     "c": [".c", ".h"],
+    "csharp": [".cs", ".csx"],
+    "razor": [".cshtml", ".razor"],
+    "xml": [".csproj", ".resx", ".config"],
 }
 
 
