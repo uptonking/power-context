@@ -142,6 +142,21 @@ Troubleshooting:
 - ImportError: `deps: No module named 'scripts'` when calling `memory_store` on the indexer MCP
   - Fix applied: server now adds `/work` and `/app` to `sys.path`. Restart `mcp_indexer`.
 
+### Qodo Integration (RMCP config)
+
+Add this to your Qodo MCP settings to target the RMCP (HTTP) endpoints:
+
+````json
+{
+  "mcpServers": {
+    "qdrant": { "url": "http://localhost:8002/mcp" },
+    "qdrant-indexer": { "url": "http://localhost:8003/mcp" }
+  }
+}
+````
+
+Note: Qodo can talk to the RMCP endpoints directly, so no `mcp-remote` wrapper is required.
+
 
 ## Architecture overview
 
@@ -833,4 +848,3 @@ Client tips:
 - If the MCP servers can’t reach Qdrant, confirm both containers are up: `make ps`.
 - If the SSE port collides, change `FASTMCP_PORT` in `.env` and the mapped port in `docker-compose.yml`.
 - If you customize tool descriptions, restart: `make restart`.
-
