@@ -292,30 +292,8 @@ Tips:
 - Use precise queries (2–5 tokens). Add a couple synonyms if needed; the server supports multiple phrasings.
 - Combine `topic`/`tags` in your memory text to make them easier to find (they also live in payload for filtering).
 
-### Migrating and backing up memories
-Memories are normal Qdrant points (often in the same collection as code). Back them up or migrate using one of these patterns:
-
-1) Snapshot the collection (fastest, whole collection)
-- Create snapshot via Qdrant HTTP API, then download the file and store it safely.
-  - POST /collections/{collection}/snapshots
-  - GET  /collections/{collection}/snapshots/{snapshot}
-- Restore by placing the snapshot in Qdrant’s snapshots dir and calling the restore API (see Qdrant docs).
-
-2) Export only memory entries (portable, selective)
-- Use qdrant-client to scroll all points where `metadata.kind == "memory"` and write NDJSON; later upsert into another instance.
-- Pseudocode:
-```
-from qdrant_client import QdrantClient, models
-c = QdrantClient(url="http://localhost:6333")
-filt = models.Filter(must=[models.FieldCondition(key="metadata.kind", match=models.MatchValue(value="memory"))])
-# scroll/export all matching points and write to NDJSON; then upsert to import
-```
-
-3) Volume-level backup (Docker)
-- Archive the Qdrant volume for a full-instance backup:
-```
-docker run --rm -v qdrant_storage:/data -v "$PWD":/backup alpine sh -c "tar czf /backup/qdrant_storage.tgz /data"
-```
+### Backup and migration (advanced)
+For production-grade backup/migration strategies, see the official Qdrant documentation for snapshots and export/import. For local development, we recommend relying on Docker volumes and reindexing when needed.
 
 Operational notes:
 - Collection name comes from `COLLECTION_NAME` (see .env). This stack defaults to a single collection for both code and memories; filtering uses `metadata.kind`.
@@ -788,45 +766,7 @@ We create payload indexes to accelerate filtered searches:
 - `metadata.ingested_at` (keyword)
 - Git history fields available in payload: `commit_id`, `author_name`, `authored_date`, `message`, `files`
 
-This enables fast filters like “only Python results under scripts/”. Example (Qdrant REST):
-
-```bash
-curl -s -X POST "http://localhost:6333/collections/my-collection/points/search" \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "vector": {"name": "fast-bge-base-en-v1.5", "vector": [0, ...]},
-### Kind/Symbol filters example
-
-- After indexing, you can filter by symbol metadata for tighter queries. Example with reranker:
-
-```bash
-make rerank ARGS="--language python --under /work/scripts"
-```
-
-- Direct Qdrant query (Python):
-
-```python
-from qdrant_client import QdrantClient, models
-client = QdrantClient(url="http://localhost:6333")
-flt = models.Filter(must=[
-    models.FieldCondition(key="metadata.language", match=models.MatchValue(value="python")),
-    models.FieldCondition(key="metadata.kind", match=models.MatchValue(value="function")),
-])
-```
-
-    "limit": 5,
-    "with_payload": true,
-    "filter": {
-      "must": [
-        {"key": "metadata.language", "match": {"value": "python"}},
-        {"key": "metadata.path_prefix", "match": {"value": "/work/scripts"}}
-      ]
-    }
-  }'
-```
-
-Note: The named vector for BGE in this stack is `fast-bge-base-en-v1.5`.
-
+Payload indexes enable fast server-side filters (e.g., language, path_prefix, kind, symbol). Prefer using the MCP tools repo_search/context_search with filter arguments rather than raw Qdrant REST/Python snippets. See the Qdrant documentation if you need low-level API examples.
 ### Best-practice querying
 
 - Use precise intent + language: “python chunking function for Qdrant indexing”
