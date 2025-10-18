@@ -33,6 +33,26 @@ Alternative (compose only)
 HOST_INDEX_PATH="$(pwd)" FASTMCP_INDEXER_PORT=8001 docker compose up -d qdrant mcp mcp_indexer indexer watcher
 ```
 
+### Make targets (quick reference)
+- reset-dev: SSE stack on 8000/8001; seeds Qdrant, downloads tokenizer + tiny llama.cpp model, reindexes, brings up memory + indexer + watcher
+- reset-dev-codex: RMCP stack on 8002/8003; same seeding + bring-up for Codex/Qodo
+- reset-dev-dual: SSE + RMCP together (8000/8001 and 8002/8003)
+- up / down / logs / ps: Docker Compose lifecycle helpers
+- index / reindex: Index current repo; reindex recreates the collection first
+- index-here / index-path: Index arbitrary host path without cloning into this repo
+- watch: Watch-and-reindex on file changes
+- warm / health: Warm caches and run health checks
+- hybrid / rerank: Example hybrid search + reranker helper
+- setup-reranker / rerank-local / quantize-reranker: Manage ONNX reranker assets and local runs
+- prune / prune-path: Remove stale points (missing files or hash mismatch)
+- llama-model / tokenizer: Fetch tiny GGUF model and tokenizer.json
+
+## Supported IDE clients/extensions
+- Kiro (SSE): uses mcp-remote bridge via command/args; see config below
+- Qodo (RMCP): connects directly to HTTP endpoints; add each tool individually
+- OpenAI Codex (RMCP): TOML config for memory/indexer URLs
+- Augment (SSE): simple JSON configs for both servers
+
 3) Verify endpoints
 ```bash
 curl -sSf http://localhost:6333/readyz >/dev/null && echo "Qdrant OK"
@@ -144,6 +164,33 @@ Troubleshooting:
   - Fix: Use the `command`/`args` form above; do not use `type:url` in Kiro.
 - ImportError: `deps: No module named 'scripts'` when calling `memory_store` on the indexer MCP
   - Fix applied: server now adds `/work` and `/app` to `sys.path`. Restart `mcp_indexer`.
+
+## Available MCP tools
+
+Memory MCP (8000 SSE, 8002 RMCP):
+- store(information, metadata?, collection?) — write a memory entry into the default collection (dual vectors: dense + lexical)
+- find(query, limit=5, collection?, top_k?) — hybrid memory search over memory-like entries
+
+Indexer/Search MCP (8001 SSE, 8003 RMCP):
+- repo_search — hybrid code search (dense + lexical + optional reranker)
+- context_search — search that can also blend memory results (include_memories)
+- code_search — alias of repo_search
+- repo_search_compat — permissive wrapper that normalizes q/text/queries/top_k payloads
+- qdrant_index_root — index /work (mounted repo root) with safe defaults
+- qdrant_index(subdir?, recreate?, collection?) — index a subdir or recreate collection
+- qdrant_prune — remove points for missing files or file_hash mismatch
+- qdrant_list — list Qdrant collections
+- qdrant_status — collection counts and recent ingestion timestamps
+- memory_store — convenience memory store from the indexer (uses default collection)
+- search_tests_for — intent wrapper for test files
+- search_config_for — intent wrapper for likely config files
+- search_callers_for — intent wrapper for probable callers/usages
+- search_importers_for — intent wrapper for files importing a module/symbol
+- change_history_for_path(path) — summarize recent changes using stored metadata
+
+Notes:
+- Most search tools accept filters like language, under, path_glob, kind, symbol, ext.
+- Reranker can be enabled; timeouts fall back to hybrid results.
 
 ### Qodo Integration (RMCP config)
 
