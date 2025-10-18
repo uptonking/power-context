@@ -152,7 +152,7 @@ Add this to your Qodo MCP settings to target the RMCP (HTTP) endpoints:
 ````json
 {
   "mcpServers": {
-    "qdrant": { "url": "http://localhost:8002/mcp" },
+    "memory": { "url": "http://localhost:8002/mcp" },
     "qdrant-indexer": { "url": "http://localhost:8003/mcp" }
   }
 }
