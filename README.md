@@ -81,6 +81,66 @@ Ports
 - FASTMCP_PORT (SSE/RMCP): Override Memory MCP ports (defaults: 8000/8002)
 - FASTMCP_INDEXER_PORT (SSE/RMCP): Override Indexer MCP ports (defaults: 8001/8003)
 
+
+### Env var quick table
+
+| Name | Description | Default |
+|------|-------------|---------|
+| COLLECTION_NAME | Qdrant collection name used by both servers | my-collection |
+| REPO_NAME | Logical repo tag stored in payload for filtering | auto-detect from git/folder |
+| HOST_INDEX_PATH | Host path mounted at /work in containers | current repo (.) |
+| QDRANT_URL | Qdrant base URL | container: http://qdrant:6333; local: http://localhost:6333 |
+| INDEX_MICRO_CHUNKS | Enable token-based micro-chunking | 0 (off) |
+| MAX_MICRO_CHUNKS_PER_FILE | Cap micro-chunks per file | 500 |
+| TOKENIZER_URL | HF tokenizer.json URL (for Make download) | n/a (use Make target) |
+| TOKENIZER_PATH | Local path where tokenizer is saved (Make) | models/tokenizer.json |
+| TOKENIZER_JSON | Runtime path for tokenizer (indexer) | models/tokenizer.json |
+| USE_TREE_SITTER | Enable tree-sitter parsing (py/js/ts) | 0 (off) |
+| WATCH_DEBOUNCE_SECS | Debounce between FS events (watcher) | 1.5 |
+| INDEX_UPSERT_BATCH | Upsert batch size (watcher) | 128 |
+| INDEX_UPSERT_RETRIES | Retry count (watcher) | 5 |
+| INDEX_UPSERT_BACKOFF | Seconds between retries (watcher) | 0.5 |
+| QDRANT_TIMEOUT | HTTP timeout seconds | watcher: 60; search: 20 |
+| RERANKER_ONNX_PATH | Local ONNX cross-encoder model path | unset (see make setup-reranker) |
+| RERANKER_TOKENIZER_PATH | Tokenizer path for reranker | unset |
+| RERANKER_ENABLED | Enable reranker by default | 1 (enabled) |
+| FASTMCP_PORT | Memory MCP server port (SSE/RMCP) | 8000 (container-internal) |
+| FASTMCP_INDEXER_PORT | Indexer MCP server port (SSE/RMCP) | 8001 (container-internal) |
+| FASTMCP_HTTP_PORT | Memory RMCP host port mapping | 8002 |
+| FASTMCP_INDEXER_HTTP_PORT | Indexer RMCP host port mapping | 8003 |
+| FASTMCP_HEALTH_PORT | Health port (memory/indexer) | memory: 18000; indexer: 18001 |
+
+## Running tests
+
+Local (recommended)
+- Python 3.11+
+- Create venv and install deps:
+````bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+````
+- Run the full suite:
+````bash
+pytest -q
+````
+- Run a single file or test:
+````bash
+pytest tests/test_ingest_micro_chunks.py -q
+pytest tests/test_php_support.py::test_imports -q
+````
+- Tips:
+  - RERANKER_ENABLED=0 can speed up some tests locally; functionality still validated via hybrid fallback.
+  - Some integration tests may start ephemeral containers via testcontainers; ensure Docker is running.
+
+Inside Docker (optional, ad-hoc)
+- You can run tests in the indexer image by overriding the entrypoint:
+````bash
+docker compose run --rm --entrypoint pytest mcp-indexer -q
+````
+Note: the provided dev images focus on runtime; local venv is faster for iterative testing.
+
+
 ## Language support
 - Python, JavaScript/TypeScript, Go, Java, Rust, Shell, Terraform, PowerShell, YAML, C#, PHP
 
