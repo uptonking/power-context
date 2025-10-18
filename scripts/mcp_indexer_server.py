@@ -1578,6 +1578,38 @@ async def search_callers_for(
 
 
 @mcp.tool()
+async def search_importers_for(
+    query: Any = None,
+    limit: Any = None,
+    language: Any = None,
+    **kwargs,
+) -> Dict[str, Any]:
+    """Intent: find files likely importing/referencing a given module/symbol.
+    Presets code-centric globs, accepts additional filters via kwargs.
+    """
+    globs = [
+        "**/*.py", "**/*.js", "**/*.ts", "**/*.tsx", "**/*.jsx", "**/*.mjs", "**/*.cjs",
+        "**/*.go", "**/*.java", "**/*.cs", "**/*.rb", "**/*.php", "**/*.rs",
+        "**/*.c", "**/*.h", "**/*.cpp", "**/*.hpp",
+    ]
+    extra_glob = kwargs.get("path_glob")
+    if extra_glob:
+        if isinstance(extra_glob, (list, tuple)):
+            globs.extend([str(x) for x in extra_glob])
+        else:
+            globs.append(str(extra_glob))
+    # Forward to repo_search with preset path_glob; caller can still pass other filters
+    return await repo_search(
+        query=query,
+        limit=limit,
+        language=language,
+        path_glob=globs,
+        **{k: v for k, v in kwargs.items() if k not in {"path_glob"}}
+    )
+
+
+
+@mcp.tool()
 async def change_history_for_path(
     path: Any,
     collection: Any = None,

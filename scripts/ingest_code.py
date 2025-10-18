@@ -763,6 +763,14 @@ def _extract_imports(language: str, text: str) -> list:
                 imps.append(m.group(1))
                 continue
     elif language == "java":
+    elif language == "csharp":
+        for ln in lines:
+            # using Namespace.Sub; using static System.Math; using Alias = Namespace.Type;
+            m = re.match(r"^\s*using\s+(?:static\s+)?([A-Za-z_][\w\._]*)(?:\s*;|\s*=)", ln)
+            if m:
+                imps.append(m.group(1))
+                continue
+
         for ln in lines:
             m = re.match(r"^\s*import\s+([\w\.\*]+);", ln)
             if m:

@@ -1245,7 +1245,7 @@ def run_hybrid_search(
         merged = ranked[:limit]
 
     # Emit structured items
-    # Build directory  paths map for related hints (same dir siblings)
+    # Build directory → paths map for related hints (same dir siblings)
     dir_to_paths: Dict[str, set] = {}
     try:
         for _m in merged:
@@ -1256,6 +1256,13 @@ def run_hybrid_search(
                 dir_to_paths.setdefault(_pp, set()).add(_p)
     except Exception:
         dir_to_paths = {}
+    # Precompute known paths for quick membership checks
+    all_paths: set = set()
+    try:
+        for _s in dir_to_paths.values():
+            all_paths |= set(_s)
+    except Exception:
+        all_paths = set()
 
     items: List[Dict[str, Any]] = []
     for m in merged:
@@ -1276,13 +1283,7 @@ def run_hybrid_search(
         why = []
         if comp["dense_rrf"]:
             why.append(f"dense_rrf:{comp['dense_rrf']}")
-        for k in (
-            "lexical",
-            "symbol_substr",
-            "symbol_exact",
-            "core_boost",
-            "lang_boost",
-        ):
+        for k in ("lexical", "symbol_substr", "symbol_exact", "core_boost", "lang_boost"):
             if comp[k]:
                 why.append(f"{k}:{comp[k]}")
         if comp["vendor_penalty"]:
@@ -1294,16 +1295,73 @@ def run_hybrid_search(
         _calls = md.get("calls") or []
         _symp = md.get("symbol_path") or md.get("symbol") or ""
         _pp = str(md.get("path_prefix") or "")
-        _related = []
+        _path = str(md.get("path") or "")
+        _related_set = set()
+        # Same-dir siblings
         try:
             if _pp in dir_to_paths:
-                _related = [p for p in sorted(dir_to_paths[_pp]) if p != md.get("path")][:5]
+                for p in dir_to_paths[_pp]:
+                    if p != _path:
+                        _related_set.add(p)
         except Exception:
-            _related = []
+            pass
+        # Import-based hints: resolve relative/quoted path-like imports
+        try:
+            import re as _re, posixpath as _ppath
+
+            def _pathlike_segments(s: str) -> list[str]:
+                s = str(s or "")
+                segs = []
+                # quoted segments first
+                for mmm in _re.findall(r"[\"']([^\"']+)[\"']", s):
+                    if "/" in mmm or mmm.startswith("."):
+                        segs.append(mmm)
+                # fall back to whitespace tokens containing '/' or starting with '.'
+                for tok in str(s).replace(",", " ").split():
+                    if ("/" in tok) or tok.startswith("."):
+                        segs.append(tok)
+                return segs
+
+            def _resolve(seg: str) -> list[str]:
+                try:
+                    seg = seg.strip()
+                    # base dir from path_prefix
+                    base = _pp or ""
+                    candidates = []
+                    # choose join rule
+                    if seg.startswith("./") or seg.startswith("../") or "/" in seg:
+                        j = _ppath.normpath(_ppath.join(base, seg)) if not seg.startswith("/") else _ppath.normpath(seg)
+                        candidates.append(j)
+                        # add extensions if last segment lacks a dot
+                        last = j.split("/")[-1]
+                        if "." not in last:
+                            for ext in [".py", ".js", ".ts", ".tsx", ".jsx", ".mjs", ".cjs"]:
+                                candidates.append(j + ext)
+                    out = set()
+                    for c in candidates:
+                        if c in all_paths:
+                            out.add(c)
+                        if c.startswith("/") and c.lstrip("/") in all_paths:
+                            out.add(c.lstrip("/"))
+                        if c.startswith("/work/") and c[len("/work/"):] in all_paths:
+                            out.add(c[len("/work/"):])
+                    return list(out)
+                except Exception:
+                    return []
+
+            for imp in (_imports or []):
+                for seg in _pathlike_segments(imp):
+                    for cand in _resolve(seg):
+                        if cand != _path:
+                            _related_set.add(cand)
+        except Exception:
+            pass
+
+        _related = sorted(_related_set)[:10]
         items.append(
             {
                 "score": round(float(m["s"]), 4),
-                "path": md.get("path"),
+                "path": _path,
                 "symbol": _symp,
                 "start_line": start_line,
                 "end_line": end_line,

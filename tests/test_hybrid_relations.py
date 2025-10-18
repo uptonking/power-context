@@ -58,6 +58,9 @@ def test_run_hybrid_search_relations_and_related_paths(monkeypatch):
         _Pt("2", "src/b.py"),
         _Pt("3", "tests/c_test.py"),
     ]
+    # Add an import-like path so a.py imports b -> should appear via import-based resolution
+    pts[0].payload["metadata"]["imports"] = ["./b"]
+
     monkeypatch.setattr(hyb, "QdrantClient", lambda *a, **k: FakeQdrant(pts))
     monkeypatch.setattr(hyb, "TextEmbedding", lambda *a, **k: FakeEmbed())
     monkeypatch.setenv("EMBEDDING_MODEL", "unit-test")
