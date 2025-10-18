@@ -62,6 +62,56 @@ services:
     volumes:
       - ${HOST_INDEX_PATH:-.}:/work
 
+
+  mcp_http:
+    build:
+      context: .
+      dockerfile: Dockerfile.mcp
+    container_name: mcp-search-http
+    depends_on:
+      - qdrant
+    env_file:
+      - .env
+    environment:
+      - FASTMCP_HOST=${FASTMCP_HOST}
+      - FASTMCP_PORT=8000
+      - FASTMCP_TRANSPORT=${FASTMCP_HTTP_TRANSPORT}
+      - QDRANT_URL=${QDRANT_URL}
+      - COLLECTION_NAME=${COLLECTION_NAME}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL}
+      - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER}
+      - TOOL_STORE_DESCRIPTION=${TOOL_STORE_DESCRIPTION}
+      - TOOL_FIND_DESCRIPTION=${TOOL_FIND_DESCRIPTION}
+      - FASTMCP_HEALTH_PORT=18000
+    # Streamable HTTP endpoint for IDE agents at http://localhost:${FASTMCP_HTTP_PORT:-8002}/mcp/
+    ports:
+      - "${FASTMCP_HTTP_HEALTH_PORT:-18002}:18000"
+      - "${FASTMCP_HTTP_PORT:-8002}:8000"
+    volumes:
+      - ${HOST_INDEX_PATH:-.}:/work:ro
+
+  mcp_indexer_http:
+    build:
+      context: .
+      dockerfile: Dockerfile.mcp-indexer
+    container_name: mcp-indexer-http
+    depends_on:
+      - qdrant
+    env_file:
+      - .env
+    environment:
+      - FASTMCP_HOST=${FASTMCP_HOST}
+      - FASTMCP_INDEXER_PORT=8001
+      - FASTMCP_TRANSPORT=${FASTMCP_HTTP_TRANSPORT}
+      - QDRANT_URL=${QDRANT_URL}
+      - FASTMCP_HEALTH_PORT=18001
+    # Streamable HTTP endpoint for IDE agents at http://localhost:${FASTMCP_INDEXER_HTTP_PORT:-8003}/mcp/
+    ports:
+      - "${FASTMCP_INDEXER_HTTP_PORT:-8003}:8001"
+      - "${FASTMCP_INDEXER_HTTP_HEALTH_PORT:-18003}:18001"
+    volumes:
+      - ${HOST_INDEX_PATH:-.}:/work
+
   llamacpp:
     image: ghcr.io/ggerganov/llama.cpp:server
     container_name: llama-decoder

@@ -411,14 +411,10 @@ def _tokens_from_queries(qs):
 @mcp.tool()
 async def qdrant_index_root(
     recreate: Optional[bool] = None, collection: Optional[str] = None
-) -> Dict[str, Any]:
-    """Index the mounted root path (/work) with zero-arg safe defaults.
-    Notes for IDE agents (Cursor/Windsurf/Augment):
-    - Prefer this tool when you want to index the repo root without specifying params.
-    - Do NOT send null values to tools; either omit a field or pass an empty string "".
-    - Args:
-      - recreate (bool, default false): drop and recreate collection schema if needed
-      - collection (string, optional): defaults to env COLLECTION_NAME
+):
+    """Index the mounted root path (/work) with streaming progress to avoid client timeouts.
+    - Emits periodic progress/heartbeat messages while ingest runs
+    - Final message contains exit code and last log tail
     """
     # Leniency: if clients embed JSON in 'collection' (and include 'recreate'), parse it
     try:
@@ -436,12 +432,60 @@ async def qdrant_index_root(
     env = os.environ.copy()
     env["QDRANT_URL"] = QDRANT_URL
     env["COLLECTION_NAME"] = coll
+    # Encourage ingest to print progress periodically (env is respected by ingest_code)
+    env.setdefault("INDEX_PROGRESS_EVERY", os.environ.get("INDEX_PROGRESS_EVERY", "200"))
 
     cmd = ["python", "/work/scripts/ingest_code.py", "--root", "/work"]
     if recreate:
         cmd.append("--recreate")
-    res = await _run_async(cmd, env=env)
-    return {"args": {"root": "/work", "collection": coll, "recreate": recreate}, **res}
+
+    # Run subprocess and stream logs back as progress; send heartbeat if quiet
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+        env=env,
+    )
+
+    from collections import deque
+    tail = deque(maxlen=50)
+
+    # Initial banner
+    try:
+        yield {"progress": f"Starting ingest: collection={coll}, recreate={bool(recreate)}"}
+    except Exception:
+        pass
+
+    while True:
+        try:
+            line_bytes = await asyncio.wait_for(proc.stdout.readline(), timeout=5.0)
+        except asyncio.TimeoutError:
+            # Heartbeat to keep RMCP clients alive even if ingest is quiet
+            try:
+                yield {"progress": "[heartbeat] indexing still running..."}
+            except Exception:
+                pass
+            continue
+        if not line_bytes:
+            break
+        line = line_bytes.decode("utf-8", errors="ignore").rstrip()
+        if line:
+            tail.append(line)
+            try:
+                yield {"progress": line}
+            except Exception:
+                pass
+
+    code = await proc.wait()
+    ok = (code == 0)
+    final_tail = "\n".join(tail)
+    return {
+        "ok": ok,
+        "code": code,
+        "args": {"root": "/work", "collection": coll, "recreate": recreate},
+        "stderr": "",
+        "stdout": final_tail,
+    }
 
 
 @mcp.tool()
@@ -690,13 +734,11 @@ async def qdrant_index(
     subdir: Optional[str] = None,
     recreate: Optional[bool] = None,
     collection: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Index the mounted path (/work) or a subdirectory.
-    Important for IDE agents (Cursor/Windsurf/Augment):
-    - Do NOT pass null values; omit a field or pass empty string "".
-    - subdir: "" or omit to index repo root; or a relative path like "scripts"
-    - recreate: bool (default false)
-    - collection: string (optional; defaults to env COLLECTION_NAME)
+):
+    """Index the mounted path (/work or subdir) with streaming progress to avoid client timeouts.
+    - Emits periodic progress lines from ingest
+    - Sends a heartbeat every few seconds when ingest is quiet
+    - Returns final exit code and a tail of logs
     """
     # Leniency: parse JSON-ish payloads mistakenly sent in 'collection' or 'subdir'
     try:
@@ -731,6 +773,7 @@ async def qdrant_index(
     env = os.environ.copy()
     env["QDRANT_URL"] = QDRANT_URL
     env["COLLECTION_NAME"] = coll
+    env.setdefault("INDEX_PROGRESS_EVERY", os.environ.get("INDEX_PROGRESS_EVERY", "200"))
 
     cmd = [
         "python",
@@ -740,8 +783,51 @@ async def qdrant_index(
     ]
     if recreate:
         cmd.append("--recreate")
-    res = await _run_async(cmd, env=env)
-    return {"args": {"root": root, "collection": coll, "recreate": recreate}, **res}
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+        env=env,
+    )
+
+    from collections import deque
+    tail = deque(maxlen=50)
+
+    try:
+        yield {"progress": f"Starting ingest: root={root}, collection={coll}, recreate={bool(recreate)}"}
+    except Exception:
+        pass
+
+    while True:
+        try:
+            line_bytes = await asyncio.wait_for(proc.stdout.readline(), timeout=5.0)
+        except asyncio.TimeoutError:
+            try:
+                yield {"progress": "[heartbeat] indexing still running..."}
+            except Exception:
+                pass
+            continue
+        if not line_bytes:
+            break
+        line = line_bytes.decode("utf-8", errors="ignore").rstrip()
+        if line:
+            tail.append(line)
+            try:
+                yield {"progress": line}
+            except Exception:
+                pass
+
+    code = await proc.wait()
+    ok = (code == 0)
+    final_tail = "\n".join(tail)
+    return {
+        "ok": ok,
+        "code": code,
+        "args": {"root": root, "collection": coll, "recreate": recreate},
+        "stderr": "",
+        "stdout": final_tail,
+    }
 
 
 @mcp.tool()
@@ -2172,10 +2258,25 @@ if __name__ == "__main__":
 
     transport = os.environ.get("FASTMCP_TRANSPORT", "sse").strip().lower()
     if transport == "stdio":
-        # Run over stdio (for clients that don't support SSE)
+        # Run over stdio (for clients that don't support network transports)
         mcp.run(transport="stdio")
+    elif transport in {"http", "streamable", "streamable_http", "streamable-http"}:
+        # Streamable HTTP (recommended) — endpoint at /mcp (FastMCP default)
+        try:
+            mcp.settings.host = HOST
+            mcp.settings.port = PORT
+        except Exception:
+            pass
+        # Use the correct FastMCP transport name
+        try:
+            mcp.run(transport="streamable-http")
+        except Exception:
+            # Fallback to SSE only if HTTP truly unavailable
+            mcp.settings.host = HOST
+            mcp.settings.port = PORT
+            mcp.run(transport="sse")
     else:
-        # Serve over SSE at /sse on the configured host/port
+        # SSE (legacy) — endpoint at /sse
         mcp.settings.host = HOST
         mcp.settings.port = PORT
         mcp.run(transport="sse")

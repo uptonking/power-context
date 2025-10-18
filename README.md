@@ -14,6 +14,18 @@ This gets you from zero to “search works” in under five minutes.
 INDEX_MICRO_CHUNKS=1 MAX_MICRO_CHUNKS_PER_FILE=500 make reset-dev
 ```
 - Default ports: Memory MCP :8000, Indexer MCP :8001, Qdrant :6333, llama.cpp :8080
+
+### Make targets: SSE, RMCP, and dual-compat
+- Legacy SSE only (default):
+  - Ports: 8000 (/sse), 8001 (/sse)
+  - Command: `INDEX_MICRO_CHUNKS=1 MAX_MICRO_CHUNKS_PER_FILE=500 make reset-dev`
+- RMCP (Codex) only:
+  - Ports: 8002 (/mcp), 8003 (/mcp)
+  - Command: `INDEX_MICRO_CHUNKS=1 MAX_MICRO_CHUNKS_PER_FILE=500 make reset-dev-codex`
+- Dual compatibility (SSE + RMCP together):
+  - Ports: 8000/8001 (/sse) and 8002/8003 (/mcp)
+  - Command: `INDEX_MICRO_CHUNKS=1 MAX_MICRO_CHUNKS_PER_FILE=500 make reset-dev-dual`
+
 - You can skip the decoder; it’s feature-flagged off by default.
 
 Alternative (compose only)
@@ -86,6 +98,25 @@ Endpoints
 | Memory MCP  | http://localhost:8000/sse    |
 | Indexer MCP | http://localhost:8001/sse    |
 | Qdrant DB   | http://localhost:6333        |
+
+
+### Streamable HTTP (RMCP) endpoints + OpenAI Codex config
+
+- Memory HTTP (RMCP): http://localhost:8002/mcp
+- Indexer HTTP (RMCP): http://localhost:8003/mcp
+
+OpenAI Codex config (RMCP client):
+
+````toml
+experimental_use_rmcp_client = true
+
+[mcp_servers.qdrant_memory_http]
+url = "http://127.0.0.1:8002/mcp"
+
+[mcp_servers.qdrant_indexer_http/mcp]
+url = "http://127.0.0.1:8003/mcp"
+````
+
 
 ### Kiro Integration (workspace config)
 

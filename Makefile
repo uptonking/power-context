@@ -152,10 +152,40 @@ reset-dev: ## full dev reset: qdrant -> wait -> init payload -> reindex -> bring
 	docker compose ps
 
 
+reset-dev-codex: ## bring up Qdrant + Streamable HTTP MCPs only (for OpenAI Codex RMCP)
+	docker compose down || true
+	docker compose build --no-cache mcp_http mcp_indexer_http watcher llamacpp
+	docker compose up -d qdrant
+	./scripts/wait-for-qdrant.sh
+	# Seed Qdrant and create a fresh index for Codex
+	docker compose run --rm init_payload || true
+	$(MAKE) tokenizer
+	docker compose run --rm -e INDEX_MICRO_CHUNKS -e MAX_MICRO_CHUNKS_PER_FILE -e TOKENIZER_PATH -e TOKENIZER_URL indexer --root /work --recreate
+	$(MAKE) llama-model
+
+	docker compose up -d mcp_http mcp_indexer_http watcher llamacpp
+	docker compose ps
+
+
 quantize-reranker: ## Quantize reranker ONNX to INT8 (set RERANKER_ONNX_PATH, optional OUTPUT_ONNX_PATH)
 	@[ -n "$(RERANKER_ONNX_PATH)" ] || { echo "Set RERANKER_ONNX_PATH to your ONNX file"; exit 1; }
 	python3 scripts/quantize_reranker.py
 
+
+
+reset-dev-dual: ## bring up BOTH legacy SSE and Streamable HTTP MCPs (dual-compat mode)
+	docker compose down || true
+	docker compose build --no-cache mcp mcp_indexer mcp_http mcp_indexer_http watcher llamacpp
+	docker compose up -d qdrant
+	./scripts/wait-for-qdrant.sh
+	docker compose run --rm init_payload || true
+	$(MAKE) tokenizer
+	docker compose run --rm -e INDEX_MICRO_CHUNKS -e MAX_MICRO_CHUNKS_PER_FILE -e TOKENIZER_PATH -e TOKENIZER_URL indexer --root /work --recreate
+	$(MAKE) llama-model
+	docker compose up -d mcp mcp_indexer mcp_http mcp_indexer_http watcher llamacpp
+	# Ensure watcher is up even if a prior step or manual bring-up omitted it
+	docker compose up -d watcher
+	docker compose ps
 
 # --- llama.cpp tiny model provisioning ---
 LLAMACPP_MODEL_URL ?= https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf

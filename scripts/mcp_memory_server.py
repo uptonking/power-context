@@ -246,8 +246,25 @@ if __name__ == "__main__":
         pass
 
     if transport == "stdio":
+        # Run over stdio (for clients that don't support network transports)
         mcp.run(transport="stdio")
+    elif transport in {"http", "streamable", "streamable_http", "streamable-http"}:
+        # Streamable HTTP (recommended) — endpoint at /mcp (FastMCP default)
+        try:
+            mcp.settings.host = HOST
+            mcp.settings.port = PORT
+        except Exception:
+            pass
+        # Use the correct FastMCP transport name
+        try:
+            mcp.run(transport="streamable-http")
+        except Exception:
+            # Fallback to SSE only if HTTP truly unavailable
+            mcp.settings.host = HOST
+            mcp.settings.port = PORT
+            mcp.run(transport="sse")
     else:
+        # SSE (legacy) — endpoint at /sse
         mcp.settings.host = HOST
         mcp.settings.port = PORT
         mcp.run(transport="sse")
