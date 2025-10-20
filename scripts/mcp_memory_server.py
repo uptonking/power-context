@@ -1,5 +1,4 @@
 import os
-import time
 from typing import Any, Dict, Optional, List
 import json
 import threading
@@ -137,7 +136,9 @@ def store(
     model = TextEmbedding(model_name=EMBEDDING_MODEL)
     dense = next(model.embed([str(information)])).tolist()
     lex = _lex_hash_vector_text(str(information), LEX_VECTOR_DIM)
-    pid = int(time.time_ns() % (2**31 - 1))
+    # Use UUID to avoid point ID collisions under concurrent load
+    import uuid
+    pid = uuid.uuid4().hex
     payload = {
         "information": str(information),
         "metadata": metadata or {"kind": "memory", "source": "memory"},

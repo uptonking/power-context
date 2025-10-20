@@ -145,7 +145,7 @@ services:
     working_dir: /work
     volumes:
       - ${HOST_INDEX_PATH:-.}:/work:ro
-    entrypoint: ["python", "scripts/ingest_code.py"]
+    entrypoint: ["python", "/app/scripts/ingest_code.py"]
 
   watcher:
     build:
@@ -169,7 +169,7 @@ services:
     working_dir: /work
     volumes:
       - ${HOST_INDEX_PATH:-.}:/work:ro
-    entrypoint: ["python", "scripts/watch_index.py"]
+    entrypoint: ["python", "/app/scripts/watch_index.py"]
 
   init_payload:
     build:
@@ -185,7 +185,7 @@ services:
     working_dir: /work
     volumes:
       - ${HOST_INDEX_PATH:-.}:/work:ro
-    entrypoint: ["python", "scripts/create_indexes.py"]
+    entrypoint: ["python", "/app/scripts/create_indexes.py"]
 
 volumes:
   qdrant_storage:

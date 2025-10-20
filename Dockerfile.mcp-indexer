@@ -3,7 +3,8 @@
 FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    WORK_ROOTS="/work,/app"
 
 # OS deps (git for history if we extend later)
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
@@ -13,11 +14,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends git ca-certific
 RUN pip install --no-cache-dir --upgrade qdrant-client fastembed watchdog onnxruntime tokenizers \
     tree_sitter tree_sitter_languages mcp fastmcp
 
+# Bake scripts into the image so entrypoints don't rely on /work
+COPY scripts /app/scripts
+
 # Expose SSE port for this companion server
 EXPOSE 8001
 
 WORKDIR /work
 
 # Default command runs the companion MCP server
-CMD ["python", "/work/scripts/mcp_indexer_server.py"]
-
+CMD ["python", "/app/scripts/mcp_indexer_server.py"]

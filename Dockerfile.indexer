@@ -2,15 +2,18 @@
 FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    WORK_ROOTS="/work,/app"
 
 # OS packages needed: git for history ingestion
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir qdrant-client fastembed watchdog onnxruntime tokenizers tree_sitter tree_sitter_languages
 
+# Bake scripts into the image so we can mount arbitrary code at /work
+COPY scripts /app/scripts
+
 WORKDIR /work
 
-# Default command shows help; Makefile will override
-CMD ["python", "scripts/ingest_code.py", "--help"]
-
+# Default command shows help; Makefile/compose will override entrypoint
+CMD ["python", "/app/scripts/ingest_code.py", "--help"]

@@ -2,14 +2,17 @@
 FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    WORK_ROOTS="/work,/app"
 
 # Install latest FastMCP with Streamable HTTP (RMCP) support + deps
 RUN pip install --no-cache-dir --upgrade mcp fastmcp qdrant-client fastembed
+
+# Bake scripts into image so server can run even when /work points elsewhere
+COPY scripts /app/scripts
 
 # Expose SSE port
 EXPOSE 8000
 
 # Default command: run the server with SSE transport (env provides host/port)
-CMD ["python", "/work/scripts/mcp_memory_server.py"]
-
+CMD ["python", "/app/scripts/mcp_memory_server.py"]

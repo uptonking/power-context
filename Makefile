@@ -1,5 +1,9 @@
 SHELL := /bin/bash
 
+# Avoid inheriting Docker context from shells/venvs (e.g., DOCKER_HOST=unix:///Users/...)
+# An empty export forces docker to use its default context/socket.
+export DOCKER_HOST =
+
 .PHONY: help up down logs ps restart rebuild index reindex watch env hybrid bootstrap history rerank-local setup-reranker prune warm health
 .PHONY: venv venv-install
 
@@ -138,7 +142,7 @@ restart-nc: ## down, no-cache rebuild, up
 
 reset-dev: ## full dev reset: qdrant -> wait -> init payload -> reindex -> bring up services (incl. decoder)
 	docker compose down || true
-	docker compose build --no-cache
+	docker compose build --no-cache indexer mcp mcp_indexer mcp_http mcp_indexer_http watcher llamacpp
 	docker compose up -d qdrant
 	./scripts/wait-for-qdrant.sh
 	docker compose run --rm init_payload || true
@@ -154,7 +158,7 @@ reset-dev: ## full dev reset: qdrant -> wait -> init payload -> reindex -> bring
 
 reset-dev-codex: ## bring up Qdrant + Streamable HTTP MCPs only (for OpenAI Codex RMCP)
 	docker compose down || true
-	docker compose build --no-cache mcp_http mcp_indexer_http watcher llamacpp
+	docker compose build --no-cache indexer mcp_http mcp_indexer_http watcher llamacpp
 	docker compose up -d qdrant
 	./scripts/wait-for-qdrant.sh
 	# Seed Qdrant and create a fresh index for Codex
@@ -175,7 +179,7 @@ quantize-reranker: ## Quantize reranker ONNX to INT8 (set RERANKER_ONNX_PATH, op
 
 reset-dev-dual: ## bring up BOTH legacy SSE and Streamable HTTP MCPs (dual-compat mode)
 	docker compose down || true
-	docker compose build --no-cache mcp mcp_indexer mcp_http mcp_indexer_http watcher llamacpp
+	docker compose build --no-cache indexer mcp mcp_indexer mcp_http mcp_indexer_http watcher llamacpp
 	docker compose up -d qdrant
 	./scripts/wait-for-qdrant.sh
 	docker compose run --rm init_payload || true

@@ -47,6 +47,33 @@ HOST_INDEX_PATH="$(pwd)" FASTMCP_INDEXER_PORT=8001 docker compose up -d qdrant m
 - prune / prune-path: Remove stale points (missing files or hash mismatch)
 - llama-model / tokenizer: Fetch tiny GGUF model and tokenizer.json
 
+## Index another codebase (outside this repo)
+
+You can index any local folder by mounting it at /work. Three easy ways:
+
+1) Make target: index a specific path
+```bash
+make index-path REPO_PATH=/abs/path/to/other/repo [RECREATE=1] [REPO_NAME=name] [COLLECTION=name]
+```
+- RECREATE=1 drops and recreates the collection before indexing
+- Defaults: REPO_NAME and COLLECTION fall back to the folder name
+
+2) Make target: index the current working directory
+```bash
+cd /abs/path/to/other/repo
+make -C /Users/user/Desktop/Context-Engine index-here [RECREATE=1] [REPO_NAME=name] [COLLECTION=name]
+```
+
+3) Raw docker compose (one‑shot ingest without Make)
+```bash
+docker compose run --rm \
+  -v /abs/path/to/other/repo:/work \
+  indexer --root /work [--recreate]
+```
+Notes:
+- No need to bind-mount this repository; the images bake /app/scripts and set WORK_ROOTS="/work,/app" so utilities import correctly.
+- MCP clients can connect to the running servers and operate on whichever folder is mounted at /work.
+
 ## Supported IDE clients/extensions
 - Kiro (SSE): uses mcp-remote bridge via command/args; see config below
 - Qodo (RMCP): connects directly to HTTP endpoints; add each tool individually
