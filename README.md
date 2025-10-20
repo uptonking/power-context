@@ -79,6 +79,8 @@ Notes:
 - Qodo (RMCP): connects directly to HTTP endpoints; add each tool individually
 - OpenAI Codex (RMCP): TOML config for memory/indexer URLs
 - Augment (SSE): simple JSON configs for both servers
+- AmpCode (SSE): simple URL for both legacy sse endpoints
+- Claude Code CLI(SSE): simple JSON configs for both servers
 
 3) Verify endpoints
 ## Configuration reference (env vars)
