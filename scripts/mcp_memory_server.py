@@ -24,6 +24,17 @@ import hashlib
 
 
 
+# Ensure repo roots are importable so 'scripts' resolves inside container
+import sys as _sys
+_roots_env = os.environ.get("WORK_ROOTS", "")
+_roots = [p.strip() for p in _roots_env.split(",") if p.strip()] or ["/work", "/app"]
+try:
+    for _root in _roots:
+        if _root and _root not in _sys.path:
+            _sys.path.insert(0, _root)
+except Exception:
+    pass
+
 # Map model to named vector used in indexer
 
 
