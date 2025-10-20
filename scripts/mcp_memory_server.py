@@ -22,25 +22,14 @@ from fastembed import TextEmbedding
 import hashlib
 
 
-def _lex_hash_vector(text: str, dim: int = LEX_VECTOR_DIM) -> List[float]:
-    v = [0.0] * dim
-    for tok in (text or "").lower().split():
-        h = int(hashlib.md5(tok.encode()).hexdigest(), 16) % dim
-        v[h] += 1.0
-    # L2 normalize
-    norm = sum(x * x for x in v) ** 0.5 or 1.0
-    return [x / norm for x in v]
 
 
 # Map model to named vector used in indexer
 
 
-def _sanitize_vector_name(model_name: str) -> str:
-    name = (model_name or "").strip().lower()
-    if "bge-base-en-v1.5" in name:
-        return "fast-bge-base-en-v1.5"
-    return name.replace("/", "-").replace("_", "-")[:64]
-
+# Use shared utils for consistent vector naming and lexical hashing
+from scripts.utils import sanitize_vector_name as _sanitize_vector_name
+from scripts.utils import lex_hash_vector_text as _lex_hash_vector_text
 
 VECTOR_NAME = _sanitize_vector_name(EMBEDDING_MODEL)
 
@@ -101,10 +90,16 @@ def _ensure_collection(name: str):
     except Exception:
         pass
     # Derive dense vector dimension from embedding model to avoid mismatch
+    # Derive dense vector dimension from embedding model to avoid mismatch
     try:
-        _dense_dim = int(os.environ.get("EMBED_DIM", "768") or 768)
+        _model_probe = TextEmbedding(model_name=EMBEDDING_MODEL)
+        _dense_vec = next(_model_probe.embed(["probe"]))
+        _dense_dim = len(getattr(_dense_vec, "tolist", lambda: _dense_vec)()) if hasattr(_dense_vec, "tolist") else len(_dense_vec)
     except Exception:
-        _dense_dim = 768
+        try:
+            _dense_dim = int(os.environ.get("EMBED_DIM", "768") or 768)
+        except Exception:
+            _dense_dim = 768
     vectors_cfg = {
         VECTOR_NAME: models.VectorParams(
             size=int(_dense_dim or 768), distance=models.Distance.COSINE
@@ -130,7 +125,7 @@ def store(
     coll = collection or DEFAULT_COLLECTION
     model = TextEmbedding(model_name=EMBEDDING_MODEL)
     dense = next(model.embed([str(information)])).tolist()
-    lex = _lex_hash_vector(str(information))
+    lex = _lex_hash_vector_text(str(information), LEX_VECTOR_DIM)
     pid = int(time.time_ns() % (2**31 - 1))
     payload = {
         "information": str(information),
@@ -154,7 +149,7 @@ def find(
     coll = collection or DEFAULT_COLLECTION
     model = TextEmbedding(model_name=EMBEDDING_MODEL)
     dense = next(model.embed([str(query)])).tolist()
-    lex = _lex_hash_vector(str(query))
+    lex = _lex_hash_vector_text(str(query), LEX_VECTOR_DIM)
 
     # Harmonize alias: top_k -> limit
     lim = int(limit or top_k or 5)

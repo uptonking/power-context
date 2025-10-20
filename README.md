@@ -71,6 +71,8 @@ Watcher
 - WATCH_DEBOUNCE_SECS: Debounce between change events (e.g., 1.5)
 - INDEX_UPSERT_BATCH / INDEX_UPSERT_RETRIES / INDEX_UPSERT_BACKOFF: Upsert tuning
 - QDRANT_TIMEOUT: Request timeout in seconds for upserts/queries (e.g., 60–90)
+- MCP_TOOL_TIMEOUT_SECS: Max duration for long-running MCP tools (index/prune); default 3600s
+
 
 Reranker
 - RERANKER_ONNX_PATH, RERANKER_TOKENIZER_PATH: Paths for local ONNX cross‑encoder
@@ -99,6 +101,7 @@ Ports
 | WATCH_DEBOUNCE_SECS | Debounce between FS events (watcher) | 1.5 |
 | INDEX_UPSERT_BATCH | Upsert batch size (watcher) | 128 |
 | INDEX_UPSERT_RETRIES | Retry count (watcher) | 5 |
+| MCP_TOOL_TIMEOUT_SECS | Max duration for long-running MCP tools | 3600 |
 | INDEX_UPSERT_BACKOFF | Seconds between retries (watcher) | 0.5 |
 | QDRANT_TIMEOUT | HTTP timeout seconds | watcher: 60; search: 20 |
 | RERANKER_ONNX_PATH | Local ONNX cross-encoder model path | unset (see make setup-reranker) |

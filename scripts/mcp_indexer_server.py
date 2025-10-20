@@ -83,6 +83,8 @@ DEFAULT_COLLECTION = os.environ.get("COLLECTION_NAME", "my-collection")
 MAX_LOG_TAIL = int(os.environ.get("MCP_MAX_LOG_TAIL", "4000"))
 SNIPPET_MAX_BYTES = int(os.environ.get("MCP_SNIPPET_MAX_BYTES", "8192") or 8192)
 
+MCP_TOOL_TIMEOUT_SECS = float(os.environ.get("MCP_TOOL_TIMEOUT_SECS", "3600") or 3600.0)
+
 mcp = FastMCP(APP_NAME)
 
 # Lightweight readiness endpoint on a separate health port (non-MCP), optional
@@ -130,7 +132,7 @@ def _start_readyz_server():
 
 # Async subprocess runner to avoid blocking event loop
 async def _run_async(
-    cmd: list[str], env: Optional[Dict[str, str]] = None, timeout: int = 60
+    cmd: list[str], env: Optional[Dict[str, str]] = None, timeout: Optional[float] = None
 ) -> Dict[str, Any]:
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -139,6 +141,9 @@ async def _run_async(
             stderr=asyncio.subprocess.PIPE,
             env=env,
         )
+        # Default timeout from env if not provided by caller
+        if timeout is None:
+            timeout = MCP_TOOL_TIMEOUT_SECS
         try:
             stdout_b, stderr_b = await asyncio.wait_for(
                 proc.communicate(), timeout=timeout
