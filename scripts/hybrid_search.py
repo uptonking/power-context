@@ -93,6 +93,9 @@ SYMBOL_EQUALITY_BOOST = float(
 VENDOR_PENALTY = float(os.environ.get("HYBRID_VENDOR_PENALTY", "0.05") or 0.05)
 LANG_MATCH_BOOST = float(os.environ.get("HYBRID_LANG_MATCH_BOOST", "0.05") or 0.05)
 CLUSTER_LINES = int(os.environ.get("HYBRID_CLUSTER_LINES", "15") or 15)
+# Penalize test files slightly to prefer implementation over tests
+TEST_FILE_PENALTY = float(os.environ.get("HYBRID_TEST_FILE_PENALTY", "0.15") or 0.15)
+
 # Micro-span compaction and budgeting (ReFRAG-lite output shaping)
 MICRO_OUT_MAX_SPANS = int(os.environ.get("MICRO_OUT_MAX_SPANS", "3") or 3)
 MICRO_MERGE_LINES = int(os.environ.get("MICRO_MERGE_LINES", "4") or 4)
@@ -254,6 +257,23 @@ NON_CORE_PATTERNS = [
     r"README",
     r"CHANGELOG",
 ]
+
+# Test file patterns
+TEST_FILE_PATTERNS = [
+    r"/tests?/",
+    r"(^|/)test_",
+    r"_test\.",
+    r"\.test\.",
+    r"\.spec\.",
+]
+
+def is_test_file(path: str) -> bool:
+    import re
+    p = path.lower()
+    for pattern in TEST_FILE_PATTERNS:
+        if re.search(pattern, p):
+            return True
+    return False
 
 
 def is_core_file(path: str) -> bool:
@@ -884,6 +904,7 @@ def run_hybrid_search(
                 "vendor": 0.0,
                 "langb": 0.0,
                 "rec": 0.0,
+                "test": 0.0,
             },
         )
         lxs = LEX_VECTOR_WEIGHT * rrf(rank)
@@ -892,6 +913,13 @@ def run_hybrid_search(
 
     # Dense queries
     embedded = _embed_queries_cached(_model, qlist)
+    # Ensure collection schema is compatible with current search settings (named vectors)
+    try:
+        if embedded:
+            dim = len(embedded[0])
+            _ensure_collection(client, _collection(), dim, vec_name)
+    except Exception:
+        pass
     # Optional gate-first using mini vectors to restrict dense search to candidates
     flt_gated = flt
     try:
@@ -912,24 +940,52 @@ def run_hybrid_search(
         gate_first, refrag_on, cand_n = False, False, 200
     if gate_first and refrag_on:
         try:
+            # ReFRAG gate-first: Use MINI vectors to prefilter candidates
             mini_queries = [_project_mini(list(v), MINI_VEC_DIM) for v in embedded]
-            cand_ids: set[str] = set()
+
+            # Get top candidates using MINI vectors (fast prefilter)
+            candidate_ids = set()
             for mv in mini_queries:
-                res = dense_query(client, MINI_VECTOR_NAME, mv, flt, max(50, cand_n))
-                for p in res:
-                    cand_ids.add(str(p.id))
-            if cand_ids:
-                hid = models.HasIdCondition(has_id=list(cand_ids))
-                if flt and getattr(flt, "must", None):
-                    flt_gated = models.Filter(must=list(flt.must) + [hid])
+                mini_results = dense_query(client, MINI_VECTOR_NAME, mv, flt, cand_n)
+                for result in mini_results:
+                    if hasattr(result, 'id'):
+                        candidate_ids.add(result.id)
+
+            if candidate_ids:
+                # Build server-side gating filter using pid_str FieldCondition
+                from qdrant_client import models as _models
+                id_vals = [str(cid) for cid in candidate_ids]
+                gating_cond = _models.FieldCondition(
+                    key="pid_str",
+                    match=_models.MatchAny(any=id_vals),
+                )
+                if flt is None:
+                    flt_gated = _models.Filter(must=[gating_cond])
                 else:
-                    flt_gated = models.Filter(must=[hid])
-        except Exception:
-            pass
+                    must = list(flt.must or [])
+                    must.append(gating_cond)
+                    flt_gated = _models.Filter(must=must, should=flt.should, must_not=flt.must_not)
+                if os.environ.get("DEBUG_HYBRID_SEARCH"):
+                    print(f"DEBUG: ReFRAG gate-first (server-side): {len(candidate_ids)} candidates")
+                    print(f"DEBUG: flt_gated.must has {len(flt_gated.must or [])} conditions")
+                    print(f"DEBUG: flt_gated.must_not has {len(flt_gated.must_not or [])} conditions")
+            else:
+                # No candidates -> no gating
+                flt_gated = flt
+        except Exception as e:
+            if os.environ.get("DEBUG_HYBRID_SEARCH"):
+                print(f"DEBUG: ReFRAG gate-first failed: {e}, proceeding without gating")
+            # Fallback to normal search (no gating)
+            flt_gated = flt
+    else:
+        flt_gated = flt
 
     result_sets: List[List[Any]] = [
         dense_query(client, vec_name, v, flt_gated, max(24, limit)) for v in embedded
     ]
+    if os.environ.get("DEBUG_HYBRID_SEARCH"):
+        total_dense_results = sum(len(rs) for rs in result_sets)
+        print(f"DEBUG: Dense query returned {total_dense_results} total results across {len(result_sets)} queries")
 
     # Optional ReFRAG-style mini-vector gating: add compact-vector RRF if enabled
     try:
@@ -961,6 +1017,7 @@ def run_hybrid_search(
                                 "vendor": 0.0,
                                 "langb": 0.0,
                                 "rec": 0.0,
+                                "test": 0.0,
                             },
                         )
                         dens = float(HYBRID_MINI_WEIGHT) * rrf(rank)
@@ -1032,6 +1089,7 @@ def run_hybrid_search(
                         "vendor": 0.0,
                         "langb": 0.0,
                         "rec": 0.0,
+                        "test": 0.0,
                     },
                 )
                 lxs = prf_lw * rrf(rank)
@@ -1060,6 +1118,7 @@ def run_hybrid_search(
                                 "vendor": 0.0,
                                 "langb": 0.0,
                                 "rec": 0.0,
+                                "test": 0.0,
                             },
                         )
                         dens = prf_dw * rrf(rank)
@@ -1084,6 +1143,7 @@ def run_hybrid_search(
                     "vendor": 0.0,
                     "langb": 0.0,
                     "rec": 0.0,
+                    "test": 0.0,
                 },
             )
             dens = DENSE_WEIGHT * rrf(rank)
@@ -1120,6 +1180,10 @@ def run_hybrid_search(
         if VENDOR_PENALTY > 0.0 and path and is_vendor_path(path):
             rec["vendor"] -= VENDOR_PENALTY
             rec["s"] -= VENDOR_PENALTY
+        if TEST_FILE_PENALTY > 0.0 and path and is_test_file(path):
+            rec["test"] -= TEST_FILE_PENALTY
+            rec["s"] -= TEST_FILE_PENALTY
+
         if LANG_MATCH_BOOST > 0.0 and path and eff_language:
             lang = str(eff_language).lower()
             md_lang = str((md.get("language") or "")).lower()
@@ -1146,7 +1210,11 @@ def run_hybrid_search(
         start_line = int(md.get("start_line") or 0)
         return (-float(m["s"]), len(sp), path, start_line)
 
+    if os.environ.get("DEBUG_HYBRID_SEARCH"):
+        print(f"DEBUG: score_map has {len(score_map)} items before ranking")
     ranked = sorted(score_map.values(), key=_tie_key)
+    if os.environ.get("DEBUG_HYBRID_SEARCH"):
+        print(f"DEBUG: ranked has {len(ranked)} items after sorting")
 
     # Cluster by path adjacency
     clusters: Dict[str, List[Dict[str, Any]]] = {}
@@ -1172,6 +1240,8 @@ def run_hybrid_search(
             lst.append({"start": start_line, "end": end_line, "m": m})
 
     ranked = sorted([c["m"] for lst in clusters.values() for c in lst], key=_tie_key)
+    if os.environ.get("DEBUG_HYBRID_SEARCH"):
+        print(f"DEBUG: ranked has {len(ranked)} items after clustering")
 
     # Client-side filters and per-path diversification
     import re as _re, fnmatch as _fnm
@@ -1217,21 +1287,15 @@ def run_hybrid_search(
 
         ranked = [m for m in ranked if _pass_filters(m)]
 
-    # ReFRAG-lite span compaction and budgeting (applied after filters)
-    try:
-        if str(os.environ.get("REFRAG_MODE", "")).strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }:
-            ranked = _merge_and_budget_spans(ranked)
-    except Exception:
-        pass
+    # ReFRAG-lite span compaction and budgeting is NOT applied here in run_hybrid_search
+    # It's only applied in context_answer where token budgeting is needed for LLM context
+    # Removing this to avoid over-filtering search results
 
     if per_path and per_path > 0:
         counts: Dict[str, int] = {}
         merged: List[Dict[str, Any]] = []
+        if os.environ.get("DEBUG_HYBRID_SEARCH"):
+            print(f"DEBUG: Applying per_path={per_path} limiting to {len(ranked)} ranked results")
         for m in ranked:
             md = (m["pt"].payload or {}).get("metadata") or {}
             path = str(md.get("path", ""))
@@ -1241,6 +1305,8 @@ def run_hybrid_search(
                 counts[path] = c + 1
             if len(merged) >= limit:
                 break
+        if os.environ.get("DEBUG_HYBRID_SEARCH"):
+            print(f"DEBUG: After per_path limiting: {len(merged)} results from {len(counts)} unique paths")
     else:
         merged = ranked[:limit]
 
@@ -1279,6 +1345,7 @@ def run_hybrid_search(
             "vendor_penalty": round(float(m.get("vendor", 0.0)), 4),
             "lang_boost": round(float(m.get("langb", 0.0)), 4),
             "recency": round(float(m.get("rec", 0.0)), 4),
+            "test_penalty": round(float(m.get("test", 0.0)), 4),
         }
         why = []
         if comp["dense_rrf"]:
@@ -1288,6 +1355,8 @@ def run_hybrid_search(
                 why.append(f"{k}:{comp[k]}")
         if comp["vendor_penalty"]:
             why.append(f"vendor_penalty:{comp['vendor_penalty']}")
+        if comp.get("test_penalty"):
+            why.append(f"test_penalty:{comp['test_penalty']}")
         if comp["recency"]:
             why.append(f"recency:{comp['recency']}")
         # Related hints
@@ -1358,6 +1427,21 @@ def run_hybrid_search(
             pass
 
         _related = sorted(_related_set)[:10]
+        # Best-effort snippet text directly from payload for downstream LLM stitching
+        _payload = (m["pt"].payload or {}) if m.get("pt") is not None else {}
+        _metadata = _payload.get("metadata", {}) or {}
+        _text = (
+            _payload.get("text") or
+            _metadata.get("text") or
+            _metadata.get("code") or
+            ""
+        )
+        # Skip memory-like points without a real file path
+        if not _path or not _path.strip():
+            if os.environ.get("DEBUG_HYBRID_FILTER"):
+                print(f"DEBUG: Filtered out item with empty path: {_metadata}")
+            continue
+
         items.append(
             {
                 "score": round(float(m["s"]), 4),
@@ -1371,6 +1455,7 @@ def run_hybrid_search(
                 "related_paths": _related,
                 "span_budgeted": bool(m.get("_merged_start") is not None),
                 "budget_tokens_used": m.get("_budget_tokens"),
+                "text": _text,
             }
         )
     return items
@@ -1570,6 +1655,7 @@ def main():
                 "vendor": 0.0,
                 "langb": 0.0,
                 "rec": 0.0,
+                "test": 0.0,
             },
         )
         lxs = LEX_VECTOR_WEIGHT * rrf(rank)
@@ -1598,6 +1684,7 @@ def main():
                     "vendor": 0.0,
                     "langb": 0.0,
                     "rec": 0.0,
+                    "test": 0.0,
                 },
             )
             dens = DENSE_WEIGHT * rrf(rank)
@@ -1640,6 +1727,10 @@ def main():
         if VENDOR_PENALTY > 0.0 and path and is_vendor_path(path):
             rec["vendor"] -= VENDOR_PENALTY
             rec["s"] -= VENDOR_PENALTY
+        if TEST_FILE_PENALTY > 0.0 and path and is_test_file(path):
+            rec["test"] -= TEST_FILE_PENALTY
+            rec["s"] -= TEST_FILE_PENALTY
+
 
         # Language match boost if requested
         if (
@@ -1816,6 +1907,7 @@ def main():
                     "vendor_penalty": round(float(m.get("vendor", 0.0)), 4),
                     "lang_boost": round(float(m.get("langb", 0.0)), 4),
                     "recency": round(float(m.get("rec", 0.0)), 4),
+                    "test_penalty": round(float(m.get("test", 0.0)), 4),
                 },
                 "relations": {"imports": _imports, "calls": _calls, "symbol_path": _symp},
                 "related_paths": _related,
@@ -1835,6 +1927,8 @@ def main():
                     why.append(f"{k}:{item['components'][k]}")
             if item["components"]["vendor_penalty"]:
                 why.append(f"vendor_penalty:{item['components']['vendor_penalty']}")
+            if item["components"].get("test_penalty"):
+                why.append(f"test_penalty:{item['components']['test_penalty']}")
             if item["components"]["recency"]:
                 why.append(f"recency:{item['components']['recency']}")
             item["why"] = why

@@ -1034,7 +1034,7 @@ async def repo_search(
             items = run_hybrid_search(
                 queries=queries,
                 limit=int(limit),
-                per_path=int(per_path) if per_path else 1,
+                per_path=(int(per_path) if (per_path is not None and str(per_path).strip() != "") else 1),
                 language=language or None,
                 under=under or None,
                 kind=kind or None,
@@ -1064,7 +1064,7 @@ async def repo_search(
             str(int(limit)),
             "--json",
         ]
-        if per_path and int(per_path) > 0:
+        if (per_path is not None and str(per_path).strip() != ""):
             cmd += ["--per-path", str(int(per_path))]
         if language:
             cmd += ["--language", language]
@@ -1408,8 +1408,8 @@ async def repo_search(
             "path_regex": path_regex,
             "path_glob": path_globs,
             "not_glob": not_globs,
-            # Echo the user-provided compact flag in args, even if we disabled it for snippets
-            "compact": (bool(compact_raw) if (compact_raw is not None and str(compact_raw) != "") else bool(compact)),
+            # Echo the user-provided compact flag in args, normalized via _to_bool to respect strings like "false"/"0"
+            "compact": (_to_bool(compact_raw, compact)),
         },
         "used_rerank": bool(used_rerank),
         "rerank_counters": rerank_counters,
@@ -1727,6 +1727,35 @@ async def context_search(
       (payloads lacking code path metadata) and blends them with code results.
     - memory_weight scales memory scores when merging.
     """
+    # Unwrap kwargs if MCP client sent everything in a single kwargs string
+    if kwargs and not query and not limit:
+        # If all named params are None and kwargs has content, assume wrapped call
+        query = kwargs.get("query", query)
+        limit = kwargs.get("limit", limit)
+        per_path = kwargs.get("per_path", per_path)
+        include_memories = kwargs.get("include_memories", include_memories)
+        memory_weight = kwargs.get("memory_weight", memory_weight)
+        per_source_limits = kwargs.get("per_source_limits", per_source_limits)
+        include_snippet = kwargs.get("include_snippet", include_snippet)
+        context_lines = kwargs.get("context_lines", context_lines)
+        rerank_enabled = kwargs.get("rerank_enabled", rerank_enabled)
+        rerank_top_n = kwargs.get("rerank_top_n", rerank_top_n)
+        rerank_return_m = kwargs.get("rerank_return_m", rerank_return_m)
+        rerank_timeout_ms = kwargs.get("rerank_timeout_ms", rerank_timeout_ms)
+        highlight_snippet = kwargs.get("highlight_snippet", highlight_snippet)
+        collection = kwargs.get("collection", collection)
+        language = kwargs.get("language", language)
+        under = kwargs.get("under", under)
+        kind = kwargs.get("kind", kind)
+        symbol = kwargs.get("symbol", symbol)
+        path_regex = kwargs.get("path_regex", path_regex)
+        path_glob = kwargs.get("path_glob", path_glob)
+        not_glob = kwargs.get("not_glob", not_glob)
+        ext = kwargs.get("ext", ext)
+        not_ = kwargs.get("not_", not_)
+        case = kwargs.get("case", case)
+        compact = kwargs.get("compact", compact)
+
     # Normalize inputs
     coll = (collection or DEFAULT_COLLECTION) or ""
     mcoll = (os.environ.get("MEMORY_COLLECTION_NAME") or coll) or ""
@@ -2353,6 +2382,447 @@ async def context_search(
     if memory_note:
         ret["memory_note"] = memory_note
     return ret
+@mcp.tool()
+async def expand_query(query: Any = None, max_new: Any = None) -> Dict[str, Any]:
+    """LLM-assisted query expansion. Returns up to 2 alternates.
+    Uses the local llama.cpp decoder when enabled; otherwise returns []."""
+    try:
+        qlist: list[str] = []
+        if isinstance(query, (list, tuple)):
+            qlist = [str(x) for x in query if str(x).strip()]
+        elif query is not None:
+            qlist = [str(query)] if str(query).strip() else []
+        cap = 2
+        if max_new not in (None, ""):
+            try:
+                cap = max(0, min(2, int(max_new)))
+            except Exception:
+                cap = 2
+        from scripts.refrag_llamacpp import LlamaCppRefragClient, is_decoder_enabled  # type: ignore
+        if not is_decoder_enabled() or not qlist:
+            return {"alternates": []}
+        prompt = (
+            "You expand code search queries. Given short queries, propose up to 2 compact alternates.\n"
+            "Return JSON array of strings only. No explanations.\n"
+            f"Queries: {qlist}\n"
+        )
+        client = LlamaCppRefragClient()
+        out = client.generate_with_soft_embeddings(
+            prompt=prompt,
+            max_tokens=int(os.environ.get("EXPAND_MAX_TOKENS", "64") or 64),
+            temperature=float(os.environ.get("EXPAND_TEMPERATURE", "0.08") or 0.08),
+            top_k=int(os.environ.get("EXPAND_TOP_K", "30") or 30),
+            top_p=float(os.environ.get("EXPAND_TOP_P", "0.9") or 0.9),
+            stop=["\n\n"],
+        )
+        import json as _json
+        alts: list[str] = []
+        try:
+            parsed = _json.loads(out)
+            if isinstance(parsed, list):
+                for s in parsed:
+                    if isinstance(s, str) and s and s not in qlist:
+                        alts.append(s)
+                        if len(alts) >= cap:
+                            break
+        except Exception:
+            pass
+        return {"alternates": alts}
+    except Exception as e:
+        return {"alternates": [], "error": str(e)}
+
+
+
+
+@mcp.tool()
+async def context_answer(
+    query: Any = None,
+    limit: Any = None,
+    per_path: Any = None,
+    budget_tokens: Any = None,
+    include_snippet: Any = None,
+    collection: Any = None,
+    max_tokens: Any = None,
+    temperature: Any = None,
+    mode: Any = None,  # "stitch" (default) or "pack"
+    expand: Any = None,  # whether to LLM-expand queries (up to 2 alternates)
+    **kwargs,
+) -> Dict[str, Any]:
+    """Answer a question using gate-first retrieval (ReFRAG Option B), assembling
+    context spans with citations and synthesizing an answer via llama.cpp.
+
+    Behavior:
+    - Runs hybrid retrieval with optional ReFRAG gate-first using MINI vectors.
+    - Applies micro-span merge + token budgeting (REFRAG_MODE=1) in-process.
+    - Builds citations (path + line range) from the budgeted spans.
+    - Calls llama.cpp to synthesize an answer from the assembled context.
+
+    Env knobs (read at call time):
+    - REFRAG_MODE=1 to enable span budgeting
+    - REFRAG_GATE_FIRST=1 to enable MINI-vector gating
+    - REFRAG_CANDIDATES (default 200) to size the gated candidate set
+    - MICRO_BUDGET_TOKENS (e.g., 1200) total token budget across spans
+    - MICRO_OUT_MAX_SPANS (e.g., 8) max number of citation spans to return
+    - LLAMACPP_URL (default http://localhost:8080)
+    - REFRAG_DECODER=1 to enable llama.cpp calls
+    """
+    # Unwrap kwargs if MCP client sent everything in a single kwargs string
+    if kwargs and not query:
+        query = kwargs.get("query", query)
+        limit = kwargs.get("limit", limit)
+        per_path = kwargs.get("per_path", per_path)
+        budget_tokens = kwargs.get("budget_tokens", budget_tokens)
+        include_snippet = kwargs.get("include_snippet", include_snippet)
+        collection = kwargs.get("collection", collection)
+        max_tokens = kwargs.get("max_tokens", max_tokens)
+        temperature = kwargs.get("temperature", temperature)
+        mode = kwargs.get("mode", mode)
+        expand = kwargs.get("expand", expand)
+
+    # Normalize query to list[str]
+    queries: list[str] = []
+    if isinstance(query, (list, tuple)):
+        queries = [str(q).strip() for q in query if str(q).strip()]
+    elif isinstance(query, str):
+        queries = _to_str_list_relaxed(query)
+    elif query is not None:
+        s = str(query).strip()
+        if s:
+            queries = [s]
+    if not queries:
+        return {"error": "query required"}
+
+    # Effective limits
+    try:
+        lim = int(limit) if (limit is not None and str(limit).strip() != "") else 10
+    except Exception:
+        lim = 10
+    try:
+        ppath = int(per_path) if (per_path is not None and str(per_path).strip() != "") else 1
+    except Exception:
+        ppath = 1
+
+    # Collection + model setup (reuse indexer defaults)
+    coll = (collection or DEFAULT_COLLECTION) or ""
+    model_name = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
+    model = _get_embedding_model(model_name)
+
+    # Prepare environment toggles for ReFRAG gate-first and budgeting
+    prev = {
+        "REFRAG_MODE": os.environ.get("REFRAG_MODE"),
+        "REFRAG_GATE_FIRST": os.environ.get("REFRAG_GATE_FIRST"),
+        "REFRAG_CANDIDATES": os.environ.get("REFRAG_CANDIDATES"),
+        "COLLECTION_NAME": os.environ.get("COLLECTION_NAME"),
+        "MICRO_BUDGET_TOKENS": os.environ.get("MICRO_BUDGET_TOKENS"),
+    }
+    # Enable ReFRAG gate-first for context compression
+    os.environ["REFRAG_MODE"] = "1"
+    os.environ["REFRAG_GATE_FIRST"] = os.environ.get("REFRAG_GATE_FIRST", "1") or "1"
+    os.environ["COLLECTION_NAME"] = coll
+    if budget_tokens is not None and str(budget_tokens).strip() != "":
+        os.environ["MICRO_BUDGET_TOKENS"] = str(budget_tokens)
+
+    # Run in-process hybrid search to get structured items with span budgeting info
+    from scripts.hybrid_search import run_hybrid_search  # type: ignore
+
+    # Optionally expand queries via local decoder (tight cap) when requested
+    queries = list(queries)
+    # For LLM answering, default to include snippets so the model sees actual code
+    try:
+        if include_snippet in (None, ""):
+            include_snippet = True
+    except Exception:
+        include_snippet = True
+    try:
+        do_expand = (
+            (expand is True) or
+            (str(expand).strip().lower() in {"1","true","yes","on"}) or
+            (str(os.environ.get("HYBRID_EXPAND", "0")).strip().lower() in {"1","true","yes","on"})
+        )
+    except Exception:
+        do_expand = False
+    if do_expand:
+        try:
+            from scripts.refrag_llamacpp import LlamaCppRefragClient, is_decoder_enabled  # type: ignore
+            if is_decoder_enabled():
+                prompt = (
+                    "You expand code search queries. Given one or more short queries, "
+                    "propose up to 2 compact alternates. Return JSON array of strings only.\n"
+                    f"Queries: {queries}\n"
+                )
+                client = LlamaCppRefragClient()
+                # tight decoding for expansions
+                out = client.generate_with_soft_embeddings(
+                    prompt=prompt, max_tokens=int(os.environ.get("EXPAND_MAX_TOKENS", "64") or 64),
+                    temperature=float(os.environ.get("EXPAND_TEMPERATURE", "0.08") or 0.08),
+                    top_k=int(os.environ.get("EXPAND_TOP_K", "30") or 30),
+                    top_p=float(os.environ.get("EXPAND_TOP_P", "0.9") or 0.9),
+                    stop=["\n\n"]
+                )
+                import json as _json
+                alts = []
+                try:
+                    parsed = _json.loads(out)
+                    if isinstance(parsed, list):
+                        for s in parsed:
+                            if isinstance(s, str) and s and s not in queries:
+                                alts.append(s)
+                                if len(alts) >= 2:
+                                    break
+                except Exception:
+                    pass
+                if alts:
+                    queries.extend(alts)
+        except Exception:
+            pass
+
+    # Default exclusions to avoid noisy self-test and cache artifacts
+    user_not_glob = kwargs.get("not_glob")
+    if isinstance(user_not_glob, str):
+        user_not_glob = [user_not_glob]
+    base_excludes = [".selftest_repo/", ".pytest_cache/"]
+    # Add robust variants for absolute and recursive matching
+    def _variants(p: str) -> list[str]:
+        p = str(p).strip().strip()
+        if not p:
+            return []
+        p = p.replace("\\", "/").lstrip("/")
+        return [
+            p,  # relative
+            f"/work/{p}",  # absolute in payloads
+            f"**/{p}**",  # recursive glob
+        ]
+    default_not_glob = []
+    for b in base_excludes:
+        default_not_glob.extend(_variants(b))
+    # Dedup while preserving order
+    seen = set()
+    eff_not_glob = []
+    for g in default_not_glob + (user_not_glob or []):
+        s = str(g).strip()
+        if s and s not in seen:
+            eff_not_glob.append(s)
+            seen.add(s)
+
+    items = []
+    err = None
+    try:
+        # Respect 'collection' arg by passing it via env to hybrid_search
+        coll = (collection or kwargs.get("collection") or os.environ.get("COLLECTION_NAME") or "").strip()
+        if coll:
+            os.environ["COLLECTION_NAME"] = coll
+
+        # Debug: log the search parameters
+        if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+            print(f"DEBUG SEARCH PARAMS: queries={queries}, limit={int(max(lim, 4))}, per_path={int(max(ppath, 0))}")
+            print(f"DEBUG ENV: REFRAG_MODE={os.environ.get('REFRAG_MODE')}, COLLECTION_NAME={os.environ.get('COLLECTION_NAME')}")
+            print(f"DEBUG FILTERS: not_glob={eff_not_glob}")
+
+        items = run_hybrid_search(
+            queries=queries,
+            limit=int(max(lim, 4)),  # fetch a few extra for budgeting
+            per_path=int(max(ppath, 0)),
+            language=kwargs.get("language") or None,
+            under=kwargs.get("under") or None,
+            kind=kwargs.get("kind") or None,
+            symbol=kwargs.get("symbol") or None,
+            ext=kwargs.get("ext") or None,
+            not_filter=kwargs.get("not_") or kwargs.get("not") or None,
+            case=kwargs.get("case") or None,
+            path_regex=kwargs.get("path_regex") or None,
+            path_glob=(kwargs.get("path_glob") or None),
+            not_glob=eff_not_glob,
+            expand=str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower() in {"1","true","yes","on"},
+            model=model,
+        )
+
+        # Debug: log search results
+        if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+            print(f"DEBUG SEARCH RESULTS: found {len(items)} items")
+            for i, item in enumerate(items[:3]):
+                print(f"  Item {i+1}: {item.get('path')} lines {item.get('start_line')}-{item.get('end_line')}")
+
+        # Fallback: if nothing matched (e.g., overly strict filters), retry with relaxed settings
+        if not items:
+            items = run_hybrid_search(
+                queries=queries,
+                limit=int(max(lim, 4)),
+                per_path=int(max(ppath, 0)),
+                not_glob=eff_not_glob,
+                expand=True,
+                model=model,
+            )
+
+        # Filter out memory-like items without a valid path to avoid empty citations
+        items = [it for it in items if str(it.get("path") or "").strip()]
+
+        # Apply ReFRAG span budgeting to compress context (33% compression target)
+        from scripts.hybrid_search import _merge_and_budget_spans  # type: ignore
+        try:
+            if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                print(f"DEBUG: Before span budgeting: {len(items)} items")
+            budgeted = _merge_and_budget_spans(items)
+            if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                print(f"DEBUG: After span budgeting: {len(budgeted)} items")
+        except Exception as e:
+            if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                print(f"DEBUG: Span budgeting failed: {e}, using raw items")
+            budgeted = items
+
+        # Enforce an output max spans knob - do this BEFORE env restore
+        try:
+            out_max = int(os.environ.get("MICRO_OUT_MAX_SPANS", "8") or 8)
+        except Exception:
+            out_max = 8
+        spans = budgeted[: max(1, min(out_max, lim))]
+
+        # Debug span selection
+        if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+            print(f"DEBUG SPAN SELECTION: items={len(items)}, budgeted={len(budgeted)}, out_max={out_max}, lim={lim}, spans={len(spans)}")
+
+    except Exception as e:
+        err = str(e)
+        spans = []
+    finally:
+        # Restore env to previous values to avoid cross-call bleed
+        for k, v in prev.items():
+            if v is None:
+                try:
+                    del os.environ[k]
+                except Exception:
+                    pass
+            else:
+                os.environ[k] = v
+    if err is not None:
+        return {"error": f"hybrid search failed: {err}", "citations": [], "query": queries}
+
+    # Build citations and context payload for the decoder
+    citations: list[Dict[str, Any]] = []
+    context_blocks: list[str] = []
+    for idx, it in enumerate(spans, 1):
+        path = str(it.get("path") or "")
+        sline = int(it.get("start_line") or 0)
+        eline = int(it.get("end_line") or 0)
+        citations.append({
+            "id": idx,
+            "path": path,
+            "start_line": sline,
+            "end_line": eline,
+        })
+        # ALWAYS read actual code from disk - ignore metadata text from Qdrant
+        snippet = ""
+        try:
+            if path and sline and eline:
+                candidates = [path]
+                if path.startswith("/work/"):
+                    rel = path[len("/work/"):]
+                    candidates.extend([rel, os.path.join(os.getcwd(), rel)])
+                for pth in candidates:
+                    if os.path.exists(pth):
+                        with open(pth, "r", encoding="utf-8", errors="ignore") as f:
+                            lines = f.readlines()
+                        s0 = max(1, sline) - 1
+                        e0 = min(len(lines), max(sline, eline))
+                        disk_snip = "".join(lines[s0:e0]).strip()
+                        if disk_snip:
+                            snippet = disk_snip
+                            break
+
+            if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                print(f"DEBUG: Snippet {idx} from {path}:{sline}-{eline}, length={len(snippet)}, starts with: {snippet[:80] if snippet else 'EMPTY'}...")
+        except Exception as e:
+            if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                print(f"DEBUG: Snippet extraction failed for {path}: {e}")
+        header = f"[{idx}] {path}:{sline}-{eline}"
+        # Keep snippets small - we want total prompt under 4k chars for 1.5B model
+        try:
+            MAX_SNIPPET_CHARS = int(os.environ.get("CTX_SNIPPET_CHARS", "600") or 600)
+        except Exception:
+            MAX_SNIPPET_CHARS = 600
+        if snippet and len(snippet) > MAX_SNIPPET_CHARS:
+            snippet = snippet[:MAX_SNIPPET_CHARS] + "\n..."
+        block = header + "\n" + (snippet.strip() if snippet else "(no code)")
+        context_blocks.append(block)
+
+
+
+    # Debug: log span details
+    if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+        print(f"DEBUG: spans={len(spans)}, context_blocks={len(context_blocks)}")
+        if context_blocks:
+            print(f"DEBUG: first context block: {context_blocks[0][:200]}...")
+        else:
+            print("DEBUG: no context blocks!")
+
+
+
+    # Optional stop sequences via env (comma-separated)
+    stop_env = os.environ.get("DECODER_STOP", "")
+    stops = [s for s in (stop_env.split(",") if stop_env else []) if s]
+
+    # Decoder parameter tuning for small models (defaults can be overridden via args or env)
+    def _to_int(v, d):
+        try:
+            return int(v)
+        except Exception:
+            return d
+    def _to_float(v, d):
+        try:
+            return float(v)
+        except Exception:
+            return d
+    # Default 300 tokens for concise answers
+    mtok = _to_int(max_tokens, _to_int(os.environ.get("DECODER_MAX_TOKENS", "300"), 300))
+    temp = _to_float(temperature, _to_float(os.environ.get("DECODER_TEMPERATURE", "0.1"), 0.1))
+    top_k = _to_int(os.environ.get("DECODER_TOP_K", "40"), 40)
+    top_p = _to_float(os.environ.get("DECODER_TOP_P", "0.92"), 0.92)
+
+    # Call llama.cpp decoder (requires REFRAG_DECODER=1)
+    try:
+        from scripts.refrag_llamacpp import LlamaCppRefragClient, is_decoder_enabled  # type: ignore
+        if not is_decoder_enabled():
+            return {
+                "error": "decoder disabled: set REFRAG_DECODER=1 and start llamacpp",
+                "citations": citations,
+                "query": queries,
+            }
+        client = LlamaCppRefragClient()
+
+        # SIMPLE APPROACH: One LLM call with all context, tight prompt, 300 token limit
+        qtxt = "\n".join(queries)
+        all_context = "\n\n".join(context_blocks) if context_blocks else "(no code found)"
+
+        prompt = (
+            "Answer the question using ONLY the code provided. Be concise (max 300 chars).\n"
+            f"Question: {qtxt}\n\n"
+            f"Code:\n{all_context}\n\n"
+            "Answer:"
+        )
+
+        if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+            print(f"DEBUG: Single LLM call, prompt length={len(prompt)}")
+
+        answer = client.generate_with_soft_embeddings(
+            prompt=prompt,
+            max_tokens=mtok,
+            temperature=temp,
+            top_k=top_k,
+            top_p=top_p,
+            stop=stops,
+        )
+
+        # Debug: log the raw LLM response
+        if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+            print(f"DEBUG: raw LLM answer: '{answer}' (len={len(answer)})")
+    except Exception as e:
+        return {"error": f"decoder call failed: {e}", "citations": citations, "query": queries}
+
+    return {
+        "answer": answer.strip(),
+        "citations": citations,
+        "query": queries,
+        "used": {"gate_first": True, "refrag": True},
+    }
 
 
 @mcp.tool()

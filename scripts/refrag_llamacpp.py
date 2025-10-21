@@ -66,7 +66,9 @@ class LlamaCppRefragClient:
         req = request.Request(self.base_url.rstrip("/") + path, method="POST")
         req.add_header("Content-Type", "application/json")
         data = _json.dumps(json_payload).encode("utf-8")
-        with request.urlopen(req, data=data, timeout=30) as resp:
+        import os as _os
+        _timeout = float(_os.environ.get("LLAMACPP_TIMEOUT_SEC", "60") or 60)
+        with request.urlopen(req, data=data, timeout=_timeout) as resp:
             body = resp.read()
         return _json.loads(body.decode("utf-8"))
 

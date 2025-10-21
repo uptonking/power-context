@@ -581,6 +581,59 @@ from scripts.utils import sanitize_vector_name as _sanitize_vector_name
 from scripts.utils import lex_hash_vector_text as _lex_hash_vector_text
 
 
+# Optional index-time pseudo descriptions for micro-chunks
+# Enabled via REFRAG_PSEUDO_DESCRIBE=1 and requires REFRAG_DECODER=1
+
+def _pseudo_describe_enabled() -> bool:
+    try:
+        return str(os.environ.get("REFRAG_PSEUDO_DESCRIBE", "0")).strip().lower() in {"1","true","yes","on"}
+    except Exception:
+        return False
+
+
+def generate_pseudo_tags(text: str) -> tuple[str, list[str]]:
+    """Best-effort: ask local decoder to produce a short label and 3-6 tags.
+    Returns (pseudo, tags). On failure returns ("", [])."""
+    pseudo: str = ""
+    tags: list[str] = []
+    if not _pseudo_describe_enabled() or not text.strip():
+        return pseudo, tags
+    try:
+        from scripts.refrag_llamacpp import LlamaCppRefragClient, is_decoder_enabled  # type: ignore
+        if not is_decoder_enabled():
+            return "", []
+        # Keep decoding tight/fast – this is only enrichment for retrieval
+        prompt = (
+            "You label code spans for search enrichment.\n"
+            "Return strictly JSON: {\"pseudo\": string (<=20 tokens), \"tags\": [3-6 short strings]}.\n"
+            "Code:\n" + text[:2000]
+        )
+        client = LlamaCppRefragClient()
+        out = client.generate_with_soft_embeddings(
+            prompt=prompt,
+            max_tokens=int(os.environ.get("PSEUDO_MAX_TOKENS", "96") or 96),
+            temperature=float(os.environ.get("PSEUDO_TEMPERATURE", "0.10") or 0.10),
+            top_k=int(os.environ.get("PSEUDO_TOP_K", "30") or 30),
+            top_p=float(os.environ.get("PSEUDO_TOP_P", "0.9") or 0.9),
+            stop=["\n\n"],
+        )
+        import json as _json
+        try:
+            obj = _json.loads(out)
+            if isinstance(obj, dict):
+                p = obj.get("pseudo")
+                t = obj.get("tags")
+                if isinstance(p, str):
+                    pseudo = p.strip()[:256]
+                if isinstance(t, list):
+                    tags = [str(x).strip() for x in t if str(x).strip()][:6]
+        except Exception:
+            pass
+    except Exception:
+        return "", []
+    return pseudo, tags
+
+
 def ensure_collection(client: QdrantClient, name: str, dim: int, vector_name: str):
     """Ensure collection exists with named vectors.
     Always includes dense (vector_name) and lexical (LEX_VECTOR_NAME).
@@ -709,6 +762,7 @@ def ensure_payload_indexes(client: QdrantClient, collection: str):
         "metadata.last_modified_at",
         "metadata.churn_count",
         "metadata.author_count",
+        "pid_str",
     ):
         try:
             client.create_payload_index(
@@ -1671,13 +1725,30 @@ def index_single_file(
                 "author_count": int(author_count),
             },
         }
+        # Optional LLM enrichment for lexical retrieval: pseudo + tags per micro-chunk
+        pseudo, tags = ("", [])
+        try:
+            pseudo, tags = generate_pseudo_tags(ch.get("text") or "")
+            if pseudo:
+                payload["pseudo"] = pseudo
+            if tags:
+                payload["tags"] = tags
+        except Exception:
+            pass
         batch_texts.append(info)
         batch_meta.append(payload)
         batch_ids.append(hash_id(ch["text"], str(file_path), ch["start"], ch["end"]))
-        batch_lex.append(_lex_hash_vector_text(ch.get("text") or ""))
+        aug_lex_text = (ch.get("text") or "") + (" " + pseudo if pseudo else "") + (" " + " ".join(tags) if tags else "")
+        batch_lex.append(_lex_hash_vector_text(aug_lex_text))
 
     if batch_texts:
         vectors = embed_batch(model, batch_texts)
+        # Inject pid_str into payloads for server-side gating
+        for _idx, _m in enumerate(batch_meta):
+            try:
+                _m["pid_str"] = str(batch_ids[_idx])
+            except Exception:
+                pass
         points = [
             make_point(i, v, lx, m)
             for i, v, lx, m in zip(batch_ids, vectors, batch_lex, batch_meta)
@@ -1765,6 +1836,10 @@ def index_repo(
         "yes",
         "on",
     }
+    # Debug chunking mode
+    if os.environ.get("DEBUG_CHUNKING"):
+        print(f"[DEBUG] INDEX_SEMANTIC_CHUNKS={os.environ.get('INDEX_SEMANTIC_CHUNKS', 'NOT_SET')} -> use_semantic={use_semantic}")
+        print(f"[DEBUG] INDEX_MICRO_CHUNKS={os.environ.get('INDEX_MICRO_CHUNKS', 'NOT_SET')}")
 
     files_seen = 0
     files_indexed = 0
@@ -1884,15 +1959,32 @@ def index_repo(
                     "author_count": int(author_count),
                 },
             }
+            # Optional LLM enrichment for lexical retrieval: pseudo + tags per micro-chunk
+            pseudo, tags = ("", [])
+            try:
+                pseudo, tags = generate_pseudo_tags(ch.get("text") or "")
+                if pseudo:
+                    payload["pseudo"] = pseudo
+                if tags:
+                    payload["tags"] = tags
+            except Exception:
+                pass
             batch_texts.append(info)
             batch_meta.append(payload)
             batch_ids.append(
                 hash_id(ch["text"], str(file_path), ch["start"], ch["end"])
             )
-            batch_lex.append(_lex_hash_vector_text(ch.get("text") or ""))
+            aug_lex_text = (ch.get("text") or "") + (" " + pseudo if pseudo else "") + (" " + " ".join(tags) if tags else "")
+            batch_lex.append(_lex_hash_vector_text(aug_lex_text))
             points_indexed += 1
             if len(batch_texts) >= BATCH_SIZE:
                 vectors = embed_batch(model, batch_texts)
+                # Inject pid_str into payloads for server-side gating
+                for _idx, _m in enumerate(batch_meta):
+                    try:
+                        _m["pid_str"] = str(batch_ids[_idx])
+                    except Exception:
+                        pass
                 points = [
                     make_point(i, v, lx, m)
                     for i, v, lx, m in zip(batch_ids, vectors, batch_lex, batch_meta)
@@ -1907,6 +1999,12 @@ def index_repo(
 
     if batch_texts:
         vectors = embed_batch(model, batch_texts)
+        # Inject pid_str into payloads for server-side gating (final batch)
+        for _idx, _m in enumerate(batch_meta):
+            try:
+                _m["pid_str"] = str(batch_ids[_idx])
+            except Exception:
+                pass
         points = [
             make_point(i, v, lx, m)
             for i, v, lx, m in zip(batch_ids, vectors, batch_lex, batch_meta)
