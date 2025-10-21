@@ -85,6 +85,20 @@ SNIPPET_MAX_BYTES = int(os.environ.get("MCP_SNIPPET_MAX_BYTES", "8192") or 8192)
 
 MCP_TOOL_TIMEOUT_SECS = float(os.environ.get("MCP_TOOL_TIMEOUT_SECS", "3600") or 3600.0)
 
+
+def _work_script(name: str) -> str:
+    """Return path to a script under /work if present, else local ./scripts.
+    Keeps Docker/default behavior but works in local dev without /work mount.
+    """
+    try:
+        w = os.path.join("/work", "scripts", name)
+        if os.path.exists(w):
+            return w
+    except Exception:
+        pass
+    return os.path.join(os.getcwd(), "scripts", name)
+
+
 mcp = FastMCP(APP_NAME)
 
 # Lightweight readiness endpoint on a separate health port (non-MCP), optional
@@ -117,6 +131,8 @@ def _start_readyz_server():
                         self.end_headers()
                     except Exception:
                         pass
+
+
 
             def log_message(self, *args, **kwargs):
                 # Quiet health server logs
@@ -442,7 +458,7 @@ async def qdrant_index_root(
     env["QDRANT_URL"] = QDRANT_URL
     env["COLLECTION_NAME"] = coll
 
-    cmd = ["python", "/work/scripts/ingest_code.py", "--root", "/work"]
+    cmd = ["python", _work_script("ingest_code.py"), "--root", "/work"]
     if recreate:
         cmd.append("--recreate")
 
@@ -740,7 +756,7 @@ async def qdrant_index(
 
     cmd = [
         "python",
-        "/work/scripts/ingest_code.py",
+        _work_script("ingest_code.py"),
         "--root",
         root,
     ]
@@ -757,7 +773,7 @@ async def qdrant_prune(**kwargs) -> Dict[str, Any]:
     env = os.environ.copy()
     env["PRUNE_ROOT"] = "/work"
 
-    cmd = ["python", "/work/scripts/prune.py"]
+    cmd = ["python", _work_script("prune.py")]
     res = await _run_async(cmd, env=env)
     return res
 
@@ -1059,7 +1075,7 @@ async def repo_search(
         # Try hybrid search via subprocess (JSONL output)
         cmd = [
             "python",
-            "/work/scripts/hybrid_search.py",
+            _work_script("hybrid_search.py"),
             "--limit",
             str(int(limit)),
             "--json",
@@ -1099,6 +1115,33 @@ async def repo_search(
                 json_lines.append(obj)
             except Exception:
                 continue
+        # Fallback: if subprocess yielded nothing (e.g., local dev without /work), try in-process once
+        if (not json_lines):
+            try:
+                from scripts.hybrid_search import run_hybrid_search  # type: ignore
+
+                model_name = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
+                model = _get_embedding_model(model_name)
+                items = run_hybrid_search(
+                    queries=queries,
+                    limit=int(limit),
+                    per_path=(int(per_path) if (per_path is not None and str(per_path).strip() != "") else 1),
+                    language=language or None,
+                    under=under or None,
+                    kind=kind or None,
+                    symbol=symbol or None,
+                    ext=ext or None,
+                    not_filter=not_ or None,
+                    case=case or None,
+                    path_regex=path_regex or None,
+                    path_glob=(path_globs or None),
+                    not_glob=(not_globs or None),
+                    expand=str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower() in {"1", "true", "yes", "on"},
+                    model=model,
+                )
+                json_lines = items
+            except Exception:
+                pass
 
     # Optional rerank fallback path: if enabled, attempt; on timeout or error, keep hybrid
     used_rerank = False
@@ -1216,7 +1259,7 @@ async def repo_search(
                     rq = queries[0] if queries else ""
                     rcmd = [
                         "python",
-                        "/work/scripts/rerank_local.py",
+                        _work_script("rerank_local.py"),
                         "--query",
                         rq,
                         "--topk",
@@ -2642,16 +2685,26 @@ async def context_answer(
             for i, item in enumerate(items[:3]):
                 print(f"  Item {i+1}: {item.get('path')} lines {item.get('start_line')}-{item.get('end_line')}")
 
-        # Fallback: if nothing matched (e.g., overly strict filters), retry with relaxed settings
+        # Fallback: if nothing matched (e.g., overly strict filters), retry without gate-first
         if not items:
-            items = run_hybrid_search(
-                queries=queries,
-                limit=int(max(lim, 4)),
-                per_path=int(max(ppath, 0)),
-                not_glob=eff_not_glob,
-                expand=True,
-                model=model,
-            )
+            if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                print("DEBUG: 0 items after gate-first; retrying without gating")
+            _prev_gate = os.environ.get("REFRAG_GATE_FIRST")
+            os.environ["REFRAG_GATE_FIRST"] = "0"
+            try:
+                items = run_hybrid_search(
+                    queries=queries,
+                    limit=int(max(lim, 4)),
+                    per_path=int(max(ppath, 0)),
+                    not_glob=eff_not_glob,
+                    expand=True,
+                    model=model,
+                )
+            finally:
+                if _prev_gate is not None:
+                    os.environ["REFRAG_GATE_FIRST"] = _prev_gate
+                else:
+                    os.environ.pop("REFRAG_GATE_FIRST", None)
 
         # Filter out memory-like items without a valid path to avoid empty citations
         items = [it for it in items if str(it.get("path") or "").strip()]
@@ -2793,7 +2846,8 @@ async def context_answer(
         all_context = "\n\n".join(context_blocks) if context_blocks else "(no code found)"
 
         prompt = (
-            "Answer the question using ONLY the code provided. Be concise (max 300 chars).\n"
+            "Using ONLY the cited code, write a concise factual summary naming the file/function(s) and what they do.\n"
+            "If insufficient code, reply: 'insufficient context'.\n"
             f"Question: {qtxt}\n\n"
             f"Code:\n{all_context}\n\n"
             "Answer:"
@@ -2810,6 +2864,15 @@ async def context_answer(
             top_p=top_p,
             stop=stops,
         )
+
+        # Optional length cap: if CTX_SUMMARY_CHARS is a positive int, truncate; otherwise don't cap
+        try:
+            _cap_env = str(os.environ.get("CTX_SUMMARY_CHARS", "")).strip()
+            _cap = int(_cap_env) if _cap_env not in {"", None} else 0
+        except Exception:
+            _cap = 0
+        if isinstance(answer, str) and _cap and _cap > 0 and len(answer) > _cap:
+            answer = answer[: max(0, _cap - 3) ] + "..."
 
         # Debug: log the raw LLM response
         if os.environ.get("DEBUG_CONTEXT_ANSWER"):

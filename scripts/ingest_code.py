@@ -488,8 +488,7 @@ def chunk_by_tokens(
     try:
         from tokenizers import Tokenizer  # lightweight, already in requirements
     except Exception:
-        # Fallback to line-based if tokenizers not available
-        return chunk_lines(text, max_lines=120, overlap=20)
+        Tokenizer = None  # type: ignore
 
     try:
         k = int(os.environ.get("MICRO_CHUNK_TOKENS", str(k_tokens or 16)) or 16)
@@ -503,23 +502,36 @@ def chunk_by_tokens(
     except Exception:
         s = max(1, k // 2)
 
+    # Helper: simple regex-based token offsets when HF tokenizer JSON is unavailable
+    def _simple_offsets(txt: str):
+        import re
+        offs = []
+        for m in re.finditer(r"\S+", txt):
+            offs.append((m.start(), m.end()))
+        return offs
+
+    offsets = []
     # Load tokenizer; default to local model file if present
     tok_path = os.environ.get(
         "TOKENIZER_JSON", str((ROOT_DIR / "models" / "tokenizer.json"))
     )
-    try:
-        tokenizer = Tokenizer.from_file(tok_path)
-    except Exception:
-        # As a fallback, still return line-based chunks
-        return chunk_lines(text, max_lines=120, overlap=20)
+    if Tokenizer is not None:
+        try:
+            tokenizer = Tokenizer.from_file(tok_path)
+            try:
+                enc = tokenizer.encode(text)
+                offsets = getattr(enc, "offsets", None) or []
+            except Exception:
+                offsets = []
+        except Exception:
+            offsets = []
 
-    # Encode with offsets to map tokens back to character ranges
-    try:
-        enc = tokenizer.encode(text)
-    except Exception:
-        return chunk_lines(text, max_lines=120, overlap=20)
+    if not offsets:
+        # Fallback to simple regex tokenization; avoids degrading to 120-line chunks
+        if os.environ.get("DEBUG_CHUNKING"):
+            print("[ingest] tokenizers missing/unusable -> using simple regex tokenization")
+        offsets = _simple_offsets(text)
 
-    offsets = getattr(enc, "offsets", None) or []
     if not offsets:
         return chunk_lines(text, max_lines=120, overlap=20)
 

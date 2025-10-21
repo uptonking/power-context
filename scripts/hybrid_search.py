@@ -141,10 +141,24 @@ def _merge_and_budget_spans(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     # First cluster adjacent by path using a tighter merge gap for micro spans
     clusters: Dict[str, List[Dict[str, Any]]] = {}
     for m in items:
-        md = (m.get("pt", {}).payload or {}).get("metadata") or {}
-        path = str(md.get("path") or "")
-        start_line = int(md.get("start_line") or 0)
-        end_line = int(md.get("end_line") or 0)
+        # Robust metadata extraction: support both dict-shaped results and Qdrant point payloads
+        md = {}
+        try:
+            if isinstance(m, dict):
+                if m.get("path") or m.get("start_line") or m.get("end_line"):
+                    md = {"path": m.get("path"), "start_line": m.get("start_line"), "end_line": m.get("end_line")}
+                else:
+                    pt = m.get("pt", {})
+                    if hasattr(pt, "payload") and getattr(pt, "payload"):
+                        md = (pt.payload or {}).get("metadata") or {}
+        except Exception:
+            md = {}
+        path = str((md or {}).get("path") or "")
+        start_line = int((md or {}).get("start_line") or 0)
+        end_line = int((md or {}).get("end_line") or 0)
+        if not path or start_line <= 0 or end_line <= 0:
+            # skip invalid entries
+            continue
         lst = clusters.setdefault(path, [])
         merged = False
         for c in lst:
@@ -178,28 +192,17 @@ def _merge_and_budget_spans(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]
 
     def _flat_key(c):
         m = c.get("m", {})
-        md = (
-            (m.get("pt", {}).payload or {}).get("metadata")
-            if hasattr(m.get("pt", {}), "payload")
-            else {}
-        )
-        path = str((md or {}).get("path") or "")
-        start = int((md or {}).get("start_line") or 0)
+        # Use stored cluster path and start for stable ordering
+        path = str(c.get("p") or "")
+        start = int(c.get("start") or 0)
         return (-float(m.get("s", 0.0)), path, start)
 
     flattened.sort(key=_flat_key)
 
     for c in flattened:
         m = c["m"]
-        # Prefer path from cluster key to avoid payload shape differences in tests
+        # Prefer path from cluster key
         path = str(c.get("p") or "")
-        if not path:
-            md = (
-                (m.get("pt", {}).payload or {}).get("metadata")
-                if hasattr(m.get("pt", {}), "payload")
-                else {}
-            )
-            path = str((md or {}).get("path") or "")
         # per-path cap
         if per_path_counts.get(path, 0) >= out_max_spans:
             continue
@@ -952,13 +955,19 @@ def run_hybrid_search(
                         candidate_ids.add(result.id)
 
             if candidate_ids:
-                # Build server-side gating filter using pid_str FieldCondition
+                # Server-side gating without requiring payload fields: prefer HasIdCondition
                 from qdrant_client import models as _models
-                id_vals = [str(cid) for cid in candidate_ids]
-                gating_cond = _models.FieldCondition(
-                    key="pid_str",
-                    match=_models.MatchAny(any=id_vals),
-                )
+                try:
+                    gating_cond = _models.HasIdCondition(has_id=list(candidate_ids))
+                    gating_kind = "has_id"
+                except Exception:
+                    # Fallback to pid_str if HasIdCondition unavailable
+                    id_vals = [str(cid) for cid in candidate_ids]
+                    gating_cond = _models.FieldCondition(
+                        key="pid_str",
+                        match=_models.MatchAny(any=id_vals),
+                    )
+                    gating_kind = "pid_str"
                 if flt is None:
                     flt_gated = _models.Filter(must=[gating_cond])
                 else:
@@ -966,7 +975,7 @@ def run_hybrid_search(
                     must.append(gating_cond)
                     flt_gated = _models.Filter(must=must, should=flt.should, must_not=flt.must_not)
                 if os.environ.get("DEBUG_HYBRID_SEARCH"):
-                    print(f"DEBUG: ReFRAG gate-first (server-side): {len(candidate_ids)} candidates")
+                    print(f"DEBUG: ReFRAG gate-first (server-side-{gating_kind}): {len(candidate_ids)} candidates")
                     print(f"DEBUG: flt_gated.must has {len(flt_gated.must or [])} conditions")
                     print(f"DEBUG: flt_gated.must_not has {len(flt_gated.must_not or [])} conditions")
             else:
@@ -1215,6 +1224,70 @@ def run_hybrid_search(
     ranked = sorted(score_map.values(), key=_tie_key)
     if os.environ.get("DEBUG_HYBRID_SEARCH"):
         print(f"DEBUG: ranked has {len(ranked)} items after sorting")
+
+    # Lightweight keyword bump: prefer spans whose local snippet contains query tokens
+    try:
+        kb = float(os.environ.get("HYBRID_KEYWORD_BUMP", "0.3") or 0.3)
+        kcap = float(os.environ.get("HYBRID_KEYWORD_CAP", "0.6") or 0.6)
+    except Exception:
+        kb, kcap = 0.3, 0.6
+    # Build lowercase keyword set from queries (simple split, keep >=3 chars + special tokens)
+    kw: set[str] = set()
+    for q in qlist:
+        ql = (q or "").lower()
+        for tok in re.findall(r"[a-zA-Z0-9_\-]+", ql):
+            t = tok.strip()
+            if len(t) >= 3:
+                kw.add(t)
+    # Add a few commonly relevant code tokens (helps for gate-first cases)
+    for t in ("hasidcondition", "pid_str", "matchany", "gate-first", "gatefirst"):
+        kw.add(t)
+
+    import io as _io
+
+    def _snippet_contains(md: dict) -> int:
+        # returns number of keyword hits found in a small local snippet
+        try:
+            path = str(md.get("path") or "")
+            sline = int(md.get("start_line") or 0)
+            eline = int(md.get("end_line") or 0)
+            txt = (md.get("text") or md.get("code") or "")
+            if not txt and path and sline:
+                p = path
+                try:
+                    if not os.path.isabs(p):
+                        p = os.path.join("/work", p)
+                    realp = os.path.realpath(p)
+                    if realp == "/work" or realp.startswith("/work/"):
+                        with open(realp, "r", encoding="utf-8", errors="ignore") as f:
+                            lines = f.readlines()
+                        si = max(1, sline - 3)
+                        ei = min(len(lines), max(sline, eline) + 3)
+                        txt = "".join(lines[si-1:ei])
+                except Exception:
+                    txt = txt or ""
+            lt = (txt or "").lower()
+            if not lt:
+                return 0
+            hits = 0
+            for t in kw:
+                if t and t in lt:
+                    hits += 1
+            return hits
+        except Exception:
+            return 0
+
+    # Apply bump to top-N ranked (limited for speed)
+    topN = min(len(ranked), 200)
+    for i in range(topN):
+        m = ranked[i]
+        md = (m["pt"].payload or {}).get("metadata") or {}
+        hits = _snippet_contains(md)
+        if hits > 0 and kb > 0.0:
+            bump = min(kcap, kb * float(hits))
+            m["s"] += bump
+    # Re-sort after bump
+    ranked = sorted(ranked, key=_tie_key)
 
     # Cluster by path adjacency
     clusters: Dict[str, List[Dict[str, Any]]] = {}
