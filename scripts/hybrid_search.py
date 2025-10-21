@@ -1515,10 +1515,22 @@ def run_hybrid_search(
                 print(f"DEBUG: Filtered out item with empty path: {_metadata}")
             continue
 
+        # Normalize path for local/dev: prefer workspace-absolute when available
+        _emit_path = _path
+        try:
+            if isinstance(_emit_path, str) and _emit_path.startswith("/work/"):
+                _rel = _emit_path[len("/work/"):]
+                if _rel and os.path.exists(_rel):
+                    _emit_path = os.path.realpath(_rel)
+            elif isinstance(_emit_path, str) and (not os.path.isabs(_emit_path)) and os.path.exists(_emit_path):
+                _emit_path = os.path.realpath(_emit_path)
+        except Exception:
+            _emit_path = _path
+
         items.append(
             {
                 "score": round(float(m["s"]), 4),
-                "path": _path,
+                "path": _emit_path,
                 "symbol": _symp,
                 "start_line": start_line,
                 "end_line": end_line,
