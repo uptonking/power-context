@@ -728,14 +728,34 @@ def dense_query(
             with_payload=True,
         )
         return getattr(qp, "points", qp)
-    except AttributeError:
-        return client.search(
-            collection_name=_collection(),
-            query_vector={"name": vec_name, "vector": v},
-            limit=per_query,
-            with_payload=True,
-            query_filter=flt,
-        )
+    except Exception as e:
+        # Some Qdrant versions reject empty/malformed filters with 400: retry without a filter
+        _msg = str(e).lower()
+        if "expected some form of condition" in _msg or "format error in json body" in _msg:
+            try:
+                qp = client.query_points(
+                    collection_name=_collection(),
+                    query=v,
+                    using=vec_name,
+                    query_filter=None,
+                    search_params=models.SearchParams(hnsw_ef=ef),
+                    limit=per_query,
+                    with_payload=True,
+                )
+                return getattr(qp, "points", qp)
+            except Exception:
+                pass
+        # Fallback to legacy search API
+        try:
+            return client.search(
+                collection_name=_collection(),
+                query_vector={"name": vec_name, "vector": v},
+                limit=per_query,
+                with_payload=True,
+                query_filter=(None if ("expected some form of condition" in _msg or "format error in json body" in _msg) else flt),
+            )
+        except Exception:
+            raise
 
 
 # In-process API: run hybrid search and return structured items list
@@ -988,6 +1008,17 @@ def run_hybrid_search(
             flt_gated = flt
     else:
         flt_gated = flt
+
+    # Sanitize filter: if empty, drop it to avoid Qdrant 400s on invalid filters
+    try:
+        if flt_gated is not None:
+            _m = [c for c in (getattr(flt_gated, "must", None) or []) if c is not None]
+            _s = [c for c in (getattr(flt_gated, "should", None) or []) if c is not None]
+            _mn = [c for c in (getattr(flt_gated, "must_not", None) or []) if c is not None]
+            if not _m and not _s and not _mn:
+                flt_gated = None
+    except Exception:
+        pass
 
     result_sets: List[List[Any]] = [
         dense_query(client, vec_name, v, flt_gated, max(24, limit)) for v in embedded
