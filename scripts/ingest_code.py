@@ -1971,6 +1971,25 @@ def index_repo(
                 sym = ch.get("symbol") or sym
             if "symbol_path" in ch and ch.get("symbol_path"):
                 sym_path = ch.get("symbol_path") or sym_path
+            # Track both container path (/work mirror) and original host path
+            _cur_path = str(file_path)
+            _host_root = str(os.environ.get("HOST_INDEX_PATH") or "").strip().rstrip("/")
+            _host_path = None
+            _container_path = None
+            try:
+                if _cur_path.startswith("/work/") and _host_root:
+                    _rel = _cur_path[len("/work/"):]
+                    _host_path = os.path.realpath(os.path.join(_host_root, _rel))
+                    _container_path = _cur_path
+                else:
+                    _host_path = _cur_path
+                    if _host_root and _cur_path.startswith((_host_root + "/")):
+                        _rel = _cur_path[len(_host_root) + 1 :]
+                        _container_path = "/work/" + _rel
+            except Exception:
+                _host_path = _cur_path
+                _container_path = _cur_path if _cur_path.startswith("/work/") else None
+
             payload = {
                 "document": info,
                 "information": info,
@@ -1992,6 +2011,9 @@ def index_repo(
                     "last_modified_at": int(last_mod),
                     "churn_count": int(churn_count),
                     "author_count": int(author_count),
+                    # New: dual-path tracking
+                    "host_path": _host_path,
+                    "container_path": _container_path,
                 },
             }
             # Optional LLM enrichment for lexical retrieval: pseudo + tags per micro-chunk

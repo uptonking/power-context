@@ -1592,26 +1592,32 @@ def run_hybrid_search(
             _cont = str(_metadata.get("container_path") or "").strip()
             _repo = str(_metadata.get("repo") or "").strip()
             _pp = str(_metadata.get("path_prefix") or "").strip()
-            _mode = str(os.environ.get("PATH_EMIT_MODE", "host")).strip().lower()
+            _mode = str(os.environ.get("PATH_EMIT_MODE", "auto")).strip().lower()
 
             if _mode == "host" and _host:
                 _emit_path = _host
             elif _mode == "container" and _cont:
                 _emit_path = _cont
             else:
-                # Auto/compat fallback: normalize to container form if repo+prefix known; else map cwd to /work
-                if _repo and _pp and isinstance(_emit_path, str):
-                    _pp_norm = _pp.rstrip("/") + "/"
-                    if _emit_path.startswith(_pp_norm):
-                        _rel = _emit_path[len(_pp_norm):]
-                        if _rel:
-                            _emit_path = f"/work/{_repo}/" + _rel.lstrip("/")
-                if isinstance(_emit_path, str):
-                    _cwd = os.getcwd().rstrip("/") + "/"
-                    if _emit_path.startswith(_cwd):
-                        _rel = _emit_path[len(_cwd):]
-                        if _rel:
-                            _emit_path = "/work/" + _rel
+                # Auto mode: prefer host when available, else container; then fallback normalization
+                if _host:
+                    _emit_path = _host
+                elif _cont:
+                    _emit_path = _cont
+                else:
+                    # Auto/compat fallback: normalize to container form if repo+prefix known; else map cwd to /work
+                    if _repo and _pp and isinstance(_emit_path, str):
+                        _pp_norm = _pp.rstrip("/") + "/"
+                        if _emit_path.startswith(_pp_norm):
+                            _rel = _emit_path[len(_pp_norm):]
+                            if _rel:
+                                _emit_path = f"/work/{_repo}/" + _rel.lstrip("/")
+                    if isinstance(_emit_path, str):
+                        _cwd = os.getcwd().rstrip("/") + "/"
+                        if _emit_path.startswith(_cwd):
+                            _rel = _emit_path[len(_cwd):]
+                            if _rel:
+                                _emit_path = "/work/" + _rel
         except Exception:
             pass
 

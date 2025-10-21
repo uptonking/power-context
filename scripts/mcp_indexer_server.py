@@ -1419,6 +1419,14 @@ async def repo_search(
         compact = True
 
     # Compact mode: return only path and line range
+    if os.environ.get("DEBUG_REPO_SEARCH"):
+        try:
+            print("DEBUG_REPO_SEARCH: results=", len(results))
+            for i, r in enumerate(results[:5]):
+                print(f"  {i+1}: path={r.get('path')} symbol={r.get('symbol')} range={r.get('start_line')}-{r.get('end_line')}")
+        except Exception:
+            pass
+
     if compact:
         results = [
             {
@@ -2718,11 +2726,13 @@ async def context_answer(
             print(f"DEBUG ENV: REFRAG_MODE={os.environ.get('REFRAG_MODE')}, COLLECTION_NAME={os.environ.get('COLLECTION_NAME')}")
             print(f"DEBUG FILTERS: not_glob={eff_not_glob}")
 
+        # Initial search
+        req_language = kwargs.get("language") or None
         items = run_hybrid_search(
             queries=queries,
             limit=int(max(lim, 4)),  # fetch a few extra for budgeting
             per_path=int(max(ppath, 0)),
-            language=kwargs.get("language") or None,
+            language=req_language,
             under=kwargs.get("under") or None,
             kind=kwargs.get("kind") or None,
             symbol=kwargs.get("symbol") or None,
@@ -2736,14 +2746,41 @@ async def context_answer(
             model=model,
         )
 
+        # Post-filter by language using path heuristics when language is provided
+        if req_language:
+            try:
+                from scripts.hybrid_search import lang_matches_path as _lmp  # type: ignore
+            except Exception:
+                _lmp = None
+            def _ok_lang(it: Dict[str, Any]) -> bool:
+                p = str(it.get("path") or "")
+                if callable(_lmp):
+                    try:
+                        return bool(_lmp(str(req_language), p))
+                    except Exception:
+                        pass
+                # Fallback simple ext mapping
+                ext = (p.rsplit(".", 1)[-1] if "." in p else "").lower()
+                table = {
+                    "python": ["py"],
+                    "typescript": ["ts", "tsx"],
+                    "javascript": ["js", "jsx", "mjs", "cjs"],
+                    "go": ["go"],
+                    "rust": ["rs"],
+                    "java": ["java"],
+                    "php": ["php"],
+                }
+                return ext in table.get(str(req_language).lower(), [])
+            items = [it for it in items if _ok_lang(it)]
+
         # Debug: log search results
         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
             print(f"DEBUG SEARCH RESULTS: found {len(items)} items")
             for i, item in enumerate(items[:3]):
                 print(f"  Item {i+1}: {item.get('path')} lines {item.get('start_line')}-{item.get('end_line')}")
 
-        # Fallback: if nothing matched (e.g., overly strict filters), retry without gate-first
-        if not items:
+        # Fallback: only if no strict filters like language were provided
+        if (not items) and (not req_language):
             if os.environ.get("DEBUG_CONTEXT_ANSWER"):
                 print("DEBUG: 0 items after gate-first; retrying without gating")
             _prev_gate = os.environ.get("REFRAG_GATE_FIRST")
@@ -2889,11 +2926,14 @@ async def context_answer(
         qtxt = "\n".join(queries)
         all_context = "\n\n".join(context_blocks) if context_blocks else "(no code found)"
 
+        # Build a sources footer (IDs and paths) to guide the model and satisfy downstream consumers
+        sources_footer = "\n".join([f"[{c.get('id')}] {c.get('path')}" for c in citations]) if citations else ""
         prompt = (
             "Using ONLY the cited code, write a concise factual summary naming the file/function(s) and what they do.\n"
             "Target 600–1000 characters in 2–3 tight sentences. No preamble/markdown. No repetition.\n"
             f"Question: {qtxt}\n\n"
             f"Code:\n{all_context}\n\n"
+            f"Sources:\n{sources_footer}\n\n"
             "Answer:"
         )
 
