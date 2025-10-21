@@ -664,9 +664,39 @@ from scripts.utils import lex_hash_vector_queries as _lex_hash_vector_queries
 def lex_hash_vector(phrases: List[str], dim: int = LEX_VECTOR_DIM) -> List[float]:
     return _lex_hash_vector_queries(phrases, dim)
 
+# Defensive: sanitize Qdrant filter objects so we never send an empty filter {}
+# Qdrant returns 400 if filter has no conditions; return None in that case.
+def _sanitize_filter_obj(flt):
+    try:
+        if flt is None:
+            return None
+        # Try model-style attributes first
+        must = getattr(flt, "must", None)
+        should = getattr(flt, "should", None)
+        must_not = getattr(flt, "must_not", None)
+        if must is None and should is None and must_not is None:
+            # Maybe dict-like
+            if isinstance(flt, dict):
+                m = [c for c in (flt.get("must") or []) if c is not None]
+                s = [c for c in (flt.get("should") or []) if c is not None]
+                mn = [c for c in (flt.get("must_not") or []) if c is not None]
+                return None if (not m and not s and not mn) else flt
+            # Unknown structure -> drop
+            return None
+        m = [c for c in (must or []) if c is not None]
+        s = [c for c in (should or []) if c is not None]
+        mn = [c for c in (must_not or []) if c is not None]
+        if not m and not s and not mn:
+            return None
+        return flt
+    except Exception:
+        return None
+
 
 def lex_query(client: QdrantClient, v: List[float], flt, per_query: int) -> List[Any]:
     ef = max(EF_SEARCH, 32 + 4 * int(per_query))
+    flt = _sanitize_filter_obj(flt)
+
     # Prefer modern API; handle kwarg rename between client versions (query_filter -> filter)
     try:
         qp = client.query_points(
@@ -706,6 +736,8 @@ def dense_query(
     client: QdrantClient, vec_name: str, v: List[float], flt, per_query: int
 ) -> List[Any]:
     ef = max(EF_SEARCH, 32 + 4 * int(per_query))
+    flt = _sanitize_filter_obj(flt)
+
     try:
         qp = client.query_points(
             collection_name=_collection(),
@@ -891,6 +923,8 @@ def run_hybrid_search(
             )
         )
     flt = models.Filter(must=must) if must else None
+    flt = _sanitize_filter_obj(flt)
+
 
     # Build query list (LLM-assisted first, then synonym expansion)
     qlist = list(clean_queries)
@@ -1019,6 +1053,8 @@ def run_hybrid_search(
                 flt_gated = None
     except Exception:
         pass
+
+    flt_gated = _sanitize_filter_obj(flt_gated)
 
     result_sets: List[List[Any]] = [
         dense_query(client, vec_name, v, flt_gated, max(24, limit)) for v in embedded

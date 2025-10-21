@@ -2476,6 +2476,47 @@ async def expand_query(query: Any = None, max_new: Any = None) -> Dict[str, Any]
 
 
 
+# Lightweight cleanup to reduce repetition from small models
+def _cleanup_answer(text: str, max_chars: int | None = None) -> str:
+    try:
+        import re
+        t = (text or "").strip()
+        if not t:
+            return t
+        # Collapse excessive whitespace
+        t = re.sub(r"\s+", " ", t)
+        # Sentence-split and normalize
+        sents = re.split(r"(?<=[.!?])\s+", t)
+        out, seen = [], set()
+        for s in sents:
+            ss = s.strip()
+            if not ss:
+                continue
+            # Drop bare 'insufficient context' lines when other content exists
+            base = re.sub(r"[.!?]+$", "", ss).strip().lower()
+            if base == "insufficient context":
+                # Defer adding; we'll add only if nothing else made it through
+                continue
+            # De-duplicate by lowercased, de-punctuated key
+            key = base
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(ss)
+        if not out:
+            # If nothing survived, return the canonical insufficient message if present
+            if "insufficient context" in t.lower():
+                return "insufficient context"
+            return t
+        t2 = " ".join(out)
+        # Optional final cap
+        if max_chars and max_chars > 0 and len(t2) > max_chars:
+            t2 = t2[: max(0, max_chars - 3) ] + "..."
+        return t2
+    except Exception:
+        return text
+
+
 
 @mcp.tool()
 async def context_answer(
@@ -2847,7 +2888,8 @@ async def context_answer(
 
         prompt = (
             "Using ONLY the cited code, write a concise factual summary naming the file/function(s) and what they do.\n"
-            "If insufficient code, reply: 'insufficient context'.\n"
+            "Target 600–1000 characters in 2–3 tight sentences. No preamble/markdown. No repetition.\n"
+            "If the code is insufficient, reply exactly: 'insufficient context' and nothing else.\n"
             f"Question: {qtxt}\n\n"
             f"Code:\n{all_context}\n\n"
             "Answer:"
@@ -2863,20 +2905,23 @@ async def context_answer(
             top_k=top_k,
             top_p=top_p,
             stop=stops,
+            repeat_penalty=float(os.environ.get("DECODER_REPEAT_PENALTY", "1.15") or 1.15),
+            repeat_last_n=int(os.environ.get("DECODER_REPEAT_LAST_N", "128") or 128),
         )
 
-        # Optional length cap: if CTX_SUMMARY_CHARS is a positive int, truncate; otherwise don't cap
+        # Optional length cap: if CTX_SUMMARY_CHARS is a positive int, apply after cleanup; otherwise don't cap
         try:
             _cap_env = str(os.environ.get("CTX_SUMMARY_CHARS", "")).strip()
             _cap = int(_cap_env) if _cap_env not in {"", None} else 0
         except Exception:
             _cap = 0
-        if isinstance(answer, str) and _cap and _cap > 0 and len(answer) > _cap:
-            answer = answer[: max(0, _cap - 3) ] + "..."
 
-        # Debug: log the raw LLM response
+        # Cleanup repetition and optionally cap length
+        answer = _cleanup_answer(answer, max_chars=(_cap if _cap and _cap > 0 else None))
+
+        # Debug: log the cleaned LLM response
         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
-            print(f"DEBUG: raw LLM answer: '{answer}' (len={len(answer)})")
+            print(f"DEBUG: cleaned LLM answer: '{answer}' (len={len(answer)})")
     except Exception as e:
         return {"error": f"decoder call failed: {e}", "citations": citations, "query": queries}
 
