@@ -2483,31 +2483,47 @@ def _cleanup_answer(text: str, max_chars: int | None = None) -> str:
         t = (text or "").strip()
         if not t:
             return t
+        # If model emitted 'insufficient context' anywhere, keep only what precedes it; if nothing precedes, return it
+        low = t.lower()
+        idx = low.find("insufficient context")
+        if idx >= 0:
+            prefix = t[:idx].strip()
+            if prefix:
+                t = prefix
+            else:
+                return "insufficient context"
         # Collapse excessive whitespace
         t = re.sub(r"\s+", " ", t)
         # Sentence-split and normalize
         sents = re.split(r"(?<=[.!?])\s+", t)
         out, seen = [], set()
+        # Patterns of generic disclaimers we want to drop
+        drop_substr = [
+            "the provided code snippets only show",
+            "without additional context",
+            "i cannot provide a complete summary",
+            "to understand",
+        ]
         for s in sents:
             ss = s.strip()
             if not ss:
                 continue
-            # Drop bare 'insufficient context' lines when other content exists
             base = re.sub(r"[.!?]+$", "", ss).strip().lower()
-            if base == "insufficient context":
-                # Defer adding; we'll add only if nothing else made it through
+            # Skip disclaimers/filler
+            if any(pat in base for pat in drop_substr):
                 continue
-            # De-duplicate by lowercased, de-punctuated key
+            # Skip standalone 'insufficient context' (already handled above)
+            if base == "insufficient context":
+                continue
+            # De-duplicate by normalized key
             key = base
             if key in seen:
                 continue
             seen.add(key)
             out.append(ss)
         if not out:
-            # If nothing survived, return the canonical insufficient message if present
-            if "insufficient context" in t.lower():
-                return "insufficient context"
-            return t
+            # Nothing useful; fall back to canonical insufficient message if hinted
+            return "insufficient context" if "insufficient context" in low else t
         t2 = " ".join(out)
         # Optional final cap
         if max_chars and max_chars > 0 and len(t2) > max_chars:
@@ -2815,7 +2831,12 @@ async def context_answer(
                     if os.path.exists(pth):
                         with open(pth, "r", encoding="utf-8", errors="ignore") as f:
                             lines = f.readlines()
-                        s0 = max(1, sline) - 1
+                        # Nudge snippet upward by a few lines for more context (configurable)
+                        try:
+                            _nudge = int(os.environ.get("CTX_SNIPPET_NUDGE_UP", "3") or 3)
+                        except Exception:
+                            _nudge = 3
+                        s0 = max(0, (max(1, sline) - 1) - max(0, _nudge))
                         e0 = min(len(lines), max(sline, eline))
                         disk_snip = "".join(lines[s0:e0]).strip()
                         if disk_snip:
