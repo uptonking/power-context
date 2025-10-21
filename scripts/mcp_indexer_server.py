@@ -2819,10 +2819,10 @@ async def context_answer(
             "start_line": sline,
             "end_line": eline,
         })
-        # ALWAYS read actual code from disk - ignore metadata text from Qdrant
-        snippet = ""
+        # Prefer snippet from search payload; fallback to reading code from disk
+        snippet = str(it.get("text") or "").strip()
         try:
-            if path and sline and eline:
+            if (not snippet) and path and sline and eline and (str(os.environ.get("CTX_READ_DISK_FALLBACK", "1")).strip().lower() in {"1","true","yes","on"}):
                 candidates = [path]
                 if path.startswith("/work/"):
                     rel = path[len("/work/"):]
@@ -2910,7 +2910,6 @@ async def context_answer(
         prompt = (
             "Using ONLY the cited code, write a concise factual summary naming the file/function(s) and what they do.\n"
             "Target 600–1000 characters in 2–3 tight sentences. No preamble/markdown. No repetition.\n"
-            "If the code is insufficient, reply exactly: 'insufficient context' and nothing else.\n"
             f"Question: {qtxt}\n\n"
             f"Code:\n{all_context}\n\n"
             "Answer:"

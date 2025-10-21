@@ -1571,9 +1571,10 @@ def run_hybrid_search(
         _payload = (m["pt"].payload or {}) if m.get("pt") is not None else {}
         _metadata = _payload.get("metadata", {}) or {}
         _text = (
+            _payload.get("code") or
+            _metadata.get("code") or
             _payload.get("text") or
             _metadata.get("text") or
-            _metadata.get("code") or
             ""
         )
         # Skip memory-like points without a real file path
@@ -1582,17 +1583,16 @@ def run_hybrid_search(
                 print(f"DEBUG: Filtered out item with empty path: {_metadata}")
             continue
 
-        # Normalize path for local/dev: prefer workspace-absolute when available
+        # Emit path in container form when possible: map host cwd prefix to /work
         _emit_path = _path
         try:
-            if isinstance(_emit_path, str) and _emit_path.startswith("/work/"):
-                _rel = _emit_path[len("/work/"):]
-                if _rel and os.path.exists(_rel):
-                    _emit_path = os.path.realpath(_rel)
-            elif isinstance(_emit_path, str) and (not os.path.isabs(_emit_path)) and os.path.exists(_emit_path):
-                _emit_path = os.path.realpath(_emit_path)
+            _cwd = os.getcwd()
+            if isinstance(_emit_path, str) and _emit_path.startswith(_cwd.rstrip("/") + "/"):
+                _rel = _emit_path[len(_cwd.rstrip("/") + "/"):]
+                if _rel:
+                    _emit_path = "/work/" + _rel
         except Exception:
-            _emit_path = _path
+            pass
 
         items.append(
             {
@@ -1776,6 +1776,7 @@ def main():
             )
         )
     flt = models.Filter(must=must) if must else None
+    flt = _sanitize_filter_obj(flt)
 
     # Build query set (optionally expanded)
     queries = list(clean_queries)
