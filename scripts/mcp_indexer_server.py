@@ -2813,41 +2813,23 @@ async def context_answer(
         path = str(it.get("path") or "")
         sline = int(it.get("start_line") or 0)
         eline = int(it.get("end_line") or 0)
-        citations.append({
+        _hostp = it.get("host_path")
+        _contp = it.get("container_path")
+        _cit = {
             "id": idx,
             "path": path,
             "start_line": sline,
             "end_line": eline,
-        })
-        # Prefer snippet from search payload; fallback to reading code from disk
+        }
+        if _hostp:
+            _cit["host_path"] = _hostp
+        if _contp:
+            _cit["container_path"] = _contp
+        citations.append(_cit)
+        # Use snippet from search payload only (no filesystem read)
         snippet = str(it.get("text") or "").strip()
-        try:
-            if (not snippet) and path and sline and eline and (str(os.environ.get("CTX_READ_DISK_FALLBACK", "1")).strip().lower() in {"1","true","yes","on"}):
-                candidates = [path]
-                if path.startswith("/work/"):
-                    rel = path[len("/work/"):]
-                    candidates.extend([rel, os.path.join(os.getcwd(), rel)])
-                for pth in candidates:
-                    if os.path.exists(pth):
-                        with open(pth, "r", encoding="utf-8", errors="ignore") as f:
-                            lines = f.readlines()
-                        # Nudge snippet upward by a few lines for more context (configurable)
-                        try:
-                            _nudge = int(os.environ.get("CTX_SNIPPET_NUDGE_UP", "3") or 3)
-                        except Exception:
-                            _nudge = 3
-                        s0 = max(0, (max(1, sline) - 1) - max(0, _nudge))
-                        e0 = min(len(lines), max(sline, eline))
-                        disk_snip = "".join(lines[s0:e0]).strip()
-                        if disk_snip:
-                            snippet = disk_snip
-                            break
-
-            if os.environ.get("DEBUG_CONTEXT_ANSWER"):
-                print(f"DEBUG: Snippet {idx} from {path}:{sline}-{eline}, length={len(snippet)}, starts with: {snippet[:80] if snippet else 'EMPTY'}...")
-        except Exception as e:
-            if os.environ.get("DEBUG_CONTEXT_ANSWER"):
-                print(f"DEBUG: Snippet extraction failed for {path}: {e}")
+        if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+            print(f"DEBUG: Snippet {idx} (payload) {path}:{sline}-{eline}, length={len(snippet)}, starts with: {snippet[:80] if snippet else 'EMPTY'}...")
         header = f"[{idx}] {path}:{sline}-{eline}"
         # Keep snippets small - we want total prompt under 4k chars for 1.5B model
         try:

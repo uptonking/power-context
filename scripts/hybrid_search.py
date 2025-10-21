@@ -1583,14 +1583,35 @@ def run_hybrid_search(
                 print(f"DEBUG: Filtered out item with empty path: {_metadata}")
             continue
 
-        # Emit path in container form when possible: map host cwd prefix to /work
+        # Emit path: prefer original host path when available; also include container path
         _emit_path = _path
+        _host = ""
+        _cont = ""
         try:
-            _cwd = os.getcwd()
-            if isinstance(_emit_path, str) and _emit_path.startswith(_cwd.rstrip("/") + "/"):
-                _rel = _emit_path[len(_cwd.rstrip("/") + "/"):]
-                if _rel:
-                    _emit_path = "/work/" + _rel
+            _host = str(_metadata.get("host_path") or "").strip()
+            _cont = str(_metadata.get("container_path") or "").strip()
+            _repo = str(_metadata.get("repo") or "").strip()
+            _pp = str(_metadata.get("path_prefix") or "").strip()
+            _mode = str(os.environ.get("PATH_EMIT_MODE", "host")).strip().lower()
+
+            if _mode == "host" and _host:
+                _emit_path = _host
+            elif _mode == "container" and _cont:
+                _emit_path = _cont
+            else:
+                # Auto/compat fallback: normalize to container form if repo+prefix known; else map cwd to /work
+                if _repo and _pp and isinstance(_emit_path, str):
+                    _pp_norm = _pp.rstrip("/") + "/"
+                    if _emit_path.startswith(_pp_norm):
+                        _rel = _emit_path[len(_pp_norm):]
+                        if _rel:
+                            _emit_path = f"/work/{_repo}/" + _rel.lstrip("/")
+                if isinstance(_emit_path, str):
+                    _cwd = os.getcwd().rstrip("/") + "/"
+                    if _emit_path.startswith(_cwd):
+                        _rel = _emit_path[len(_cwd):]
+                        if _rel:
+                            _emit_path = "/work/" + _rel
         except Exception:
             pass
 
@@ -1598,6 +1619,8 @@ def run_hybrid_search(
             {
                 "score": round(float(m["s"]), 4),
                 "path": _emit_path,
+                "host_path": _host,
+                "container_path": _cont,
                 "symbol": _symp,
                 "start_line": start_line,
                 "end_line": end_line,
