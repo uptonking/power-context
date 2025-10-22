@@ -66,7 +66,9 @@ class LlamaCppRefragClient:
         req = request.Request(self.base_url.rstrip("/") + path, method="POST")
         req.add_header("Content-Type", "application/json")
         data = _json.dumps(json_payload).encode("utf-8")
-        with request.urlopen(req, data=data, timeout=30) as resp:
+        import os as _os
+        _timeout = float(_os.environ.get("LLAMACPP_TIMEOUT_SEC", "60") or 60)
+        with request.urlopen(req, data=data, timeout=_timeout) as resp:
             body = resp.read()
         return _json.loads(body.decode("utf-8"))
 
@@ -83,6 +85,10 @@ class LlamaCppRefragClient:
         if mode == "soft":
             if not soft_embeddings:
                 raise ValueError("soft mode requires soft_embeddings")
+            _rp = float(os.environ.get("DECODER_REPEAT_PENALTY", str(gen_kwargs.get("repeat_penalty", 1.1))))
+            _rln = int(os.environ.get("DECODER_REPEAT_LAST_N", str(gen_kwargs.get("repeat_last_n", 128))))
+            _pp = float(os.environ.get("DECODER_PRESENCE_PENALTY", str(gen_kwargs.get("presence_penalty", 0.0))))
+            _fp = float(os.environ.get("DECODER_FREQUENCY_PENALTY", str(gen_kwargs.get("frequency_penalty", 0.0))))
             payload = {
                 "prompt": prompt,
                 "soft_embeddings": soft_embeddings,
@@ -91,6 +97,10 @@ class LlamaCppRefragClient:
                 "temperature": float(gen_kwargs.get("temperature", 0.2)),
                 "top_k": int(gen_kwargs.get("top_k", 40)),
                 "top_p": float(gen_kwargs.get("top_p", 0.95)),
+                "repeat_penalty": _rp,
+                "repeat_last_n": _rln,
+                "presence_penalty": _pp,
+                "frequency_penalty": _fp,
                 "stop": gen_kwargs.get("stop") or [],
             }
             try:
@@ -99,6 +109,11 @@ class LlamaCppRefragClient:
                 raise RuntimeError(f"llama.cpp soft_completion failed: {e}")
             return (res.get("content") or res.get("generation") or "").strip()
         # Prompt mode: send a normal completion request using a compressed prompt
+        # Allow repetition controls; fall back to env if not passed
+        _rp = float(os.environ.get("DECODER_REPEAT_PENALTY", str(gen_kwargs.get("repeat_penalty", 1.1))))
+        _rln = int(os.environ.get("DECODER_REPEAT_LAST_N", str(gen_kwargs.get("repeat_last_n", 128))))
+        _pp = float(os.environ.get("DECODER_PRESENCE_PENALTY", str(gen_kwargs.get("presence_penalty", 0.0))))
+        _fp = float(os.environ.get("DECODER_FREQUENCY_PENALTY", str(gen_kwargs.get("frequency_penalty", 0.0))))
         payload = {
             "prompt": prompt,
             "n_predict": int(gen_kwargs.get("max_tokens", max_tokens)),
@@ -106,6 +121,10 @@ class LlamaCppRefragClient:
             "temperature": float(gen_kwargs.get("temperature", 0.2)),
             "top_k": int(gen_kwargs.get("top_k", 40)),
             "top_p": float(gen_kwargs.get("top_p", 0.95)),
+            "repeat_penalty": _rp,
+            "repeat_last_n": _rln,
+            "presence_penalty": _pp,
+            "frequency_penalty": _fp,
             "stop": gen_kwargs.get("stop") or [],
         }
         try:

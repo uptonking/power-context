@@ -488,8 +488,7 @@ def chunk_by_tokens(
     try:
         from tokenizers import Tokenizer  # lightweight, already in requirements
     except Exception:
-        # Fallback to line-based if tokenizers not available
-        return chunk_lines(text, max_lines=120, overlap=20)
+        Tokenizer = None  # type: ignore
 
     try:
         k = int(os.environ.get("MICRO_CHUNK_TOKENS", str(k_tokens or 16)) or 16)
@@ -503,23 +502,36 @@ def chunk_by_tokens(
     except Exception:
         s = max(1, k // 2)
 
+    # Helper: simple regex-based token offsets when HF tokenizer JSON is unavailable
+    def _simple_offsets(txt: str):
+        import re
+        offs = []
+        for m in re.finditer(r"\S+", txt):
+            offs.append((m.start(), m.end()))
+        return offs
+
+    offsets = []
     # Load tokenizer; default to local model file if present
     tok_path = os.environ.get(
         "TOKENIZER_JSON", str((ROOT_DIR / "models" / "tokenizer.json"))
     )
-    try:
-        tokenizer = Tokenizer.from_file(tok_path)
-    except Exception:
-        # As a fallback, still return line-based chunks
-        return chunk_lines(text, max_lines=120, overlap=20)
+    if Tokenizer is not None:
+        try:
+            tokenizer = Tokenizer.from_file(tok_path)
+            try:
+                enc = tokenizer.encode(text)
+                offsets = getattr(enc, "offsets", None) or []
+            except Exception:
+                offsets = []
+        except Exception:
+            offsets = []
 
-    # Encode with offsets to map tokens back to character ranges
-    try:
-        enc = tokenizer.encode(text)
-    except Exception:
-        return chunk_lines(text, max_lines=120, overlap=20)
+    if not offsets:
+        # Fallback to simple regex tokenization; avoids degrading to 120-line chunks
+        if os.environ.get("DEBUG_CHUNKING"):
+            print("[ingest] tokenizers missing/unusable -> using simple regex tokenization")
+        offsets = _simple_offsets(text)
 
-    offsets = getattr(enc, "offsets", None) or []
     if not offsets:
         return chunk_lines(text, max_lines=120, overlap=20)
 
@@ -579,6 +591,59 @@ def chunk_by_tokens(
 
 from scripts.utils import sanitize_vector_name as _sanitize_vector_name
 from scripts.utils import lex_hash_vector_text as _lex_hash_vector_text
+
+
+# Optional index-time pseudo descriptions for micro-chunks
+# Enabled via REFRAG_PSEUDO_DESCRIBE=1 and requires REFRAG_DECODER=1
+
+def _pseudo_describe_enabled() -> bool:
+    try:
+        return str(os.environ.get("REFRAG_PSEUDO_DESCRIBE", "0")).strip().lower() in {"1","true","yes","on"}
+    except Exception:
+        return False
+
+
+def generate_pseudo_tags(text: str) -> tuple[str, list[str]]:
+    """Best-effort: ask local decoder to produce a short label and 3-6 tags.
+    Returns (pseudo, tags). On failure returns ("", [])."""
+    pseudo: str = ""
+    tags: list[str] = []
+    if not _pseudo_describe_enabled() or not text.strip():
+        return pseudo, tags
+    try:
+        from scripts.refrag_llamacpp import LlamaCppRefragClient, is_decoder_enabled  # type: ignore
+        if not is_decoder_enabled():
+            return "", []
+        # Keep decoding tight/fast – this is only enrichment for retrieval
+        prompt = (
+            "You label code spans for search enrichment.\n"
+            "Return strictly JSON: {\"pseudo\": string (<=20 tokens), \"tags\": [3-6 short strings]}.\n"
+            "Code:\n" + text[:2000]
+        )
+        client = LlamaCppRefragClient()
+        out = client.generate_with_soft_embeddings(
+            prompt=prompt,
+            max_tokens=int(os.environ.get("PSEUDO_MAX_TOKENS", "96") or 96),
+            temperature=float(os.environ.get("PSEUDO_TEMPERATURE", "0.10") or 0.10),
+            top_k=int(os.environ.get("PSEUDO_TOP_K", "30") or 30),
+            top_p=float(os.environ.get("PSEUDO_TOP_P", "0.9") or 0.9),
+            stop=["\n\n"],
+        )
+        import json as _json
+        try:
+            obj = _json.loads(out)
+            if isinstance(obj, dict):
+                p = obj.get("pseudo")
+                t = obj.get("tags")
+                if isinstance(p, str):
+                    pseudo = p.strip()[:256]
+                if isinstance(t, list):
+                    tags = [str(x).strip() for x in t if str(x).strip()][:6]
+        except Exception:
+            pass
+    except Exception:
+        return "", []
+    return pseudo, tags
 
 
 def ensure_collection(client: QdrantClient, name: str, dim: int, vector_name: str):
@@ -709,6 +774,7 @@ def ensure_payload_indexes(client: QdrantClient, collection: str):
         "metadata.last_modified_at",
         "metadata.churn_count",
         "metadata.author_count",
+        "pid_str",
     ):
         try:
             client.create_payload_index(
@@ -1648,6 +1714,26 @@ def index_single_file(
         if "symbol_path" in ch and ch.get("symbol_path"):
             sym_path = ch.get("symbol_path") or sym_path
 
+        # Track both container path (/work mirror) and original host path for clarity across environments
+        _cur_path = str(file_path)
+        _host_root = str(os.environ.get("HOST_INDEX_PATH") or "").strip().rstrip("/")
+        _host_path = None
+        _container_path = None
+        try:
+            if _cur_path.startswith("/work/") and _host_root:
+                _rel = _cur_path[len("/work/"):]
+                _host_path = os.path.realpath(os.path.join(_host_root, _rel))
+                _container_path = _cur_path
+            else:
+                # Likely indexing on the host directly
+                _host_path = _cur_path
+                if _host_root and _cur_path.startswith((_host_root + "/")):
+                    _rel = _cur_path[len(_host_root) + 1 :]
+                    _container_path = "/work/" + _rel
+        except Exception:
+            _host_path = _cur_path
+            _container_path = _cur_path if _cur_path.startswith("/work/") else None
+
         payload = {
             "document": info,
             "information": info,
@@ -1669,15 +1755,35 @@ def index_single_file(
                 "last_modified_at": int(last_mod),
                 "churn_count": int(churn_count),
                 "author_count": int(author_count),
+                # New: explicit dual-path tracking
+                "host_path": _host_path,
+                "container_path": _container_path,
             },
         }
+        # Optional LLM enrichment for lexical retrieval: pseudo + tags per micro-chunk
+        pseudo, tags = ("", [])
+        try:
+            pseudo, tags = generate_pseudo_tags(ch.get("text") or "")
+            if pseudo:
+                payload["pseudo"] = pseudo
+            if tags:
+                payload["tags"] = tags
+        except Exception:
+            pass
         batch_texts.append(info)
         batch_meta.append(payload)
         batch_ids.append(hash_id(ch["text"], str(file_path), ch["start"], ch["end"]))
-        batch_lex.append(_lex_hash_vector_text(ch.get("text") or ""))
+        aug_lex_text = (ch.get("text") or "") + (" " + pseudo if pseudo else "") + (" " + " ".join(tags) if tags else "")
+        batch_lex.append(_lex_hash_vector_text(aug_lex_text))
 
     if batch_texts:
         vectors = embed_batch(model, batch_texts)
+        # Inject pid_str into payloads for server-side gating
+        for _idx, _m in enumerate(batch_meta):
+            try:
+                _m["pid_str"] = str(batch_ids[_idx])
+            except Exception:
+                pass
         points = [
             make_point(i, v, lx, m)
             for i, v, lx, m in zip(batch_ids, vectors, batch_lex, batch_meta)
@@ -1765,6 +1871,10 @@ def index_repo(
         "yes",
         "on",
     }
+    # Debug chunking mode
+    if os.environ.get("DEBUG_CHUNKING"):
+        print(f"[DEBUG] INDEX_SEMANTIC_CHUNKS={os.environ.get('INDEX_SEMANTIC_CHUNKS', 'NOT_SET')} -> use_semantic={use_semantic}")
+        print(f"[DEBUG] INDEX_MICRO_CHUNKS={os.environ.get('INDEX_MICRO_CHUNKS', 'NOT_SET')}")
 
     files_seen = 0
     files_indexed = 0
@@ -1861,6 +1971,25 @@ def index_repo(
                 sym = ch.get("symbol") or sym
             if "symbol_path" in ch and ch.get("symbol_path"):
                 sym_path = ch.get("symbol_path") or sym_path
+            # Track both container path (/work mirror) and original host path
+            _cur_path = str(file_path)
+            _host_root = str(os.environ.get("HOST_INDEX_PATH") or "").strip().rstrip("/")
+            _host_path = None
+            _container_path = None
+            try:
+                if _cur_path.startswith("/work/") and _host_root:
+                    _rel = _cur_path[len("/work/"):]
+                    _host_path = os.path.realpath(os.path.join(_host_root, _rel))
+                    _container_path = _cur_path
+                else:
+                    _host_path = _cur_path
+                    if _host_root and _cur_path.startswith((_host_root + "/")):
+                        _rel = _cur_path[len(_host_root) + 1 :]
+                        _container_path = "/work/" + _rel
+            except Exception:
+                _host_path = _cur_path
+                _container_path = _cur_path if _cur_path.startswith("/work/") else None
+
             payload = {
                 "document": info,
                 "information": info,
@@ -1882,17 +2011,37 @@ def index_repo(
                     "last_modified_at": int(last_mod),
                     "churn_count": int(churn_count),
                     "author_count": int(author_count),
+                    # New: dual-path tracking
+                    "host_path": _host_path,
+                    "container_path": _container_path,
                 },
             }
+            # Optional LLM enrichment for lexical retrieval: pseudo + tags per micro-chunk
+            pseudo, tags = ("", [])
+            try:
+                pseudo, tags = generate_pseudo_tags(ch.get("text") or "")
+                if pseudo:
+                    payload["pseudo"] = pseudo
+                if tags:
+                    payload["tags"] = tags
+            except Exception:
+                pass
             batch_texts.append(info)
             batch_meta.append(payload)
             batch_ids.append(
                 hash_id(ch["text"], str(file_path), ch["start"], ch["end"])
             )
-            batch_lex.append(_lex_hash_vector_text(ch.get("text") or ""))
+            aug_lex_text = (ch.get("text") or "") + (" " + pseudo if pseudo else "") + (" " + " ".join(tags) if tags else "")
+            batch_lex.append(_lex_hash_vector_text(aug_lex_text))
             points_indexed += 1
             if len(batch_texts) >= BATCH_SIZE:
                 vectors = embed_batch(model, batch_texts)
+                # Inject pid_str into payloads for server-side gating
+                for _idx, _m in enumerate(batch_meta):
+                    try:
+                        _m["pid_str"] = str(batch_ids[_idx])
+                    except Exception:
+                        pass
                 points = [
                     make_point(i, v, lx, m)
                     for i, v, lx, m in zip(batch_ids, vectors, batch_lex, batch_meta)
@@ -1907,6 +2056,12 @@ def index_repo(
 
     if batch_texts:
         vectors = embed_batch(model, batch_texts)
+        # Inject pid_str into payloads for server-side gating (final batch)
+        for _idx, _m in enumerate(batch_meta):
+            try:
+                _m["pid_str"] = str(batch_ids[_idx])
+            except Exception:
+                pass
         points = [
             make_point(i, v, lx, m)
             for i, v, lx, m in zip(batch_ids, vectors, batch_lex, batch_meta)

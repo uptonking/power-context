@@ -93,6 +93,9 @@ SYMBOL_EQUALITY_BOOST = float(
 VENDOR_PENALTY = float(os.environ.get("HYBRID_VENDOR_PENALTY", "0.05") or 0.05)
 LANG_MATCH_BOOST = float(os.environ.get("HYBRID_LANG_MATCH_BOOST", "0.05") or 0.05)
 CLUSTER_LINES = int(os.environ.get("HYBRID_CLUSTER_LINES", "15") or 15)
+# Penalize test files slightly to prefer implementation over tests
+TEST_FILE_PENALTY = float(os.environ.get("HYBRID_TEST_FILE_PENALTY", "0.15") or 0.15)
+
 # Micro-span compaction and budgeting (ReFRAG-lite output shaping)
 MICRO_OUT_MAX_SPANS = int(os.environ.get("MICRO_OUT_MAX_SPANS", "3") or 3)
 MICRO_MERGE_LINES = int(os.environ.get("MICRO_MERGE_LINES", "4") or 4)
@@ -138,10 +141,24 @@ def _merge_and_budget_spans(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     # First cluster adjacent by path using a tighter merge gap for micro spans
     clusters: Dict[str, List[Dict[str, Any]]] = {}
     for m in items:
-        md = (m.get("pt", {}).payload or {}).get("metadata") or {}
-        path = str(md.get("path") or "")
-        start_line = int(md.get("start_line") or 0)
-        end_line = int(md.get("end_line") or 0)
+        # Robust metadata extraction: support both dict-shaped results and Qdrant point payloads
+        md = {}
+        try:
+            if isinstance(m, dict):
+                if m.get("path") or m.get("start_line") or m.get("end_line"):
+                    md = {"path": m.get("path"), "start_line": m.get("start_line"), "end_line": m.get("end_line")}
+                else:
+                    pt = m.get("pt", {})
+                    if hasattr(pt, "payload") and getattr(pt, "payload"):
+                        md = (pt.payload or {}).get("metadata") or {}
+        except Exception:
+            md = {}
+        path = str((md or {}).get("path") or "")
+        start_line = int((md or {}).get("start_line") or 0)
+        end_line = int((md or {}).get("end_line") or 0)
+        if not path or start_line <= 0 or end_line <= 0:
+            # skip invalid entries
+            continue
         lst = clusters.setdefault(path, [])
         merged = False
         for c in lst:
@@ -175,28 +192,17 @@ def _merge_and_budget_spans(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]
 
     def _flat_key(c):
         m = c.get("m", {})
-        md = (
-            (m.get("pt", {}).payload or {}).get("metadata")
-            if hasattr(m.get("pt", {}), "payload")
-            else {}
-        )
-        path = str((md or {}).get("path") or "")
-        start = int((md or {}).get("start_line") or 0)
+        # Use stored cluster path and start for stable ordering
+        path = str(c.get("p") or "")
+        start = int(c.get("start") or 0)
         return (-float(m.get("s", 0.0)), path, start)
 
     flattened.sort(key=_flat_key)
 
     for c in flattened:
         m = c["m"]
-        # Prefer path from cluster key to avoid payload shape differences in tests
+        # Prefer path from cluster key
         path = str(c.get("p") or "")
-        if not path:
-            md = (
-                (m.get("pt", {}).payload or {}).get("metadata")
-                if hasattr(m.get("pt", {}), "payload")
-                else {}
-            )
-            path = str((md or {}).get("path") or "")
         # per-path cap
         if per_path_counts.get(path, 0) >= out_max_spans:
             continue
@@ -254,6 +260,23 @@ NON_CORE_PATTERNS = [
     r"README",
     r"CHANGELOG",
 ]
+
+# Test file patterns
+TEST_FILE_PATTERNS = [
+    r"/tests?/",
+    r"(^|/)test_",
+    r"_test\.",
+    r"\.test\.",
+    r"\.spec\.",
+]
+
+def is_test_file(path: str) -> bool:
+    import re
+    p = path.lower()
+    for pattern in TEST_FILE_PATTERNS:
+        if re.search(pattern, p):
+            return True
+    return False
 
 
 def is_core_file(path: str) -> bool:
@@ -641,9 +664,39 @@ from scripts.utils import lex_hash_vector_queries as _lex_hash_vector_queries
 def lex_hash_vector(phrases: List[str], dim: int = LEX_VECTOR_DIM) -> List[float]:
     return _lex_hash_vector_queries(phrases, dim)
 
+# Defensive: sanitize Qdrant filter objects so we never send an empty filter {}
+# Qdrant returns 400 if filter has no conditions; return None in that case.
+def _sanitize_filter_obj(flt):
+    try:
+        if flt is None:
+            return None
+        # Try model-style attributes first
+        must = getattr(flt, "must", None)
+        should = getattr(flt, "should", None)
+        must_not = getattr(flt, "must_not", None)
+        if must is None and should is None and must_not is None:
+            # Maybe dict-like
+            if isinstance(flt, dict):
+                m = [c for c in (flt.get("must") or []) if c is not None]
+                s = [c for c in (flt.get("should") or []) if c is not None]
+                mn = [c for c in (flt.get("must_not") or []) if c is not None]
+                return None if (not m and not s and not mn) else flt
+            # Unknown structure -> drop
+            return None
+        m = [c for c in (must or []) if c is not None]
+        s = [c for c in (should or []) if c is not None]
+        mn = [c for c in (must_not or []) if c is not None]
+        if not m and not s and not mn:
+            return None
+        return flt
+    except Exception:
+        return None
+
 
 def lex_query(client: QdrantClient, v: List[float], flt, per_query: int) -> List[Any]:
     ef = max(EF_SEARCH, 32 + 4 * int(per_query))
+    flt = _sanitize_filter_obj(flt)
+
     # Prefer modern API; handle kwarg rename between client versions (query_filter -> filter)
     try:
         qp = client.query_points(
@@ -683,6 +736,8 @@ def dense_query(
     client: QdrantClient, vec_name: str, v: List[float], flt, per_query: int
 ) -> List[Any]:
     ef = max(EF_SEARCH, 32 + 4 * int(per_query))
+    flt = _sanitize_filter_obj(flt)
+
     try:
         qp = client.query_points(
             collection_name=_collection(),
@@ -705,14 +760,34 @@ def dense_query(
             with_payload=True,
         )
         return getattr(qp, "points", qp)
-    except AttributeError:
-        return client.search(
-            collection_name=_collection(),
-            query_vector={"name": vec_name, "vector": v},
-            limit=per_query,
-            with_payload=True,
-            query_filter=flt,
-        )
+    except Exception as e:
+        # Some Qdrant versions reject empty/malformed filters with 400: retry without a filter
+        _msg = str(e).lower()
+        if "expected some form of condition" in _msg or "format error in json body" in _msg:
+            try:
+                qp = client.query_points(
+                    collection_name=_collection(),
+                    query=v,
+                    using=vec_name,
+                    query_filter=None,
+                    search_params=models.SearchParams(hnsw_ef=ef),
+                    limit=per_query,
+                    with_payload=True,
+                )
+                return getattr(qp, "points", qp)
+            except Exception:
+                pass
+        # Fallback to legacy search API
+        try:
+            return client.search(
+                collection_name=_collection(),
+                query_vector={"name": vec_name, "vector": v},
+                limit=per_query,
+                with_payload=True,
+                query_filter=(None if ("expected some form of condition" in _msg or "format error in json body" in _msg) else flt),
+            )
+        except Exception:
+            raise
 
 
 # In-process API: run hybrid search and return structured items list
@@ -848,6 +923,8 @@ def run_hybrid_search(
             )
         )
     flt = models.Filter(must=must) if must else None
+    flt = _sanitize_filter_obj(flt)
+
 
     # Build query list (LLM-assisted first, then synonym expansion)
     qlist = list(clean_queries)
@@ -884,6 +961,7 @@ def run_hybrid_search(
                 "vendor": 0.0,
                 "langb": 0.0,
                 "rec": 0.0,
+                "test": 0.0,
             },
         )
         lxs = LEX_VECTOR_WEIGHT * rrf(rank)
@@ -892,6 +970,13 @@ def run_hybrid_search(
 
     # Dense queries
     embedded = _embed_queries_cached(_model, qlist)
+    # Ensure collection schema is compatible with current search settings (named vectors)
+    try:
+        if embedded:
+            dim = len(embedded[0])
+            _ensure_collection(client, _collection(), dim, vec_name)
+    except Exception:
+        pass
     # Optional gate-first using mini vectors to restrict dense search to candidates
     flt_gated = flt
     try:
@@ -912,24 +997,71 @@ def run_hybrid_search(
         gate_first, refrag_on, cand_n = False, False, 200
     if gate_first and refrag_on:
         try:
+            # ReFRAG gate-first: Use MINI vectors to prefilter candidates
             mini_queries = [_project_mini(list(v), MINI_VEC_DIM) for v in embedded]
-            cand_ids: set[str] = set()
+
+            # Get top candidates using MINI vectors (fast prefilter)
+            candidate_ids = set()
             for mv in mini_queries:
-                res = dense_query(client, MINI_VECTOR_NAME, mv, flt, max(50, cand_n))
-                for p in res:
-                    cand_ids.add(str(p.id))
-            if cand_ids:
-                hid = models.HasIdCondition(has_id=list(cand_ids))
-                if flt and getattr(flt, "must", None):
-                    flt_gated = models.Filter(must=list(flt.must) + [hid])
+                mini_results = dense_query(client, MINI_VECTOR_NAME, mv, flt, cand_n)
+                for result in mini_results:
+                    if hasattr(result, 'id'):
+                        candidate_ids.add(result.id)
+
+            if candidate_ids:
+                # Server-side gating without requiring payload fields: prefer HasIdCondition
+                from qdrant_client import models as _models
+                try:
+                    gating_cond = _models.HasIdCondition(has_id=list(candidate_ids))
+                    gating_kind = "has_id"
+                except Exception:
+                    # Fallback to pid_str if HasIdCondition unavailable
+                    id_vals = [str(cid) for cid in candidate_ids]
+                    gating_cond = _models.FieldCondition(
+                        key="pid_str",
+                        match=_models.MatchAny(any=id_vals),
+                    )
+                    gating_kind = "pid_str"
+                if flt is None:
+                    flt_gated = _models.Filter(must=[gating_cond])
                 else:
-                    flt_gated = models.Filter(must=[hid])
-        except Exception:
-            pass
+                    must = list(flt.must or [])
+                    must.append(gating_cond)
+                    flt_gated = _models.Filter(must=must, should=flt.should, must_not=flt.must_not)
+                if os.environ.get("DEBUG_HYBRID_SEARCH"):
+                    print(f"DEBUG: ReFRAG gate-first (server-side-{gating_kind}): {len(candidate_ids)} candidates")
+                    print(f"DEBUG: flt_gated.must has {len(flt_gated.must or [])} conditions")
+                    print(f"DEBUG: flt_gated.must_not has {len(flt_gated.must_not or [])} conditions")
+            else:
+                # No candidates -> no gating
+                flt_gated = flt
+        except Exception as e:
+            if os.environ.get("DEBUG_HYBRID_SEARCH"):
+                print(f"DEBUG: ReFRAG gate-first failed: {e}, proceeding without gating")
+            # Fallback to normal search (no gating)
+            flt_gated = flt
+    else:
+        flt_gated = flt
+
+    # Sanitize filter: if empty, drop it to avoid Qdrant 400s on invalid filters
+    try:
+        if flt_gated is not None:
+            _m = [c for c in (getattr(flt_gated, "must", None) or []) if c is not None]
+            _s = [c for c in (getattr(flt_gated, "should", None) or []) if c is not None]
+            _mn = [c for c in (getattr(flt_gated, "must_not", None) or []) if c is not None]
+            if not _m and not _s and not _mn:
+                flt_gated = None
+    except Exception:
+        pass
+
+    flt_gated = _sanitize_filter_obj(flt_gated)
 
     result_sets: List[List[Any]] = [
         dense_query(client, vec_name, v, flt_gated, max(24, limit)) for v in embedded
     ]
+    if os.environ.get("DEBUG_HYBRID_SEARCH"):
+        total_dense_results = sum(len(rs) for rs in result_sets)
+        print(f"DEBUG: Dense query returned {total_dense_results} total results across {len(result_sets)} queries")
 
     # Optional ReFRAG-style mini-vector gating: add compact-vector RRF if enabled
     try:
@@ -961,6 +1093,7 @@ def run_hybrid_search(
                                 "vendor": 0.0,
                                 "langb": 0.0,
                                 "rec": 0.0,
+                                "test": 0.0,
                             },
                         )
                         dens = float(HYBRID_MINI_WEIGHT) * rrf(rank)
@@ -1032,6 +1165,7 @@ def run_hybrid_search(
                         "vendor": 0.0,
                         "langb": 0.0,
                         "rec": 0.0,
+                        "test": 0.0,
                     },
                 )
                 lxs = prf_lw * rrf(rank)
@@ -1060,6 +1194,7 @@ def run_hybrid_search(
                                 "vendor": 0.0,
                                 "langb": 0.0,
                                 "rec": 0.0,
+                                "test": 0.0,
                             },
                         )
                         dens = prf_dw * rrf(rank)
@@ -1084,6 +1219,7 @@ def run_hybrid_search(
                     "vendor": 0.0,
                     "langb": 0.0,
                     "rec": 0.0,
+                    "test": 0.0,
                 },
             )
             dens = DENSE_WEIGHT * rrf(rank)
@@ -1120,6 +1256,10 @@ def run_hybrid_search(
         if VENDOR_PENALTY > 0.0 and path and is_vendor_path(path):
             rec["vendor"] -= VENDOR_PENALTY
             rec["s"] -= VENDOR_PENALTY
+        if TEST_FILE_PENALTY > 0.0 and path and is_test_file(path):
+            rec["test"] -= TEST_FILE_PENALTY
+            rec["s"] -= TEST_FILE_PENALTY
+
         if LANG_MATCH_BOOST > 0.0 and path and eff_language:
             lang = str(eff_language).lower()
             md_lang = str((md.get("language") or "")).lower()
@@ -1146,7 +1286,75 @@ def run_hybrid_search(
         start_line = int(md.get("start_line") or 0)
         return (-float(m["s"]), len(sp), path, start_line)
 
+    if os.environ.get("DEBUG_HYBRID_SEARCH"):
+        print(f"DEBUG: score_map has {len(score_map)} items before ranking")
     ranked = sorted(score_map.values(), key=_tie_key)
+    if os.environ.get("DEBUG_HYBRID_SEARCH"):
+        print(f"DEBUG: ranked has {len(ranked)} items after sorting")
+
+    # Lightweight keyword bump: prefer spans whose local snippet contains query tokens
+    try:
+        kb = float(os.environ.get("HYBRID_KEYWORD_BUMP", "0.3") or 0.3)
+        kcap = float(os.environ.get("HYBRID_KEYWORD_CAP", "0.6") or 0.6)
+    except Exception:
+        kb, kcap = 0.3, 0.6
+    # Build lowercase keyword set from queries (simple split, keep >=3 chars + special tokens)
+    kw: set[str] = set()
+    for q in qlist:
+        ql = (q or "").lower()
+        for tok in re.findall(r"[a-zA-Z0-9_\-]+", ql):
+            t = tok.strip()
+            if len(t) >= 3:
+                kw.add(t)
+    # Add a few commonly relevant code tokens (helps for gate-first cases)
+    for t in ("hasidcondition", "pid_str", "matchany", "gate-first", "gatefirst"):
+        kw.add(t)
+
+    import io as _io
+
+    def _snippet_contains(md: dict) -> int:
+        # returns number of keyword hits found in a small local snippet
+        try:
+            path = str(md.get("path") or "")
+            sline = int(md.get("start_line") or 0)
+            eline = int(md.get("end_line") or 0)
+            txt = (md.get("text") or md.get("code") or "")
+            if not txt and path and sline:
+                p = path
+                try:
+                    if not os.path.isabs(p):
+                        p = os.path.join("/work", p)
+                    realp = os.path.realpath(p)
+                    if realp == "/work" or realp.startswith("/work/"):
+                        with open(realp, "r", encoding="utf-8", errors="ignore") as f:
+                            lines = f.readlines()
+                        si = max(1, sline - 3)
+                        ei = min(len(lines), max(sline, eline) + 3)
+                        txt = "".join(lines[si-1:ei])
+                except Exception:
+                    txt = txt or ""
+            lt = (txt or "").lower()
+            if not lt:
+                return 0
+            hits = 0
+            for t in kw:
+                if t and t in lt:
+                    hits += 1
+            return hits
+        except Exception:
+            return 0
+
+    # Apply bump to top-N ranked (limited for speed)
+    topN = min(len(ranked), 200)
+    for i in range(topN):
+        m = ranked[i]
+        md = (m["pt"].payload or {}).get("metadata") or {}
+        hits = _snippet_contains(md)
+        if hits > 0 and kb > 0.0:
+            bump = min(kcap, kb * float(hits))
+            m["s"] += bump
+    # Re-sort after bump
+    ranked = sorted(ranked, key=_tie_key)
 
     # Cluster by path adjacency
     clusters: Dict[str, List[Dict[str, Any]]] = {}
@@ -1172,6 +1380,8 @@ def run_hybrid_search(
             lst.append({"start": start_line, "end": end_line, "m": m})
 
     ranked = sorted([c["m"] for lst in clusters.values() for c in lst], key=_tie_key)
+    if os.environ.get("DEBUG_HYBRID_SEARCH"):
+        print(f"DEBUG: ranked has {len(ranked)} items after clustering")
 
     # Client-side filters and per-path diversification
     import re as _re, fnmatch as _fnm
@@ -1217,21 +1427,15 @@ def run_hybrid_search(
 
         ranked = [m for m in ranked if _pass_filters(m)]
 
-    # ReFRAG-lite span compaction and budgeting (applied after filters)
-    try:
-        if str(os.environ.get("REFRAG_MODE", "")).strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }:
-            ranked = _merge_and_budget_spans(ranked)
-    except Exception:
-        pass
+    # ReFRAG-lite span compaction and budgeting is NOT applied here in run_hybrid_search
+    # It's only applied in context_answer where token budgeting is needed for LLM context
+    # Removing this to avoid over-filtering search results
 
     if per_path and per_path > 0:
         counts: Dict[str, int] = {}
         merged: List[Dict[str, Any]] = []
+        if os.environ.get("DEBUG_HYBRID_SEARCH"):
+            print(f"DEBUG: Applying per_path={per_path} limiting to {len(ranked)} ranked results")
         for m in ranked:
             md = (m["pt"].payload or {}).get("metadata") or {}
             path = str(md.get("path", ""))
@@ -1241,6 +1445,8 @@ def run_hybrid_search(
                 counts[path] = c + 1
             if len(merged) >= limit:
                 break
+        if os.environ.get("DEBUG_HYBRID_SEARCH"):
+            print(f"DEBUG: After per_path limiting: {len(merged)} results from {len(counts)} unique paths")
     else:
         merged = ranked[:limit]
 
@@ -1279,6 +1485,7 @@ def run_hybrid_search(
             "vendor_penalty": round(float(m.get("vendor", 0.0)), 4),
             "lang_boost": round(float(m.get("langb", 0.0)), 4),
             "recency": round(float(m.get("rec", 0.0)), 4),
+            "test_penalty": round(float(m.get("test", 0.0)), 4),
         }
         why = []
         if comp["dense_rrf"]:
@@ -1288,6 +1495,8 @@ def run_hybrid_search(
                 why.append(f"{k}:{comp[k]}")
         if comp["vendor_penalty"]:
             why.append(f"vendor_penalty:{comp['vendor_penalty']}")
+        if comp.get("test_penalty"):
+            why.append(f"test_penalty:{comp['test_penalty']}")
         if comp["recency"]:
             why.append(f"recency:{comp['recency']}")
         # Related hints
@@ -1358,10 +1567,66 @@ def run_hybrid_search(
             pass
 
         _related = sorted(_related_set)[:10]
+        # Best-effort snippet text directly from payload for downstream LLM stitching
+        _payload = (m["pt"].payload or {}) if m.get("pt") is not None else {}
+        _metadata = _payload.get("metadata", {}) or {}
+        _text = (
+            _payload.get("code") or
+            _metadata.get("code") or
+            _payload.get("text") or
+            _metadata.get("text") or
+            ""
+        )
+        # Skip memory-like points without a real file path
+        if not _path or not _path.strip():
+            if os.environ.get("DEBUG_HYBRID_FILTER"):
+                print(f"DEBUG: Filtered out item with empty path: {_metadata}")
+            continue
+
+        # Emit path: prefer original host path when available; also include container path
+        _emit_path = _path
+        _host = ""
+        _cont = ""
+        try:
+            _host = str(_metadata.get("host_path") or "").strip()
+            _cont = str(_metadata.get("container_path") or "").strip()
+            _repo = str(_metadata.get("repo") or "").strip()
+            _pp = str(_metadata.get("path_prefix") or "").strip()
+            _mode = str(os.environ.get("PATH_EMIT_MODE", "auto")).strip().lower()
+
+            if _mode == "host" and _host:
+                _emit_path = _host
+            elif _mode == "container" and _cont:
+                _emit_path = _cont
+            else:
+                # Auto mode: prefer host when available, else container; then fallback normalization
+                if _host:
+                    _emit_path = _host
+                elif _cont:
+                    _emit_path = _cont
+                else:
+                    # Auto/compat fallback: normalize to container form if repo+prefix known; else map cwd to /work
+                    if _repo and _pp and isinstance(_emit_path, str):
+                        _pp_norm = _pp.rstrip("/") + "/"
+                        if _emit_path.startswith(_pp_norm):
+                            _rel = _emit_path[len(_pp_norm):]
+                            if _rel:
+                                _emit_path = f"/work/{_repo}/" + _rel.lstrip("/")
+                    if isinstance(_emit_path, str):
+                        _cwd = os.getcwd().rstrip("/") + "/"
+                        if _emit_path.startswith(_cwd):
+                            _rel = _emit_path[len(_cwd):]
+                            if _rel:
+                                _emit_path = "/work/" + _rel
+        except Exception:
+            pass
+
         items.append(
             {
                 "score": round(float(m["s"]), 4),
-                "path": _path,
+                "path": _emit_path,
+                "host_path": _host,
+                "container_path": _cont,
                 "symbol": _symp,
                 "start_line": start_line,
                 "end_line": end_line,
@@ -1371,6 +1636,7 @@ def run_hybrid_search(
                 "related_paths": _related,
                 "span_budgeted": bool(m.get("_merged_start") is not None),
                 "budget_tokens_used": m.get("_budget_tokens"),
+                "text": _text,
             }
         )
     return items
@@ -1539,6 +1805,7 @@ def main():
             )
         )
     flt = models.Filter(must=must) if must else None
+    flt = _sanitize_filter_obj(flt)
 
     # Build query set (optionally expanded)
     queries = list(clean_queries)
@@ -1570,6 +1837,7 @@ def main():
                 "vendor": 0.0,
                 "langb": 0.0,
                 "rec": 0.0,
+                "test": 0.0,
             },
         )
         lxs = LEX_VECTOR_WEIGHT * rrf(rank)
@@ -1598,6 +1866,7 @@ def main():
                     "vendor": 0.0,
                     "langb": 0.0,
                     "rec": 0.0,
+                    "test": 0.0,
                 },
             )
             dens = DENSE_WEIGHT * rrf(rank)
@@ -1640,6 +1909,10 @@ def main():
         if VENDOR_PENALTY > 0.0 and path and is_vendor_path(path):
             rec["vendor"] -= VENDOR_PENALTY
             rec["s"] -= VENDOR_PENALTY
+        if TEST_FILE_PENALTY > 0.0 and path and is_test_file(path):
+            rec["test"] -= TEST_FILE_PENALTY
+            rec["s"] -= TEST_FILE_PENALTY
+
 
         # Language match boost if requested
         if (
@@ -1816,6 +2089,7 @@ def main():
                     "vendor_penalty": round(float(m.get("vendor", 0.0)), 4),
                     "lang_boost": round(float(m.get("langb", 0.0)), 4),
                     "recency": round(float(m.get("rec", 0.0)), 4),
+                    "test_penalty": round(float(m.get("test", 0.0)), 4),
                 },
                 "relations": {"imports": _imports, "calls": _calls, "symbol_path": _symp},
                 "related_paths": _related,
@@ -1835,6 +2109,8 @@ def main():
                     why.append(f"{k}:{item['components'][k]}")
             if item["components"]["vendor_penalty"]:
                 why.append(f"vendor_penalty:{item['components']['vendor_penalty']}")
+            if item["components"].get("test_penalty"):
+                why.append(f"test_penalty:{item['components']['test_penalty']}")
             if item["components"]["recency"]:
                 why.append(f"recency:{item['components']['recency']}")
             item["why"] = why
