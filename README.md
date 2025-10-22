@@ -904,6 +904,62 @@ Notes:
 - In prompt mode, the client calls /completion on the llama.cpp server with a compressed prompt.
 - In soft mode, the client will require a patched server to accept soft embeddings. The flag ensures no breakage.
 
+
+## How context_answer works (with decoder)
+
+The `context_answer` MCP tool answers natural-language questions using retrieval + a decoder sidecar.
+
+- Inputs (most relevant): `query`, `limit`, `per_path`, `budget_tokens`, `include_snippet`, `collection`, `language`, `path_glob/not_glob`
+- Outputs:
+  - `answer` (string)
+  - `citations`: `[ { path, start_line, end_line, container_path? }, ... ]`
+  - `query`: list of query strings actually used
+  - `used`: `{ "gate_first": true|false, "refrag": true|false }`
+
+Pipeline
+1) Hybrid search (gate-first): Uses MINI-vector gating when `REFRAG_GATE_FIRST=1` to prefilter candidates, then runs dense+lexical fusion
+2) Micro-span budgeting: Merges adjacent micro hits and applies a global token budget (`REFRAG_MODE=1`, `MICRO_BUDGET_TOKENS`, `MICRO_OUT_MAX_SPANS`)
+3) Prompt assembly: Builds compact context blocks and a “Sources” footer
+4) Decoder call (llama.cpp): When `REFRAG_DECODER=1`, calls `LLAMACPP_URL` to synthesize the final answer
+5) Return: Answer + citations + usage flags; errors keep citations for debugging
+
+Environment toggles
+- Retrieval: `REFRAG_MODE=1`, `REFRAG_GATE_FIRST=1`, `REFRAG_CANDIDATES=200`
+- Budgeting/output: `MICRO_BUDGET_TOKENS`, `MICRO_OUT_MAX_SPANS`
+- Decoder: `REFRAG_DECODER=1`, `LLAMACPP_URL=http://localhost:8080`
+
+Fallbacks and safety
+- If gate-first yields 0 items and no strict language filter is set, the tool automatically retries without gating
+- If the decoder call fails, the response contains `{ "error": "..." }` plus `citations`, so you can still inspect sources
+
+Quick health + example
+```bash
+# Decoder health (llama.cpp sidecar)
+curl -s http://localhost:8080/health
+
+# Qdrant
+curl -sSf http://localhost:6333/readyz >/dev/null && echo "Qdrant OK"
+```
+
+```python
+# Minimal local call (uses the running MCP indexer server code)
+import os, asyncio
+os.environ.update(
+  QDRANT_URL="http://localhost:6333",
+  COLLECTION_NAME="my-collection",
+  REFRAG_MODE="1", REFRAG_GATE_FIRST="1",
+  REFRAG_DECODER="1", LLAMACPP_URL="http://localhost:8080",
+)
+from scripts import mcp_indexer_server as srv
+async def t():
+    out = await srv.context_answer(query="How does hybrid search work?", limit=5)
+    print(out["used"], len(out.get("citations", [])), len(out.get("answer", "")))
+asyncio.run(t())
+```
+
+Implementation
+- See `scripts/mcp_indexer_server.py` (`context_answer` tool) for the full pipeline, env knobs, and debug flags (`DEBUG_CONTEXT_ANSWER=1`).
+
 ### MCP search filtering (language, path, kind)
 
 - The indexer creates payload indexes for efficient filtering.
