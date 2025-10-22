@@ -81,6 +81,19 @@ Notes:
 - Augment (SSE): simple JSON configs for both servers
 
 3) Verify endpoints
+````bash
+# Qdrant DB
+curl -sSf http://localhost:6333/readyz >/dev/null && echo "Qdrant OK"
+# Decoder (llama.cpp sidecar)
+curl -s http://localhost:8080/health
+# SSE endpoints (Memory, Indexer)
+curl -sI http://localhost:8000/sse | head -n1
+curl -sI http://localhost:8001/sse | head -n1
+# RMCP endpoints (HTTP JSON-RPC)
+curl -sI http://localhost:8002/mcp | head -n1
+curl -sI http://localhost:8003/mcp | head -n1
+````
+
 ## Configuration reference (env vars)
 
 Core
@@ -240,6 +253,7 @@ Notes:
   INDEX_UPSERT_BACKOFF=0.5
   WATCH_DEBOUNCE_SECS=1.5
   ````
+
 
   - If issues persist, try lowering INDEX_UPSERT_BATCH to 96 or raising QDRANT_TIMEOUT to 90.
 
@@ -861,7 +875,7 @@ REFRAG_RUNTIME=llamacpp
 LLAMACPP_URL=http://llamacpp:8080
 REFRAG_DECODER_MODE=prompt  # prompt|soft (soft requires patched llama.cpp)
 REFRAG_ENCODER_MODEL=BAAI/bge-base-en-v1.5
-REFRAG_PHI_PATH=/work/models/refrag_phi_768_to_dmodel.bin
+REFRAG_PHI_PATH=/work/models/refrag_phi_768_to_dmodel.json
 ````
 
 Bring up llama.cpp sidecar (optional):
