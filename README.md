@@ -1,5 +1,7 @@
+## Context-Engine
 
-## Quick Start Guide (5 minutes)
+
+## Context-Engine Quickstart (5 minutes)
 
 This gets you from zero to “search works” in under five minutes.
 
@@ -11,22 +13,31 @@ This gets you from zero to “search works” in under five minutes.
 2) One command (recommended)
 ```bash
 # Provisions tokenizer.json, downloads a tiny llama.cpp model, reindexes, and brings all services up
-INDEX_MICRO_CHUNKS=1 MAX_MICRO_CHUNKS_PER_FILE=500 make reset-dev
+INDEX_MICRO_CHUNKS=1 MAX_MICRO_CHUNKS_PER_FILE=200 make reset-dev-dual
 ```
 - Default ports: Memory MCP :8000, Indexer MCP :8001, Qdrant :6333, llama.cpp :8080
 
 ### Make targets: SSE, RMCP, and dual-compat
 - Legacy SSE only (default):
   - Ports: 8000 (/sse), 8001 (/sse)
-  - Command: `INDEX_MICRO_CHUNKS=1 MAX_MICRO_CHUNKS_PER_FILE=500 make reset-dev`
+  - Command: `INDEX_MICRO_CHUNKS=1 MAX_MICRO_CHUNKS_PER_FILE=200 make reset-dev`
 - RMCP (Codex) only:
   - Ports: 8002 (/mcp), 8003 (/mcp)
-  - Command: `INDEX_MICRO_CHUNKS=1 MAX_MICRO_CHUNKS_PER_FILE=500 make reset-dev-codex`
+  - Command: `INDEX_MICRO_CHUNKS=1 MAX_MICRO_CHUNKS_PER_FILE=200 make reset-dev-codex`
 - Dual compatibility (SSE + RMCP together):
   - Ports: 8000/8001 (/sse) and 8002/8003 (/mcp)
-  - Command: `INDEX_MICRO_CHUNKS=1 MAX_MICRO_CHUNKS_PER_FILE=500 make reset-dev-dual`
+  - Command: `INDEX_MICRO_CHUNKS=1 MAX_MICRO_CHUNKS_PER_FILE=200 make reset-dev-dual`
 
 - You can skip the decoder; it’s feature-flagged off by default.
+### Switch decoder model (llama.cpp)
+- Default tiny model: Qwen2.5 Coder 1.5B (GGUF)
+- Change the model by overriding Make vars (downloads to ./models/model.gguf):
+```bash
+LLAMACPP_MODEL_URL="https://huggingface.co/ORG/MODEL/resolve/main/model.gguf" \
+  INDEX_MICRO_CHUNKS=1 MAX_MICRO_CHUNKS_PER_FILE=200 make reset-dev-dual
+```
+- Embeddings: set EMBEDDING_MODEL in .env and reindex (make reindex)
+
 
 Alternative (compose only)
 ```bash
@@ -83,6 +94,19 @@ Notes:
 - Claude Code CLI(SSE): simple JSON configs for both servers
 
 3) Verify endpoints
+````bash
+# Qdrant DB
+curl -sSf http://localhost:6333/readyz >/dev/null && echo "Qdrant OK"
+# Decoder (llama.cpp sidecar)
+curl -s http://localhost:8080/health
+# SSE endpoints (Memory, Indexer)
+curl -sI http://localhost:8000/sse | head -n1
+curl -sI http://localhost:8001/sse | head -n1
+# RMCP endpoints (HTTP JSON-RPC)
+curl -sI http://localhost:8002/mcp | head -n1
+curl -sI http://localhost:8003/mcp | head -n1
+````
+
 ## Configuration reference (env vars)
 
 Core
@@ -92,7 +116,7 @@ Core
 
 Indexing / micro-chunks
 - INDEX_MICRO_CHUNKS: 1 to enable micro‑chunking; off falls back to line chunks
-- MAX_MICRO_CHUNKS_PER_FILE: Cap micro‑chunks per file (e.g., 500 default)
+- MAX_MICRO_CHUNKS_PER_FILE: Cap micro‑chunks per file (e.g., 200 default)
 - TOKENIZER_URL, TOKENIZER_PATH: Hugging Face tokenizer.json URL and local path
 - USE_TREE_SITTER: 1 to enable tree-sitter parsing (optional; off by default)
 
@@ -122,7 +146,7 @@ Ports
 | HOST_INDEX_PATH | Host path mounted at /work in containers | current repo (.) |
 | QDRANT_URL | Qdrant base URL | container: http://qdrant:6333; local: http://localhost:6333 |
 | INDEX_MICRO_CHUNKS | Enable token-based micro-chunking | 0 (off) |
-| MAX_MICRO_CHUNKS_PER_FILE | Cap micro-chunks per file | 500 |
+| MAX_MICRO_CHUNKS_PER_FILE | Cap micro-chunks per file | 200 |
 | TOKENIZER_URL | HF tokenizer.json URL (for Make download) | n/a (use Make target) |
 | TOKENIZER_PATH | Local path where tokenizer is saved (Make) | models/tokenizer.json |
 | TOKENIZER_JSON | Runtime path for tokenizer (indexer) | models/tokenizer.json |
@@ -227,7 +251,7 @@ Notes:
 - llama.cpp platform warning on Apple Silicon:
   - Safe to ignore for local dev, or set platform: linux/amd64 for the service, or build a native image.
 - Indexing feels stuck on very large files:
-  - Use MAX_MICRO_CHUNKS_PER_FILE=500 (default in code) or lower (e.g., 200) during dev runs.
+  - Use MAX_MICRO_CHUNKS_PER_FILE=200 during dev runs.
 
 
 - Watcher timeouts (-9) or Qdrant "ResponseHandlingException: timed out":
@@ -242,6 +266,7 @@ Notes:
   INDEX_UPSERT_BACKOFF=0.5
   WATCH_DEBOUNCE_SECS=1.5
   ````
+
 
   - If issues persist, try lowering INDEX_UPSERT_BATCH to 96 or raising QDRANT_TIMEOUT to 90.
 
@@ -440,7 +465,7 @@ Notes:
 Store a memory (via MCP Memory server tool `store` – use your MCP client):
 ```
 {
-  "information": "Run full reset: INDEX_MICRO_CHUNKS=1 MAX_MICRO_CHUNKS_PER_FILE=500 make reset-dev",
+  "information": "Run full reset: INDEX_MICRO_CHUNKS=1 MAX_MICRO_CHUNKS_PER_FILE=200 make reset-dev",
   "metadata": {
     "kind": "memory",
     "topic": "dev-env",
@@ -863,7 +888,7 @@ REFRAG_RUNTIME=llamacpp
 LLAMACPP_URL=http://llamacpp:8080
 REFRAG_DECODER_MODE=prompt  # prompt|soft (soft requires patched llama.cpp)
 REFRAG_ENCODER_MODEL=BAAI/bge-base-en-v1.5
-REFRAG_PHI_PATH=/work/models/refrag_phi_768_to_dmodel.bin
+REFRAG_PHI_PATH=/work/models/refrag_phi_768_to_dmodel.json
 ````
 
 Bring up llama.cpp sidecar (optional):
@@ -905,6 +930,62 @@ Notes:
 
 - In prompt mode, the client calls /completion on the llama.cpp server with a compressed prompt.
 - In soft mode, the client will require a patched server to accept soft embeddings. The flag ensures no breakage.
+
+
+## How context_answer works (with decoder)
+
+The `context_answer` MCP tool answers natural-language questions using retrieval + a decoder sidecar.
+
+- Inputs (most relevant): `query`, `limit`, `per_path`, `budget_tokens`, `include_snippet`, `collection`, `language`, `path_glob/not_glob`
+- Outputs:
+  - `answer` (string)
+  - `citations`: `[ { path, start_line, end_line, container_path? }, ... ]`
+  - `query`: list of query strings actually used
+  - `used`: `{ "gate_first": true|false, "refrag": true|false }`
+
+Pipeline
+1) Hybrid search (gate-first): Uses MINI-vector gating when `REFRAG_GATE_FIRST=1` to prefilter candidates, then runs dense+lexical fusion
+2) Micro-span budgeting: Merges adjacent micro hits and applies a global token budget (`REFRAG_MODE=1`, `MICRO_BUDGET_TOKENS`, `MICRO_OUT_MAX_SPANS`)
+3) Prompt assembly: Builds compact context blocks and a “Sources” footer
+4) Decoder call (llama.cpp): When `REFRAG_DECODER=1`, calls `LLAMACPP_URL` to synthesize the final answer
+5) Return: Answer + citations + usage flags; errors keep citations for debugging
+
+Environment toggles
+- Retrieval: `REFRAG_MODE=1`, `REFRAG_GATE_FIRST=1`, `REFRAG_CANDIDATES=200`
+- Budgeting/output: `MICRO_BUDGET_TOKENS`, `MICRO_OUT_MAX_SPANS`
+- Decoder: `REFRAG_DECODER=1`, `LLAMACPP_URL=http://localhost:8080`
+
+Fallbacks and safety
+- If gate-first yields 0 items and no strict language filter is set, the tool automatically retries without gating
+- If the decoder call fails, the response contains `{ "error": "..." }` plus `citations`, so you can still inspect sources
+
+Quick health + example
+```bash
+# Decoder health (llama.cpp sidecar)
+curl -s http://localhost:8080/health
+
+# Qdrant
+curl -sSf http://localhost:6333/readyz >/dev/null && echo "Qdrant OK"
+```
+
+```python
+# Minimal local call (uses the running MCP indexer server code)
+import os, asyncio
+os.environ.update(
+  QDRANT_URL="http://localhost:6333",
+  COLLECTION_NAME="my-collection",
+  REFRAG_MODE="1", REFRAG_GATE_FIRST="1",
+  REFRAG_DECODER="1", LLAMACPP_URL="http://localhost:8080",
+)
+from scripts import mcp_indexer_server as srv
+async def t():
+    out = await srv.context_answer(query="How does hybrid search work?", limit=5)
+    print(out["used"], len(out.get("citations", [])), len(out.get("answer", "")))
+asyncio.run(t())
+```
+
+Implementation
+- See `scripts/mcp_indexer_server.py` (`context_answer` tool) for the full pipeline, env knobs, and debug flags (`DEBUG_CONTEXT_ANSWER=1`).
 
 ### MCP search filtering (language, path, kind)
 
@@ -958,9 +1039,6 @@ Payload indexes enable fast server-side filters (e.g., language, path_prefix, ki
 Client tips:
 - MCP tools: issue multiple finds with variant phrasings and re-rank by score + metadata match
 - Direct Qdrant: use `vector={name: ..., vector: ...}` with the named vector above
-
-
-
 - Data persists in the `qdrant_storage` Docker volume.
 - The MCP server uses SSE transport and will auto-create the collection if it doesn't exist.
 - Only FastEmbed models are supported at this time.
