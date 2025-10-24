@@ -1820,9 +1820,6 @@ def index_repo(
     dedupe: bool = True,
     skip_unchanged: bool = True,
 ):
-    print(
-        f"Indexing root={root} -> {qdrant_url} collection={collection} model={model_name} recreate={recreate}"
-    )
     model = TextEmbedding(model_name=model_name)
     # Determine embedding dimension
     dim = len(next(model.embed(["dimension probe"])))
@@ -1884,6 +1881,9 @@ def index_repo(
         pass
 
 
+    print(
+        f"Indexing root={root} -> {qdrant_url} collection={collection} model={model_name} recreate={recreate}"
+    )
     if recreate:
         recreate_collection(client, collection, dim, vector_name)
     else:

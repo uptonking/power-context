@@ -244,6 +244,84 @@ def get_collection_name(workspace_path: str) -> str:
     update_workspace_state(workspace_path, {"qdrant_collection": coll})
     return coll
 
+# --- Persistent file-hash cache (.codebase/cache.json) ---
+CACHE_FILENAME = "cache.json"
+
+
+def _get_cache_path(workspace_path: str) -> Path:
+    ws = Path(workspace_path).resolve()
+    return ws / STATE_DIRNAME / CACHE_FILENAME
+
+
+def _read_cache(workspace_path: str) -> Dict[str, Any]:
+    """Best-effort load of the workspace cache (file hashes keyed by absolute path)."""
+    try:
+        p = _get_cache_path(workspace_path)
+        if not p.exists():
+            return {"file_hashes": {}, "updated_at": datetime.now().isoformat()}
+        with open(p, "r", encoding="utf-8") as f:
+            obj = json.load(f)
+            if isinstance(obj, dict) and isinstance(obj.get("file_hashes"), dict):
+                return obj
+            return {"file_hashes": {}, "updated_at": datetime.now().isoformat()}
+    except Exception:
+        return {"file_hashes": {}, "updated_at": datetime.now().isoformat()}
+
+
+def _write_cache(workspace_path: str, cache: Dict[str, Any]) -> None:
+    """Atomic write of cache file to avoid corruption under concurrency."""
+    lock = _get_state_lock(workspace_path)
+    with lock:
+        state_dir = Path(workspace_path).resolve() / STATE_DIRNAME
+        state_dir.mkdir(exist_ok=True)
+        cache_path = _get_cache_path(workspace_path)
+        tmp = cache_path.with_suffix(f".tmp.{uuid.uuid4().hex[:8]}")
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(cache, f, ensure_ascii=False, indent=2)
+            tmp.replace(cache_path)
+        finally:
+            try:
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
+def get_cached_file_hash(workspace_path: str, file_path: str) -> str:
+    """Return cached content hash for an absolute file path, or empty string."""
+    cache = _read_cache(workspace_path)
+    try:
+        return str((cache.get("file_hashes") or {}).get(str(Path(file_path).resolve()), ""))
+    except Exception:
+        return ""
+
+
+def set_cached_file_hash(workspace_path: str, file_path: str, file_hash: str) -> None:
+    """Set cached content hash for an absolute file path and persist immediately."""
+    lock = _get_state_lock(workspace_path)
+    with lock:
+        cache = _read_cache(workspace_path)
+        fh = cache.setdefault("file_hashes", {})
+        fh[str(Path(file_path).resolve())] = str(file_hash)
+        cache["updated_at"] = datetime.now().isoformat()
+        _write_cache(workspace_path, cache)
+
+
+def remove_cached_file(workspace_path: str, file_path: str) -> None:
+    """Remove a file entry from the cache and persist."""
+    lock = _get_state_lock(workspace_path)
+    with lock:
+        cache = _read_cache(workspace_path)
+        fh = cache.setdefault("file_hashes", {})
+        try:
+            fp = str(Path(file_path).resolve())
+        except Exception:
+            fp = str(file_path)
+        if fp in fh:
+            fh.pop(fp, None)
+            cache["updated_at"] = datetime.now().isoformat()
+            _write_cache(workspace_path, cache)
+
 def list_workspaces(search_root: Optional[str] = None) -> List[Dict[str, Any]]:
     """Find all workspaces with .codebase/state.json files."""
     if search_root is None:
