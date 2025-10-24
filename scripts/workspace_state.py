@@ -20,7 +20,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Literal, TypedDict
 import threading
-import tempfile
 
 # Type definitions matching codebase-index-cli patterns
 IndexingState = Literal['idle', 'initializing', 'scanning', 'indexing', 'watching', 'error']
@@ -173,8 +172,11 @@ def get_workspace_state(workspace_path: str) -> WorkspaceState:
 
         # Create new state
         now = datetime.now().isoformat()
-        workspace_name = Path(workspace_path).name
-        collection_name = os.environ.get("COLLECTION_NAME", workspace_name)
+        env_coll = os.environ.get("COLLECTION_NAME")
+        if isinstance(env_coll, str) and env_coll.strip() and env_coll.strip() != "my-collection":
+            collection_name = env_coll.strip()
+        else:
+            collection_name = _generate_collection_name(workspace_path)
 
         state: WorkspaceState = {
             "workspace_path": str(Path(workspace_path).resolve()),
