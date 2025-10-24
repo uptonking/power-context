@@ -481,7 +481,20 @@ async def qdrant_index_root(
     except Exception:
         pass
 
-    coll = collection or _default_collection()
+    # Resolve collection: prefer explicit non-placeholder; otherwise workspace state
+    try:
+        _c = (collection or "").strip()
+    except Exception:
+        _c = ""
+    _placeholders = {"", "my-collection"}
+    if _c and _c not in _placeholders:
+        coll = _c
+    else:
+        try:
+            from scripts.workspace_state import get_collection_name as _ws_get_collection_name  # type: ignore
+            coll = _ws_get_collection_name("/work")
+        except Exception:
+            coll = _default_collection()
 
     env = os.environ.copy()
     env["QDRANT_URL"] = QDRANT_URL
@@ -814,7 +827,20 @@ async def qdrant_index(
     if not (real_root == "/work" or real_root.startswith("/work/")):
         return {"ok": False, "error": "subdir escapes /work sandbox"}
     root = real_root
-    coll = collection or _default_collection()
+    # Resolve collection: prefer explicit non-placeholder; otherwise workspace state (use workspace root)
+    try:
+        _c2 = (collection or "").strip()
+    except Exception:
+        _c2 = ""
+    _placeholders2 = {"", "my-collection"}
+    if _c2 and _c2 not in _placeholders2:
+        coll = _c2
+    else:
+        try:
+            from scripts.workspace_state import get_collection_name as _ws_get_collection_name  # type: ignore
+            coll = _ws_get_collection_name("/work")
+        except Exception:
+            coll = _default_collection()
 
     env = os.environ.copy()
     env["QDRANT_URL"] = QDRANT_URL

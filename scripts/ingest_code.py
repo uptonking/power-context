@@ -2144,6 +2144,12 @@ def index_repo(
                 pass
             batch_texts.append(info)
             batch_meta.append(payload)
+            # Track per-file latest hash once we add the first chunk to any batch
+            try:
+                batch_file_hashes[str(file_path)] = file_hash
+            except Exception:
+                pass
+
             batch_ids.append(
                 hash_id(ch["text"], str(file_path), ch["start"], ch["end"])
             )
@@ -2163,18 +2169,13 @@ def index_repo(
                     for i, v, lx, m in zip(batch_ids, vectors, batch_lex, batch_meta)
                 ]
                 upsert_points(client, collection, points)
-                # Update local file-hash cache for all files in this batch
+                # Update local file-hash cache for any files that had chunks in this flush
                 try:
                     if set_cached_file_hash:
-                        _seen_paths = set()
-                        for _bm in batch_meta:
+                        for _p, _h in list(batch_file_hashes.items()):
                             try:
-                                _md = _bm.get("metadata") or {}
-                                _p = str(_md.get("path") or "").strip()
-                                _h = str(_md.get("file_hash") or "").strip()
-                                if _p and _h and _p not in _seen_paths:
+                                if _p and _h:
                                     set_cached_file_hash(ws_path, _p, _h)
-                                    _seen_paths.add(_p)
                             except Exception:
                                 continue
                 except Exception:
