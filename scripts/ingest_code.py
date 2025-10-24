@@ -453,6 +453,19 @@ def chunk_semantic(
     lines = text.splitlines()
     n = len(lines)
 
+# Discover the workspace root for a given file by finding a parent that contains .codebase
+# Falls back to /work if not found
+def _find_workspace_root_for_file(p: Path) -> str:
+    try:
+        cur = Path(p).resolve()
+        for anc in [cur] + list(cur.parents):
+            if (anc / ".codebase").exists():
+                return str(anc)
+    except Exception:
+        pass
+    return os.environ.get("WORKSPACE_PATH", "/work")
+
+
     # Extract symbols with line ranges
     symbols = _extract_symbols(language, text)
     if not symbols:
