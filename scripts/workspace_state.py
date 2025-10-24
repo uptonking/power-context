@@ -230,14 +230,28 @@ def get_collection_name(workspace_path: str) -> str:
     """Get the Qdrant collection name for a workspace.
     If none is present in state, persist either COLLECTION_NAME from env or a generated
     repoName-<shortHash> based on the workspace path, and return it.
+
+    Fix: treat placeholders as not-real so we don't collide across repos.
+    Placeholders include: empty string, "my-collection", and the env default if it equals "my-collection".
+    Only short-circuit when the stored name is already real.
     """
     state = get_workspace_state(workspace_path)
     coll = state.get("qdrant_collection") if isinstance(state, dict) else None
-    if isinstance(coll, str) and coll.strip():
-        return coll.strip()
-    # Prefer explicit env override if provided
     env_coll = os.environ.get("COLLECTION_NAME")
-    if env_coll and env_coll.strip():
+    env_coll = env_coll.strip() if isinstance(env_coll, str) else ""
+    placeholders = {"", "my-collection"}
+    # If env is explicitly the default placeholder, consider it a placeholder too
+    if env_coll == "my-collection":
+        placeholders.add(env_coll)
+
+    # If state has a real (non-placeholder) collection, keep it
+    if isinstance(coll, str):
+        c = coll.strip()
+        if c and c not in placeholders:
+            return c
+
+    # Otherwise, prefer a non-placeholder explicit env override; else generate
+    if env_coll and env_coll not in placeholders:
         coll = env_coll.strip()
     else:
         coll = _generate_collection_name(workspace_path)

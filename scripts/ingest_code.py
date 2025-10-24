@@ -2163,10 +2163,20 @@ def index_repo(
                     for i, v, lx, m in zip(batch_ids, vectors, batch_lex, batch_meta)
                 ]
                 upsert_points(client, collection, points)
-                # Update local file-hash cache after successful upsert for this file
+                # Update local file-hash cache for all files in this batch
                 try:
                     if set_cached_file_hash:
-                        set_cached_file_hash(ws_path, str(file_path), file_hash)
+                        _seen_paths = set()
+                        for _bm in batch_meta:
+                            try:
+                                _md = _bm.get("metadata") or {}
+                                _p = str(_md.get("path") or "").strip()
+                                _h = str(_md.get("file_hash") or "").strip()
+                                if _p and _h and _p not in _seen_paths:
+                                    set_cached_file_hash(ws_path, _p, _h)
+                                    _seen_paths.add(_p)
+                            except Exception:
+                                continue
                 except Exception:
                     pass
 
@@ -2205,10 +2215,20 @@ def index_repo(
             for i, v, lx, m in zip(batch_ids, vectors, batch_lex, batch_meta)
         ]
         upsert_points(client, collection, points)
-        # Update local file-hash cache for the last processed file
+        # Update local file-hash cache for all files in the final batch
         try:
             if set_cached_file_hash:
-                set_cached_file_hash(ws_path, str(file_path), file_hash)
+                _seen_paths = set()
+                for _bm in batch_meta:
+                    try:
+                        _md = _bm.get("metadata") or {}
+                        _p = str(_md.get("path") or "").strip()
+                        _h = str(_md.get("file_hash") or "").strip()
+                        if _p and _h and _p not in _seen_paths:
+                            set_cached_file_hash(ws_path, _p, _h)
+                            _seen_paths.add(_p)
+                    except Exception:
+                        continue
         except Exception:
             pass
 

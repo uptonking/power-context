@@ -204,8 +204,7 @@ class IndexHandler(FileSystemEventHandler):
         if moved_count and moved_count > 0:
             try:
                 print(f"[moved] {src} -> {dest} ({moved_count} chunk(s) relinked)")
-            # Update local cache: carry hash from src to dest if present
-            try:
+                # Update local cache: carry hash from src to dest if present
                 prev_hash = None
                 try:
                     prev_hash = get_cached_file_hash(str(self.root), str(src))
@@ -220,9 +219,6 @@ class IndexHandler(FileSystemEventHandler):
                         remove_cached_file(str(self.root), str(src))
                     except Exception:
                         pass
-            except Exception:
-                pass
-
             except Exception:
                 pass
             try:
