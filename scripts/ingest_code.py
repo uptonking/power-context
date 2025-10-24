@@ -64,6 +64,8 @@ try:
         update_last_activity,
         update_workspace_state,
         get_collection_name,
+        get_cached_file_hash,
+        set_cached_file_hash,
     )
 except Exception:
     # State integration is optional; continue if not available
@@ -71,6 +73,8 @@ except Exception:
     update_last_activity = None  # type: ignore
     update_workspace_state = None  # type: ignore
     get_collection_name = None  # type: ignore
+    get_cached_file_hash = None  # type: ignore
+    set_cached_file_hash = None  # type: ignore
 
 # Optional Tree-sitter import (graceful fallback)
 try:
