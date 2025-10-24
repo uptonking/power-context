@@ -73,14 +73,15 @@ STATE_DIRNAME = ".codebase"
 STATE_FILENAME = "state.json"
 
 # Thread-safe state management
-_state_locks: Dict[str, threading.Lock] = {}
+# Use re-entrant locks to avoid deadlocks when helper functions call each other
+_state_locks: Dict[str, threading.RLock] = {}
 _state_lock = threading.Lock()
 
-def _get_state_lock(workspace_path: str) -> threading.Lock:
+def _get_state_lock(workspace_path: str) -> threading.RLock:
     """Get or create a thread-safe lock for a specific workspace."""
     with _state_lock:
         if workspace_path not in _state_locks:
-            _state_locks[workspace_path] = threading.Lock()
+            _state_locks[workspace_path] = threading.RLock()
         return _state_locks[workspace_path]
 
 def _get_state_path(workspace_path: str) -> Path:
