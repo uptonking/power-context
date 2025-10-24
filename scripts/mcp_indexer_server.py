@@ -535,6 +535,19 @@ async def workspace_info(workspace_path: Optional[str] = None, **kwargs) -> Dict
     }
 
 @mcp.tool()
+async def list_workspaces(search_root: Optional[str] = None) -> Dict[str, Any]:
+    """Discover workspaces by scanning for .codebase/state.json files.
+    Returns: {"workspaces": [{"workspace_path", "collection_name", "last_updated", "indexing_state"}, ...]}
+    """
+    try:
+        from scripts.workspace_state import list_workspaces as _lw  # type: ignore
+        items = await asyncio.to_thread(lambda: _lw(search_root))
+        return {"workspaces": items}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
 async def memory_store(
     information: str,
     metadata: Optional[Dict[str, Any]] = None,
@@ -845,6 +858,7 @@ async def repo_search(
     rerank_timeout_ms: Any = None,
     highlight_snippet: Any = None,
     collection: Any = None,
+    workspace_path: Any = None,
     # Structured filters (optional; mirrors hybrid_search flags)
     language: Any = None,
     under: Any = None,
