@@ -436,6 +436,19 @@ def chunk_lines(text: str, max_lines: int = 120, overlap: int = 20) -> List[Dict
         chunks.append({"text": chunk, "start": i + 1, "end": j})
         if j == n:
             break
+
+# Discover the workspace root for a given file by finding a parent that contains .codebase
+# Falls back to /work if not found
+def _find_workspace_root_for_file(p: Path) -> str:
+    try:
+        cur = Path(p).resolve()
+        for anc in [cur] + list(cur.parents):
+            if (anc / ".codebase").exists():
+                return str(anc)
+    except Exception:
+        pass
+    return os.environ.get("WORKSPACE_PATH", "/work")
+
         i = max(j - overlap, i + 1)
     return chunks
 
