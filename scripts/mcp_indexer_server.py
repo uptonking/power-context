@@ -85,6 +85,35 @@ SNIPPET_MAX_BYTES = int(os.environ.get("MCP_SNIPPET_MAX_BYTES", "8192") or 8192)
 
 MCP_TOOL_TIMEOUT_SECS = float(os.environ.get("MCP_TOOL_TIMEOUT_SECS", "3600") or 3600.0)
 
+# --- Workspace state integration helpers ---
+def _state_file_path(ws_path: str = "/work") -> str:
+    try:
+        return os.path.join(ws_path, ".codebase", "state.json")
+    except Exception:
+        return "/work/.codebase/state.json"
+
+
+def _read_ws_state(ws_path: str = "/work") -> Optional[Dict[str, Any]]:
+    try:
+        p = _state_file_path(ws_path)
+        if not os.path.exists(p):
+            return None
+        with open(p, "r", encoding="utf-8") as f:
+            obj = json.load(f)
+            return obj if isinstance(obj, dict) else None
+    except Exception:
+        return None
+
+
+def _default_collection() -> str:
+    st = _read_ws_state("/work")
+    if st:
+        coll = st.get("qdrant_collection")
+        if isinstance(coll, str) and coll.strip():
+            return coll.strip()
+    return DEFAULT_COLLECTION
+
+
 
 def _work_script(name: str) -> str:
     """Return path to a script under /work if present, else local ./scripts.
@@ -452,7 +481,7 @@ async def qdrant_index_root(
     except Exception:
         pass
 
-    coll = collection or DEFAULT_COLLECTION
+    coll = collection or _default_collection()
 
     env = os.environ.copy()
     env["QDRANT_URL"] = QDRANT_URL
@@ -485,6 +514,26 @@ async def qdrant_list(**kwargs) -> Dict[str, Any]:
         return {"error": str(e)}
 
 
+
+@mcp.tool()
+async def workspace_info(workspace_path: Optional[str] = None, **kwargs) -> Dict[str, Any]:
+    """Return the current workspace state from .codebase/state.json, if present.
+    Returns:
+      - workspace_path: resolved path (defaults to "/work")
+      - default_collection: resolved collection (state.json > env > DEFAULT)
+      - source: "state_file" or "env"
+      - state: raw state.json contents (or {})
+    """
+    ws_path = (workspace_path or "/work").strip() or "/work"
+    st = _read_ws_state(ws_path) or {}
+    coll = (st.get("qdrant_collection") if isinstance(st, dict) else None) or os.environ.get("COLLECTION_NAME") or DEFAULT_COLLECTION
+    return {
+        "workspace_path": ws_path,
+        "default_collection": coll,
+        "source": ("state_file" if st else "env"),
+        "state": st or {},
+    }
+
 @mcp.tool()
 async def memory_store(
     information: str,
@@ -510,7 +559,7 @@ async def memory_store(
     if not information or not str(information).strip():
         return {"error": "information is required"}
 
-    coll = (collection or DEFAULT_COLLECTION) or ""
+    coll = (collection or _default_collection()) or ""
     model_name = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
     vector_name = sanitize_vector_name(model_name)
 
@@ -618,12 +667,14 @@ async def qdrant_status(
         if _extra and not collection:
             collection = _extra.get("collection", collection)
         if _extra and max_points in (None, "") and _extra.get("max_points") is not None:
+
+
             max_points = _coerce_int(_extra.get("max_points"), None)
         if _extra and batch in (None, "") and _extra.get("batch") is not None:
             batch = _coerce_int(_extra.get("batch"), None)
     except Exception:
         pass
-    coll = collection or DEFAULT_COLLECTION
+    coll = collection or _default_collection()
     try:
         from qdrant_client import QdrantClient
         import datetime as _dt
@@ -725,6 +776,8 @@ async def qdrant_index(
         if _looks_jsonish_string(collection):
             _parsed = _maybe_parse_jsonish(collection)
             if isinstance(_parsed, dict):
+
+
                 subdir = _parsed.get("subdir", subdir)
                 collection = _parsed.get("collection", collection)
                 if recreate is None and "recreate" in _parsed:
@@ -748,7 +801,7 @@ async def qdrant_index(
     if not (real_root == "/work" or real_root.startswith("/work/")):
         return {"ok": False, "error": "subdir escapes /work sandbox"}
     root = real_root
-    coll = collection or DEFAULT_COLLECTION
+    coll = collection or _default_collection()
 
     env = os.environ.copy()
     env["QDRANT_URL"] = QDRANT_URL
@@ -783,6 +836,7 @@ async def repo_search(
     query: Any = None,
     limit: Any = None,
     per_path: Any = None,
+
     include_snippet: Any = None,
     context_lines: Any = None,
     rerank_enabled: Any = None,
@@ -968,9 +1022,7 @@ async def repo_search(
         rerank_timeout_ms, int(os.environ.get("RERANKER_TIMEOUT_MS", "120") or 120)
     )
     highlight_snippet = _to_bool(highlight_snippet, True)
-    collection = _to_str(collection, "").strip() or os.environ.get(
-        "COLLECTION_NAME", DEFAULT_COLLECTION
-    )
+    collection = _to_str(collection, "").strip() or _default_collection()
 
     language = _to_str(language, "").strip()
     under = _to_str(under, "").strip()
@@ -1677,7 +1729,7 @@ async def change_history_for_path(
     p = str(path or "").strip()
     if not p:
         return {"error": "path required"}
-    coll = str(collection or "").strip() or os.environ.get("COLLECTION_NAME", DEFAULT_COLLECTION)
+    coll = str(collection or "").strip() or _default_collection()
     try:
         mcap = int(max_points) if max_points not in (None, "") else 200
     except Exception:
@@ -1808,7 +1860,7 @@ async def context_search(
         compact = kwargs.get("compact", compact)
 
     # Normalize inputs
-    coll = (collection or DEFAULT_COLLECTION) or ""
+    coll = (collection or _default_collection()) or ""
     mcoll = (os.environ.get("MEMORY_COLLECTION_NAME") or coll) or ""
     use_sse_memory = str(os.environ.get("MEMORY_SSE_ENABLED", "false")).lower() in (
         "1",
@@ -2611,7 +2663,7 @@ async def context_answer(
         ppath = 1
 
     # Collection + model setup (reuse indexer defaults)
-    coll = (collection or DEFAULT_COLLECTION) or ""
+    coll = (collection or _default_collection()) or ""
     model_name = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
     model = _get_embedding_model(model_name)
 
@@ -3072,7 +3124,7 @@ if __name__ == "__main__":
                 # Fire a tiny warmup rerank once via subprocess; ignore failures
                 _env = os.environ.copy()
                 _env["QDRANT_URL"] = QDRANT_URL
-                _env["COLLECTION_NAME"] = DEFAULT_COLLECTION
+                _env["COLLECTION_NAME"] = _default_collection()
                 _cmd = [
                     "python",
                     "/work/scripts/rerank_local.py",

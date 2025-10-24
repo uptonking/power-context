@@ -56,6 +56,20 @@ from qdrant_client import QdrantClient, models
 from fastembed import TextEmbedding
 
 
+
+from datetime import datetime
+try:
+    from scripts.workspace_state import (
+        update_indexing_status,
+        update_last_activity,
+        update_workspace_state,
+    )
+except Exception:
+    # State integration is optional; continue if not available
+    update_indexing_status = None  # type: ignore
+    update_last_activity = None  # type: ignore
+    update_workspace_state = None  # type: ignore
+
 # Optional Tree-sitter import (graceful fallback)
 try:
     from tree_sitter import Parser  # type: ignore
@@ -1845,6 +1859,23 @@ def index_repo(
         if vector_name is None:
             vector_name = _sanitize_vector_name(model_name)
 
+    # Workspace state: announce indexing start
+    try:
+        if update_workspace_state:
+            update_workspace_state("/work", {"qdrant_collection": collection})
+        if update_indexing_status:
+            update_indexing_status(
+                "/work",
+                {
+                    "state": "indexing",
+                    "started_at": datetime.now().isoformat(),
+                    "progress": {"files_processed": 0, "total_files": None},
+                },
+            )
+    except Exception:
+        pass
+
+
     if recreate:
         recreate_collection(client, collection, dim, vector_name)
     else:
@@ -2071,6 +2102,33 @@ def index_repo(
     print(
         f"Indexing complete. files_seen={files_seen}, files_indexed={files_indexed}, chunks_indexed={points_indexed}"
     )
+
+    # Workspace state: mark completion
+    try:
+        if update_last_activity:
+            update_last_activity(
+                "/work",
+                {
+                    "timestamp": datetime.now().isoformat(),
+                    "action": "scan-completed",
+                    "filePath": "",
+                    "details": {
+                        "files_seen": files_seen,
+                        "files_indexed": files_indexed,
+                        "chunks_indexed": points_indexed,
+                    },
+                },
+            )
+        if update_indexing_status:
+            update_indexing_status(
+                "/work",
+                {
+                    "state": "idle",
+                    "progress": {"files_processed": files_indexed, "total_files": None},
+                },
+            )
+    except Exception:
+        pass
 
 
 def main():
