@@ -1973,6 +1973,9 @@ def index_repo(
             # unnamed collection: store dense only
             return models.PointStruct(id=pid, vector=dense_vec, payload=payload)
 
+    # Track per-file hashes across the entire run for cache updates on any flush
+    batch_file_hashes = {}
+
     for file_path in iter_files(root):
         files_seen += 1
         try:

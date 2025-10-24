@@ -388,6 +388,18 @@ def _rename_in_store(client: QdrantClient, collection: str, src: Path, dest: Pat
 
 
 def main():
+    # Resolve collection name from workspace state before any client/state ops
+    try:
+        from scripts.workspace_state import get_collection_name as _get_coll
+    except Exception:
+        _get_coll = None
+    global COLLECTION
+    try:
+        if _get_coll:
+            COLLECTION = _get_coll(str(ROOT))
+    except Exception:
+        pass
+
     print(
         f"Watch mode: root={ROOT} qdrant={QDRANT_URL} collection={COLLECTION} model={MODEL}"
     )
