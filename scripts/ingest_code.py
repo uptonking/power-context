@@ -1983,6 +1983,33 @@ def index_repo(
 
         # Skip unchanged files if enabled (default)
         if skip_unchanged:
+            # Prefer local workspace cache to avoid Qdrant lookups
+            try:
+                if get_cached_file_hash:
+                    prev_local = get_cached_file_hash(ws_path, str(file_path))
+                    if prev_local and prev_local == file_hash:
+                        if PROGRESS_EVERY <= 0 and files_seen % 50 == 0:
+                            print(f"... processed {files_seen} files (skipping unchanged, cache)")
+                            try:
+                                if update_indexing_status:
+                                    update_indexing_status(
+                                        ws_path,
+                                        {
+                                            "state": "indexing",
+                                            "progress": {
+                                                "files_processed": files_seen,
+                                                "total_files": None,
+                                                "current_file": str(file_path),
+                                            },
+                                        },
+                                    )
+                            except Exception:
+                                pass
+                        else:
+                            print(f"Skipping unchanged file (cache): {file_path}")
+                        continue
+            except Exception:
+                pass
             prev = get_indexed_file_hash(client, collection, str(file_path))
             if prev and prev == file_hash:
                 if PROGRESS_EVERY <= 0 and files_seen % 50 == 0:
@@ -2003,6 +2030,8 @@ def index_repo(
                             )
                     except Exception:
                         pass
+                else:
+                    print(f"Skipping unchanged file: {file_path}")
                 continue
 
         # Dedupe per-file by deleting previous points for this path (default)
@@ -2134,6 +2163,13 @@ def index_repo(
                     for i, v, lx, m in zip(batch_ids, vectors, batch_lex, batch_meta)
                 ]
                 upsert_points(client, collection, points)
+                # Update local file-hash cache after successful upsert for this file
+                try:
+                    if set_cached_file_hash:
+                        set_cached_file_hash(ws_path, str(file_path), file_hash)
+                except Exception:
+                    pass
+
                 batch_texts, batch_meta, batch_ids, batch_lex = [], [], [], []
 
         if PROGRESS_EVERY > 0 and files_seen % PROGRESS_EVERY == 0:
@@ -2162,6 +2198,13 @@ def index_repo(
         for _idx, _m in enumerate(batch_meta):
             try:
                 _m["pid_str"] = str(batch_ids[_idx])
+    # Update local file-hash cache for the last processed file batch
+    try:
+        if set_cached_file_hash:
+            set_cached_file_hash(ws_path, str(file_path), file_hash)
+    except Exception:
+        pass
+
             except Exception:
                 pass
         points = [
