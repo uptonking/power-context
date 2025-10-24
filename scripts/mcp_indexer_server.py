@@ -947,6 +947,11 @@ async def repo_search(
                 or (isinstance(collection, str) and collection.strip() == "")
             ) and _extra.get("collection"):
                 collection = _extra.get("collection")
+            # Optional workspace_path routing
+            if (
+                (workspace_path is None) or (isinstance(workspace_path, str) and str(workspace_path).strip() == "")
+            ) and _extra.get("workspace_path") is not None:
+                workspace_path = _extra.get("workspace_path")
             if (
                 language is None
                 or (isinstance(language, str) and language.strip() == "")
@@ -1036,7 +1041,18 @@ async def repo_search(
         rerank_timeout_ms, int(os.environ.get("RERANKER_TIMEOUT_MS", "120") or 120)
     )
     highlight_snippet = _to_bool(highlight_snippet, True)
-    collection = _to_str(collection, "").strip() or _default_collection()
+
+    # Resolve collection: explicit > workspace_path state > default
+    ws_hint = _to_str(workspace_path, "").strip()
+    coll_hint = _to_str(collection, "").strip()
+    if not coll_hint and ws_hint:
+        try:
+            st = _read_ws_state(ws_hint)
+            if st and isinstance(st.get("qdrant_collection"), str):
+                coll_hint = st.get("qdrant_collection").strip()
+        except Exception:
+            pass
+    collection = coll_hint or _default_collection()
 
     language = _to_str(language, "").strip()
     under = _to_str(under, "").strip()
