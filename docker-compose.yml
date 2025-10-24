@@ -145,6 +145,8 @@ services:
     working_dir: /work
     volumes:
       - ${HOST_INDEX_PATH:-.}:/work:ro
+      - ${HOST_INDEX_PATH:-.}/.codebase:/work/.codebase:rw
+
     entrypoint: ["python", "/app/scripts/ingest_code.py"]
 
   watcher:
@@ -169,7 +171,9 @@ services:
     working_dir: /work
     volumes:
       - ${HOST_INDEX_PATH:-.}:/work:ro
+      - ${HOST_INDEX_PATH:-.}/.codebase:/work/.codebase:rw
     entrypoint: ["python", "/app/scripts/watch_index.py"]
+
 
   init_payload:
     build:
@@ -185,6 +189,8 @@ services:
     working_dir: /work
     volumes:
       - ${HOST_INDEX_PATH:-.}:/work:ro
+      - ${HOST_INDEX_PATH:-.}/.codebase:/work/.codebase:rw
+
     entrypoint: ["python", "/app/scripts/create_indexes.py"]
 
 volumes:

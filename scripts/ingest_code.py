@@ -56,6 +56,28 @@ from qdrant_client import QdrantClient, models
 from fastembed import TextEmbedding
 
 
+
+from datetime import datetime
+try:
+    from scripts.workspace_state import (
+        update_indexing_status,
+        update_last_activity,
+        update_workspace_state,
+        get_collection_name,
+        get_cached_file_hash,
+        set_cached_file_hash,
+        remove_cached_file,
+    )
+except Exception:
+    # State integration is optional; continue if not available
+    update_indexing_status = None  # type: ignore
+    update_last_activity = None  # type: ignore
+    update_workspace_state = None  # type: ignore
+    get_collection_name = None  # type: ignore
+    get_cached_file_hash = None  # type: ignore
+    set_cached_file_hash = None  # type: ignore
+    remove_cached_file = None  # type: ignore
+
 # Optional Tree-sitter import (graceful fallback)
 try:
     from tree_sitter import Parser  # type: ignore
@@ -73,7 +95,12 @@ _TS_WARNED = False
 
 def _use_tree_sitter() -> bool:
     global _TS_WARNED
-    want = os.environ.get("USE_TREE_SITTER", "").lower() in {"1", "true", "yes", "on"}
+    val = os.environ.get("USE_TREE_SITTER")
+    # Default ON when libs are available; allow explicit disable via 0/false
+    if val is None or str(val).strip() == "":
+        want = True
+    else:
+        want = str(val).strip().lower() in {"1", "true", "yes", "on"}
     if want and not _TS_AVAILABLE and not _TS_WARNED:
         print(
             "[WARN] USE_TREE_SITTER=1 but tree-sitter libs not available; falling back to regex heuristics"
@@ -416,6 +443,8 @@ def chunk_lines(text: str, max_lines: int = 120, overlap: int = 20) -> List[Dict
         chunks.append({"text": chunk, "start": i + 1, "end": j})
         if j == n:
             break
+
+
         i = max(j - overlap, i + 1)
     return chunks
 
@@ -430,6 +459,8 @@ def chunk_semantic(
 
     lines = text.splitlines()
     n = len(lines)
+
+
 
     # Extract symbols with line ranges
     symbols = _extract_symbols(language, text)
@@ -489,6 +520,8 @@ def chunk_by_tokens(
         from tokenizers import Tokenizer  # lightweight, already in requirements
     except Exception:
         Tokenizer = None  # type: ignore
+
+
 
     try:
         k = int(os.environ.get("MICRO_CHUNK_TOKENS", str(k_tokens or 16)) or 16)
@@ -1628,6 +1661,16 @@ def index_single_file(
     repo_tag = _detect_repo_name_from_path(file_path)
 
     if skip_unchanged:
+        # Prefer local workspace cache to avoid Qdrant lookups
+        ws_path = os.environ.get("WATCH_ROOT") or os.environ.get("WORKSPACE_PATH") or "/work"
+        try:
+            if get_cached_file_hash:
+                prev_local = get_cached_file_hash(ws_path, str(file_path))
+                if prev_local and prev_local == file_hash:
+                    print(f"Skipping unchanged file (cache): {file_path}")
+                    return False
+        except Exception:
+            pass
         prev = get_indexed_file_hash(client, collection, str(file_path))
         if prev and prev == file_hash:
             print(f"Skipping unchanged file: {file_path}")
@@ -1779,6 +1822,7 @@ def index_single_file(
     if batch_texts:
         vectors = embed_batch(model, batch_texts)
         # Inject pid_str into payloads for server-side gating
+
         for _idx, _m in enumerate(batch_meta):
             try:
                 _m["pid_str"] = str(batch_ids[_idx])
@@ -1789,6 +1833,13 @@ def index_single_file(
             for i, v, lx, m in zip(batch_ids, vectors, batch_lex, batch_meta)
         ]
         upsert_points(client, collection, points)
+        # Update local file-hash cache only after successful upsert
+        try:
+            ws = os.environ.get("WATCH_ROOT") or os.environ.get("WORKSPACE_PATH") or "/work"
+            if set_cached_file_hash:
+                set_cached_file_hash(ws, str(file_path), file_hash)
+        except Exception:
+            pass
         return True
     return False
 
@@ -1804,9 +1855,6 @@ def index_repo(
     dedupe: bool = True,
     skip_unchanged: bool = True,
 ):
-    print(
-        f"Indexing root={root} -> {qdrant_url} collection={collection} model={model_name} recreate={recreate}"
-    )
     model = TextEmbedding(model_name=model_name)
     # Determine embedding dimension
     dim = len(next(model.embed(["dimension probe"])))
@@ -1845,6 +1893,32 @@ def index_repo(
         if vector_name is None:
             vector_name = _sanitize_vector_name(model_name)
 
+    # Workspace state: ensure unique per-workspace collection and announce start
+    try:
+        ws_path = str(root)
+        # If collection is unset or default placeholder, generate a per-workspace one
+        if 'get_collection_name' in globals() and get_collection_name:
+            default_marker = os.environ.get("COLLECTION_NAME", "my-collection")
+            if (not collection) or (collection == "my-collection") or (default_marker == "my-collection"):
+                collection = get_collection_name(ws_path)
+        if update_workspace_state:
+            update_workspace_state(ws_path, {"qdrant_collection": collection})
+        if update_indexing_status:
+            update_indexing_status(
+                ws_path,
+                {
+                    "state": "indexing",
+                    "started_at": datetime.now().isoformat(),
+                    "progress": {"files_processed": 0, "total_files": None},
+                },
+            )
+    except Exception:
+        pass
+
+
+    print(
+        f"Indexing root={root} -> {qdrant_url} collection={collection} model={model_name} recreate={recreate}"
+    )
     if recreate:
         recreate_collection(client, collection, dim, vector_name)
     else:
@@ -1899,6 +1973,9 @@ def index_repo(
             # unnamed collection: store dense only
             return models.PointStruct(id=pid, vector=dense_vec, payload=payload)
 
+    # Track per-file hashes across the entire run for cache updates on any flush
+    batch_file_hashes = {}
+
     for file_path in iter_files(root):
         files_seen += 1
         try:
@@ -1911,11 +1988,55 @@ def index_repo(
 
         # Skip unchanged files if enabled (default)
         if skip_unchanged:
+            # Prefer local workspace cache to avoid Qdrant lookups
+            try:
+                if get_cached_file_hash:
+                    prev_local = get_cached_file_hash(ws_path, str(file_path))
+                    if prev_local and prev_local == file_hash:
+                        if PROGRESS_EVERY <= 0 and files_seen % 50 == 0:
+                            print(f"... processed {files_seen} files (skipping unchanged, cache)")
+                            try:
+                                if update_indexing_status:
+                                    update_indexing_status(
+                                        ws_path,
+                                        {
+                                            "state": "indexing",
+                                            "progress": {
+                                                "files_processed": files_seen,
+                                                "total_files": None,
+                                                "current_file": str(file_path),
+                                            },
+                                        },
+                                    )
+                            except Exception:
+                                pass
+                        else:
+                            print(f"Skipping unchanged file (cache): {file_path}")
+                        continue
+            except Exception:
+                pass
             prev = get_indexed_file_hash(client, collection, str(file_path))
             if prev and prev == file_hash:
                 if PROGRESS_EVERY <= 0 and files_seen % 50 == 0:
                     # minor heartbeat when no progress cadence configured
                     print(f"... processed {files_seen} files (skipping unchanged)")
+                    try:
+                        if update_indexing_status:
+                            update_indexing_status(
+                                ws_path,
+                                {
+                                    "state": "indexing",
+                                    "progress": {
+                                        "files_processed": files_seen,
+                                        "total_files": None,
+                                        "current_file": str(file_path),
+                                    },
+                                },
+                            )
+                    except Exception:
+                        pass
+                else:
+                    print(f"Skipping unchanged file: {file_path}")
                 continue
 
         # Dedupe per-file by deleting previous points for this path (default)
@@ -2028,6 +2149,12 @@ def index_repo(
                 pass
             batch_texts.append(info)
             batch_meta.append(payload)
+            # Track per-file latest hash once we add the first chunk to any batch
+            try:
+                batch_file_hashes[str(file_path)] = file_hash
+            except Exception:
+                pass
+
             batch_ids.append(
                 hash_id(ch["text"], str(file_path), ch["start"], ch["end"])
             )
@@ -2047,12 +2174,39 @@ def index_repo(
                     for i, v, lx, m in zip(batch_ids, vectors, batch_lex, batch_meta)
                 ]
                 upsert_points(client, collection, points)
+                # Update local file-hash cache for any files that had chunks in this flush
+                try:
+                    if set_cached_file_hash:
+                        for _p, _h in list(batch_file_hashes.items()):
+                            try:
+                                if _p and _h:
+                                    set_cached_file_hash(ws_path, _p, _h)
+                            except Exception:
+                                continue
+                except Exception:
+                    pass
+
                 batch_texts, batch_meta, batch_ids, batch_lex = [], [], [], []
 
         if PROGRESS_EVERY > 0 and files_seen % PROGRESS_EVERY == 0:
             print(
                 f"Progress: files_seen={files_seen}, files_indexed={files_indexed}, chunks_indexed={points_indexed}"
             )
+            try:
+                if update_indexing_status:
+                    update_indexing_status(
+                        ws_path,
+                        {
+                            "state": "indexing",
+                            "progress": {
+                                "files_processed": files_seen,
+                                "total_files": None,
+                                "current_file": str(file_path),
+                            },
+                        },
+                    )
+            except Exception:
+                pass
 
     if batch_texts:
         vectors = embed_batch(model, batch_texts)
@@ -2067,10 +2221,48 @@ def index_repo(
             for i, v, lx, m in zip(batch_ids, vectors, batch_lex, batch_meta)
         ]
         upsert_points(client, collection, points)
+        # Update local file-hash cache for any files that had chunks during this run (final flush)
+        try:
+            if set_cached_file_hash:
+                for _p, _h in list(batch_file_hashes.items()):
+                    try:
+                        if _p and _h:
+                            set_cached_file_hash(ws_path, _p, _h)
+                    except Exception:
+                        continue
+        except Exception:
+            pass
 
     print(
         f"Indexing complete. files_seen={files_seen}, files_indexed={files_indexed}, chunks_indexed={points_indexed}"
     )
+
+    # Workspace state: mark completion
+    try:
+        if update_last_activity:
+            update_last_activity(
+                ws_path,
+                {
+                    "timestamp": datetime.now().isoformat(),
+                    "action": "scan-completed",
+                    "file_path": "",
+                    "details": {
+                        "files_seen": files_seen,
+                        "files_indexed": files_indexed,
+                        "chunks_indexed": points_indexed,
+                    },
+                },
+            )
+        if update_indexing_status:
+            update_indexing_status(
+                ws_path,
+                {
+                    "state": "idle",
+                    "progress": {"files_processed": files_indexed, "total_files": None},
+                },
+            )
+    except Exception:
+        pass
 
 
 def main():
