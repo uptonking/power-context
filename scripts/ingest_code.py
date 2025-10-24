@@ -1820,12 +1820,6 @@ def index_single_file(
     if batch_texts:
         vectors = embed_batch(model, batch_texts)
         # Inject pid_str into payloads for server-side gating
-        try:
-            ws = os.environ.get("WATCH_ROOT") or os.environ.get("WORKSPACE_PATH") or "/work"
-            if set_cached_file_hash:
-                set_cached_file_hash(ws, str(file_path), file_hash)
-        except Exception:
-            pass
 
         for _idx, _m in enumerate(batch_meta):
             try:
@@ -1837,6 +1831,13 @@ def index_single_file(
             for i, v, lx, m in zip(batch_ids, vectors, batch_lex, batch_meta)
         ]
         upsert_points(client, collection, points)
+        # Update local file-hash cache only after successful upsert
+        try:
+            ws = os.environ.get("WATCH_ROOT") or os.environ.get("WORKSPACE_PATH") or "/work"
+            if set_cached_file_hash:
+                set_cached_file_hash(ws, str(file_path), file_hash)
+        except Exception:
+            pass
         return True
     return False
 
