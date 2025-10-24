@@ -63,12 +63,14 @@ try:
         update_indexing_status,
         update_last_activity,
         update_workspace_state,
+        get_collection_name,
     )
 except Exception:
     # State integration is optional; continue if not available
     update_indexing_status = None  # type: ignore
     update_last_activity = None  # type: ignore
     update_workspace_state = None  # type: ignore
+    get_collection_name = None  # type: ignore
 
 # Optional Tree-sitter import (graceful fallback)
 try:
@@ -1859,8 +1861,13 @@ def index_repo(
         if vector_name is None:
             vector_name = _sanitize_vector_name(model_name)
 
-    # Workspace state: announce indexing start
+    # Workspace state: ensure unique per-workspace collection and announce start
     try:
+        # If collection is unset or default placeholder, generate a per-workspace one
+        if 'get_collection_name' in globals() and get_collection_name:
+            default_marker = os.environ.get("COLLECTION_NAME", "my-collection")
+            if (not collection) or (collection == "my-collection") or (default_marker == "my-collection"):
+                collection = get_collection_name("/work")
         if update_workspace_state:
             update_workspace_state("/work", {"qdrant_collection": collection})
         if update_indexing_status:
@@ -1947,6 +1954,21 @@ def index_repo(
                 if PROGRESS_EVERY <= 0 and files_seen % 50 == 0:
                     # minor heartbeat when no progress cadence configured
                     print(f"... processed {files_seen} files (skipping unchanged)")
+                    try:
+                        if update_indexing_status:
+                            update_indexing_status(
+                                "/work",
+                                {
+                                    "state": "indexing",
+                                    "progress": {
+                                        "files_processed": files_seen,
+                                        "total_files": None,
+                                        "current_file": str(file_path),
+                                    },
+                                },
+                            )
+                    except Exception:
+                        pass
                 continue
 
         # Dedupe per-file by deleting previous points for this path (default)
@@ -2084,6 +2106,21 @@ def index_repo(
             print(
                 f"Progress: files_seen={files_seen}, files_indexed={files_indexed}, chunks_indexed={points_indexed}"
             )
+            try:
+                if update_indexing_status:
+                    update_indexing_status(
+                        "/work",
+                        {
+                            "state": "indexing",
+                            "progress": {
+                                "files_processed": files_seen,
+                                "total_files": None,
+                                "current_file": str(file_path),
+                            },
+                        },
+                    )
+            except Exception:
+                pass
 
     if batch_texts:
         vectors = embed_batch(model, batch_texts)

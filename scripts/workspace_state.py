@@ -97,6 +97,46 @@ def _ensure_state_dir(workspace_path: str) -> Path:
     state_dir.mkdir(exist_ok=True)
     return state_dir / STATE_FILENAME
 
+def _sanitize_name(s: str, max_len: int = 64) -> str:
+    s = s.lower().strip()
+    s = re.sub(r"[^a-z0-9_.-]+", "-", s)
+    s = re.sub(r"-+", "-", s).strip("-")
+    if not s:
+        s = "workspace"
+    return s[:max_len]
+
+
+def _detect_repo_name_from_path(path: Path) -> str:
+    try:
+        base = path if path.is_dir() else path.parent
+        r = subprocess.run(["git", "-C", str(base), "rev-parse", "--show-toplevel"],
+                           capture_output=True, text=True)
+        top = (r.stdout or "").strip()
+        if r.returncode == 0 and top:
+            return Path(top).name
+    except Exception:
+        pass
+    try:
+        # Walk up to find .git
+        cur = path if path.is_dir() else path.parent
+        for p in [cur] + list(cur.parents):
+            try:
+                if (p / ".git").exists():
+                    return p.name
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return (path if path.is_dir() else path.parent).name or "workspace"
+
+
+def _generate_collection_name(workspace_path: str) -> str:
+    ws = Path(workspace_path).resolve()
+    repo = _sanitize_name(_detect_repo_name_from_path(ws))
+    # stable suffix from absolute path
+    h = hashlib.sha1(str(ws).encode("utf-8", errors="ignore")).hexdigest()[:6]
+    return _sanitize_name(f"{repo}-{h}")
+
 def _atomic_write_state(state_path: Path, state: WorkspaceState) -> None:
     """Atomically write state to prevent corruption during concurrent access."""
     # Write to temp file first, then rename (atomic on most filesystems)
@@ -118,7 +158,7 @@ def get_workspace_state(workspace_path: str) -> WorkspaceState:
     lock = _get_state_lock(workspace_path)
     with lock:
         state_path = _get_state_path(workspace_path)
-        
+
         if state_path.exists():
             try:
                 with open(state_path, 'r', encoding='utf-8') as f:
@@ -130,12 +170,12 @@ def get_workspace_state(workspace_path: str) -> WorkspaceState:
             except (json.JSONDecodeError, ValueError, OSError):
                 # Corrupted or invalid state file, recreate
                 pass
-        
+
         # Create new state
         now = datetime.now().isoformat()
         workspace_name = Path(workspace_path).name
         collection_name = os.environ.get("COLLECTION_NAME", workspace_name)
-        
+
         state: WorkspaceState = {
             "workspace_path": str(Path(workspace_path).resolve()),
             "created_at": now,
@@ -145,7 +185,7 @@ def get_workspace_state(workspace_path: str) -> WorkspaceState:
                 "state": "idle"
             }
         }
-        
+
         # Ensure directory exists and write state
         state_path = _ensure_state_dir(workspace_path)
         _atomic_write_state(state_path, state)
@@ -156,15 +196,15 @@ def update_workspace_state(workspace_path: str, updates: Dict[str, Any]) -> Work
     lock = _get_state_lock(workspace_path)
     with lock:
         state = get_workspace_state(workspace_path)
-        
+
         # Apply updates
         for key, value in updates.items():
             if key in state or key in WorkspaceState.__annotations__:
                 state[key] = value
-        
+
         # Always update timestamp
         state["updated_at"] = datetime.now().isoformat()
-        
+
         # Write back to file
         state_path = _ensure_state_dir(workspace_path)
         _atomic_write_state(state_path, state)
@@ -184,18 +224,31 @@ def update_qdrant_stats(workspace_path: str, stats: QdrantStats) -> WorkspaceSta
     return update_workspace_state(workspace_path, {"qdrant_stats": stats})
 
 def get_collection_name(workspace_path: str) -> str:
-    """Get the Qdrant collection name for a workspace."""
+    """Get the Qdrant collection name for a workspace.
+    If none is present in state, persist either COLLECTION_NAME from env or a generated
+    repoName-<shortHash> based on the workspace path, and return it.
+    """
     state = get_workspace_state(workspace_path)
-    return state.get("qdrant_collection", os.environ.get("COLLECTION_NAME", "my-collection"))
+    coll = state.get("qdrant_collection") if isinstance(state, dict) else None
+    if isinstance(coll, str) and coll.strip():
+        return coll.strip()
+    # Prefer explicit env override if provided
+    env_coll = os.environ.get("COLLECTION_NAME")
+    if env_coll and env_coll.strip():
+        coll = env_coll.strip()
+    else:
+        coll = _generate_collection_name(workspace_path)
+    update_workspace_state(workspace_path, {"qdrant_collection": coll})
+    return coll
 
 def list_workspaces(search_root: Optional[str] = None) -> List[Dict[str, Any]]:
     """Find all workspaces with .codebase/state.json files."""
     if search_root is None:
         search_root = os.getcwd()
-    
+
     workspaces = []
     search_path = Path(search_root).resolve()
-    
+
     # Search for .codebase directories
     for state_dir in search_path.rglob(STATE_DIRNAME):
         state_file = state_dir / STATE_FILENAME
@@ -212,7 +265,7 @@ def list_workspaces(search_root: Optional[str] = None) -> List[Dict[str, Any]]:
             except Exception:
                 # Skip corrupted state files
                 continue
-    
+
     return sorted(workspaces, key=lambda x: x.get("last_updated", ""), reverse=True)
 
 def cleanup_old_state_locks():
