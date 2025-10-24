@@ -24,6 +24,9 @@ from scripts.workspace_state import (
     update_indexing_status,
     update_last_activity,
     update_workspace_state,
+    get_cached_file_hash,
+    set_cached_file_hash,
+    remove_cached_file,
 )
 import hashlib
 from datetime import datetime
@@ -149,6 +152,12 @@ class IndexHandler(FileSystemEventHandler):
         try:
             idx.delete_points_by_path(self.client, self.collection, str(p))
             print(f"[deleted] {p}")
+            # Drop local cache entry
+            try:
+                remove_cached_file(str(self.root), str(p))
+            except Exception:
+                pass
+
             try:
                 _log_activity(str(self.root), "deleted", p)
             except Exception:
@@ -195,6 +204,25 @@ class IndexHandler(FileSystemEventHandler):
         if moved_count and moved_count > 0:
             try:
                 print(f"[moved] {src} -> {dest} ({moved_count} chunk(s) relinked)")
+            # Update local cache: carry hash from src to dest if present
+            try:
+                prev_hash = None
+                try:
+                    prev_hash = get_cached_file_hash(str(self.root), str(src))
+                except Exception:
+                    prev_hash = None
+                if prev_hash:
+                    try:
+                        set_cached_file_hash(str(self.root), str(dest), prev_hash)
+                    except Exception:
+                        pass
+                    try:
+                        remove_cached_file(str(self.root), str(src))
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
             except Exception:
                 pass
             try:

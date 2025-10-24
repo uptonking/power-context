@@ -2198,13 +2198,6 @@ def index_repo(
         for _idx, _m in enumerate(batch_meta):
             try:
                 _m["pid_str"] = str(batch_ids[_idx])
-    # Update local file-hash cache for the last processed file batch
-    try:
-        if set_cached_file_hash:
-            set_cached_file_hash(ws_path, str(file_path), file_hash)
-    except Exception:
-        pass
-
             except Exception:
                 pass
         points = [
@@ -2212,6 +2205,12 @@ def index_repo(
             for i, v, lx, m in zip(batch_ids, vectors, batch_lex, batch_meta)
         ]
         upsert_points(client, collection, points)
+        # Update local file-hash cache for the last processed file
+        try:
+            if set_cached_file_hash:
+                set_cached_file_hash(ws_path, str(file_path), file_hash)
+        except Exception:
+            pass
 
     print(
         f"Indexing complete. files_seen={files_seen}, files_indexed={files_indexed}, chunks_indexed={points_indexed}"
