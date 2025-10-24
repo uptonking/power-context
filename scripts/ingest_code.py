@@ -1659,6 +1659,16 @@ def index_single_file(
     repo_tag = _detect_repo_name_from_path(file_path)
 
     if skip_unchanged:
+        # Prefer local workspace cache to avoid Qdrant lookups
+        ws_path = os.environ.get("WATCH_ROOT") or os.environ.get("WORKSPACE_PATH") or "/work"
+        try:
+            if get_cached_file_hash:
+                prev_local = get_cached_file_hash(ws_path, str(file_path))
+                if prev_local and prev_local == file_hash:
+                    print(f"Skipping unchanged file (cache): {file_path}")
+                    return False
+        except Exception:
+            pass
         prev = get_indexed_file_hash(client, collection, str(file_path))
         if prev and prev == file_hash:
             print(f"Skipping unchanged file: {file_path}")
@@ -1810,6 +1820,13 @@ def index_single_file(
     if batch_texts:
         vectors = embed_batch(model, batch_texts)
         # Inject pid_str into payloads for server-side gating
+        try:
+            ws = os.environ.get("WATCH_ROOT") or os.environ.get("WORKSPACE_PATH") or "/work"
+            if set_cached_file_hash:
+                set_cached_file_hash(ws, str(file_path), file_hash)
+        except Exception:
+            pass
+
         for _idx, _m in enumerate(batch_meta):
             try:
                 _m["pid_str"] = str(batch_ids[_idx])
