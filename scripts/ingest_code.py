@@ -93,7 +93,12 @@ _TS_WARNED = False
 
 def _use_tree_sitter() -> bool:
     global _TS_WARNED
-    want = os.environ.get("USE_TREE_SITTER", "").lower() in {"1", "true", "yes", "on"}
+    val = os.environ.get("USE_TREE_SITTER")
+    # Default ON when libs are available; allow explicit disable via 0/false
+    if val is None or str(val).strip() == "":
+        want = True
+    else:
+        want = str(val).strip().lower() in {"1", "true", "yes", "on"}
     if want and not _TS_AVAILABLE and not _TS_WARNED:
         print(
             "[WARN] USE_TREE_SITTER=1 but tree-sitter libs not available; falling back to regex heuristics"
@@ -453,17 +458,6 @@ def chunk_semantic(
     lines = text.splitlines()
     n = len(lines)
 
-# Discover the workspace root for a given file by finding a parent that contains .codebase
-# Falls back to /work if not found
-def _find_workspace_root_for_file(p: Path) -> str:
-    try:
-        cur = Path(p).resolve()
-        for anc in [cur] + list(cur.parents):
-            if (anc / ".codebase").exists():
-                return str(anc)
-    except Exception:
-        pass
-    return os.environ.get("WORKSPACE_PATH", "/work")
 
 
     # Extract symbols with line ranges
@@ -524,6 +518,8 @@ def chunk_by_tokens(
         from tokenizers import Tokenizer  # lightweight, already in requirements
     except Exception:
         Tokenizer = None  # type: ignore
+
+
 
     try:
         k = int(os.environ.get("MICRO_CHUNK_TOKENS", str(k_tokens or 16)) or 16)
