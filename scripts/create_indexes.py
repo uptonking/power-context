@@ -12,11 +12,13 @@ except Exception:
     get_collection_name = None  # type: ignore
 
 COLLECTION = os.environ.get("COLLECTION_NAME", "my-collection")
+# Discover workspace path for state updates (allows subdir indexing)
+WS_PATH = os.environ.get("INDEX_ROOT") or os.environ.get("WORKSPACE_PATH") or "/work"
 
 # Prefer per-workspace unique collection if none provided
 if (COLLECTION == "my-collection") and ('get_collection_name' in globals()) and get_collection_name:
     try:
-        COLLECTION = get_collection_name("/work")
+        COLLECTION = get_collection_name(WS_PATH)
     except Exception:
         pass
 
@@ -38,14 +40,14 @@ cli.create_payload_index(
 # Update workspace state to record collection and activity
 try:
     if update_workspace_state:
-        update_workspace_state("/work", {"qdrant_collection": COLLECTION})
+        update_workspace_state(WS_PATH, {"qdrant_collection": COLLECTION})
     if update_last_activity:
         update_last_activity(
-            "/work",
+            WS_PATH,
             {
                 "timestamp": datetime.now().isoformat(),
                 "action": "initialized",
-                "filePath": "",
+                "file_path": "",
                 "details": {"created_indexes": ["metadata.language", "metadata.path_prefix"]},
             },
         )

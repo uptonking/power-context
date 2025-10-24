@@ -1863,16 +1863,17 @@ def index_repo(
 
     # Workspace state: ensure unique per-workspace collection and announce start
     try:
+        ws_path = str(root)
         # If collection is unset or default placeholder, generate a per-workspace one
         if 'get_collection_name' in globals() and get_collection_name:
             default_marker = os.environ.get("COLLECTION_NAME", "my-collection")
             if (not collection) or (collection == "my-collection") or (default_marker == "my-collection"):
-                collection = get_collection_name("/work")
+                collection = get_collection_name(ws_path)
         if update_workspace_state:
-            update_workspace_state("/work", {"qdrant_collection": collection})
+            update_workspace_state(ws_path, {"qdrant_collection": collection})
         if update_indexing_status:
             update_indexing_status(
-                "/work",
+                ws_path,
                 {
                     "state": "indexing",
                     "started_at": datetime.now().isoformat(),
@@ -1957,7 +1958,7 @@ def index_repo(
                     try:
                         if update_indexing_status:
                             update_indexing_status(
-                                "/work",
+                                ws_path,
                                 {
                                     "state": "indexing",
                                     "progress": {
@@ -2109,7 +2110,7 @@ def index_repo(
             try:
                 if update_indexing_status:
                     update_indexing_status(
-                        "/work",
+                        ws_path,
                         {
                             "state": "indexing",
                             "progress": {
@@ -2144,11 +2145,11 @@ def index_repo(
     try:
         if update_last_activity:
             update_last_activity(
-                "/work",
+                ws_path,
                 {
                     "timestamp": datetime.now().isoformat(),
                     "action": "scan-completed",
-                    "filePath": "",
+                    "file_path": "",
                     "details": {
                         "files_seen": files_seen,
                         "files_indexed": files_indexed,
@@ -2158,7 +2159,7 @@ def index_repo(
             )
         if update_indexing_status:
             update_indexing_status(
-                "/work",
+                ws_path,
                 {
                     "state": "idle",
                     "progress": {"files_processed": files_indexed, "total_files": None},
