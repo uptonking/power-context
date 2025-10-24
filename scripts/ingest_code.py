@@ -66,6 +66,7 @@ try:
         get_collection_name,
         get_cached_file_hash,
         set_cached_file_hash,
+        remove_cached_file,
     )
 except Exception:
     # State integration is optional; continue if not available
@@ -75,6 +76,7 @@ except Exception:
     get_collection_name = None  # type: ignore
     get_cached_file_hash = None  # type: ignore
     set_cached_file_hash = None  # type: ignore
+    remove_cached_file = None  # type: ignore
 
 # Optional Tree-sitter import (graceful fallback)
 try:
@@ -2216,18 +2218,13 @@ def index_repo(
             for i, v, lx, m in zip(batch_ids, vectors, batch_lex, batch_meta)
         ]
         upsert_points(client, collection, points)
-        # Update local file-hash cache for all files in the final batch
+        # Update local file-hash cache for any files that had chunks during this run (final flush)
         try:
             if set_cached_file_hash:
-                _seen_paths = set()
-                for _bm in batch_meta:
+                for _p, _h in list(batch_file_hashes.items()):
                     try:
-                        _md = _bm.get("metadata") or {}
-                        _p = str(_md.get("path") or "").strip()
-                        _h = str(_md.get("file_hash") or "").strip()
-                        if _p and _h and _p not in _seen_paths:
+                        if _p and _h:
                             set_cached_file_hash(ws_path, _p, _h)
-                            _seen_paths.add(_p)
                     except Exception:
                         continue
         except Exception:
