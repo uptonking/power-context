@@ -1,0 +1,110 @@
+---
+# MCP Indexer Server (SSE) Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-indexer
+  namespace: context-engine
+  labels:
+    app: context-engine
+    component: mcp-indexer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: context-engine
+    component: mcp-indexer
+  template:
+    metadata:
+      labels:
+        app: context-engine
+        component: mcp-indexer
+    spec:
+      containers:
+      - name: mcp-indexer
+        image: context-engine:latest  # Replace with actual image after building
+        imagePullPolicy: IfNotPresent
+        command: ["python", "-m", "mcp.server.fastmcp"]
+        args: ["--server-name", "context-engine-indexer", "--host", "0.0.0.0", "--port", "8001", "--transport", "sse", "/app/scripts/indexer_server.py"]
+        ports:
+        - name: sse
+          containerPort: 8001
+          protocol: TCP
+        - name: health
+          containerPort: 18001
+          protocol: TCP
+        env:
+        - name: QDRANT_URL
+          value: "http://qdrant:6333"
+        - name: FASTMCP_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: FASTMCP_HOST
+        - name: FASTMCP_INDEXER_PORT
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: FASTMCP_INDEXER_PORT
+        - name: FASTMCP_HEALTH_PORT
+          value: "18001"
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        volumeMounts:
+        - name: work-volume
+          mountPath: /work
+        - name: codebase-volume
+          mountPath: /work/.codebase
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: health
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: health
+          initialDelaySeconds: 10
+          periodSeconds: 5
+      volumes:
+      - name: work-volume
+        hostPath:
+          path: /tmp/context-engine-work  # Adjust for your environment
+          type: DirectoryOrCreate
+      - name: codebase-volume
+        hostPath:
+          path: /tmp/context-engine-work/.codebase  # Adjust for your environment
+          type: DirectoryOrCreate
+
+---
+# MCP Indexer Server (SSE) Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-indexer
+  namespace: context-engine
+  labels:
+    app: context-engine
+    component: mcp-indexer
+spec:
+  type: NodePort  # Change to LoadBalancer for external access
+  ports:
+  - name: sse
+    port: 8001
+    targetPort: sse
+    nodePort: 30802  # Optional: specify node port
+    protocol: TCP
+  - name: health
+    port: 18001
+    targetPort: health
+    nodePort: 30803  # Optional: specify node port
+    protocol: TCP
+  selector:
+    app: context-engine
+    component: mcp-indexer

@@ -1,0 +1,75 @@
+---
+# Optional Ingress for external access via domain
+# Note: Requires an Ingress controller (e.g., nginx-ingress, traefik)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: context-engine-ingress
+  namespace: context-engine
+  annotations:
+    # nginx-ingress annotations (adjust based on your ingress controller)
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    # Enable large request bodies for embeddings
+    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+    # WebSocket support for SSE
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+  labels:
+    app: context-engine
+    component: ingress
+spec:
+  ingressClassName: nginx  # Adjust based on your ingress controller
+  rules:
+  # Replace with your actual domain
+  - host: context-engine.local  # Adjust to your domain
+    http:
+      paths:
+      # Qdrant HTTP API
+      - path: /qdrant
+        pathType: Prefix
+        backend:
+          service:
+            name: qdrant
+            port:
+              number: 6333
+      # MCP Memory Server (SSE)
+      - path: /memory-sse
+        pathType: Prefix
+        backend:
+          service:
+            name: mcp-memory
+            port:
+              number: 8000
+      # MCP Memory Server (HTTP)
+      - path: /memory-http
+        pathType: Prefix
+        backend:
+          service:
+            name: mcp-memory-http
+            port:
+              number: 8002
+      # MCP Indexer Server (SSE)
+      - path: /indexer-sse
+        pathType: Prefix
+        backend:
+          service:
+            name: mcp-indexer
+            port:
+              number: 8001
+      # MCP Indexer Server (HTTP)
+      - path: /indexer-http
+        pathType: Prefix
+        backend:
+          service:
+            name: mcp-indexer-http
+            port:
+              number: 8003
+      # Optional Llama.cpp
+      - path: /llamacpp
+        pathType: Prefix
+        backend:
+          service:
+            name: llamacpp
+            port:
+              number: 8080

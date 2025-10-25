@@ -1,0 +1,125 @@
+---
+# Qdrant StatefulSet
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: qdrant
+  namespace: context-engine
+  labels:
+    app: context-engine
+    component: qdrant
+spec:
+  serviceName: qdrant
+  replicas: 1
+  selector:
+    matchLabels:
+      app: context-engine
+      component: qdrant
+  template:
+    metadata:
+      labels:
+        app: context-engine
+        component: qdrant
+    spec:
+      containers:
+      - name: qdrant
+        image: qdrant/qdrant:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 6333
+          protocol: TCP
+        - name: grpc
+          containerPort: 6334
+          protocol: TCP
+        env:
+        - name: QDRANT__SERVICE__HTTP_PORT
+          value: "6333"
+        - name: QDRANT__SERVICE__GRPC_PORT
+          value: "6334"
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        volumeMounts:
+        - name: qdrant-storage
+          mountPath: /qdrant/storage
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: http
+          initialDelaySeconds: 5
+          periodSeconds: 5
+  volumeClaimTemplates:
+  - metadata:
+      name: qdrant-storage
+      labels:
+        app: context-engine
+        component: qdrant
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      storageClassName: fast-ssd  # Adjust based on your cluster
+      resources:
+        requests:
+          storage: 20Gi
+
+---
+# Qdrant Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: qdrant
+  namespace: context-engine
+  labels:
+    app: context-engine
+    component: qdrant
+spec:
+  type: ClusterIP
+  ports:
+  - name: http
+    port: 6333
+    targetPort: http
+    protocol: TCP
+  - name: grpc
+    port: 6334
+    targetPort: grpc
+    protocol: TCP
+  selector:
+    app: context-engine
+    component: qdrant
+
+---
+# Optional: Qdrant External Service (for direct access)
+apiVersion: v1
+kind: Service
+metadata:
+  name: qdrant-external
+  namespace: context-engine
+  labels:
+    app: context-engine
+    component: qdrant
+spec:
+  type: NodePort  # Change to LoadBalancer if your cluster supports it
+  ports:
+  - name: http
+    port: 6333
+    targetPort: http
+    nodePort: 30333  # Optional: specify node port
+    protocol: TCP
+  - name: grpc
+    port: 6334
+    targetPort: grpc
+    nodePort: 30334  # Optional: specify node port
+    protocol: TCP
+  selector:
+    app: context-engine
+    component: qdrant

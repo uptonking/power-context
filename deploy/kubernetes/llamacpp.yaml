@@ -1,0 +1,102 @@
+---
+# Optional Llama.cpp Service (Text Generation)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llamacpp
+  namespace: context-engine
+  labels:
+    app: context-engine
+    component: llamacpp
+spec:
+  replicas: 1  # Set to 0 if not needed
+  selector:
+    matchLabels:
+      app: context-engine
+      component: llamacpp
+  template:
+    metadata:
+      labels:
+        app: context-engine
+        component: llamacpp
+    spec:
+      containers:
+      - name: llamacpp
+        image: ghcr.io/ggerganov/llama.cpp:server
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 8080
+          protocol: TCP
+        env:
+        - name: LLAMA_ARG_MODEL
+          value: "/models/model.gguf"
+        - name: LLAMA_ARG_CTX_SIZE
+          value: "8192"
+        - name: LLAMA_ARG_HOST
+          value: "0.0.0.0"
+        - name: LLAMA_ARG_PORT
+          value: "8080"
+        command: ["llama-server"]
+        args:
+        - "--model"
+        - "/models/model.gguf"
+        - "--host"
+        - "0.0.0.0"
+        - "--port"
+        - "8080"
+        - "--ctx-size"
+        - "8192"
+        - "--no-warmup"
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1000m"
+          limits:
+            memory: "8Gi"
+            cpu: "4000m"
+        volumeMounts:
+        - name: models-volume
+          mountPath: /models
+          readOnly: true
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+      volumes:
+      - name: models-volume
+        hostPath:
+          path: /tmp/context-engine-models  # Adjust for your environment
+          type: DirectoryOrCreate
+
+---
+# Llama.cpp Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: llamacpp
+  namespace: context-engine
+  labels:
+    app: context-engine
+    component: llamacpp
+spec:
+  type: NodePort  # Change to LoadBalancer for external access
+  ports:
+  - name: http
+    port: 8080
+    targetPort: http
+    nodePort: 30808  # Optional: specify node port
+    protocol: TCP
+  selector:
+    app: context-engine
+    component: llamacpp
