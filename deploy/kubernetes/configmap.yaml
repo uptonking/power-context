@@ -117,3 +117,6 @@ data:
   WATCH_DEBOUNCE_SECS: "1.5"
   INDEX_UPSERT_BATCH: "128"
   INDEX_UPSERT_RETRIES: "5"
+
+  # Service URLs for Kubernetes deployment
+  QDRANT_URL: "http://qdrant:6333"
