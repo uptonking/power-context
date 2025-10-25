@@ -35,7 +35,10 @@ spec:
           protocol: TCP
         env:
         - name: QDRANT_URL
-          value: "http://qdrant:6333"
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: QDRANT_URL
         - name: FASTMCP_HOST
           valueFrom:
             configMapKeyRef:
@@ -88,13 +91,13 @@ spec:
           readOnly: true
         livenessProbe:
           httpGet:
-            path: /health
+            path: /readyz
             port: health
           initialDelaySeconds: 30
           periodSeconds: 10
         readinessProbe:
           httpGet:
-            path: /health
+            path: /readyz
             port: health
           initialDelaySeconds: 10
           periodSeconds: 5
@@ -168,7 +171,10 @@ spec:
           protocol: TCP
         env:
         - name: QDRANT_URL
-          value: "http://qdrant:6333"
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: QDRANT_URL
         - name: FASTMCP_HOST
           valueFrom:
             configMapKeyRef:
@@ -197,13 +203,13 @@ spec:
           mountPath: /work/.codebase
         livenessProbe:
           httpGet:
-            path: /health
+            path: /readyz
             port: health
           initialDelaySeconds: 30
           periodSeconds: 10
         readinessProbe:
           httpGet:
-            path: /health
+            path: /readyz
             port: health
           initialDelaySeconds: 10
           periodSeconds: 5

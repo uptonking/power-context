@@ -118,6 +118,9 @@ data:
   INDEX_UPSERT_BATCH: "128"
   INDEX_UPSERT_RETRIES: "5"
 
+# Service URLs for Kubernetes deployment
+  QDRANT_URL: "http://qdrant:6333"
+
   # Additional environment variables for full compatibility
   QDRANT_API_KEY: ""                    # For Qdrant Cloud/remote authentication (optional)
   REPO_NAME: "workspace"                # Repository name for payload tracking
