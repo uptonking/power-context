@@ -67,7 +67,7 @@ spec:
         component: qdrant
     spec:
       accessModes: ["ReadWriteOnce"]
-      storageClassName: fast-ssd  # Adjust based on your cluster
+      # storageClassName: "" # Uncomment and set if you want to specify a storage class
       resources:
         requests:
           storage: 20Gi
