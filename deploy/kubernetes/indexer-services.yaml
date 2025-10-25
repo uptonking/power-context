@@ -24,7 +24,10 @@ spec:
         workingDir: /work
         env:
         - name: QDRANT_URL
-          value: "http://qdrant:6333"
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: QDRANT_URL
         - name: COLLECTION_NAME
           valueFrom:
             configMapKeyRef:
@@ -88,7 +91,10 @@ spec:
         workingDir: /work
         env:
         - name: QDRANT_URL
-          value: "http://qdrant:6333"
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: QDRANT_URL
         - name: COLLECTION_NAME
           valueFrom:
             configMapKeyRef:
@@ -173,7 +179,10 @@ spec:
         workingDir: /work
         env:
         - name: QDRANT_URL
-          value: "http://qdrant:6333"
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: QDRANT_URL
         - name: COLLECTION_NAME
           valueFrom:
             configMapKeyRef:
