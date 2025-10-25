@@ -22,7 +22,7 @@ spec:
     spec:
       containers:
       - name: mcp-memory
-        image: context-engine:latest  # Replace with actual image after building
+        image: context-engine-memory  # Use service-specific image name
         imagePullPolicy: IfNotPresent
         command: ["python", "-m", "mcp.server.fastmcp"]
         args: ["--server-name", "context-engine", "--host", "0.0.0.0", "--port", "8000", "--transport", "sse", "/app/scripts/memory_server.py"]

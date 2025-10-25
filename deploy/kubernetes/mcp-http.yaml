@@ -22,7 +22,7 @@ spec:
     spec:
       containers:
       - name: mcp-memory-http
-        image: context-engine:latest  # Replace with actual image after building
+        image: context-engine-memory  # Use service-specific image name
         imagePullPolicy: IfNotPresent
         command: ["python", "-m", "mcp.server.fastmcp"]
         args: ["--server-name", "context-engine-http", "--host", "0.0.0.0", "--port", "8000", "--transport", "http", "/app/scripts/memory_server.py"]
@@ -155,7 +155,7 @@ spec:
     spec:
       containers:
       - name: mcp-indexer-http
-        image: context-engine:latest  # Replace with actual image after building
+        image: context-engine-indexer  # Use service-specific image name
         imagePullPolicy: IfNotPresent
         command: ["python", "-m", "mcp.server.fastmcp"]
         args: ["--server-name", "context-engine-indexer-http", "--host", "0.0.0.0", "--port", "8001", "--transport", "http", "/app/scripts/indexer_server.py"]

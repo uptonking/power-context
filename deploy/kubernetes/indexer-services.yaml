@@ -18,7 +18,7 @@ spec:
       restartPolicy: OnFailure
       containers:
       - name: indexer
-        image: context-engine:latest  # Replace with actual image after building
+        image: context-engine-indexer-service  # Use service-specific image name
         imagePullPolicy: IfNotPresent
         command: ["python", "/app/scripts/ingest_code.py"]
         workingDir: /work
@@ -82,7 +82,7 @@ spec:
     spec:
       containers:
       - name: watcher
-        image: context-engine:latest  # Replace with actual image after building
+        image: context-engine-indexer-service  # Use service-specific image name
         imagePullPolicy: IfNotPresent
         command: ["python", "/app/scripts/watch_index.py"]
         workingDir: /work
@@ -167,7 +167,7 @@ spec:
       restartPolicy: OnFailure
       containers:
       - name: init-payload
-        image: context-engine:latest  # Replace with actual image after building
+        image: context-engine-indexer-service  # Use service-specific image name
         imagePullPolicy: IfNotPresent
         command: ["python", "/app/scripts/create_indexes.py"]
         workingDir: /work
