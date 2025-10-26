@@ -162,6 +162,16 @@ def build_plan(q: str) -> List[Tuple[str, Dict[str, Any]]]:
     search_limit = int(os.environ.get("ROUTER_SEARCH_LIMIT", "8") or 8)
     max_tokens_env = os.environ.get("ROUTER_MAX_TOKENS", "").strip()
 
+    # Repeat/redo handling: reuse last plan if asked
+    try:
+        if _looks_like_repeat(q):
+            sp = _load_scratchpad()
+            lp = sp.get("last_plan")
+            if isinstance(lp, list) and lp:
+                return lp
+    except Exception:
+        pass
+
     # Multi-intent: memory store + reindex in a single prompt
     lowq = q.lower()
     if any(w in lowq for w in ["remember this", "store memory", "save memory", "remember that"]) and any(w in lowq for w in ["reindex", "index now", "recreate", "fresh index"]):
@@ -188,6 +198,7 @@ def build_plan(q: str) -> List[Tuple[str, Dict[str, Any]]]:
     if intent == INTENT_LIST:
         return [("qdrant_list", {})]
 
+
     if intent == INTENT_SEARCH:
         # Parse lightweight repo hints and choose the best search tool via signature similarity
         hints = _parse_repo_hints(q)
@@ -197,7 +208,19 @@ def build_plan(q: str) -> List[Tuple[str, Dict[str, Any]]]:
         if include_snippet:
             args["include_snippet"] = True
         # Attach safe filters if we inferred them
-        for k in ("language", "under", "symbol", "ext"):
+        # Optionally reuse last filters if requested
+        try:
+            if _looks_like_same_filters(q):
+                sp = _load_scratchpad()
+                lf = sp.get("last_filters") if isinstance(sp, dict) else None
+                if isinstance(lf, dict):
+                    for k in ("language", "under", "symbol", "ext", "path_glob", "not_glob"):
+                        if k not in args and lf.get(k) not in (None, ""):
+                            args[k] = lf.get(k)
+        except Exception:
+            pass
+
+        for k in ("language", "under", "symbol", "ext", "path_glob", "not_glob"):
             v = hints.get(k)
             if v not in (None, ""):
                 args[k] = v
@@ -215,7 +238,19 @@ def build_plan(q: str) -> List[Tuple[str, Dict[str, Any]]]:
             args["limit"] = search_limit
         if include_snippet:
             args["include_snippet"] = True
-        for k in ("language", "under", "symbol", "ext"):
+        # Optionally reuse last filters if requested
+        try:
+            if _looks_like_same_filters(q):
+                sp = _load_scratchpad()
+                lf = sp.get("last_filters") if isinstance(sp, dict) else None
+                if isinstance(lf, dict):
+                    for k in ("language", "under", "symbol", "ext", "path_glob", "not_glob"):
+                        if k not in args and lf.get(k) not in (None, ""):
+                            args[k] = lf.get(k)
+        except Exception:
+            pass
+
+        for k in ("language", "under", "symbol", "ext", "path_glob", "not_glob"):
             v = hints.get(k)
             if v not in (None, ""):
                 args[k] = v
@@ -228,7 +263,19 @@ def build_plan(q: str) -> List[Tuple[str, Dict[str, Any]]]:
             args["limit"] = search_limit
         if include_snippet:
             args["include_snippet"] = True
-        for k in ("language", "under", "symbol", "ext"):
+        # Optionally reuse last filters if requested
+        try:
+            if _looks_like_same_filters(q):
+                sp = _load_scratchpad()
+                lf = sp.get("last_filters") if isinstance(sp, dict) else None
+                if isinstance(lf, dict):
+                    for k in ("language", "under", "symbol", "ext", "path_glob", "not_glob"):
+                        if k not in args and lf.get(k) not in (None, ""):
+                            args[k] = lf.get(k)
+        except Exception:
+            pass
+
+        for k in ("language", "under", "symbol", "ext", "path_glob", "not_glob"):
             v = hints.get(k)
             if v not in (None, ""):
                 args[k] = v
@@ -249,7 +296,31 @@ def build_plan(q: str) -> List[Tuple[str, Dict[str, Any]]]:
         args = {"query": q}
         if search_limit:
             args["limit"] = search_limit
-        for k in ("language", "under", "symbol", "ext"):
+        # Optionally reuse last filters if requested
+        try:
+            if _looks_like_same_filters(q):
+                sp = _load_scratchpad()
+                lf = sp.get("last_filters") if isinstance(sp, dict) else None
+                if isinstance(lf, dict):
+                    for k in ("language", "under", "symbol", "ext", "path_glob", "not_glob"):
+                        if k not in args and lf.get(k) not in (None, ""):
+                            args[k] = lf.get(k)
+        except Exception:
+            pass
+
+        # Optionally reuse last filters if requested
+        try:
+            if _looks_like_same_filters(q):
+                sp = _load_scratchpad()
+                lf = sp.get("last_filters") if isinstance(sp, dict) else None
+                if isinstance(lf, dict):
+                    for k in ("language", "under", "symbol", "ext", "path_glob", "not_glob"):
+                        if k not in args and lf.get(k) not in (None, ""):
+                            args[k] = lf.get(k)
+        except Exception:
+            pass
+
+        for k in ("language", "under", "symbol", "ext", "path_glob", "not_glob"):
             v = hints.get(k)
             if v not in (None, ""):
                 args[k] = v
@@ -260,7 +331,7 @@ def build_plan(q: str) -> List[Tuple[str, Dict[str, Any]]]:
         args = {"query": q}
         if search_limit:
             args["limit"] = search_limit
-        for k in ("language", "under", "symbol", "ext"):
+        for k in ("language", "under", "symbol", "ext", "path_glob", "not_glob"):
             v = hints.get(k)
             if v not in (None, ""):
                 args[k] = v
@@ -534,8 +605,34 @@ def _mcp_tools_describe(base_url: str, timeout: float = 20.0) -> list[dict]:
         j = _parse_stream_or_json(body)
         tools = ((j.get("result") or {}).get("tools") or [])
         out = []
+        for t in tools:
+            if not isinstance(t, dict):
+                continue
+            name = (t.get("name") or "").strip()
+            if not name:
+                continue
+            out.append(t)
+        return out
+    except Exception:
+        return []
+
 # -----------------------------
-# Persistent scratchpad
+# Router discovery caches
+# -----------------------------
+_TOOL_ENDPOINTS_CACHE_MAP: Dict[str, str] = {}
+_TOOL_ENDPOINTS_CACHE_TS: float = 0.0
+_TOOLS_DESCR_CACHE: Dict[str, list] = {}
+_TOOLS_DESCR_TS: Dict[str, float] = {}
+
+
+def _cache_ttl_sec() -> int:
+    try:
+        return int(os.environ.get("ROUTER_TOOLS_CACHE_TTL_SEC", "60") or 60)
+    except Exception:
+        return 60
+
+# -----------------------------
+# Persistent scratchpad (global scope)
 # -----------------------------
 
 def _scratchpad_path() -> str:
@@ -579,34 +676,6 @@ def _looks_like_repeat(q: str) -> bool:
 def _looks_like_same_filters(q: str) -> bool:
     s = q.strip().lower()
     return any(p in s for p in ["same filters", "reuse filters", "previous filters"])
-
-        for t in tools:
-            if not isinstance(t, dict):
-                continue
-            name = (t.get("name") or "").strip()
-            if not name:
-                continue
-            out.append(t)
-        return out
-    except Exception:
-        return []
-
-# -----------------------------
-# Router discovery caches
-# -----------------------------
-_TOOL_ENDPOINTS_CACHE_MAP: Dict[str, str] = {}
-_TOOL_ENDPOINTS_CACHE_TS: float = 0.0
-_TOOLS_DESCR_CACHE: Dict[str, list] = {}
-_TOOLS_DESCR_TS: Dict[str, float] = {}
-
-
-def _cache_ttl_sec() -> int:
-    try:
-        return int(os.environ.get("ROUTER_TOOLS_CACHE_TTL_SEC", "60") or 60)
-    except Exception:
-        return 60
-
-
 def _tools_describe_cached(base_url: str, allow_network: bool = True, timeout: float = 20.0) -> list[dict]:
     now = time.time()
     ts = _TOOLS_DESCR_TS.get(base_url, 0.0)
