@@ -2831,6 +2831,15 @@ async def context_answer(
     except Exception:
         ppath = 5
 
+    # For identifier-focused questions, allow more snippets per file to capture both definition and usage
+    try:
+        import re as _re
+        _ids0 = _re.findall(r"\b([A-Z_][A-Z0-9_]{2,})\b", " ".join(queries))
+        if _ids0:
+            ppath = max(ppath, 5)
+    except Exception:
+        pass
+
     # Collection + model setup (reuse indexer defaults)
     coll = (collection or _default_collection()) or ""
     model_name = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
@@ -3092,6 +3101,59 @@ async def context_answer(
             expand=str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower() in {"1","true","yes","on"},
             model=model,
         )
+
+        # Augment retrieval to capture usage sites of the identifier (e.g., default args, function defs)
+        try:
+            import re as _re
+            qj2 = " ".join(queries)
+            _ids = _re.findall(r"\b([A-Z_][A-Z0-9_]{2,})\b", qj2)
+            _asked = _ids[0] if _ids else ""
+            if _asked:
+                _fname = _asked.lower().split("_")[0]
+                _usage_qs = []
+                if _fname and len(_fname) > 2:
+                    _usage_qs.append(f"def {_fname}(")
+                _usage_qs.extend([f"{_asked})", f"{_asked},", f"= {_asked}", f"{_asked} ="])
+                _usage_qs = [u for u in _usage_qs if u and u not in queries]
+                if _usage_qs:
+                    usage_items = run_hybrid_search(
+                        queries=list(queries) + _usage_qs,
+                        limit=int(max(lim, 6)),
+                        per_path=int(max(ppath, 5)),
+                        language=eff_language,
+                        under=override_under or None,
+                        kind=kwargs.get("kind") or None,
+                        symbol=sym_arg,
+                        ext=kwargs.get("ext") or None,
+                        not_filter=kwargs.get("not_") or kwargs.get("not") or None,
+                        case=kwargs.get("case") or None,
+                        path_regex=kwargs.get("path_regex") or None,
+                        path_glob=eff_path_glob,
+                        not_glob=eff_not_glob,
+                        expand=str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower() in {"1","true","yes","on"},
+                        model=model,
+                    )
+                    # Merge unique by (path, start_line, end_line)
+                    def _ikey(it: Dict[str, Any]):
+                        return (
+                            str(it.get("path") or ""),
+                            int(it.get("start_line") or 0),
+                            int(it.get("end_line") or 0),
+                        )
+                    _seen = { _ikey(it) for it in items }
+                    added = 0
+                    for it in usage_items:
+                        k = _ikey(it)
+                        if k not in _seen:
+                            items.append(it)
+                            _seen.add(k)
+                            added += 1
+                    if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                        print(f"DEBUG USAGE_AUGMENT: asked={_asked}, added={added}, total_items={len(items)}")
+        except Exception as _e:
+            if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                print(f"DEBUG USAGE_AUGMENT failed: {_e}")
+
         # Debug: log top retrieval results before any post-filters/budgeting
         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
             try:
