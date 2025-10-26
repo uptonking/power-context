@@ -1015,6 +1015,27 @@ def main(argv: List[str]) -> int:
                 if tool.lower() in {"find", "memory.find"} and has_future_answer:
                     # Don't stop; proceed to answer step with augmented query
                     continue
+                # Persist scratchpad for repeat/reuse filters scenarios
+                try:
+                    last_filters: Dict[str, Any] = {}
+                    for (tn, ta) in plan:
+                        if tn == "repo_search" or tn.startswith("search_"):
+                            if isinstance(ta, dict):
+                                for k in ("language", "under", "symbol", "ext", "path_glob", "not_glob"):
+                                    if ta.get(k) not in (None, ""):
+                                        last_filters[k] = ta.get(k)
+                            break
+                    sp = {
+                        "last_query": args.query,
+                        "last_plan": plan,
+                        "last_filters": last_filters or None,
+                        "mem_snippets": mem_snippets[:5],
+                        "timestamp": time.time(),
+                    }
+                    _save_scratchpad(sp)
+                except Exception:
+                    pass
+
                 return 0
             # else try next tool in plan
         except Exception as e:

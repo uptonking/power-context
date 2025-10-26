@@ -174,7 +174,20 @@ def run_eval_suite() -> int:
             if not p4[1][1].get("recreate"):
                 failures.append("multi-intent: expected recreate true")
 
-        # 5) Run end-to-end for recap and ensure compat accepted and short answers not rejected
+        # 5) Glob/exclude filters
+        p5 = run_plan("search only *.py files exclude vendor")
+        if not p5:
+            failures.append("glob: plan empty")
+        else:
+            args5 = p5[0][1]
+            gl = (args5 or {}).get("path_glob") or []
+            ng = (args5 or {}).get("not_glob") or []
+            if "**/*.py" not in gl:
+                failures.append("glob: missing **/*.py")
+            if "**/vendor/**" not in ng:
+                failures.append("glob: missing exclude vendor")
+
+        # 6) Run end-to-end for recap and ensure compat accepted and short answers not rejected
         # Capture stdout of router.main
         def run_router(args: List[str]) -> str:
             from io import StringIO
@@ -192,6 +205,27 @@ def run_eval_suite() -> int:
         if "Memory context:" not in out:
             failures.append("memory→answer: query was not augmented with memory context")
             print("--- router stdout ---\n" + out + "\n--- end stdout ---")
+
+        # 7) Repeat last: persist then repeat
+        _ = run_router(["--run", "who imports foo in python under src/lib"])
+        p7a = run_plan("who imports foo in python under src/lib")
+        p7b = run_plan("repeat that")
+        if p7a != p7b:
+            failures.append("repeat: last plan not reused")
+
+        # 8) Fallback on compat failure
+        setattr(idx, "fail_context_compat", True)
+        out2 = run_router(["--run", "recap our architecture decisions for the indexer"])
+        if '"tool": "context_answer"' not in out2:
+            failures.append("fallback: did not call context_answer after compat failure")
+        setattr(idx, "fail_context_compat", False)
+
+        # 9) tools/list flakiness toleration
+        setattr(idx, "fail_list_once", True)
+        p9 = run_plan("find config changes")
+        if not p9:
+            failures.append("discovery flakiness: plan empty after retry")
+        setattr(idx, "fail_list_once", False)
 
         if failures:
             print("Router eval: FAIL\n- " + "\n- ".join(failures))
