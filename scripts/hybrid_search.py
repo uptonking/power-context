@@ -170,13 +170,16 @@ def _merge_and_budget_spans(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]
             continue
         lst = clusters.setdefault(path, [])
         merged = False
+        # Fix: use "score" field (what run_hybrid_search emits) not "s"
+        item_score = float(m.get("score") or m.get("s") or 0.0)
         for c in lst:
             if (
                 start_line <= c["end"] + merge_lines
                 and end_line >= c["start"] - merge_lines
             ):
                 # expand bounds; keep higher-score rep
-                if float(m.get("s", 0.0)) > float(c["m"].get("s", 0.0)):
+                cluster_score = float(c["m"].get("score") or c["m"].get("s") or 0.0)
+                if item_score > cluster_score:
                     c["m"] = m
                 c["start"] = min(c["start"], start_line)
                 c["end"] = max(c["end"], end_line)
@@ -204,7 +207,9 @@ def _merge_and_budget_spans(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]
         # Use stored cluster path and start for stable ordering
         path = str(c.get("p") or "")
         start = int(c.get("start") or 0)
-        return (-float(m.get("s", 0.0)), path, start)
+        # Fix: use "score" field (what run_hybrid_search emits) not "s"
+        score = float(m.get("score") or m.get("s") or 0.0)
+        return (-score, path, start)
 
     flattened.sort(key=_flat_key)
 
@@ -232,7 +237,11 @@ def _merge_and_budget_spans(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     result: List[Dict[str, Any]] = []
     for c in out:
         m = c["m"]
-        # Attach merged bounds for the downstream emitter to read
+        # Fix: Update the public start_line/end_line fields to reflect merged bounds
+        # so citations and file reads use the expanded range
+        m["start_line"] = c["start"]
+        m["end_line"] = c["end"]
+        # Also keep the internal markers for debugging
         m["_merged_start"] = c["start"]
         m["_merged_end"] = c["end"]
         m["_budget_tokens"] = c["need_tokens"]
