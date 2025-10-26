@@ -2974,30 +2974,52 @@ async def context_answer(
 
 
         # Initial search (tighten file/area when hinted and no explicit path_glob)
-        user_pg = kwargs.get("path_glob") or None
+        def _to_glob_list(val: Any) -> list[str]:
+            if not val:
+                return []
+            if isinstance(val, (list, tuple, set)):
+                return [str(x).strip() for x in val if str(x).strip()]
+            vs = str(val).strip()
+            return [vs] if vs else []
+
         req_language = kwargs.get("language") or None
         eff_language = req_language or ("python" if ("router" in qtext and not req_language) else None)
-        eff_path_glob = user_pg
-        # Heuristic: if 'under' looks like a file name (e.g., hybrid_search.py), treat as a file hint
+
+        user_path_glob = _to_glob_list(kwargs.get("path_glob"))
+        eff_path_glob: list[str] = list(user_path_glob)
+
         user_under = kwargs.get("under") or None
-        override_under = user_under
-        try:
-            _uu = str(user_under or "").strip()
-            _uu_last = _uu.split("/")[-1] if _uu else ""
-            if _uu_last and ("." in _uu_last):
-                # File-like hint: search for this file name anywhere; don't use it as path_prefix filter
-                override_under = None
-                eff_path_glob = (eff_path_glob or []) or []
-                if isinstance(eff_path_glob, str):
-                    eff_path_glob = [eff_path_glob]
-                pat = f"**/{_uu_last}"
-                if pat not in eff_path_glob:
-                    eff_path_glob = list(eff_path_glob) + [pat]
-        except Exception:
-            pass
+        override_under = None
+        if isinstance(user_under, str):
+            _uu = user_under.strip()
+            if _uu:
+                if "/" not in _uu:
+                    eff_path_glob.append(f"**/{_uu}")
+                else:
+                    override_under = _uu if _uu.startswith("/") else f"/{_uu.lstrip('./')}"
+        elif user_under:
+            override_under = str(user_under)
+
         # Router-specific tightening when the word 'router' is present
-        if (not user_pg) and ("router" in qtext):
-            eff_path_glob = ["**/mcp_router.py", "**/*router*.py"]
+        if ("router" in qtext):
+            if not eff_path_glob:
+                eff_path_glob = ["**/mcp_router.py", "**/*router*.py"]
+            if not eff_language:
+                eff_language = "python"
+
+        # Normalize path_glob list -> None when empty
+        if eff_path_glob:
+            dedup_pg = []
+            seen_pg = set()
+            for pg in eff_path_glob:
+                pg_str = str(pg).strip()
+                if not pg_str or pg_str in seen_pg:
+                    continue
+                seen_pg.add(pg_str)
+                dedup_pg.append(pg_str)
+            eff_path_glob = dedup_pg
+        else:
+            eff_path_glob = None
         # Sanitize symbol: ignore file-like strings passed as symbol
         sym_arg = kwargs.get("symbol") or None
         try:

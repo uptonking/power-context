@@ -944,6 +944,30 @@ def run_hybrid_search(
     if expand:
         qlist = expand_queries(qlist, eff_language)
 
+    # Query sharpening: derive basename tokens from path_glob to steer retrieval/gating
+    try:
+        if eff_path_globs or eff_path_globs_norm:
+            def _bn(p: str) -> str:
+                s = str(p or "").replace("\\", "/").strip()
+                # drop any trailing slashes and take last segment
+                parts = [t for t in s.split("/") if t]
+                return parts[-1] if parts else ""
+            globs_src = list(eff_path_globs or []) + list(eff_path_globs_norm or [])
+            basenames = []
+            for g in globs_src:
+                b = _bn(g)
+                if b and b not in basenames:
+                    basenames.append(b)
+            for b in basenames:
+                if b and b not in qlist:
+                    qlist.append(b)
+                # also add stem (filename without extension) as a lexical hint
+                stem = b.rsplit(".", 1)[0] if "." in b else b
+                if stem and stem not in qlist:
+                    qlist.append(stem)
+    except Exception:
+        pass
+
     # Lexical vector query
     score_map: Dict[str, Dict[str, Any]] = {}
     try:
