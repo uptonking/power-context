@@ -2905,16 +2905,14 @@ async def context_answer(
         ".git/",           # VCS internals
     ]
     # Add robust variants for absolute and recursive matching
+    # Simplified to avoid over-filtering
     def _variants(p: str) -> list[str]:
         p = str(p).strip().strip()
         if not p:
             return []
         p = p.replace("\\", "/").lstrip("/")
-        return [
-            p,  # relative
-            f"/work/{p}",  # absolute in payloads
-            f"**/{p}**",  # recursive glob
-        ]
+        # Only use recursive glob pattern to catch all cases
+        return [f"**/{p}**"]
 
     # Build defaults and conditional exclusions (skip if explicitly mentioned in query)
     default_not_glob = []
@@ -3053,6 +3051,11 @@ async def context_answer(
             budgeted = _merge_and_budget_spans(items)
             if os.environ.get("DEBUG_CONTEXT_ANSWER"):
                 print(f"DEBUG: After span budgeting: {len(budgeted)} items")
+            # Safety: if budgeting removed everything, fall back to raw items
+            if not budgeted and items:
+                if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                    print("DEBUG: Span budgeting returned empty, using raw items")
+                budgeted = items
         except Exception as e:
             if os.environ.get("DEBUG_CONTEXT_ANSWER"):
                 print(f"DEBUG: Span budgeting failed: {e}, using raw items")
@@ -3063,7 +3066,7 @@ async def context_answer(
             out_max = int(os.environ.get("MICRO_OUT_MAX_SPANS", "8") or 8)
         except Exception:
             out_max = 8
-        spans = budgeted[: max(1, min(out_max, lim))]
+        spans = budgeted[: max(1, min(out_max, lim))] if budgeted else items[:lim]
 
         # Debug span selection
         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
