@@ -3022,6 +3022,15 @@ async def context_answer(
             under=override_under or None,
             kind=kwargs.get("kind") or None,
             symbol=sym_arg,
+            ext=kwargs.get("ext") or None,
+            not_filter=kwargs.get("not_") or kwargs.get("not") or None,
+            case=kwargs.get("case") or None,
+            path_regex=kwargs.get("path_regex") or None,
+            path_glob=eff_path_glob,
+            not_glob=eff_not_glob,
+            expand=str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower() in {"1","true","yes","on"},
+            model=model,
+        )
         # Debug: log top retrieval results before any post-filters/budgeting
         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
             try:
@@ -3033,16 +3042,6 @@ async def context_answer(
                     print(f"DEBUG RETRIEVAL ITEM {i}: {p}:{s}-{e}")
             except Exception as _e:
                 print(f"DEBUG RETRIEVAL: print failed: {_e}")
-
-            ext=kwargs.get("ext") or None,
-            not_filter=kwargs.get("not_") or kwargs.get("not") or None,
-            case=kwargs.get("case") or None,
-            path_regex=kwargs.get("path_regex") or None,
-            path_glob=eff_path_glob,
-            not_glob=eff_not_glob,
-            expand=str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower() in {"1","true","yes","on"},
-            model=model,
-        )
 
         # Post-filter by language using path heuristics when language is provided
         if req_language:
