@@ -4,8 +4,8 @@ SHELL := /bin/bash
 # An empty export forces docker to use its default context/socket.
 export DOCKER_HOST =
 
-.PHONY: help up down logs ps restart rebuild index reindex watch env hybrid bootstrap history rerank-local setup-reranker prune warm health
-.PHONY: venv venv-install
+.PHONY: help up down logs ps restart rebuild index reindex watch watch-remote env hybrid bootstrap history rerank-local setup-reranker prune warm health test-e2e
+.PHONY: venv venv-install dev-remote-up dev-remote-down dev-remote-logs dev-remote-restart dev-remote-bootstrap dev-remote-test dev-remote-client dev-remote-clean
 
 venv: ## create local virtualenv .venv
 	python3 -m venv .venv && . .venv/bin/activate && pip install -U pip
@@ -69,6 +69,23 @@ index-here: ## index the current directory: make index-here [RECREATE=1] [REPO_N
 
 watch: ## watch mode: reindex changed files on save (Ctrl+C to stop)
 	docker compose run --rm --entrypoint python indexer /work/scripts/watch_index.py
+
+watch-remote: ## remote watch mode: upload delta bundles to remote server (Ctrl+C to stop)
+	@echo "Starting remote watch mode..."
+	@if [ -z "$(REMOTE_UPLOAD_ENDPOINT)" ]; then \
+		echo "Error: REMOTE_UPLOAD_ENDPOINT is required"; \
+		echo "Usage: make watch-remote REMOTE_UPLOAD_ENDPOINT=http://your-server:8080 [REMOTE_UPLOAD_MAX_RETRIES=3] [REMOTE_UPLOAD_TIMEOUT=30]"; \
+		exit 1; \
+	fi
+	@echo "Remote upload endpoint: $(REMOTE_UPLOAD_ENDPOINT)"
+	@echo "Max retries: $${REMOTE_UPLOAD_MAX_RETRIES:-3}"
+	@echo "Timeout: $${REMOTE_UPLOAD_TIMEOUT:-30} seconds"
+	docker compose run --rm --entrypoint python \
+		-e REMOTE_UPLOAD_ENABLED=1 \
+		-e REMOTE_UPLOAD_ENDPOINT=$(REMOTE_UPLOAD_ENDPOINT) \
+		-e REMOTE_UPLOAD_MAX_RETRIES=$${REMOTE_UPLOAD_MAX_RETRIES:-3} \
+		-e REMOTE_UPLOAD_TIMEOUT=$${REMOTE_UPLOAD_TIMEOUT:-30} \
+		indexer /work/scripts/watch_index.py
 
 rerank: ## multi-query re-ranker helper example
 	docker compose run --rm --entrypoint python indexer /work/scripts/rerank_query.py \
@@ -210,11 +227,53 @@ llamacpp-build-image: ## build custom llama.cpp image with baked model (override
 # Download a tokenizer.json for micro-chunking (default: BAAI/bge-base-en-v1.5)
 TOKENIZER_URL ?= https://huggingface.co/BAAI/bge-base-en-v1.5/resolve/main/tokenizer.json
 TOKENIZER_PATH ?= models/tokenizer.json
-
 tokenizer: ## download tokenizer.json to models/tokenizer.json (override with TOKENIZER_URL/TOKENIZER_PATH)
 	@mkdir -p $(dir $(TOKENIZER_PATH))
 	@echo "Downloading: $(TOKENIZER_URL) -> $(TOKENIZER_PATH)" && \
 	curl -L --fail --retry 3 -C - "$(TOKENIZER_URL)" -o "$(TOKENIZER_PATH)"
+
+# --- Development Remote Upload System Targets ---
+
+dev-remote-up: ## start dev-remote stack with upload service
+	@echo "Starting development remote upload system..."
+	@mkdir -p dev-workspace/.codebase
+	docker compose -f docker-compose.dev-remote.yml up -d --build
+
+dev-remote-down: ## stop dev-remote stack
+	@echo "Stopping development remote upload system..."
+	docker compose -f docker-compose.dev-remote.yml down
+
+dev-remote-logs: ## follow logs for dev-remote stack
+	docker compose -f docker-compose.dev-remote.yml logs -f --tail=100
+
+dev-remote-restart: ## restart dev-remote stack (rebuild)
+	docker compose -f docker-compose.dev-remote.yml down && docker compose -f docker-compose.dev-remote.yml up -d --build
+
+dev-remote-bootstrap: env dev-remote-up ## bootstrap dev-remote: up -> wait -> init -> index -> warm
+	@echo "Bootstrapping development remote upload system..."
+	./scripts/wait-for-qdrant.sh
+	docker compose -f docker-compose.dev-remote.yml run --rm init_payload || true
+	$(MAKE) tokenizer
+	docker compose -f docker-compose.dev-remote.yml run --rm indexer --root /work --recreate
+	$(MAKE) warm || true
+	$(MAKE) health
+
+dev-remote-test: ## test remote upload workflow
+	@echo "Testing remote upload workflow..."
+	@echo "Upload service should be accessible at http://localhost:8004"
+	@echo "Health check: curl http://localhost:8004/health"
+	@echo "Status check: curl 'http://localhost:8004/api/v1/delta/status?workspace_path=/work/test-repo'"
+	@echo "Test upload: curl -X POST -F 'bundle=@test-bundle.tar.gz' -F 'workspace_path=/work/test-repo' http://localhost:8004/api/v1/delta/upload"
+
+dev-remote-client: ## start remote upload client for testing
+	@echo "Starting remote upload client..."
+	docker compose -f docker-compose.dev-remote.yml --profile client up -d remote_upload_client
+
+dev-remote-clean: ## clean up dev-remote volumes and containers
+	@echo "Cleaning up development remote upload system..."
+	docker compose -f docker-compose.dev-remote.yml down -v
+	docker volume rm context-engine_shared_workspace context-engine_shared_codebase context-engine_upload_temp context-engine_qdrant_storage_dev_remote 2>/dev/null || true
+	rm -rf dev-workspace
 
 
 

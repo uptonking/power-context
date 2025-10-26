@@ -3,7 +3,7 @@ import os
 import time
 import threading
 from pathlib import Path
-from typing import Set
+from typing import Set, Optional
 
 from qdrant_client import QdrantClient, models
 from fastembed import TextEmbedding
@@ -33,6 +33,17 @@ from datetime import datetime
 
 import scripts.ingest_code as idx
 
+# Import remote upload client
+try:
+    from scripts.remote_upload_client import (
+        RemoteUploadClient,
+        is_remote_mode_enabled,
+        get_remote_config
+    )
+    _REMOTE_UPLOAD_AVAILABLE = True
+except ImportError:
+    _REMOTE_UPLOAD_AVAILABLE = False
+
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
 COLLECTION = os.environ.get("COLLECTION_NAME", "my-collection")
 MODEL = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
@@ -43,11 +54,12 @@ DELAY_SECS = float(os.environ.get("WATCH_DEBOUNCE_SECS", "1.0"))
 
 
 class ChangeQueue:
-    def __init__(self, process_cb):
+    def __init__(self, process_cb, remote_client: Optional[RemoteUploadClient] = None):
         self._lock = threading.Lock()
         self._paths: Set[Path] = set()
         self._timer: threading.Timer | None = None
         self._process_cb = process_cb
+        self._remote_client = remote_client
 
     def add(self, p: Path):
         with self._lock:
@@ -63,11 +75,26 @@ class ChangeQueue:
             paths = list(self._paths)
             self._paths.clear()
             self._timer = None
-        self._process_cb(paths)
+        
+        # Handle remote upload if enabled
+        if self._remote_client and _REMOTE_UPLOAD_AVAILABLE:
+            try:
+                success = self._remote_client.process_and_upload_changes(paths)
+                if success:
+                    print("[remote_upload] Delta upload completed successfully")
+                else:
+                    print("[remote_upload] Delta upload failed, falling back to local processing")
+                    self._process_cb(paths)
+            except Exception as e:
+                print(f"[remote_upload] Error during delta upload: {e}")
+                print("[remote_upload] Falling back to local processing")
+                self._process_cb(paths)
+        else:
+            self._process_cb(paths)
 
 
 class IndexHandler(FileSystemEventHandler):
-    def __init__(self, root: Path, queue: ChangeQueue, client: QdrantClient, collection: str):
+    def __init__(self, root: Path, queue: ChangeQueue, client: Optional[QdrantClient], collection: str):
         super().__init__()
         self.root = root
         self.queue = queue
@@ -149,19 +176,26 @@ class IndexHandler(FileSystemEventHandler):
         # Only attempt deletion for code files we would have indexed
         if p.suffix.lower() not in idx.CODE_EXTS:
             return
+        # Only attempt deletion if we have a local client
+        if self.client is not None:
+            try:
+                idx.delete_points_by_path(self.client, self.collection, str(p))
+                print(f"[deleted] {p}")
+            except Exception:
+                pass
+        else:
+            print(f"[remote_mode] File deletion detected: {p}")
+            
+        # Drop local cache entry (always do this)
         try:
-            idx.delete_points_by_path(self.client, self.collection, str(p))
-            print(f"[deleted] {p}")
-            # Drop local cache entry
-            try:
-                remove_cached_file(str(self.root), str(p))
-            except Exception:
-                pass
+            remove_cached_file(str(self.root), str(p))
+        except Exception:
+            pass
 
-            try:
-                _log_activity(str(self.root), "deleted", p)
-            except Exception:
-                pass
+        try:
+            _log_activity(str(self.root), "deleted", p)
+        except Exception:
+            pass
         except Exception as e:
             try:
                 print(f"[delete_error] {p}: {e}")
@@ -187,20 +221,24 @@ class IndexHandler(FileSystemEventHandler):
                 rel_dir = "/"
             if self.excl.exclude_dir(rel_dir):
                 if src.suffix.lower() in idx.CODE_EXTS:
-                    try:
-                        idx.delete_points_by_path(self.client, self.collection, str(src))
-                        print(f"[moved:ignored_dest_deleted_src] {src} -> {dest}")
-                    except Exception:
-                        pass
+                    if self.client is not None:
+                        try:
+                            idx.delete_points_by_path(self.client, self.collection, str(src))
+                            print(f"[moved:ignored_dest_deleted_src] {src} -> {dest}")
+                        except Exception:
+                            pass
+                    else:
+                        print(f"[remote_mode] Move to ignored destination: {src} -> {dest}")
                 return
         except Exception:
             pass
-        # Try in-place rename (preserve vectors)
+        # Try in-place rename (preserve vectors) - only if we have a local client
         moved_count = -1
-        try:
-            moved_count = _rename_in_store(self.client, self.collection, src, dest)
-        except Exception:
-            moved_count = -1
+        if self.client is not None:
+            try:
+                moved_count = _rename_in_store(self.client, self.collection, src, dest)
+            except Exception:
+                moved_count = -1
         if moved_count and moved_count > 0:
             try:
                 print(f"[moved] {src} -> {dest} ({moved_count} chunk(s) relinked)")
@@ -227,12 +265,15 @@ class IndexHandler(FileSystemEventHandler):
                 pass
             return
         # Fallback: delete old then index new destination
-        try:
-            if src.suffix.lower() in idx.CODE_EXTS:
-                idx.delete_points_by_path(self.client, self.collection, str(src))
-                print(f"[moved:deleted_src] {src}")
-        except Exception:
-            pass
+        if self.client is not None:
+            try:
+                if src.suffix.lower() in idx.CODE_EXTS:
+                    idx.delete_points_by_path(self.client, self.collection, str(src))
+                    print(f"[moved:deleted_src] {src}")
+            except Exception:
+                pass
+        else:
+            print(f"[remote_mode] Move detected: {src} -> {dest}")
         try:
             self._maybe_enqueue(str(dest))
         except Exception:
@@ -388,6 +429,36 @@ def _rename_in_store(client: QdrantClient, collection: str, src: Path, dest: Pat
 
 
 def main():
+    # Check if remote mode is enabled
+    remote_mode = False
+    remote_client = None
+    
+    if _REMOTE_UPLOAD_AVAILABLE and is_remote_mode_enabled():
+        remote_mode = True
+        try:
+            remote_config = get_remote_config()
+            remote_client = RemoteUploadClient(
+                upload_endpoint=remote_config["upload_endpoint"],
+                workspace_path=remote_config["workspace_path"],
+                collection_name=remote_config["collection_name"],
+                max_retries=remote_config["max_retries"],
+                timeout=remote_config["timeout"]
+            )
+            print(f"[remote_upload] Remote mode enabled: {remote_config['upload_endpoint']}")
+            
+            # Check server status
+            status = remote_client.get_server_status()
+            if status.get("success", False):
+                print(f"[remote_upload] Server status: {status.get('status', 'unknown')}")
+            else:
+                print(f"[remote_upload] Warning: Could not reach server - {status.get('error', {}).get('message', 'Unknown error')}")
+                
+        except Exception as e:
+            print(f"[remote_upload] Error initializing remote client: {e}")
+            print("[remote_upload] Falling back to local mode")
+            remote_mode = False
+            remote_client = None
+    
     # Resolve collection name from workspace state before any client/state ops
     try:
         from scripts.workspace_state import get_collection_name as _get_coll
@@ -400,49 +471,56 @@ def main():
     except Exception:
         pass
 
+    mode_str = "REMOTE" if remote_mode else "LOCAL"
     print(
-        f"Watch mode: root={ROOT} qdrant={QDRANT_URL} collection={COLLECTION} model={MODEL}"
+        f"Watch mode: {mode_str} root={ROOT} qdrant={QDRANT_URL} collection={COLLECTION} model={MODEL}"
     )
 
-    client = QdrantClient(
-        url=QDRANT_URL, timeout=int(os.environ.get("QDRANT_TIMEOUT", "20") or 20)
-    )
+    # Initialize Qdrant client for local mode (remote mode doesn't need it for basic operation)
+    client = None
+    model = None
+    vector_name = None
+    
+    if not remote_mode:
+        client = QdrantClient(
+            url=QDRANT_URL, timeout=int(os.environ.get("QDRANT_TIMEOUT", "20") or 20)
+        )
 
-    # Compute embedding dimension first (for deterministic dense vector selection)
-    model = TextEmbedding(model_name=MODEL)
-    dim = len(next(model.embed(["dimension probe"])))
+        # Compute embedding dimension first (for deterministic dense vector selection)
+        model = TextEmbedding(model_name=MODEL)
+        dim = len(next(model.embed(["dimension probe"])))
 
-    # Determine dense vector name deterministically
-    try:
-        info = client.get_collection(COLLECTION)
-        cfg = info.config.params.vectors
-        if isinstance(cfg, dict) and cfg:
-            # Prefer vector whose size matches embedding dim
-            vector_name = None
-            for name, params in cfg.items():
-                psize = getattr(params, "size", None) or getattr(params, "dim", None)
-                if psize and int(psize) == int(dim):
-                    vector_name = name
-                    break
-            # If LEX vector exists, pick a different name as dense
-            if vector_name is None and getattr(idx, "LEX_VECTOR_NAME", None) in cfg:
-                for name in cfg.keys():
-                    if name != idx.LEX_VECTOR_NAME:
+        # Determine dense vector name deterministically
+        try:
+            info = client.get_collection(COLLECTION)
+            cfg = info.config.params.vectors
+            if isinstance(cfg, dict) and cfg:
+                # Prefer vector whose size matches embedding dim
+                vector_name = None
+                for name, params in cfg.items():
+                    psize = getattr(params, "size", None) or getattr(params, "dim", None)
+                    if psize and int(psize) == int(dim):
                         vector_name = name
                         break
-            if vector_name is None:
+                # If LEX vector exists, pick a different name as dense
+                if vector_name is None and getattr(idx, "LEX_VECTOR_NAME", None) in cfg:
+                    for name in cfg.keys():
+                        if name != idx.LEX_VECTOR_NAME:
+                            vector_name = name
+                            break
+                if vector_name is None:
+                    vector_name = idx._sanitize_vector_name(MODEL)
+            else:
                 vector_name = idx._sanitize_vector_name(MODEL)
-        else:
+        except Exception:
             vector_name = idx._sanitize_vector_name(MODEL)
-    except Exception:
-        vector_name = idx._sanitize_vector_name(MODEL)
 
-    # Ensure collection + payload indexes exist
-    try:
-        idx.ensure_collection(client, COLLECTION, dim, vector_name)
-    except Exception:
-        pass
-    idx.ensure_payload_indexes(client, COLLECTION)
+        # Ensure collection + payload indexes exist
+        try:
+            idx.ensure_collection(client, COLLECTION, dim, vector_name)
+        except Exception:
+            pass
+        idx.ensure_payload_indexes(client, COLLECTION)
 
     # Ensure workspace state exists and set collection
     try:
@@ -451,7 +529,12 @@ def main():
     except Exception:
         pass
 
-    q = ChangeQueue(lambda paths: _process_paths(paths, client, model, vector_name, str(ROOT)))
+    # Create change queue with remote client if enabled
+    if remote_mode:
+        q = ChangeQueue(lambda paths: _process_paths(paths, client, model, vector_name, str(ROOT), remote_mode), remote_client)
+    else:
+        q = ChangeQueue(lambda paths: _process_paths(paths, client, model, vector_name, str(ROOT), remote_mode))
+    
     handler = IndexHandler(ROOT, q, client, COLLECTION)
 
     obs = Observer()
@@ -468,7 +551,12 @@ def main():
         obs.join()
 
 
-def _process_paths(paths, client, model, vector_name: str, workspace_path: str):
+def _process_paths(paths, client, model, vector_name: str, workspace_path: str, remote_mode: bool = False):
+    # In remote mode, actual processing is handled by the remote client
+    # This function is called as a fallback when remote upload fails
+    if remote_mode:
+        print(f"[local_fallback] Processing {len(paths)} files locally due to remote upload failure")
+    
     # Prepare progress
     unique_paths = sorted(set(Path(x) for x in paths))
     total = len(unique_paths)
@@ -490,33 +578,42 @@ def _process_paths(paths, client, model, vector_name: str, workspace_path: str):
         current = p
         if not p.exists():
             # File was removed; ensure its points are deleted
-            try:
-                idx.delete_points_by_path(client, COLLECTION, str(p))
-                print(f"[deleted] {p}")
-            except Exception:
-                pass
+            if client is not None:  # Only process if we have a local client
+                try:
+                    idx.delete_points_by_path(client, COLLECTION, str(p))
+                    print(f"[deleted] {p}")
+                except Exception:
+                    pass
             _log_activity(workspace_path, "deleted", p)
             processed += 1
             _update_progress(workspace_path, started_at, processed, total, current)
             continue
-        # Lazily instantiate model if needed
-        if model is None:
-            from fastembed import TextEmbedding
-            mname = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
-            model = TextEmbedding(model_name=mname)
-        ok = idx.index_single_file(
-            client, model, COLLECTION, vector_name, p, dedupe=True, skip_unchanged=False
-        )
-        status = "indexed" if ok else "skipped"
-        print(f"[{status}] {p}")
-        if ok:
-            try:
-                size = int(p.stat().st_size)
-            except Exception:
-                size = None
-            _log_activity(workspace_path, "indexed", p, {"file_size": size})
+            
+        # Only process files locally if we have a client and model
+        if client is not None and model is not None:
+            # Lazily instantiate model if needed
+            if model is None:
+                from fastembed import TextEmbedding
+                mname = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
+                model = TextEmbedding(model_name=mname)
+            ok = idx.index_single_file(
+                client, model, COLLECTION, vector_name, p, dedupe=True, skip_unchanged=False
+            )
+            status = "indexed" if ok else "skipped"
+            print(f"[{status}] {p}")
+            if ok:
+                try:
+                    size = int(p.stat().st_size)
+                except Exception:
+                    size = None
+                _log_activity(workspace_path, "indexed", p, {"file_size": size})
+            else:
+                _log_activity(workspace_path, "skipped", p, {"reason": "no-change-or-error"})
         else:
-            _log_activity(workspace_path, "skipped", p, {"reason": "no-change-or-error"})
+            # In remote mode without fallback, just log activity
+            print(f"[remote_mode] Not processing locally: {p}")
+            _log_activity(workspace_path, "remote_processed", p)
+            
         processed += 1
         _update_progress(workspace_path, started_at, processed, total, current)
 

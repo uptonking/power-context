@@ -1,0 +1,125 @@
+---
+# Delta Upload Service Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: upload-service
+  namespace: context-engine
+  labels:
+    app: context-engine
+    component: upload-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: context-engine
+      component: upload-service
+  template:
+    metadata:
+      labels:
+        app: context-engine
+        component: upload-service
+    spec:
+      containers:
+      - name: upload-service
+        image: context-engine-upload-service  # Use service-specific image name
+        imagePullPolicy: IfNotPresent
+        command: ["python", "scripts/upload_service.py"]
+        ports:
+        - name: http
+          containerPort: 8002
+          protocol: TCP
+        env:
+        - name: QDRANT_URL
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: QDRANT_URL
+        - name: COLLECTION_NAME
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: COLLECTION_NAME
+        - name: UPLOAD_SERVICE_HOST
+          value: "0.0.0.0"
+        - name: UPLOAD_SERVICE_PORT
+          value: "8002"
+        - name: WORK_DIR
+          value: "/work"
+        - name: MAX_BUNDLE_SIZE_MB
+          value: "100"
+        - name: UPLOAD_TIMEOUT_SECS
+          value: "300"
+        - name: EMBEDDING_MODEL
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: EMBEDDING_MODEL
+        - name: USE_TREE_SITTER
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: USE_TREE_SITTER
+        - name: INDEX_SEMANTIC_CHUNKS
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: INDEX_SEMANTIC_CHUNKS
+        - name: INDEX_MICRO_CHUNKS
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: INDEX_MICRO_CHUNKS
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        volumeMounts:
+        - name: work-volume
+          mountPath: /work
+        - name: codebase-volume
+          mountPath: /work/.codebase
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 5
+      volumes:
+      - name: work-volume
+        persistentVolumeClaim:
+          claimName: upload-work-pvc
+      - name: codebase-volume
+        persistentVolumeClaim:
+          claimName: upload-codebase-pvc
+
+---
+# Delta Upload Service Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: upload-service
+  namespace: context-engine
+  labels:
+    app: context-engine
+    component: upload-service
+spec:
+  type: NodePort  # Change to LoadBalancer for external access
+  ports:
+  - name: http
+    port: 8002
+    targetPort: http
+    nodePort: 30804  # Optional: specify node port
+    protocol: TCP
+  selector:
+    app: context-engine
+    component: upload-service
