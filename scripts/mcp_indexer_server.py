@@ -3171,12 +3171,33 @@ async def context_answer(
 
         # Build a sources footer (IDs and paths) to guide the model and satisfy downstream consumers
         sources_footer = "\n".join([f"[{c.get('id')}] {c.get('path')}" for c in citations]) if citations else ""
+        
+        # Extract key identifiers from code to help tiny models stay grounded
+        import re
+        key_terms = set()
+        for block in context_blocks:
+            # Extract function/class names, constants, and variables
+            # Match: def func_name, class ClassName, CONSTANT_NAME = value
+            matches = re.findall(r'\b(?:def|class|const|let|var|function)\s+([A-Za-z_][A-Za-z0-9_]*)', block)
+            matches += re.findall(r'\b([A-Z_]{2,})\s*=', block)  # CONSTANTS
+            key_terms.update(matches[:10])  # Limit to avoid prompt bloat
+        
+        key_terms_str = ", ".join(sorted(key_terms)[:15]) if key_terms else "none found"
+        
+        # Optimized prompt for tiny models (1.5B-3B params)
+        # Key strategies: explicit extraction task, reference citation IDs, constrain format
         prompt = (
-            "Using ONLY the cited code, write a concise factual summary naming the file/function(s) and what they do.\n"
-            "Target 600–1000 characters in 2–3 tight sentences. No preamble/markdown. No repetition.\n"
+            "You are a code documentation assistant. Answer using ONLY the code snippets below.\n\n"
             f"Question: {qtxt}\n\n"
-            f"Code:\n{all_context}\n\n"
-            f"Sources:\n{sources_footer}\n\n"
+            "Code snippets:\n"
+            f"{all_context}\n\n"
+            f"Key identifiers in code: {key_terms_str}\n\n"
+            "Instructions:\n"
+            "1. Quote specific names from 'Key identifiers' when explaining\n"
+            "2. Reference citation numbers [1], [2], etc. when mentioning code\n"
+            "3. If the code doesn't answer the question, say 'The provided code does not contain this information'\n"
+            "4. Write 2-4 sentences maximum\n"
+            "5. Do not add information not in the code\n\n"
             "Answer:"
         )
 
@@ -3207,6 +3228,25 @@ async def context_answer(
         # Debug: log the cleaned LLM response
         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
             print(f"DEBUG: cleaned LLM answer: '{answer}' (len={len(answer)})")
+        
+        # Simple hallucination detection for tiny models
+        # Check if answer contains generic phrases that suggest it's not grounded in the code
+        hallucination_phrases = [
+            "in general", "typically", "usually", "commonly", "often",
+            "best practice", "it depends", "various ways", "multiple approaches",
+            "can be implemented", "there are several", "one way to"
+        ]
+        answer_lower = answer.lower()
+        hallucination_score = sum(1 for phrase in hallucination_phrases if phrase in answer_lower)
+        
+        # If answer seems generic and doesn't reference citations, add a warning
+        has_citation_refs = any(f"[{i}]" in answer for i in range(1, len(citations) + 1))
+        if hallucination_score >= 2 and not has_citation_refs:
+            if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                print(f"DEBUG: Possible hallucination detected (score={hallucination_score}, has_refs={has_citation_refs})")
+            # Prepend a disclaimer for low-confidence answers
+            answer = f"[Low confidence - answer may be generic] {answer}"
+            
     except Exception as e:
         return {"error": f"decoder call failed: {e}", "citations": citations, "query": queries}
 

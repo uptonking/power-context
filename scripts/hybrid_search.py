@@ -1512,17 +1512,22 @@ def run_hybrid_search(
             "lang_boost": round(float(m.get("langb", 0.0)), 4),
             "recency": round(float(m.get("rec", 0.0)), 4),
             "test_penalty": round(float(m.get("test", 0.0)), 4),
+            # new components
+            "config_penalty": round(float(m.get("cfg", 0.0)), 4),
+            "impl_boost": round(float(m.get("impl", 0.0)), 4),
+            "doc_penalty": round(float(m.get("doc", 0.0)), 4),
         }
         why = []
         if comp["dense_rrf"]:
             why.append(f"dense_rrf:{comp['dense_rrf']}")
-        for k in ("lexical", "symbol_substr", "symbol_exact", "core_boost", "lang_boost"):
+        for k in ("lexical", "symbol_substr", "symbol_exact", "core_boost", "lang_boost", "impl_boost"):
             if comp[k]:
                 why.append(f"{k}:{comp[k]}")
         if comp["vendor_penalty"]:
             why.append(f"vendor_penalty:{comp['vendor_penalty']}")
-        if comp.get("test_penalty"):
-            why.append(f"test_penalty:{comp['test_penalty']}")
+        for k in ("test_penalty", "config_penalty", "doc_penalty"):
+            if comp.get(k):
+                why.append(f"{k}:{comp[k]}")
         if comp["recency"]:
             why.append(f"recency:{comp['recency']}")
         # Related hints
@@ -2116,6 +2121,10 @@ def main():
                     "lang_boost": round(float(m.get("langb", 0.0)), 4),
                     "recency": round(float(m.get("rec", 0.0)), 4),
                     "test_penalty": round(float(m.get("test", 0.0)), 4),
+                    # new components
+                    "config_penalty": round(float(m.get("cfg", 0.0)), 4),
+                    "impl_boost": round(float(m.get("impl", 0.0)), 4),
+                    "doc_penalty": round(float(m.get("doc", 0.0)), 4),
                 },
                 "relations": {"imports": _imports, "calls": _calls, "symbol_path": _symp},
                 "related_paths": _related,
@@ -2130,13 +2139,15 @@ def main():
                 "symbol_exact",
                 "core_boost",
                 "lang_boost",
+                "impl_boost",
             ):
                 if item["components"][k]:
                     why.append(f"{k}:{item['components'][k]}")
             if item["components"]["vendor_penalty"]:
                 why.append(f"vendor_penalty:{item['components']['vendor_penalty']}")
-            if item["components"].get("test_penalty"):
-                why.append(f"test_penalty:{item['components']['test_penalty']}")
+            for k in ("test_penalty", "config_penalty", "doc_penalty"):
+                if item["components"].get(k):
+                    why.append(f"{k}:{item['components'][k]}")
             if item["components"]["recency"]:
                 why.append(f"recency:{item['components']['recency']}")
             item["why"] = why
