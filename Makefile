@@ -217,4 +217,16 @@ tokenizer: ## download tokenizer.json to models/tokenizer.json (override with TO
 	curl -L --fail --retry 3 -C - "$(TOKENIZER_URL)" -o "$(TOKENIZER_PATH)"
 
 
+# Router helpers
+Q ?= what is hybrid search?
+route-plan: ## plan-only route for a query: make route-plan Q="your question"
+	python3 scripts/mcp_router.py --plan "$(Q)"
+
+route-run: ## execute routed tool(s) over HTTP: make route-run Q="your question"
+	python3 scripts/mcp_router.py --run "$(Q)"
+router-eval: ## run the mock-based router eval harness
+	python3 scripts/router_eval.py
+
+
+
 

@@ -1637,6 +1637,36 @@ async def repo_search_compat(**arguments) -> Dict[str, Any]:
 
 
 @mcp.tool()
+async def context_answer_compat(arguments: Any = None) -> Dict[str, Any]:
+    """Compatibility wrapper for context_answer.
+
+    Accepts a single 'arguments' dict like RMCP/HTTP clients send and forwards to
+    context_answer with normalized keys. Mirrors repo_search_compat behavior but for
+    the answer tool.
+    """
+    try:
+        args = arguments or {}
+        query = args.get("query") or args.get("q") or args.get("text")
+        forward = {
+            "query": query,
+            "limit": args.get("limit"),
+            "per_path": args.get("per_path"),
+            "budget_tokens": args.get("budget_tokens"),
+            "include_snippet": args.get("include_snippet"),
+            "collection": args.get("collection"),
+            "max_tokens": args.get("max_tokens"),
+            "temperature": args.get("temperature"),
+            "mode": args.get("mode"),
+            "expand": args.get("expand"),
+        }
+        clean = {k: v for k, v in forward.items() if v is not None}
+        return await context_answer(**clean)
+    except Exception as e:
+        return {"error": f"context_answer_compat failed: {e}"}
+
+
+
+@mcp.tool()
 async def search_tests_for(
     query: Any = None,
     limit: Any = None,
