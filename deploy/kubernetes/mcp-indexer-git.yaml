@@ -1,0 +1,216 @@
+---
+# MCP Indexer Server with Git Sync Sidecar
+# This demonstrates both local (hostPath) and Git-based source code access
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-indexer
+  namespace: context-engine
+  labels:
+    app: context-engine
+    component: mcp-indexer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: context-engine
+      component: mcp-indexer
+  template:
+    metadata:
+      labels:
+        app: context-engine
+        component: mcp-indexer
+    spec:
+      # Use init container to determine source code mode
+      initContainers:
+      - name: source-mode-check
+        image: busybox:1.36
+        command: ["sh", "-c", "echo 'Source Code Mode: $SOURCE_CODE_MODE'"]
+        env:
+        - name: SOURCE_CODE_MODE
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: SOURCE_CODE_MODE
+
+      containers:
+      # Main MCP Indexer Server Container
+      - name: mcp-indexer
+        image: context-engine-indexer:latest
+        imagePullPolicy: IfNotPresent
+        command: ["python", "-m", "mcp.server.fastmcp"]
+        args: ["--server-name", "context-engine-indexer", "--host", "0.0.0.0", "--port", "8001", "--transport", "sse", "/app/scripts/indexer_server.py"]
+        ports:
+        - name: sse
+          containerPort: 8001
+          protocol: TCP
+        - name: health
+          containerPort: 18001
+          protocol: TCP
+        env:
+        - name: QDRANT_URL
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: QDRANT_URL
+        - name: FASTMCP_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: FASTMCP_HOST
+        - name: FASTMCP_INDEXER_PORT
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: FASTMCP_INDEXER_PORT
+        - name: FASTMCP_HEALTH_PORT
+          value: "18001"
+        - name: SOURCE_CODE_MODE
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: SOURCE_CODE_MODE
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        volumeMounts:
+        - name: work-volume
+          mountPath: /work
+        - name: codebase-volume
+          mountPath: /work/.codebase
+        livenessProbe:
+          httpGet:
+            path: /readyz
+            port: health
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: health
+          initialDelaySeconds: 10
+          periodSeconds: 5
+
+      # Git Sync Sidecar Container (only active when SOURCE_CODE_MODE=git)
+      - name: git-sync
+        image: k8s.gcr.io/git-sync:v4.1.0
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: GITSYNC_REPO
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: GIT_REPO_URL
+        - name: GITSYNC_BRANCH
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: GIT_BRANCH
+        - name: GITSYNC_ROOT
+          value: "/git"
+        - name: GITSYNC_SYNC_PERIOD
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: GIT_SYNC_PERIOD
+        - name: GITSYNC_ONE_TIME
+          value: "false"
+        - name: GITSYNC_LINK
+          value: "latest"
+        - name: GITSYNC_MAX_FAILURES
+          value: "5"
+        # For SSH-based authentication (optional)
+        - name: GITSYNC_SSH
+          value: "false"
+        # For HTTP basic auth (optional)
+        - name: GITSYNC_USERNAME
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: GIT_USERNAME
+        - name: GITSYNC_PASSWORD
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: GIT_PASSWORD
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "50m"
+          limits:
+            memory: "128Mi"
+            cpu: "100m"
+        volumeMounts:
+        - name: work-volume
+          mountPath: /git
+        # Mount SSH key if using SSH authentication
+        - name: git-ssh-key
+          mountPath: /etc/git-secret/ssh
+          readOnly: true
+        securityContext:
+          runAsUser: 65533  # git-sync runs as non-root user
+        # This container will start but do nothing when SOURCE_CODE_MODE=local
+        # We could add a more sophisticated mechanism here if needed
+
+      volumes:
+      # Shared work directory for both main container and git-sync
+      - name: work-volume
+        emptyDir: {}
+      - name: codebase-volume
+        emptyDir: {}
+      # SSH key volume for private repositories (optional)
+      - name: git-ssh-key
+        secret:
+          secretName: git-ssh-key
+          optional: true
+          items:
+          - key: ssh-private-key
+            path: id_rsa
+
+---
+# MCP Indexer Server Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-indexer
+  namespace: context-engine
+  labels:
+    app: context-engine
+    component: mcp-indexer
+spec:
+  type: NodePort  # Change to LoadBalancer for external access
+  ports:
+  - name: sse
+    port: 8001
+    targetPort: sse
+    nodePort: 30802  # Optional: specify node port
+    protocol: TCP
+  - name: health
+    port: 18001
+    targetPort: health
+    nodePort: 30803  # Optional: specify node port
+    protocol: TCP
+  selector:
+    app: context-engine
+    component: mcp-indexer
+
+---
+# Example Secret for SSH Git Access (Optional)
+# Create with: kubectl create secret generic git-ssh-key --from-file=ssh-private-key=~/.ssh/id_rsa
+apiVersion: v1
+kind: Secret
+metadata:
+  name: git-ssh-key
+  namespace: context-engine
+  labels:
+    app: context-engine
+    component: git-auth
+type: Opaque
+data:
+  # Base64 encoded SSH private key
+  # ssh-private-key: <base64-encoded-ssh-private-key>
+type: Opaque
