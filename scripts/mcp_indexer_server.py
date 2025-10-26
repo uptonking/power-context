@@ -2819,14 +2819,16 @@ async def context_answer(
         return {"error": "query required"}
 
     # Effective limits
+    # For Q&A, we want more results per file to get comprehensive context
     try:
         lim = int(limit) if (limit is not None and str(limit).strip() != "") else 10
     except Exception:
         lim = 10
     try:
-        ppath = int(per_path) if (per_path is not None and str(per_path).strip() != "") else 1
+        # Default per_path=3 for Q&A (vs 1 for search) to get multiple snippets from same file
+        ppath = int(per_path) if (per_path is not None and str(per_path).strip() != "") else 3
     except Exception:
-        ppath = 1
+        ppath = 3
 
     # Collection + model setup (reuse indexer defaults)
     coll = (collection or _default_collection()) or ""
@@ -3301,20 +3303,30 @@ async def context_answer(
         key_terms_str = ", ".join(sorted(key_terms)[:15]) if key_terms else "none found"
 
         # Optimized prompt for Granite-4.0-Micro (uses chat template format)
-        # Key strategies: proper instruction format, explicit extraction task, reference citation IDs
-        system_msg = "You are a helpful assistant specialized in code analysis. Please ensure responses are professional, accurate, and safe. Answer questions using ONLY the provided code snippets. Quote specific variable/function names from the code."
+        # Goal: extract exact definitions and summarize usage strictly from provided code
+        system_msg = (
+            "You are a precise code analysis assistant."
+            " Always ground answers strictly in the provided code snippets and citations."
+            " Never speculate or generalize. If the answer is not present in the snippets,"
+            " reply exactly: 'Not found in provided snippets.'"
+        )
 
         user_msg = (
             f"Question: {qtxt}\n\n"
-            "Code snippets:\n"
+            "Context (ID, path:lines followed by snippet):\n"
             f"{all_context}\n\n"
-            f"Key identifiers: {key_terms_str}\n\n"
-            "Rules:\n"
-            "- Quote exact names from the code\n"
-            "- Reference [1], [2], etc. for citations\n"
-            "- If code doesn't answer, say so\n"
-            "- Max 3 sentences\n"
-            "- No speculation"
+            f"Key identifiers (hints): {key_terms_str}\n\n"
+            "Task:\n"
+            "- Find and quote the exact definition line(s) for the asked identifier from the snippets. Include the citation ID in brackets, e.g., [1].\n"
+            "- Summarize how/where it is used in the shown code (function(s), formula, parameters), citing [ID] where appropriate.\n\n"
+            "Output requirements (strict):\n"
+            "- Respond with EXACTLY two lines in this order and NOTHING else.\n"
+            "- Line 1 starts with 'Definition:' and contains the exact quoted line(s) and a citation ID.\n"
+            "- Line 2 starts with 'Usage:' and contains a 1-2 sentence summary with citation(s).\n"
+            "- If not found in snippets, write 'Definition: Not found in provided snippets.' and 'Usage: Not found in provided snippets.'\n\n"
+            "Format:\n"
+            "Definition: \"<exact line(s)>\" [ID]\n"
+            "Usage: <1-2 short sentences> [ID]"
         )
 
         # Use Granite-4.0-Micro chat template format
