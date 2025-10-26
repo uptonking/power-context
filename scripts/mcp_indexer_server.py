@@ -3133,9 +3133,10 @@ async def context_answer(
 
 
 
-    # Optional stop sequences via env (comma-separated)
+    # Stop sequences for Qwen2.5-Coder (ChatML format) + optional env overrides
     stop_env = os.environ.get("DECODER_STOP", "")
-    stops = [s for s in (stop_env.split(",") if stop_env else []) if s]
+    default_stops = ["<|im_end|>", "<|im_start|>"]  # Qwen ChatML tokens
+    stops = default_stops + [s for s in (stop_env.split(",") if stop_env else []) if s]
 
     # Decoder parameter tuning for small models (defaults can be overridden via args or env)
     def _to_int(v, d):
@@ -3148,11 +3149,11 @@ async def context_answer(
             return float(v)
         except Exception:
             return d
-    # Default 300 tokens for concise answers
-    mtok = _to_int(max_tokens, _to_int(os.environ.get("DECODER_MAX_TOKENS", "300"), 300))
-    temp = _to_float(temperature, _to_float(os.environ.get("DECODER_TEMPERATURE", "0.1"), 0.1))
-    top_k = _to_int(os.environ.get("DECODER_TOP_K", "40"), 40)
-    top_p = _to_float(os.environ.get("DECODER_TOP_P", "0.92"), 0.92)
+    # Generation params optimized for Qwen2.5-Coder (code-focused, deterministic)
+    mtok = _to_int(max_tokens, _to_int(os.environ.get("DECODER_MAX_TOKENS", "200"), 200))  # Shorter for conciseness
+    temp = _to_float(temperature, _to_float(os.environ.get("DECODER_TEMPERATURE", "0.3"), 0.3))  # Low but not zero
+    top_k = _to_int(os.environ.get("DECODER_TOP_K", "20"), 20)  # More focused
+    top_p = _to_float(os.environ.get("DECODER_TOP_P", "0.85"), 0.85)  # More deterministic
 
     # Call llama.cpp decoder (requires REFRAG_DECODER=1)
     try:
@@ -3184,21 +3185,28 @@ async def context_answer(
         
         key_terms_str = ", ".join(sorted(key_terms)[:15]) if key_terms else "none found"
         
-        # Optimized prompt for tiny models (1.5B-3B params)
-        # Key strategies: explicit extraction task, reference citation IDs, constrain format
-        prompt = (
-            "You are a code documentation assistant. Answer using ONLY the code snippets below.\n\n"
+        # Optimized prompt for Qwen2.5-Coder-Instruct (uses ChatML format)
+        # Key strategies: proper instruction format, explicit extraction task, reference citation IDs
+        system_msg = "You are Qwen, a code analysis assistant. Answer questions using ONLY the provided code snippets. Quote specific variable/function names from the code."
+        
+        user_msg = (
             f"Question: {qtxt}\n\n"
             "Code snippets:\n"
             f"{all_context}\n\n"
-            f"Key identifiers in code: {key_terms_str}\n\n"
-            "Instructions:\n"
-            "1. Quote specific names from 'Key identifiers' when explaining\n"
-            "2. Reference citation numbers [1], [2], etc. when mentioning code\n"
-            "3. If the code doesn't answer the question, say 'The provided code does not contain this information'\n"
-            "4. Write 2-4 sentences maximum\n"
-            "5. Do not add information not in the code\n\n"
-            "Answer:"
+            f"Key identifiers: {key_terms_str}\n\n"
+            "Rules:\n"
+            "- Quote exact names from the code\n"
+            "- Reference [1], [2], etc. for citations\n"
+            "- If code doesn't answer, say so\n"
+            "- Max 3 sentences\n"
+            "- No speculation"
+        )
+        
+        # Use ChatML format for Qwen2.5-Coder-Instruct
+        prompt = (
+            f"<|im_start|>system\n{system_msg}<|im_end|>\n"
+            f"<|im_start|>user\n{user_msg}<|im_end|>\n"
+            "<|im_start|>assistant\n"
         )
 
         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
