@@ -241,6 +241,9 @@ def _merge_and_budget_spans(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]
         # so citations and file reads use the expanded range
         m["start_line"] = c["start"]
         m["end_line"] = c["end"]
+        # Clear the text field since it no longer matches the merged bounds
+        # This forces context_answer to re-read from the file with correct line range
+        m["text"] = ""
         # Also keep the internal markers for debugging
         m["_merged_start"] = c["start"]
         m["_merged_end"] = c["end"]
