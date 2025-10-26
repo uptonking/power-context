@@ -168,7 +168,13 @@ def build_plan(q: str) -> List[Tuple[str, Dict[str, Any]]]:
             sp = _load_scratchpad()
             lp = sp.get("last_plan")
             if isinstance(lp, list) and lp:
-                return lp
+                # Normalize to list of (tool, args) tuples
+                norm: list[tuple] = []
+                for it in lp:
+                    if isinstance(it, (list, tuple)) and len(it) == 2:
+                        norm.append((it[0], it[1]))
+                if norm:
+                    return norm
     except Exception:
         pass
 

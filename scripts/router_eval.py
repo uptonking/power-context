@@ -29,6 +29,10 @@ class MockMCPHandler(BaseHTTPRequestHandler):
         if method == "notifications/initialized":
             return self._send_json({"jsonrpc": "2.0", "result": {"ok": True}})
         if method == "tools/list":
+            # Simulate flakiness once if flagged
+            if getattr(self.server, "fail_list_once", False) and not getattr(self.server, "_fail_list_consumed", False):
+                setattr(self.server, "_fail_list_consumed", True)
+                return self._send_json({"jsonrpc": "2.0", "error": {"message": "flaky list"}}, code=500)
             tools = getattr(self.server, "tools", [])
             return self._send_json({"jsonrpc": "2.0", "id": j.get("id"), "result": {"tools": tools}})
         if method == "tools/call":
@@ -61,6 +65,9 @@ class MockMCPHandler(BaseHTTPRequestHandler):
                 }
                 return self._send_json({"jsonrpc": "2.0", "id": j.get("id"), "result": {"content": [{"type": "text", "text": json.dumps(res)}], "structuredContent": res, "isError": False}})
             if name == "context_answer_compat":
+                # Simulate failure if flagged so router should fall back to context_answer
+                if getattr(self.server, "fail_context_compat", False):
+                    return self._send_json({"jsonrpc": "2.0", "id": j.get("id"), "result": {"content": [{"type": "text", "text": json.dumps({"error": "compat failed"})}], "structuredContent": {"error": "compat failed"}, "isError": True}})
                 # Require nested arguments wrapper
                 if not isinstance(args, dict) or "arguments" not in args:
                     return self._send_json({"jsonrpc": "2.0", "id": j.get("id"), "result": {"content": [{"type": "text", "text": json.dumps({"error": "compat requires nested arguments"})}], "structuredContent": {"error": "compat requires nested arguments"}, "isError": True}})
