@@ -112,6 +112,9 @@ services:
     volumes:
       - ${HOST_INDEX_PATH:-.}:/work
 
+    # Dev override: run server from host code so changes apply without rebuild
+    command: ["python", "/work/scripts/mcp_indexer_server.py"]
+
   llamacpp:
     image: ghcr.io/ggerganov/llama.cpp:server
     container_name: llama-decoder
