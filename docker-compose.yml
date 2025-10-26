@@ -105,6 +105,7 @@ services:
       - FASTMCP_TRANSPORT=${FASTMCP_HTTP_TRANSPORT}
       - QDRANT_URL=${QDRANT_URL}
       - FASTMCP_HEALTH_PORT=18001
+      - DEBUG_CONTEXT_ANSWER=${DEBUG_CONTEXT_ANSWER:-0}
     # Streamable HTTP endpoint for IDE agents at http://localhost:${FASTMCP_INDEXER_HTTP_PORT:-8003}/mcp/
     ports:
       - "${FASTMCP_INDEXER_HTTP_PORT:-8003}:8001"

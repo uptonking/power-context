@@ -1724,6 +1724,18 @@ async def context_answer_compat(arguments: Any = None) -> Dict[str, Any]:
             "temperature": args.get("temperature"),
             "mode": args.get("mode"),
             "expand": args.get("expand"),
+            # ---- Forward retrieval filters so router hints are honored ----
+            "language": args.get("language"),
+            "under": args.get("under"),
+            "kind": args.get("kind"),
+            "symbol": args.get("symbol"),
+            "ext": args.get("ext"),
+            "path_regex": args.get("path_regex"),
+            "path_glob": args.get("path_glob"),
+            "not_glob": args.get("not_glob"),
+            "case": args.get("case"),
+            # pass through NOT filter under either key
+            "not_": args.get("not_") or args.get("not"),
         }
         clean = {k: v for k, v in forward.items() if v is not None}
         return await context_answer(**clean)
