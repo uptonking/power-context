@@ -3005,6 +3005,28 @@ async def context_answer(
                 sym_arg = None
         except Exception:
             pass
+        # Query sharpening: when we inferred a file-like path_glob, add its basename and key tokens to queries
+        try:
+            if eff_path_glob:
+                def _basename(p: str) -> str:
+                    s = str(p).replace("\\", "/").strip()
+                    return s.split("/")[-1] if "/" in s else s
+                basenames = []
+                if isinstance(eff_path_glob, (list, tuple)):
+                    basenames = [_basename(p) for p in eff_path_glob]
+                else:
+                    basenames = [_basename(str(eff_path_glob))]
+                for bn in basenames:
+                    if bn and bn not in queries:
+                        queries.append(bn)
+            qj = " ".join(queries)
+            # Promote obvious identifier tokens from the user query
+            for tok in ("RRF_K",):
+                if tok in qj and tok not in queries:
+                    queries.append(tok)
+        except Exception:
+            pass
+
         # Debug: log effective retrieval filters before search
         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
             try:
