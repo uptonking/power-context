@@ -2825,10 +2825,11 @@ async def context_answer(
     except Exception:
         lim = 10
     try:
-        # Default per_path=3 for Q&A (vs 1 for search) to get multiple snippets from same file
-        ppath = int(per_path) if (per_path is not None and str(per_path).strip() != "") else 3
+        # Default per_path=5 for Q&A (vs 1 for search) to get multiple snippets from same file
+        # This ensures we capture both definitions and usages
+        ppath = int(per_path) if (per_path is not None and str(per_path).strip() != "") else 5
     except Exception:
-        ppath = 3
+        ppath = 5
 
     # Collection + model setup (reuse indexer defaults)
     coll = (collection or _default_collection()) or ""
@@ -3044,10 +3045,24 @@ async def context_answer(
                     if bn and bn not in queries:
                         queries.append(bn)
             qj = " ".join(queries)
-            # Promote obvious identifier tokens from the user query
-            for tok in ("RRF_K",):
-                if tok in qj and tok not in queries:
-                    queries.append(tok)
+            # Extract code identifiers from questions (e.g., "what is RRF_K" -> add "RRF_K" and "RRF_K =" and "def rrf")
+            import re as _re
+            for match in _re.findall(r'\b([A-Z_][A-Z0-9_]{2,})\b', qj):
+                if match not in queries:
+                    queries.append(match)
+                    # Also add definition pattern to catch assignment lines
+                    def_pattern = f"{match} ="
+                    if def_pattern not in queries:
+                        queries.append(def_pattern)
+            # For questions about constants/variables, also search for functions that might use them
+            if any(word in qj.lower() for word in ["what is", "how is", "used", "usage"]):
+                for match in _re.findall(r'\b([A-Z_][A-Z0-9_]{2,})\b', qj):
+                    # Add potential function name (e.g., RRF_K -> rrf function)
+                    func_name = match.lower().split("_")[0]
+                    if func_name and len(func_name) > 2:
+                        func_query = f"def {func_name}("
+                        if func_query not in queries:
+                            queries.append(func_query)
         except Exception:
             pass
 
@@ -3258,7 +3273,11 @@ async def context_answer(
             except Exception:
                 snippet = snippet or ""
         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
-            print(f"DEBUG: Snippet {idx} {('(payload)' if it.get('text') else '(fs)')} {path}:{sline}-{eline}, length={len(snippet)}, starts with: {snippet[:80] if snippet else 'EMPTY'}...")
+            print(f"DEBUG: Snippet {idx} {('(payload)' if it.get('text') else '(fs)')} {path}:{sline}-{eline}, length={len(snippet)}")
+            if snippet:
+                print(f"DEBUG: Snippet {idx} content preview: {snippet[:200]}")
+            else:
+                print(f"DEBUG: Snippet {idx} is EMPTY!")
         header = f"[{idx}] {path}:{sline}-{eline}"
         # Increased snippet size for better context (was 600, now 1200)
         # This provides ~10-15 lines of code per snippet for better LLM understanding
@@ -3289,10 +3308,10 @@ async def context_answer(
     # Debug: log span details
     if os.environ.get("DEBUG_CONTEXT_ANSWER"):
         print(f"DEBUG: spans={len(spans)}, context_blocks={len(context_blocks)}")
-        if context_blocks:
-            print(f"DEBUG: first context block: {context_blocks[0][:200]}...")
-        else:
-            print("DEBUG: no context blocks!")
+        for i, block in enumerate(context_blocks[:3], 1):
+            print(f"DEBUG: Context block {i}:")
+            print(block[:300])
+            print("---")
 
 
 
