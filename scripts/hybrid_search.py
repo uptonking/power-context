@@ -101,6 +101,10 @@ CONFIG_FILE_PENALTY = float(os.environ.get("HYBRID_CONFIG_FILE_PENALTY", "0.3") 
 IMPLEMENTATION_BOOST = float(os.environ.get("HYBRID_IMPLEMENTATION_BOOST", "0.2") or 0.2)
 DOCUMENTATION_PENALTY = float(os.environ.get("HYBRID_DOCUMENTATION_PENALTY", "0.1") or 0.1)
 
+# Penalize comment-heavy snippets so code (not comments) ranks higher
+COMMENT_PENALTY = float(os.environ.get("HYBRID_COMMENT_PENALTY", "0.2") or 0.2)
+COMMENT_RATIO_THRESHOLD = float(os.environ.get("HYBRID_COMMENT_RATIO_THRESHOLD", "0.6") or 0.6)
+
 # Micro-span compaction and budgeting (ReFRAG-lite output shaping)
 MICRO_OUT_MAX_SPANS = int(os.environ.get("MICRO_OUT_MAX_SPANS", "3") or 3)
 MICRO_MERGE_LINES = int(os.environ.get("MICRO_MERGE_LINES", "4") or 4)
@@ -1403,7 +1407,88 @@ def run_hybrid_search(
         if hits > 0 and kb > 0.0:
             bump = min(kcap, kb * float(hits))
             m["s"] += bump
+        # Apply comment-heavy penalty to de-emphasize comments/doc blocks
+        try:
+            if COMMENT_PENALTY > 0.0:
+                ratio = _snippet_comment_ratio(md)
+                thr = float(COMMENT_RATIO_THRESHOLD)
+                if ratio >= thr:
+                    # Scale penalty with how far ratio exceeds threshold (cap at COMMENT_PENALTY)
+                    scale = (ratio - thr) / max(1e-6, 1.0 - thr)
+                    pen = min(float(COMMENT_PENALTY), float(COMMENT_PENALTY) * max(0.0, scale))
+                    if pen > 0:
+                        m["cmt"] = float(m.get("cmt", 0.0)) - pen
+                        m["s"] -= pen
+        except Exception:
+            pass
     # Re-sort after bump
+    def _snippet_comment_ratio(md: dict) -> float:
+        # Estimate fraction of non-blank lines that are comments (language-agnostic heuristics)
+        try:
+            path = str(md.get("path") or "")
+            sline = int(md.get("start_line") or 0)
+            eline = int(md.get("end_line") or 0)
+            txt = (md.get("text") or md.get("code") or "")
+            if not txt and path and sline:
+                p = path
+                try:
+                    if not os.path.isabs(p):
+                        p = os.path.join("/work", p)
+                    realp = os.path.realpath(p)
+                    if realp == "/work" or realp.startswith("/work/"):
+                        with open(realp, "r", encoding="utf-8", errors="ignore") as f:
+                            lines = f.readlines()
+                        si = max(1, sline - 3)
+                        ei = min(len(lines), max(sline, eline) + 3)
+                        txt = "".join(lines[si-1:ei])
+                except Exception:
+                    txt = txt or ""
+            if not txt:
+                return 0.0
+            total = 0
+            comment = 0
+            in_block = False
+            for raw in txt.splitlines():
+                line = raw.strip()
+                if not line:
+                    continue
+                total += 1
+                # HTML/XML comments
+                if line.startswith("<!--"):
+                    in_block = True
+                    comment += 1
+                    continue
+                if in_block:
+                    comment += 1
+                    if "-->" in line:
+                        in_block = False
+                    continue
+                # C/JS block comments
+                if line.startswith("/*"):
+                    in_block = True
+                    comment += 1
+                    continue
+                if in_block:
+                    comment += 1
+                    if "*/" in line:
+                        in_block = False
+                    continue
+                # Single-line comments for many languages
+                if line.startswith("//") or line.startswith("#"):
+                    comment += 1
+                    continue
+                # Python docstring-like lines (treat as comment-ish for ranking)
+                if line.startswith("\"\"\"") or line.startswith("'''"):
+                    comment += 1
+                    continue
+            if total == 0:
+                return 0.0
+            return comment / float(total)
+        except Exception:
+            return 0.0
+
+    # Apply bump to top-N ranked (limited for speed)
+
     ranked = sorted(ranked, key=_tie_key)
 
     # Cluster by path adjacency
