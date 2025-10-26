@@ -3005,6 +3005,14 @@ async def context_answer(
                 sym_arg = None
         except Exception:
             pass
+        # Debug: log effective retrieval filters before search
+        if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+            try:
+                print(f"DEBUG FILTERS: language={eff_language}, override_under={override_under}, symbol={sym_arg}")
+                print(f"DEBUG FILTERS: path_glob={eff_path_glob}")
+            except Exception as _e:
+                print(f"DEBUG FILTERS: print failed: {_e}")
+
 
         items = run_hybrid_search(
             queries=queries,
@@ -3014,6 +3022,18 @@ async def context_answer(
             under=override_under or None,
             kind=kwargs.get("kind") or None,
             symbol=sym_arg,
+        # Debug: log top retrieval results before any post-filters/budgeting
+        if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+            try:
+                print(f"DEBUG RETRIEVAL: got {len(items)} items")
+                for i, it in enumerate(items[:5], 1):
+                    p = str(it.get("path") or "")
+                    s = int(it.get("start_line") or 0)
+                    e = int(it.get("end_line") or 0)
+                    print(f"DEBUG RETRIEVAL ITEM {i}: {p}:{s}-{e}")
+            except Exception as _e:
+                print(f"DEBUG RETRIEVAL: print failed: {_e}")
+
             ext=kwargs.get("ext") or None,
             not_filter=kwargs.get("not_") or kwargs.get("not") or None,
             case=kwargs.get("case") or None,
@@ -3215,7 +3235,7 @@ async def context_answer(
 
         # Build a sources footer (IDs and paths) to guide the model and satisfy downstream consumers
         sources_footer = "\n".join([f"[{c.get('id')}] {c.get('path')}" for c in citations]) if citations else ""
-        
+
         # Extract key identifiers from code to help tiny models stay grounded
         import re
         key_terms = set()
@@ -3225,13 +3245,13 @@ async def context_answer(
             matches = re.findall(r'\b(?:def|class|const|let|var|function)\s+([A-Za-z_][A-Za-z0-9_]*)', block)
             matches += re.findall(r'\b([A-Z_]{2,})\s*=', block)  # CONSTANTS
             key_terms.update(matches[:10])  # Limit to avoid prompt bloat
-        
+
         key_terms_str = ", ".join(sorted(key_terms)[:15]) if key_terms else "none found"
-        
+
         # Optimized prompt for Granite-4.0-Micro (uses chat template format)
         # Key strategies: proper instruction format, explicit extraction task, reference citation IDs
         system_msg = "You are a helpful assistant specialized in code analysis. Please ensure responses are professional, accurate, and safe. Answer questions using ONLY the provided code snippets. Quote specific variable/function names from the code."
-        
+
         user_msg = (
             f"Question: {qtxt}\n\n"
             "Code snippets:\n"
@@ -3244,7 +3264,7 @@ async def context_answer(
             "- Max 3 sentences\n"
             "- No speculation"
         )
-        
+
         # Use Granite-4.0-Micro chat template format
         # Based on official HF documentation: <|start_of_role|>role<|end_of_role|>content<|end_of_text|>
         prompt = (
@@ -3280,7 +3300,7 @@ async def context_answer(
         # Debug: log the cleaned LLM response
         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
             print(f"DEBUG: cleaned LLM answer: '{answer}' (len={len(answer)})")
-        
+
         # Simple hallucination detection for tiny models
         # Check if answer contains generic phrases that suggest it's not grounded in the code
         hallucination_phrases = [
@@ -3290,7 +3310,7 @@ async def context_answer(
         ]
         answer_lower = answer.lower()
         hallucination_score = sum(1 for phrase in hallucination_phrases if phrase in answer_lower)
-        
+
         # If answer seems generic and doesn't reference citations, add a warning
         has_citation_refs = any(f"[{i}]" in answer for i in range(1, len(citations) + 1))
         if hallucination_score >= 2 and not has_citation_refs:
@@ -3298,7 +3318,7 @@ async def context_answer(
                 print(f"DEBUG: Possible hallucination detected (score={hallucination_score}, has_refs={has_citation_refs})")
             # Prepend a disclaimer for low-confidence answers
             answer = f"[Low confidence - answer may be generic] {answer}"
-            
+
     except Exception as e:
         return {"error": f"decoder call failed: {e}", "citations": citations, "query": queries}
 
