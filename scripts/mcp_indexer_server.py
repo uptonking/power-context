@@ -190,7 +190,18 @@ def _start_readyz_server():
                         self.send_response(200)
                         self.send_header("Content-Type", "application/json")
                         self.end_headers()
-                        payload = {"ok": True, "tools": _TOOLS_REGISTRY}
+                        # Hide expand_query when decoder is disabled
+                        tools = _TOOLS_REGISTRY
+                        try:
+                            from scripts.refrag_llamacpp import is_decoder_enabled  # type: ignore
+                        except Exception:
+                            is_decoder_enabled = lambda: False  # type: ignore
+                        try:
+                            if not is_decoder_enabled():
+                                tools = [t for t in tools if (t.get("name") or "") != "expand_query"]
+                        except Exception:
+                            pass
+                        payload = {"ok": True, "tools": tools}
                         self.wfile.write((json.dumps(payload)).encode("utf-8"))
                     else:
                         self.send_response(404)
@@ -2643,7 +2654,9 @@ async def expand_query(query: Any = None, max_new: Any = None) -> Dict[str, Any]
             except Exception:
                 cap = 2
         from scripts.refrag_llamacpp import LlamaCppRefragClient, is_decoder_enabled  # type: ignore
-        if not is_decoder_enabled() or not qlist:
+        if not is_decoder_enabled():
+            return {"alternates": [], "hint": "decoder disabled: set REFRAG_DECODER=1 and start llamacpp (LLAMACPP_URL)"}
+        if not qlist:
             return {"alternates": []}
         prompt = (
             "You expand code search queries. Given short queries, propose up to 2 compact alternates.\n"
@@ -2878,10 +2891,19 @@ async def context_answer(
             pass
 
     # Default exclusions to avoid noisy self-test and cache artifacts
+    # Also filter out metadata/config files that pollute Q&A context
+    # This significantly improves answer quality by focusing on implementation code
     user_not_glob = kwargs.get("not_glob")
     if isinstance(user_not_glob, str):
         user_not_glob = [user_not_glob]
-    base_excludes = [".selftest_repo/", ".pytest_cache/"]
+    base_excludes = [
+        ".selftest_repo/",
+        ".pytest_cache/",
+        ".codebase/",      # Filter out indexer metadata (state.json, cache.json, etc.)
+        ".kiro/",          # Filter out IDE config (mcp.json, settings, etc.)
+        "node_modules/",   # Filter out dependencies
+        ".git/",           # Filter out git internals
+    ]
     # Add robust variants for absolute and recursive matching
     def _variants(p: str) -> list[str]:
         p = str(p).strip().strip()
@@ -3061,11 +3083,12 @@ async def context_answer(
         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
             print(f"DEBUG: Snippet {idx} (payload) {path}:{sline}-{eline}, length={len(snippet)}, starts with: {snippet[:80] if snippet else 'EMPTY'}...")
         header = f"[{idx}] {path}:{sline}-{eline}"
-        # Keep snippets small - we want total prompt under 4k chars for 1.5B model
+        # Increased snippet size for better context (was 600, now 1200)
+        # This provides ~10-15 lines of code per snippet for better LLM understanding
         try:
-            MAX_SNIPPET_CHARS = int(os.environ.get("CTX_SNIPPET_CHARS", "600") or 600)
+            MAX_SNIPPET_CHARS = int(os.environ.get("CTX_SNIPPET_CHARS", "1200") or 1200)
         except Exception:
-            MAX_SNIPPET_CHARS = 600
+            MAX_SNIPPET_CHARS = 1200
         if snippet and len(snippet) > MAX_SNIPPET_CHARS:
             snippet = snippet[:MAX_SNIPPET_CHARS] + "\n..."
         block = header + "\n" + (snippet.strip() if snippet else "(no code)")

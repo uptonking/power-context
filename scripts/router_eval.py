@@ -41,6 +41,13 @@ class MockMCPHandler(BaseHTTPRequestHandler):
             args = params.get("arguments") or {}
             # Indexer tools
             if name in {"repo_search", "search_config_for", "search_tests_for", "search_callers_for", "search_importers_for"}:
+                total = int(getattr(self.server, "search_total", 5))
+                # Cap returned items to avoid huge payloads; still report full total
+                shown = max(0, min(total, 3))
+                results = [
+                    {"score": 0.9 - (i * 0.1), "path": f"/work/README_{i}.md", "start_line": 1, "end_line": 2, "snippet": "demo"}
+                    for i in range(shown)
+                ]
                 res = {
                     "result": {
                         "args": {
@@ -53,10 +60,8 @@ class MockMCPHandler(BaseHTTPRequestHandler):
                             "ext": str(args.get("ext") or ""),
                             "compact": False,
                         },
-                        "total": 1,
-                        "results": [
-                            {"score": 0.9, "path": "/work/README.md", "start_line": 1, "end_line": 2, "snippet": "demo"}
-                        ],
+                        "total": total,
+                        "results": results,
                         "ok": True,
                         "code": 0,
                         "stdout": "",
@@ -207,6 +212,15 @@ def run_eval_suite() -> int:
             finally:
                 sys.stdout = old
         out = run_router(["--run", "recap our architecture decisions for the indexer"])
+        def run_router_code(args: List[str]) -> int:
+            from io import StringIO
+            old = sys.stdout
+            try:
+                sys.stdout = StringIO()  # suppress stdout capture to avoid noise
+                return int(router.main(args))
+            finally:
+                sys.stdout = old
+
         if "compat requires nested arguments" in out:
             failures.append("compat: still sending flattened args")
         if "Memory context:" not in out:
@@ -263,6 +277,26 @@ def run_eval_suite() -> int:
         if "Prior summary:" in out4:
             failures.append("ttl: prior summary injected despite stale cache")
         os.environ.pop("ROUTER_SCRATCHPAD_TTL_SEC", None)
+
+        # 13) Divergence fatal per-tool: repo_search set to fatal should cause nonzero exit
+        os.environ["ROUTER_DIVERGENCE_FATAL_TOOLS"] = "repo_search"
+        setattr(idx, "search_total", 6)
+        _ = run_router(["--run", "search for demo"])
+        setattr(idx, "search_total", 2)
+        code_div = run_router_code(["--run", "search for demo"])
+        if code_div == 0:
+            failures.append("divergence fatal: router returned success despite fatal policy")
+        os.environ.pop("ROUTER_DIVERGENCE_FATAL_TOOLS", None)
+        setattr(idx, "search_total", 5)
+
+        # 12) Divergence detection: baseline high → lower later should print a divergence notice
+        setattr(idx, "search_total", 6)
+        _ = run_router(["--run", "search for demo"])
+        setattr(idx, "search_total", 2)
+        out_div = run_router(["--run", "search for demo"])
+        if '"divergence"' not in out_div:
+            failures.append("divergence: no divergence flagged on material drop")
+
 
         if failures:
             print("Router eval: FAIL\n- " + "\n- ".join(failures))

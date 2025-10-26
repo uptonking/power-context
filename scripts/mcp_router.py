@@ -988,6 +988,80 @@ def _is_result_good(tool: str, resp: Dict[str, Any]) -> bool:
         return not _is_failure_response(resp)
 
 
+
+# -----------------------------
+# Divergence detection helpers (scratchpad v3)
+# -----------------------------
+
+def _extract_metric_from_resp(tool: str, resp: Dict[str, Any]) -> tuple[str, float] | None:
+    try:
+        r = resp.get("result") or {}
+        sc = r.get("structuredContent") or {}
+        rs = sc.get("result") or {}
+        # Search-like tools
+        if tool in {"repo_search", "code_search", "context_search", "search_tests_for", "search_config_for", "search_callers_for", "search_importers_for"}:
+            tot = rs.get("total")
+            if isinstance(tot, (int, float)):
+                return ("total_results", float(tot))
+            results = rs.get("results")
+            if isinstance(results, list):
+                return ("total_results", float(len(results)))
+            return None
+        # Answer tools: track citations count
+        if tool in {"context_answer", "context_answer_compat"}:
+            cites = rs.get("citations")
+            if isinstance(cites, list):
+                return ("citations", float(len(cites)))
+            return ("citations", 0.0)
+        # Admin/status: qdrant_status → point count
+        if tool == "qdrant_status":
+            cnt = rs.get("count")
+            if isinstance(cnt, (int, float)):
+                return ("points", float(cnt))
+            return None
+    except Exception:
+        return None
+    return None
+
+
+def _divergence_thresholds() -> tuple[float, int]:
+    try:
+        drop_frac = float(os.environ.get("ROUTER_DIVERGENCE_DROP_FRAC", "0.5") or 0.5)
+    except Exception:
+        drop_frac = 0.5
+    try:
+        min_base = int(os.environ.get("ROUTER_DIVERGENCE_MIN_BASE", "3") or 3)
+    except Exception:
+        min_base = 3
+    return drop_frac, min_base
+
+
+def _material_drop(prev: float | None, curr: float, drop_frac: float, min_base: int) -> bool:
+    try:
+        if prev is None:
+            return False
+        if prev < float(min_base):
+            return False
+        return curr < (float(prev) * float(drop_frac))
+    except Exception:
+        return False
+
+
+# Determine if divergence should be fatal for a given tool (env-driven)
+# ROUTER_DIVERGENCE_FATAL_TOOLS can be a comma-separated list (case-insensitive), or '*'/'all' to apply to all tools.
+def _divergence_is_fatal_for(tool: str) -> bool:
+    try:
+        s = (os.environ.get("ROUTER_DIVERGENCE_FATAL_TOOLS", "") or "").strip()
+        if not s:
+            return False
+        low = s.lower()
+        if low in {"*", "all", "1", "true"}:
+            return True
+        names = {t.strip().lower() for t in s.split(",") if t.strip()}
+        return tool.strip().lower() in names
+    except Exception:
+        return False
+
 # -----------------------------
 # CLI
 # -----------------------------
@@ -1163,6 +1237,53 @@ def main(argv: List[str]) -> int:
                                     last_paths_list = uniqp
                         except Exception:
                             pass
+                    # Divergence detection against last-known-good metrics
+                    divergence_should_abort = False
+                    last_metrics_prev = {}
+                    try:
+                        last_metrics_prev = sp.get("last_metrics") or {}
+                        if not isinstance(last_metrics_prev, dict):
+                            last_metrics_prev = {}
+                    except Exception:
+                        last_metrics_prev = {}
+                    metric = _extract_metric_from_resp(tool, res)
+                    last_metrics_map = dict(last_metrics_prev)
+                    if metric is not None:
+                        mname, mval = metric
+                        # Compare to previous metric for this tool
+                        prev_val = None
+                        try:
+                            prev_val = last_metrics_prev.get(tool, {}).get(mname)
+                            if prev_val is not None:
+                                prev_val = float(prev_val)
+                        except Exception:
+                            prev_val = None
+                        drop_frac, min_base = _divergence_thresholds()
+                        if _material_drop(prev_val, float(mval), drop_frac, min_base):
+                            fatal = _divergence_is_fatal_for(tool)
+                            try:
+                                print(json.dumps({
+                                    "divergence": {
+                                        "tool": tool,
+                                        "metric": mname,
+                                        "previous": prev_val,
+                                        "current": float(mval),
+                                        "drop_frac": drop_frac,
+                                        "fatal": fatal,
+                                    }
+                                }))
+                            except Exception:
+                                pass
+                            if fatal:
+                                divergence_should_abort = True
+                        # Update metrics for persistence
+                        try:
+                            last_metrics_map.setdefault(tool, {})[mname] = float(mval)
+                        except Exception:
+                            pass
+                    else:
+                        last_metrics_map = last_metrics_prev
+
                     success_criteria = {
                         "context_answer": {"expected_fields": ["answer"], "min_citations": 0},
                         "context_answer_compat": {"expected_fields": ["answer"], "min_citations": 0},
@@ -1182,11 +1303,16 @@ def main(argv: List[str]) -> int:
                         "last_citations": last_citations_list,
                         "last_paths": last_paths_list,
                         "success_criteria": success_criteria,
+                        "last_metrics": last_metrics_map,
                         "timestamp": time.time(),
                     }
                     _save_scratchpad(sp)
                 except Exception:
                     pass
+
+                if divergence_should_abort:
+                    # Treat as failure for this tool and try next in plan
+                    continue
 
                 return 0
             # else try next tool in plan

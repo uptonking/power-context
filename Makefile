@@ -7,6 +7,8 @@ export DOCKER_HOST =
 .PHONY: help up down logs ps restart rebuild index reindex watch env hybrid bootstrap history rerank-local setup-reranker prune warm health
 .PHONY: venv venv-install
 
+.PHONY: qdrant-status qdrant-list qdrant-prune qdrant-index-root
+
 venv: ## create local virtualenv .venv
 	python3 -m venv .venv && . .venv/bin/activate && pip install -U pip
 
@@ -252,5 +254,18 @@ router-smoke: ## spin up compose, reindex, store a memory via router, then answe
 	echo "router-smoke: PASS"
 
 
+
+# Qdrant via MCP router convenience targets
+qdrant-status:
+	python3 scripts/mcp_router.py --run "status"
+
+qdrant-list:
+	python3 scripts/mcp_router.py --run "list collections"
+
+qdrant-prune:
+	python3 scripts/mcp_router.py --run "prune"
+
+qdrant-index-root:
+	python3 scripts/mcp_router.py --run "reindex repo"
 
 
