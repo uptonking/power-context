@@ -96,6 +96,11 @@ CLUSTER_LINES = int(os.environ.get("HYBRID_CLUSTER_LINES", "15") or 15)
 # Penalize test files slightly to prefer implementation over tests
 TEST_FILE_PENALTY = float(os.environ.get("HYBRID_TEST_FILE_PENALTY", "0.15") or 0.15)
 
+# Additional file-type weighting knobs (defaults tuned for Q&A use)
+CONFIG_FILE_PENALTY = float(os.environ.get("HYBRID_CONFIG_FILE_PENALTY", "0.3") or 0.3)
+IMPLEMENTATION_BOOST = float(os.environ.get("HYBRID_IMPLEMENTATION_BOOST", "0.2") or 0.2)
+DOCUMENTATION_PENALTY = float(os.environ.get("HYBRID_DOCUMENTATION_PENALTY", "0.1") or 0.1)
+
 # Micro-span compaction and budgeting (ReFRAG-lite output shaping)
 MICRO_OUT_MAX_SPANS = int(os.environ.get("MICRO_OUT_MAX_SPANS", "3") or 3)
 MICRO_MERGE_LINES = int(os.environ.get("MICRO_MERGE_LINES", "4") or 4)
@@ -1259,6 +1264,27 @@ def run_hybrid_search(
         if TEST_FILE_PENALTY > 0.0 and path and is_test_file(path):
             rec["test"] -= TEST_FILE_PENALTY
             rec["s"] -= TEST_FILE_PENALTY
+
+        # Additional file-type weighting
+        path_lower = path.lower()
+        ext = ("." + path_lower.rsplit(".", 1)[-1]) if "." in path_lower else ""
+        # Penalize config/metadata files
+        if CONFIG_FILE_PENALTY > 0.0 and path:
+            if ext in {".json", ".yml", ".yaml", ".toml", ".ini"} or "/.codebase/" in path_lower or "/.kiro/" in path_lower:
+                rec["cfg"] = float(rec.get("cfg", 0.0)) - CONFIG_FILE_PENALTY
+                rec["s"] -= CONFIG_FILE_PENALTY
+        # Boost likely implementation files
+        if IMPLEMENTATION_BOOST > 0.0 and path:
+            if ext in {".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".java", ".rs", ".rb", ".php", ".cs", ".cpp", ".c", ".hpp", ".h"}:
+                rec["impl"] = float(rec.get("impl", 0.0)) + IMPLEMENTATION_BOOST
+                rec["s"] += IMPLEMENTATION_BOOST
+        # Penalize docs for implementation-style questions
+        qlow = " ".join(qlist).lower()
+        if DOCUMENTATION_PENALTY > 0.0 and path:
+            if ("readme" in path_lower or "/docs/" in path_lower or "/documentation/" in path_lower or path_lower.endswith(".md")):
+                if any(w in qlow for w in ["how does", "explain", "works", "algorithm"]):
+                    rec["doc"] = float(rec.get("doc", 0.0)) - DOCUMENTATION_PENALTY
+                    rec["s"] -= DOCUMENTATION_PENALTY
 
         if LANG_MATCH_BOOST > 0.0 and path and eff_language:
             lang = str(eff_language).lower()
