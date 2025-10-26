@@ -33,20 +33,34 @@ For local development or direct access, services are exposed via NodePort:
 
 1. **Kubernetes Cluster** (v1.20+)
 2. **kubectl** configured to access your cluster
-3. **Storage Class** named `fast-ssd` (or modify `qdrant.yaml`)
-4. **Docker image** built and pushed to registry:
+3. **Docker images** built and pushed to registry:
    ```bash
-   # Build and tag the image
-   docker build -t context-engine:latest .
+   # Build all service images
+   ./build-images.sh --push
 
-   # Tag for your registry
-   docker tag context-engine:latest your-registry/context-engine:latest
-
-   # Push to registry
-   docker push your-registry/context-engine:latest
+   # Or build individually
+   docker build -f Dockerfile.mcp -t context-engine-memory:latest .
+   docker build -f Dockerfile.mcp-indexer -t context-engine-indexer:latest .
+   docker build -f Dockerfile.indexer -t context-engine-indexer-service:latest .
    ```
 
+4. **Source Code Access** (choose one):
+   - **Local Mode**: Source code pre-distributed to all cluster nodes at `/tmp/context-engine-work`
+   - **Git Mode**: Git repository accessible from cluster with proper authentication configured
+
 ## Quick Start
+
+### Option 1: Automated Deployment with Source Code Management
+
+```bash
+# Deploy with Git-based source code synchronization (recommended)
+./deploy-with-source.sh git https://github.com/your-org/your-repo.git main
+
+# Or deploy with local source code (requires pre-distribution)
+./deploy-with-source.sh local
+```
+
+### Option 2: Manual Deployment
 
 ### 1. Deploy Core Services
 
@@ -122,6 +136,41 @@ All configuration is managed through the `context-engine-config` ConfigMap in `c
 2. **Resources**: Adjust memory/CPU limits in each deployment
 3. **Host Paths**: Update volume mounts to match your environment
 4. **Ingress**: Configure `ingress.yaml` with your domain and SSL
+
+## Source Code Management
+
+### Local Mode vs Git Mode
+
+The deployment supports two source code access strategies:
+
+#### **Local Mode** (Default)
+- Uses hostPath volumes to access source code on cluster nodes
+- **Pros**: Simple, no external dependencies
+- **Cons**: Requires manual source code distribution to all nodes
+- **Use Case**: Single-node clusters, development environments
+
+#### **Git Mode** (Recommended for Production)
+- Uses Git sync sidecars to automatically pull source code from repositories
+- **Pros**: Automatic source code synchronization, CI/CD integration
+- **Cons**: Requires Git repository access from cluster
+- **Use Case**: Multi-node clusters, production deployments
+
+### Git Sync Setup
+
+For Git mode setup, see [GIT_SYNC_SETUP.md](./GIT_SYNC_SETUP.md) for detailed instructions.
+
+**Quick Git Mode Setup:**
+
+```bash
+# Public repository
+./deploy-with-source.sh git https://github.com/your-org/your-repo.git main
+
+# Private repository (requires SSH key setup)
+kubectl create secret generic git-ssh-key \
+  --from-file=ssh-private-key=~/.ssh/id_rsa \
+  -n context-engine
+./deploy-with-source.sh git git@github.com:your-org/your-repo.git main
+```
 
 ## Development Workflow
 
