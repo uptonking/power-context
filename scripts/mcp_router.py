@@ -349,7 +349,9 @@ def build_plan(q: str) -> List[Tuple[str, Dict[str, Any]]]:
         def _looks_like_design_recap(s: str) -> bool:
             low = s.lower()
             return any(w in low for w in ["recap", "design doc", "architecture", "adr", "retrospective", "postmortem"]) and any(w in low for w in ["design", "summary", "recap", "explain"])
-        args = {"query": q}
+
+        # Start with base args and carry through parsed repo hints to answer tools
+        args: Dict[str, Any] = {"query": q}
         if max_tokens_env:
             try:
                 mt = int(max_tokens_env)
@@ -357,13 +359,32 @@ def build_plan(q: str) -> List[Tuple[str, Dict[str, Any]]]:
                     args["max_tokens"] = mt
             except Exception:
                 pass
+
+        # Parse lightweight hints and tighten when the query mentions "router"
+        hints = _parse_repo_hints(q)
+        lowq = q.lower()
+        if "router" in lowq:
+            # Bias strongly toward router implementation
+            router_globs = ["**/mcp_router.py", "**/*router*.py"]
+            if not hints.get("path_glob"):
+                hints["path_glob"] = router_globs
+            # Default language bias to python unless explicitly provided
+            if not hints.get("language"):
+                hints["language"] = "python"
+        # Carry hints into args so context_answer and compat use them
+        for k in ("language", "under", "symbol", "ext", "path_glob", "not_glob"):
+            v = hints.get(k)
+            if v not in (None, ""):
+                args[k] = v
+
         plan: List[Tuple[str, Dict[str, Any]]] = []
         if _looks_like_design_recap(q):
             plan.append(("find", {"query": q, "limit": 3}))
+        # Answer first (compat then native), then fall back to a targeted search with the same hints
         plan.extend([
-            ("context_answer_compat", args),
-            ("context_answer", args),
-            ("repo_search", {"query": q, "limit": max(5, search_limit)}),
+            ("context_answer_compat", dict(args)),
+            ("context_answer", dict(args)),
+            ("repo_search", {**{k: v for k, v in args.items() if k != "max_tokens"}, "limit": max(5, search_limit)}),
         ])
         return plan
 

@@ -2899,10 +2899,10 @@ async def context_answer(
     base_excludes = [
         ".selftest_repo/",
         ".pytest_cache/",
-        ".codebase/",      # Filter out indexer metadata (state.json, cache.json, etc.)
-        ".kiro/",          # Filter out IDE config (mcp.json, settings, etc.)
-        "node_modules/",   # Filter out dependencies
-        ".git/",           # Filter out git internals
+        ".codebase/",      # Indexer metadata (state.json, cache.json, etc.)
+        ".kiro/",          # IDE configs
+        "node_modules/",   # Dependencies
+        ".git/",           # VCS internals
     ]
     # Add robust variants for absolute and recursive matching
     def _variants(p: str) -> list[str]:
@@ -2915,9 +2915,30 @@ async def context_answer(
             f"/work/{p}",  # absolute in payloads
             f"**/{p}**",  # recursive glob
         ]
+
+    # Build defaults and conditional exclusions (skip if explicitly mentioned in query)
     default_not_glob = []
     for b in base_excludes:
         default_not_glob.extend(_variants(b))
+    qtext = " ".join(queries).lower()
+    def _mentions_any(keys: list[str]) -> bool:
+        return any(k in qtext for k in keys)
+    maybe_excludes = []
+    if not _mentions_any([".env", "dotenv", "environment variable", "env var"]):
+        maybe_excludes += [".env", ".env.*"]
+    if not _mentions_any(["docker-compose", "compose"]):
+        maybe_excludes += ["docker-compose*.yml", "docker-compose*.yaml", "compose*.yml", "compose*.yaml"]
+    if not _mentions_any(["lock", "package-lock.json", "pnpm-lock", "yarn.lock", "poetry.lock", "cargo.lock", "go.sum", "composer.lock"]):
+        maybe_excludes += [
+            "*.lock", "package-lock.json", "pnpm-lock.yaml", "yarn.lock",
+            "poetry.lock", "Cargo.lock", "go.sum", "composer.lock"
+        ]
+    if not _mentions_any(["appsettings", "settings.json", "config"]):
+        maybe_excludes += ["appsettings*.json"]
+    # Apply variants for all conditional patterns
+    for pat in maybe_excludes:
+        default_not_glob.extend(_variants(pat))
+
     # Dedup while preserving order
     seen = set()
     eff_not_glob = []
@@ -2941,13 +2962,19 @@ async def context_answer(
             print(f"DEBUG ENV: REFRAG_MODE={os.environ.get('REFRAG_MODE')}, COLLECTION_NAME={os.environ.get('COLLECTION_NAME')}")
             print(f"DEBUG FILTERS: not_glob={eff_not_glob}")
 
-        # Initial search
+        # Initial search (tighten to router implementation when mentioned and no explicit path_glob)
+        user_pg = kwargs.get("path_glob") or None
         req_language = kwargs.get("language") or None
+        eff_language = req_language or ("python" if ("router" in qtext and not req_language) else None)
+        eff_path_glob = user_pg
+        if (not user_pg) and ("router" in qtext):
+            eff_path_glob = ["**/mcp_router.py", "**/*router*.py"]
+
         items = run_hybrid_search(
             queries=queries,
             limit=int(max(lim, 4)),  # fetch a few extra for budgeting
             per_path=int(max(ppath, 0)),
-            language=req_language,
+            language=eff_language,
             under=kwargs.get("under") or None,
             kind=kwargs.get("kind") or None,
             symbol=kwargs.get("symbol") or None,
@@ -2955,7 +2982,7 @@ async def context_answer(
             not_filter=kwargs.get("not_") or kwargs.get("not") or None,
             case=kwargs.get("case") or None,
             path_regex=kwargs.get("path_regex") or None,
-            path_glob=(kwargs.get("path_glob") or None),
+            path_glob=eff_path_glob,
             not_glob=eff_not_glob,
             expand=str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower() in {"1","true","yes","on"},
             model=model,
