@@ -3087,8 +3087,17 @@ async def context_answer(
                     queries=queries,
                     limit=int(max(lim, 4)),
                     per_path=int(max(ppath, 0)),
+                    language=eff_language,
+                    under=override_under or None,
+                    kind=kwargs.get("kind") or None,
+                    symbol=sym_arg,
+                    ext=kwargs.get("ext") or None,
+                    not_filter=kwargs.get("not_") or kwargs.get("not") or None,
+                    case=kwargs.get("case") or None,
+                    path_regex=kwargs.get("path_regex") or None,
+                    path_glob=eff_path_glob,
                     not_glob=eff_not_glob,
-                    expand=True,
+                    expand=str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower() in {"1","true","yes","on"},
                     model=model,
                 )
             finally:
