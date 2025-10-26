@@ -2972,22 +2972,47 @@ async def context_answer(
             print(f"DEBUG ENV: REFRAG_MODE={os.environ.get('REFRAG_MODE')}, COLLECTION_NAME={os.environ.get('COLLECTION_NAME')}")
             print(f"DEBUG FILTERS: not_glob={eff_not_glob}")
 
-        # Initial search (tighten to router implementation when mentioned and no explicit path_glob)
+        # Initial search (tighten file/area when hinted and no explicit path_glob)
         user_pg = kwargs.get("path_glob") or None
         req_language = kwargs.get("language") or None
         eff_language = req_language or ("python" if ("router" in qtext and not req_language) else None)
         eff_path_glob = user_pg
+        # Heuristic: if 'under' looks like a file name (e.g., hybrid_search.py), treat as a file hint
+        user_under = kwargs.get("under") or None
+        override_under = user_under
+        try:
+            _uu = str(user_under or "").strip()
+            _uu_last = _uu.split("/")[-1] if _uu else ""
+            if _uu_last and ("." in _uu_last):
+                # File-like hint: search for this file name anywhere; don't use it as path_prefix filter
+                override_under = None
+                eff_path_glob = (eff_path_glob or []) or []
+                if isinstance(eff_path_glob, str):
+                    eff_path_glob = [eff_path_glob]
+                pat = f"**/{_uu_last}"
+                if pat not in eff_path_glob:
+                    eff_path_glob = list(eff_path_glob) + [pat]
+        except Exception:
+            pass
+        # Router-specific tightening when the word 'router' is present
         if (not user_pg) and ("router" in qtext):
             eff_path_glob = ["**/mcp_router.py", "**/*router*.py"]
+        # Sanitize symbol: ignore file-like strings passed as symbol
+        sym_arg = kwargs.get("symbol") or None
+        try:
+            if sym_arg and ("/" in str(sym_arg) or "." in str(sym_arg)):
+                sym_arg = None
+        except Exception:
+            pass
 
         items = run_hybrid_search(
             queries=queries,
             limit=int(max(lim, 4)),  # fetch a few extra for budgeting
             per_path=int(max(ppath, 0)),
             language=eff_language,
-            under=kwargs.get("under") or None,
+            under=override_under or None,
             kind=kwargs.get("kind") or None,
-            symbol=kwargs.get("symbol") or None,
+            symbol=sym_arg,
             ext=kwargs.get("ext") or None,
             not_filter=kwargs.get("not_") or kwargs.get("not") or None,
             case=kwargs.get("case") or None,
@@ -3074,11 +3099,13 @@ async def context_answer(
             budgeted = items
 
         # Enforce an output max spans knob - do this BEFORE env restore
+        # Increased default from 8 to 12 for better context coverage
         try:
-            out_max = int(os.environ.get("MICRO_OUT_MAX_SPANS", "8") or 8)
+            out_max = int(os.environ.get("MICRO_OUT_MAX_SPANS", "12") or 12)
         except Exception:
-            out_max = 8
-        spans = budgeted[: max(1, min(out_max, lim))] if budgeted else items[:lim]
+            out_max = 12
+        # Ensure we get at least min(out_max, lim) spans, or all items if fewer
+        spans = budgeted[: max(1, min(out_max, lim))] if budgeted else items[: min(len(items), lim)]
 
         # Debug span selection
         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
