@@ -3148,9 +3148,9 @@ async def context_answer(
 
 
 
-    # Stop sequences for Qwen2.5-Coder (ChatML format) + optional env overrides
+    # Stop sequences for Granite-4.0-Micro + optional env overrides
     stop_env = os.environ.get("DECODER_STOP", "")
-    default_stops = ["<|im_end|>", "<|im_start|>"]  # Qwen ChatML tokens
+    default_stops = ["<|end_of_text|>", "<|start_of_role|>"]  # Granite format tokens
     stops = default_stops + [s for s in (stop_env.split(",") if stop_env else []) if s]
 
     # Decoder parameter tuning for small models (defaults can be overridden via args or env)
@@ -3200,9 +3200,9 @@ async def context_answer(
         
         key_terms_str = ", ".join(sorted(key_terms)[:15]) if key_terms else "none found"
         
-        # Optimized prompt for Qwen2.5-Coder-Instruct (uses ChatML format)
+        # Optimized prompt for Granite-4.0-Micro (uses chat template format)
         # Key strategies: proper instruction format, explicit extraction task, reference citation IDs
-        system_msg = "You are Qwen, a code analysis assistant. Answer questions using ONLY the provided code snippets. Quote specific variable/function names from the code."
+        system_msg = "You are a helpful assistant specialized in code analysis. Please ensure responses are professional, accurate, and safe. Answer questions using ONLY the provided code snippets. Quote specific variable/function names from the code."
         
         user_msg = (
             f"Question: {qtxt}\n\n"
@@ -3217,11 +3217,12 @@ async def context_answer(
             "- No speculation"
         )
         
-        # Use ChatML format for Qwen2.5-Coder-Instruct
+        # Use Granite-4.0-Micro chat template format
+        # Based on official HF documentation: <|start_of_role|>role<|end_of_role|>content<|end_of_text|>
         prompt = (
-            f"<|im_start|>system\n{system_msg}<|im_end|>\n"
-            f"<|im_start|>user\n{user_msg}<|im_end|>\n"
-            "<|im_start|>assistant\n"
+            f"<|start_of_role|>system<|end_of_role|>{system_msg}<|end_of_text|>\n"
+            f"<|start_of_role|>user<|end_of_role|>{user_msg}<|end_of_text|>\n"
+            "<|start_of_role|>assistant<|end_of_role|>"
         )
 
         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
