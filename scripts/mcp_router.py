@@ -538,6 +538,47 @@ def _is_failure_response(resp: Dict[str, Any]) -> bool:
 
 # -----------------------------
 # Multi-server tool discovery and result validation
+# Prefer live /tools registry from the servers' health ports when available
+try:
+    _HEALTH_PORT_INDEXER = int(os.environ.get("FASTMCP_INDEXER_HTTP_HEALTH_PORT", "18003") or 18003)
+except Exception:
+    _HEALTH_PORT_INDEXER = 18003
+try:
+    _HEALTH_PORT_MEMORY = int(os.environ.get("FASTMCP_HTTP_HEALTH_PORT", "18002") or 18002)
+except Exception:
+    _HEALTH_PORT_MEMORY = 18002
+
+
+def _tools_describe_from_health(base_url: str, timeout: float = 3.0) -> list[dict]:
+    """Best-effort: fetch tool descriptors from health /tools endpoint.
+    Only attempts for known default HTTP_URL_INDEXER/HTTP_URL_MEMORY.
+    """
+    try:
+        import urllib.request
+        if base_url == HTTP_URL_INDEXER:
+            url = f"http://localhost:{_HEALTH_PORT_INDEXER}/tools"
+        elif base_url == HTTP_URL_MEMORY:
+            url = f"http://localhost:{_HEALTH_PORT_MEMORY}/tools"
+        else:
+            return []
+        with urllib.request.urlopen(url, timeout=timeout) as r:
+            if getattr(r, "status", 200) != 200:
+                return []
+            body = r.read()
+            j = _parse_stream_or_json(body)
+            tools = (j.get("tools") if isinstance(j, dict) else None) or []
+            out = []
+            for t in tools:
+                if not isinstance(t, dict):
+                    continue
+                nm = t.get("name")
+                if not nm:
+                    continue
+                out.append({"name": nm, "description": (t.get("description") or "").strip()})
+            return out
+    except Exception:
+        return []
+
 # -----------------------------
 
 def _post_raw_retry(url: str, payload: Dict[str, Any], headers: Dict[str, str], timeout: float = 60.0, retries: int = 2, backoff: float = 0.5) -> Tuple[Dict[str, str], bytes]:
@@ -689,10 +730,27 @@ def _tools_describe_cached(base_url: str, allow_network: bool = True, timeout: f
         return _TOOLS_DESCR_CACHE[base_url]
     if not allow_network:
         return _TOOLS_DESCR_CACHE.get(base_url, [])
-    desc = _mcp_tools_describe(base_url, timeout=timeout)
+    # Prefer /tools on health port; fallback to MCP tools/list
+    desc = _tools_describe_from_health(base_url, timeout=min(timeout, 3.0)) or _mcp_tools_describe(base_url, timeout=timeout)
     _TOOLS_DESCR_CACHE[base_url] = desc
     _TOOLS_DESCR_TS[base_url] = now
     return desc
+
+
+def _scratchpad_ttl_sec() -> int:
+    try:
+        return int(os.environ.get("ROUTER_SCRATCHPAD_TTL_SEC", "300") or 300)
+    except Exception:
+        return 300
+
+
+def _looks_like_expand(q: str) -> bool:
+    s = q.strip().lower()
+    pats = [
+        "expand on", "expand that", "expand the summary", "elaborate",
+        "more detail", "more details", "go deeper", "add details",
+    ]
+    return any(p in s for p in pats)
 
 
 def _default_tool_endpoints() -> Dict[str, str]:
@@ -875,12 +933,17 @@ def _discover_tool_endpoints(force: bool = False, allow_network: bool = True) ->
         # Use cached if present; otherwise a conservative default
         return _TOOL_ENDPOINTS_CACHE_MAP or _default_tool_endpoints()
     mapping: Dict[str, str] = {}
-    # Indexer first (priority)
-    for n in _mcp_tools_list(HTTP_URL_INDEXER):
-        mapping[n] = HTTP_URL_INDEXER
+    # Indexer first (priority) — prefer health /tools registry when available
+    idx_desc = _tools_describe_cached(HTTP_URL_INDEXER, allow_network=allow_network)
+    for t in idx_desc:
+        n = t.get("name") if isinstance(t, dict) else None
+        if n:
+            mapping[n] = HTTP_URL_INDEXER
     # Memory server next
-    for n in _mcp_tools_list(HTTP_URL_MEMORY):
-        if n not in mapping:
+    mem_desc = _tools_describe_cached(HTTP_URL_MEMORY, allow_network=allow_network)
+    for t in mem_desc:
+        n = t.get("name") if isinstance(t, dict) else None
+        if n and n not in mapping:
             mapping[n] = HTTP_URL_MEMORY
     if mapping:
         _TOOL_ENDPOINTS_CACHE_MAP.clear()
@@ -943,26 +1006,72 @@ def main(argv: List[str]) -> int:
     if args.plan and not args.run:
         return 0
 
+    # Load scratchpad for prior context and TTL freshness
+    sp = {}
+    fresh = False
+    prior_answer = None
+    prior_citations = None
+    prior_paths = None
+    try:
+        sp = _load_scratchpad()
+        ts = float(sp.get("timestamp") or 0.0)
+        fresh = bool(ts and (time.time() - ts) <= _scratchpad_ttl_sec())
+        if fresh:
+            prior_answer = sp.get("last_answer")
+            prior_citations = sp.get("last_citations")
+            prior_paths = sp.get("last_paths")
+    except Exception:
+        pass
+
     # Execute sequentially until one succeeds
     last_err = None
     last = None
     tool_servers = _discover_tool_endpoints()
     # Simple scratchpad for memory→answer workflow
-    mem_snippets: list[str] = []
+    mem_snippets: list[str] = list(sp.get("mem_snippets") or []) if fresh else []
     for idx, (tool, targs) in enumerate(plan):
         base_url = tool_servers.get(tool, HTTP_URL_INDEXER)
-        # If we have memory snippets and are about to answer, augment the query text
-        if tool in {"context_answer", "context_answer_compat"} and mem_snippets:
+        # Skip memory.find if we already have fresh snippets and this is a repeat/expand
+        if (tool.lower().endswith("find") or tool.lower() in {"find", "memory.find"}) and mem_snippets and fresh and (_looks_like_repeat(args.query) or _looks_like_expand(args.query)):
+            try:
+                print(json.dumps({"tool": tool, "skipped": "scratchpad_fresh"}))
+            except Exception:
+                pass
+            continue
+
+        # If we have memory/prior summary and are about to answer, augment the query text
+        if tool in {"context_answer", "context_answer_compat"} and (mem_snippets or (fresh and (prior_answer or prior_citations or prior_paths))):
             try:
                 tq = str((targs or {}).get("query") or args.query)
-                # Truncate and bulletize top snippets
-                bullets = []
-                for s in mem_snippets[:3]:
-                    ss = re.sub(r"\s+", " ", str(s)).strip()
-                    if len(ss) > 200:
-                        ss = ss[:197] + "..."
-                    bullets.append(f"- {ss}")
-                aug = tq + "\n\nMemory context:\n" + "\n".join(bullets)
+                sections = [tq]
+                # Memory snippets → bullets
+                if mem_snippets:
+                    bullets = []
+                    for s in mem_snippets[:3]:
+                        ss = re.sub(r"\s+", " ", str(s)).strip()
+                        if len(ss) > 200:
+                            ss = ss[:197] + "..."
+                        bullets.append(f"- {ss}")
+                    sections.append("Memory context:\n" + "\n".join(bullets))
+                # Prior summary/citations if asked to expand or repeat and still fresh
+                if fresh and (_looks_like_expand(args.query) or _looks_like_repeat(args.query)):
+                    if isinstance(prior_answer, str) and prior_answer.strip():
+                        pa = re.sub(r"\s+", " ", prior_answer).strip()
+                        if len(pa) > 400:
+                            pa = pa[:397] + "..."
+                        sections.append("Prior summary:\n" + pa)
+                    paths_list = []
+                    if isinstance(prior_paths, list) and prior_paths:
+                        paths_list = [str(p) for p in prior_paths[:5]]
+                    elif isinstance(prior_citations, list) and prior_citations:
+                        uniq = []
+                        for c in prior_citations:
+                            if isinstance(c, dict) and c.get("path") and c["path"] not in uniq:
+                                uniq.append(c["path"])
+                        paths_list = uniq[:5]
+                    if paths_list:
+                        sections.append("Citations context:\n" + "\n".join(f"- {p}" for p in paths_list))
+                aug = "\n\n".join(sections)
                 targs = {**(targs or {}), "query": aug}
             except Exception:
                 pass
@@ -1021,7 +1130,7 @@ def main(argv: List[str]) -> int:
                 if tool.lower() in {"find", "memory.find"} and has_future_answer:
                     # Don't stop; proceed to answer step with augmented query
                     continue
-                # Persist scratchpad for repeat/reuse filters scenarios
+                # Persist scratchpad: filters, memory, prior answer/citations, and success criteria
                 try:
                     last_filters: Dict[str, Any] = {}
                     for (tn, ta) in plan:
@@ -1031,11 +1140,48 @@ def main(argv: List[str]) -> int:
                                     if ta.get(k) not in (None, ""):
                                         last_filters[k] = ta.get(k)
                             break
+                    # Extract prior answer and citations if this was an answer tool
+                    last_answer_text = None
+                    last_citations_list = None
+                    last_paths_list: list[str] | None = None
+                    if tool in {"context_answer", "context_answer_compat"}:
+                        try:
+                            r0 = res.get("result") or {}
+                            sc0 = r0.get("structuredContent") or {}
+                            rs0 = sc0.get("result") or sc0
+                            if isinstance(rs0, dict):
+                                ans0 = rs0.get("answer")
+                                if isinstance(ans0, str):
+                                    last_answer_text = ans0
+                                cites0 = rs0.get("citations")
+                                if isinstance(cites0, list):
+                                    last_citations_list = cites0
+                                    uniqp: list[str] = []
+                                    for c in cites0:
+                                        if isinstance(c, dict) and c.get("path") and c["path"] not in uniqp:
+                                            uniqp.append(c["path"])
+                                    last_paths_list = uniqp
+                        except Exception:
+                            pass
+                    success_criteria = {
+                        "context_answer": {"expected_fields": ["answer"], "min_citations": 0},
+                        "context_answer_compat": {"expected_fields": ["answer"], "min_citations": 0},
+                        "repo_search": {"min_results": 1},
+                        "search_config_for": {"min_results": 1},
+                        "search_tests_for": {"min_results": 1},
+                        "search_callers_for": {"min_results": 1},
+                        "search_importers_for": {"min_results": 1},
+                        "find": {"min_results": 1},
+                    }
                     sp = {
                         "last_query": args.query,
                         "last_plan": plan,
                         "last_filters": last_filters or None,
                         "mem_snippets": mem_snippets[:5],
+                        "last_answer": last_answer_text,
+                        "last_citations": last_citations_list,
+                        "last_paths": last_paths_list,
+                        "success_criteria": success_criteria,
                         "timestamp": time.time(),
                     }
                     _save_scratchpad(sp)

@@ -128,7 +128,42 @@ def _work_script(name: str) -> str:
     return os.path.join(os.getcwd(), "scripts", name)
 
 
+# Invalidate router scratchpad after reindex to avoid stale state reuse
+_def_ws = "/work"
+
+def _invalidate_router_scratchpad(ws_path: str = _def_ws) -> bool:
+    try:
+        p = os.path.join(ws_path, ".codebase", "router_scratchpad.json")
+        if os.path.exists(p):
+            os.remove(p)
+            return True
+    except Exception:
+        pass
+    return False
+
+
 mcp = FastMCP(APP_NAME)
+
+
+# Capture tool registry automatically by wrapping the decorator once
+_TOOLS_REGISTRY: list[dict] = []
+try:
+    _orig_tool = mcp.tool
+    def _tool_capture_wrapper(*dargs, **dkwargs):
+        orig_deco = _orig_tool(*dargs, **dkwargs)
+        def _inner(fn):
+            try:
+                _TOOLS_REGISTRY.append({
+                    "name": dkwargs.get("name") or getattr(fn, "__name__", ""),
+                    "description": (getattr(fn, "__doc__", None) or "").strip(),
+                })
+            except Exception:
+                pass
+            return orig_deco(fn)
+        return _inner
+    mcp.tool = _tool_capture_wrapper  # type: ignore
+except Exception:
+    pass
 
 # Lightweight readiness endpoint on a separate health port (non-MCP), optional
 # Exposes GET /readyz returning {ok: true, app: <name>} once process is up.
@@ -150,6 +185,12 @@ def _start_readyz_server():
                         self.send_header("Content-Type", "application/json")
                         self.end_headers()
                         payload = {"ok": True, "app": APP_NAME}
+                        self.wfile.write((json.dumps(payload)).encode("utf-8"))
+                    elif self.path == "/tools":
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/json")
+                        self.end_headers()
+                        payload = {"ok": True, "tools": _TOOLS_REGISTRY}
                         self.wfile.write((json.dumps(payload)).encode("utf-8"))
                     else:
                         self.send_response(404)
@@ -505,7 +546,14 @@ async def qdrant_index_root(
         cmd.append("--recreate")
 
     res = await _run_async(cmd, env=env)
-    return {"args": {"root": "/work", "collection": coll, "recreate": recreate}, **res}
+    ret = {"args": {"root": "/work", "collection": coll, "recreate": recreate}, **res}
+    try:
+        if ret.get("ok") and int(ret.get("code", 1)) == 0:
+            if _invalidate_router_scratchpad("/work"):
+                ret["invalidated_router_scratchpad"] = True
+    except Exception:
+        pass
+    return ret
 
 
 @mcp.tool()
@@ -856,7 +904,14 @@ async def qdrant_index(
         cmd.append("--recreate")
 
     res = await _run_async(cmd, env=env)
-    return {"args": {"root": root, "collection": coll, "recreate": recreate}, **res}
+    ret = {"args": {"root": root, "collection": coll, "recreate": recreate}, **res}
+    try:
+        if ret.get("ok") and int(ret.get("code", 1)) == 0:
+            if _invalidate_router_scratchpad("/work"):
+                ret["invalidated_router_scratchpad"] = True
+    except Exception:
+        pass
+    return ret
 
 
 @mcp.tool()

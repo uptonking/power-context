@@ -213,12 +213,29 @@ def run_eval_suite() -> int:
             failures.append("memory→answer: query was not augmented with memory context")
             print("--- router stdout ---\n" + out + "\n--- end stdout ---")
 
+
+        # 6b) Repeat immediately after recap should skip fresh memory.find step
+        out_repeat = run_router(["--run", "repeat that"])
+        if '"skipped": "scratchpad_fresh"' not in out_repeat:
+            failures.append("repeat: find step not skipped on fresh cache")
+
         # 7) Repeat last: persist then repeat
         _ = run_router(["--run", "who imports foo in python under src/lib"])
         p7a = run_plan("who imports foo in python under src/lib")
         p7b = run_plan("repeat that")
         if p7a != p7b:
             failures.append("repeat: last plan not reused")
+
+        # 7b) "same filters" carry-over in planning
+        p7c = run_plan("search with same filters for bar baz")
+        if not p7c:
+            failures.append("same filters: plan empty")
+        else:
+            args7c = p7c[0][1]
+            if (args7c or {}).get("language") != "python" or (args7c or {}).get("under") != "src/lib":
+                failures.append("same filters: did not reuse prior language/under")
+
+
 
         # 8) Fallback on compat failure
         setattr(idx, "fail_context_compat", True)
@@ -233,6 +250,19 @@ def run_eval_suite() -> int:
         if not p9:
             failures.append("discovery flakiness: plan empty after retry")
         setattr(idx, "fail_list_once", False)
+
+
+        # 10) Expand on last summary uses prior summary and citations (fresh)
+        out3 = run_router(["--run", "expand on that summary"])
+        if "Prior summary:" not in out3 or "/work/file.py" not in out3:
+            failures.append("expand: prior summary/citations not injected when fresh")
+
+        # 11) TTL expiry should suppress prior summary injection
+        os.environ["ROUTER_SCRATCHPAD_TTL_SEC"] = "0"
+        out4 = run_router(["--run", "expand on that summary"])
+        if "Prior summary:" in out4:
+            failures.append("ttl: prior summary injected despite stale cache")
+        os.environ.pop("ROUTER_SCRATCHPAD_TTL_SEC", None)
 
         if failures:
             print("Router eval: FAIL\n- " + "\n- ".join(failures))
