@@ -2068,6 +2068,13 @@ def main():
         action="store_true",
         help="Emit JSON lines with score breakdown",
     )
+    ap.add_argument(
+        "--quiet",
+        dest="quiet",
+        action="store_true",
+        help="Suppress human output on empty results; exit with code 1 when no matches",
+    )
+
     # Structured filters to mirror MCP tool fields
     ap.add_argument("--ext", type=str, default=None)
     ap.add_argument("--not", dest="not_filter", type=str, default=None)
@@ -2436,6 +2443,7 @@ def main():
             pp = str(md.get("path_prefix") or "")
             p = str(md.get("path") or "")
             if pp and p:
+
                 dir_to_paths.setdefault(pp, set()).add(p)
     except Exception:
         dir_to_paths = {}
@@ -2454,6 +2462,19 @@ def main():
             _related = []
             try:
                 if _pp in dir_to_paths:
+    # Empty result handling
+    if not merged:
+        if getattr(args, "json", False):
+            try:
+                print(json.dumps({"results": [], "query": clean_queries, "count": 0}))
+            except Exception:
+                print("{}")
+            return
+        if getattr(args, "quiet", False):
+            sys.exit(1)
+        print("No results.")
+        sys.exit(1)
+
                     _related = [p for p in sorted(dir_to_paths[_pp]) if p != md.get("path")][:5]
             except Exception:
                 _related = []

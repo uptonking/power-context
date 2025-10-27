@@ -873,11 +873,22 @@ def _load_scratchpad() -> Dict[str, Any]:
 
 def _save_scratchpad(d: Dict[str, Any]) -> None:
     p = _scratchpad_path()
+    tmp = p + ".tmp"
     try:
-        with open(p, "w", encoding="utf-8") as f:
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(d, f)
+            try:
+                f.flush()
+                os.fsync(f.fileno())
+            except Exception:
+                pass
+        os.replace(tmp, p)
     except Exception:
-        pass
+        try:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        except Exception:
+            pass
 
 
 def _looks_like_repeat(q: str) -> bool:
