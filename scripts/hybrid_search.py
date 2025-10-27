@@ -2451,17 +2451,6 @@ def main():
     else:
         merged = ranked[: args.limit]
 
-    for m in merged:
-        md = (m["pt"].payload or {}).get("metadata") or {}
-        if getattr(args, "json", False):
-            # Related hints
-            _imports = md.get("imports") or []
-            _calls = md.get("calls") or []
-            _symp = md.get("symbol_path") or md.get("symbol") or ""
-            _pp = str(md.get("path_prefix") or "")
-            _related = []
-            try:
-                if _pp in dir_to_paths:
     # Empty result handling
     if not merged:
         if getattr(args, "json", False):
@@ -2474,6 +2463,19 @@ def main():
             sys.exit(1)
         print("No results.")
         sys.exit(1)
+
+    for m in merged:
+        md = (m["pt"].payload or {}).get("metadata") or {}
+        if getattr(args, "json", False):
+            # Related hints
+            _imports = md.get("imports") or []
+            _calls = md.get("calls") or []
+            _symp = md.get("symbol_path") or md.get("symbol") or ""
+            _pp = str(md.get("path_prefix") or "")
+            _related = []
+            try:
+                if _pp in dir_to_paths:
+    # Empty result handling
 
                     _related = [p for p in sorted(dir_to_paths[_pp]) if p != md.get("path")][:5]
             except Exception:
