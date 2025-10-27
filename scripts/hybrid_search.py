@@ -829,6 +829,79 @@ def _adaptive_weights(stats: Dict[str, Any]) -> Tuple[float, float, float]:
     return base_d * dens_scale, base_lv * lv_scale, base_lx * lx_scale
 
 
+def _bm25_token_weights_from_results(phrases: List[str], results: List[Any]) -> Dict[str, float]:
+    """Compute lightweight per-token IDF-like weights from a small sample of lex results.
+    Returns weights normalized to mean 1.0 over tokens present in phrases.
+    """
+    try:
+        tokens = [t for t in tokenize_queries(phrases) if t]
+        if not tokens or not results:
+            return {}
+        tok_set = set(tokens)
+        N = max(1, len(results))
+        df: Dict[str, int] = {t: 0 for t in tok_set}
+        for p in results:
+            try:
+                md = (p.payload or {}).get("metadata") or {}
+            except Exception:
+                md = {}
+            text = " ".join(
+                [
+                    str(md.get("symbol") or ""),
+                    str(md.get("symbol_path") or ""),
+                    str(md.get("path") or ""),
+                    str((md.get("code") or ""))[:2000],
+                ]
+            ).lower()
+            doc_toks = set(tokenize_queries([text]))
+            for t in tok_set:
+                if t in doc_toks:
+                    df[t] += 1
+        idf: Dict[str, float] = {t: math.log(1.0 + (N / float(df[t] + 1))) for t in tok_set}
+        mean = sum(idf.values()) / max(1, len(idf))
+        if mean <= 0:
+            return {t: 1.0 for t in tok_set}
+        return {t: (idf[t] / mean) for t in tok_set}
+    except Exception:
+        return {}
+
+
+def _bm25_token_weights_from_results(phrases: List[str], results: List[Any]) -> Dict[str, float]:
+    """Compute lightweight per-token IDF-like weights from a small sample of lex results.
+    Returns weights normalized to mean 1.0 over tokens present in phrases.
+    """
+    try:
+        tokens = [t for t in tokenize_queries(phrases) if t]
+        if not tokens or not results:
+            return {}
+        tok_set = set(tokens)
+        N = max(1, len(results))
+        df: Dict[str, int] = {t: 0 for t in tok_set}
+        for p in results:
+            try:
+                md = (p.payload or {}).get("metadata") or {}
+            except Exception:
+                md = {}
+            text = " ".join(
+                [
+                    str(md.get("symbol") or ""),
+                    str(md.get("symbol_path") or ""),
+                    str(md.get("path") or ""),
+                    str((md.get("code") or ""))[:2000],
+                ]
+            ).lower()
+            doc_toks = set(tokenize_queries([text]))
+            for t in tok_set:
+                if t in doc_toks:
+                    df[t] += 1
+        idf: Dict[str, float] = {t: math.log(1.0 + (N / float(df[t] + 1))) for t in tok_set}
+        mean = sum(idf.values()) / max(1, len(idf))
+        if mean <= 0:
+            return {t: 1.0 for t in tok_set}
+        return {t: (idf[t] / mean) for t in tok_set}
+    except Exception:
+        return {}
+
 def _mmr_diversify(ranked: List[Dict[str, Any]], k: int = 60, lambda_: float = 0.7) -> List[Dict[str, Any]]:
     """Maximal Marginal Relevance over fused list.
     Preserves top-1 by relevance, then balances relevance vs. diversity by path/symbol.
@@ -1167,6 +1240,12 @@ def run_hybrid_search(
             return None
         if not u.startswith("/"):
             v = "/work/" + u
+        else:
+            v = "/work/" + u.lstrip("/") if not u.startswith("/work/") else u
+        return v
+
+    eff_under = _norm_under(eff_under)
+
     # Results cache: return cached results for identical (queries, filters, knobs)
     _USE_CACHE = (MAX_RESULTS_CACHE > 0) and _env_truthy(os.environ.get("HYBRID_RESULTS_CACHE_ENABLED"), True)
     cache_key = None
@@ -1204,12 +1283,6 @@ def run_hybrid_search(
                     if os.environ.get("DEBUG_HYBRID_SEARCH"):
                         logger.debug("cache hit for hybrid results")
                     return val
-
-        else:
-            v = "/work/" + u.lstrip("/") if not u.startswith("/work/") else u
-        return v
-
-    eff_under = _norm_under(eff_under)
 
     # Build optional filter
     flt = None
@@ -1525,9 +1598,23 @@ def run_hybrid_search(
     except Exception:
         pass
 
+    lex_results2: List[Any] = []
+
     # Pseudo-Relevance Feedback (default-on): mine top terms from current results and run a light second pass
     try:
+
         prf_enabled = _env_truthy(os.environ.get("PRF_ENABLED"), True)
+    # Lightweight BM25-style lexical boost (default ON)
+    try:
+        _USE_BM25 = _env_truthy(os.environ.get("HYBRID_BM25"), True)
+    except Exception:
+        _USE_BM25 = True
+    try:
+        _BM25_W = float(os.environ.get("HYBRID_BM25_WEIGHT", "0.2") or 0.2)
+    except Exception:
+        _BM25_W = 0.2
+    _bm25_tok_w = _bm25_token_weights_from_results(qlist, (lex_results or []) + (lex_results2 or [])) if _USE_BM25 else {}
+
     except (ValueError, TypeError):
         prf_enabled = True
     if prf_enabled and score_map:
@@ -1652,7 +1739,7 @@ def run_hybrid_search(
     timestamps: List[int] = []
     for pid, rec in list(score_map.items()):
         md = (rec["pt"].payload or {}).get("metadata") or {}
-        lx = (_AD_LEX_TEXT_W * lexical_score(qlist, md)) if _USE_ADAPT else (LEXICAL_WEIGHT * lexical_score(qlist, md))
+        lx = (_AD_LEX_TEXT_W * lexical_score(qlist, md, token_weights=_bm25_tok_w, bm25_weight=_BM25_W)) if _USE_ADAPT else (LEXICAL_WEIGHT * lexical_score(qlist, md, token_weights=_bm25_tok_w, bm25_weight=_BM25_W))
         rec["lx"] += lx
         rec["s"] += lx
         ts = md.get("last_modified_at") or md.get("ingested_at")
