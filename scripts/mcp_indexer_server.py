@@ -35,21 +35,8 @@ from typing import Any, Dict, Optional, List
 
 import sys
 
-# Import structured logging and error handling
-from scripts.logger import (
-    get_logger,
-    ContextLogger,
-    RetrievalError,
-    IndexingError,
-    DecoderError,
-    ValidationError,
-    ConfigurationError,
-    safe_int,
-    safe_float,
-    safe_bool,
-)
-
-logger = get_logger(__name__)
+# Import structured logging and error handling (after sys.path setup)
+# Will be imported after sys.path is configured below
 
 # Ensure code roots are on sys.path so absolute imports like 'from scripts.x import y' work
 # when this file is executed directly (sys.path[0] may be /work/scripts).
@@ -67,6 +54,55 @@ try:
 except Exception:
     pass
 
+# Import structured logging and error handling (after sys.path setup)
+try:
+    from scripts.logger import (
+        get_logger,
+        ContextLogger,
+        RetrievalError,
+        IndexingError,
+        DecoderError,
+        ValidationError,
+        ConfigurationError,
+        safe_int,
+        safe_float,
+        safe_bool,
+    )
+    logger = get_logger(__name__)
+except ImportError:
+    # Fallback if logger module not available
+    import logging
+    logger = logging.getLogger(__name__)
+    logging.basicConfig(level=logging.INFO)
+    # Define fallback safe conversion functions
+    def safe_int(value, default=0, logger=None, context=""):
+        try:
+            if value is None or (isinstance(value, str) and value.strip() == ""):
+                return default
+            return int(value)
+        except (ValueError, TypeError):
+            return default
+    def safe_float(value, default=0.0, logger=None, context=""):
+        try:
+            if value is None or (isinstance(value, str) and value.strip() == ""):
+                return default
+            return float(value)
+        except (ValueError, TypeError):
+            return default
+    def safe_bool(value, default=False, logger=None, context=""):
+        try:
+            if value is None or (isinstance(value, str) and value.strip() == ""):
+                return default
+            if isinstance(value, bool):
+                return value
+            s = str(value).strip().lower()
+            if s in {"1", "true", "yes", "on"}:
+                return True
+            if s in {"0", "false", "no", "off"}:
+                return False
+            return default
+        except (ValueError, TypeError):
+            return default
 
 # Shared utilities (lex hashing, snippet highlighter)
 try:
@@ -2947,8 +2983,8 @@ async def context_answer(
         try:
             print(f"DEBUG ARG-SHAPE: raw_query={repr(query)} type={type(query).__name__}")
             print(f"DEBUG ARG-SHAPE: normalized_queries={queries}")
-        except Exception:
-            pass
+        except (AttributeError, TypeError) as e:
+            logger.debug("Failed to print debug info", exc_info=e)
     if not queries:
         return {"error": "query required"}
 
@@ -3035,6 +3071,7 @@ async def context_answer(
                     logger.warning("Failed to parse query expansion JSON", exc_info=e, extra={"output": out[:200]})
                 if alts:
                     queries.extend(alts)
+                    did_local_expand = True  # Mark that we already expanded
         except (ImportError, AttributeError) as e:
             logger.warning("Query expansion failed", exc_info=e)
 
@@ -3052,15 +3089,21 @@ async def context_answer(
         "node_modules/",   # Dependencies
         ".git/",           # VCS internals
     ]
-    # Add robust variants for absolute and recursive matching
-    # Simplified to avoid over-filtering
+    # Add glob patterns for default excludes - less aggressive than **/{pat}**
+    # Use exact path matching to avoid overfiltering
     def _variants(p: str) -> list[str]:
         p = str(p).strip().strip()
         if not p:
             return []
         p = p.replace("\\", "/").lstrip("/")
-        # Only use recursive glob pattern to catch all cases
-        return [f"**/{p}**"]
+        # Use more specific patterns: match directory prefix or exact paths
+        # Avoid **/{pat}** which is too aggressive (e.g., hides valid .env references)
+        if p.endswith("/"):
+            # Directory: match at any level
+            return [f"**/{p}*"]
+        else:
+            # File pattern: match exact or as wildcard
+            return [p, f"**/{p}"]
 
     # Build defaults and conditional exclusions (skip if explicitly mentioned in query)
     default_not_glob = []
@@ -3234,7 +3277,7 @@ async def context_answer(
             path_regex=(path_regex or kwargs.get("path_regex") or None),
             path_glob=eff_path_glob,
             not_glob=eff_not_glob,
-            expand=str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower() in {"1","true","yes","on"},
+            expand=False if did_local_expand else (str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower() in {"1","true","yes","on"}),
             model=model,
         )
 
@@ -3269,7 +3312,7 @@ async def context_answer(
                         path_regex=(path_regex or kwargs.get("path_regex") or None),
                         path_glob=eff_path_glob,
                         not_glob=eff_not_glob,
-                        expand=str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower() in {"1","true","yes","on"},
+                        expand=False if did_local_expand else (str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower() in {"1","true","yes","on"}),
                         model=model,
                     )
                     # Merge unique by (path, start_line, end_line)
@@ -3312,7 +3355,7 @@ async def context_answer(
                                 path_regex=(path_regex or kwargs.get("path_regex") or None),
                                 path_glob=eff_path_glob,
                                 not_glob=eff_not_glob,
-                                expand=str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower() in {"1","true","yes","on"},
+                                expand=False if did_local_expand else (str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower() in {"1","true","yes","on"}),
                                 model=model,
                             )
                             # Merge targeted results with higher priority
@@ -3399,7 +3442,7 @@ async def context_answer(
                     path_regex=None,  # Remove path_regex filter
                     path_glob=None,  # Remove path_glob filter
                     not_glob=eff_not_glob,  # Keep not_glob for safety
-                    expand=str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower() in {"1","true","yes","on"},
+                    expand=False if did_local_expand else (str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower() in {"1","true","yes","on"}),
                     model=model,
                 )
                 if os.environ.get("DEBUG_CONTEXT_ANSWER"):
@@ -3853,33 +3896,17 @@ async def context_answer(
 
         key_terms_str = ", ".join(sorted(key_terms)[:15]) if key_terms else "none found"
 
-        # Use official Granite 4.0 RAG pattern with <documents> tags
-        # Based on https://huggingface.co/ibm-granite/granite-4.0-3b-instruct#rag
-        # Format code snippets as documents list
+        # Use simple labeled code blocks instead of JSON-in-XML
+        # Plain text works more reliably across different llama.cpp models
         if context_blocks:
-            documents = []
-            for idx, block in enumerate(context_blocks, 1):
-                # Extract path and snippet from block
-                lines = block.split('\n', 1)
-                header = lines[0] if lines else f"[{idx}]"
-                snippet_text = lines[1] if len(lines) > 1 else "(no code)"
-                documents.append({
-                    "doc_id": idx,
-                    "title": header,
-                    "text": snippet_text.strip(),
-                    "source": ""
-                })
-
-            import json as _json
-            docs_json = "\n".join([_json.dumps(d) for d in documents])
+            # Format as simple numbered code blocks with headers
+            docs_text = "\n\n".join(context_blocks)
 
             system_msg = (
                 "You are a helpful assistant with access to the following code snippets. "
                 "You may use one or more snippets to assist with the user query.\n\n"
-                "You are given a list of code snippets within <documents></documents> XML tags:\n"
-                "<documents>\n"
-                f"{docs_json}\n"
-                "</documents>\n\n"
+                "Code snippets:\n"
+                f"{docs_text}\n\n"
                 "Write the response to the user's input by strictly aligning with the facts in the provided code snippets. "
                 "If the information needed to answer the question is not available in the snippets, "
                 "inform the user that the question cannot be answered based on the available data."
@@ -3989,7 +4016,8 @@ async def context_answer(
                                 usage_text = _ln.strip()
                                 usage_cid = _usage_id
                                 break
-            except Exception:
+            except (AttributeError, KeyError, IndexError) as e:
+                logger.debug("Failed to extract usage line from snippet", exc_info=e)
                 usage_text = ""
                 usage_cid = None
 
@@ -4023,8 +4051,9 @@ async def context_answer(
 
             # Final strict two-line output
             answer = f"{def_line}\n{usage_line}".strip()
-        except Exception:
+        except (AttributeError, KeyError, IndexError, ValueError) as e:
             # If anything goes wrong, keep the original cleaned answer
+            logger.warning("Failed to format strict two-line answer", exc_info=e)
             answer = answer.strip()
 
         # Debug: log the cleaned/formatted LLM response
