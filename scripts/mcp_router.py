@@ -819,8 +819,9 @@ def _load_scratchpad() -> Dict[str, Any]:
                     ts = float(j.get("timestamp") or 0.0)
                 except Exception:
                     ts = 0.0
-                if ts and (time.time() - ts) > _scratchpad_ttl_sec():
-                    for stale_key in (
+                ttl = _scratchpad_ttl_sec()
+                if ts and ttl >= 0 and (time.time() - ts) > ttl:
+                    stale_keys = (
                         "last_plan",
                         "last_filters",
                         "mem_snippets",
@@ -828,9 +829,28 @@ def _load_scratchpad() -> Dict[str, Any]:
                         "last_citations",
                         "last_paths",
                         "last_metrics",
-                    ):
-                        j.pop(stale_key, None)
-                    j["timestamp"] = 0.0
+                    )
+                    removed = False
+                    for stale_key in stale_keys:
+                        if stale_key in j:
+                            j.pop(stale_key, None)
+                            removed = True
+                    if removed:
+                        j["timestamp"] = 0.0
+                        try:
+                            print(
+                                json.dumps(
+                                    {
+                                        "router": {
+                                            "scratchpad": "stale_cleared",
+                                            "age_sec": round(time.time() - ts, 2),
+                                        }
+                                    }
+                                ),
+                                file=sys.stderr,
+                            )
+                        except Exception:
+                            pass
                 return j
     except Exception:
         pass

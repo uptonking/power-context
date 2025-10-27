@@ -38,6 +38,8 @@ import sys
 # Import structured logging and error handling (after sys.path setup)
 # Will be imported after sys.path is configured below
 
+import contextlib
+
 # Ensure code roots are on sys.path so absolute imports like 'from scripts.x import y' work
 # when this file is executed directly (sys.path[0] may be /work/scripts).
 # Supports multiple roots via WORK_ROOTS env (comma-separated), defaults to /work and /app.
@@ -2984,7 +2986,7 @@ async def context_answer(
     except (TypeError, ValueError) as e:
         logger.warning("Failed to normalize query", exc_info=e, extra={"raw_query": query})
         raise ValidationError(f"Invalid query format: {e}")
-    
+
     # Debug: log raw and normalized query when running over MCP to diagnose null argument issues
     if os.environ.get("DEBUG_CONTEXT_ANSWER"):
         try:
@@ -3436,7 +3438,7 @@ async def context_answer(
                     if len(parts) > 2:
                         multi_ext = ".".join(parts[-2:]).lower()
                         extensions.add(multi_ext)
-                
+
                 table = {
                     "python": ["py", "pyi"],
                     "typescript": ["ts", "tsx", "d.ts", "mts", "cts"],
