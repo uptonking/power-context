@@ -3260,10 +3260,6 @@ async def context_answer(
         coll = (collection or kwargs.get("collection") or os.environ.get("COLLECTION_NAME") or "").strip()
         if coll:
             os.environ["COLLECTION_NAME"] = coll
-    except (AttributeError, KeyError) as e:
-        logger.warning("Failed to set collection name", exc_info=e, extra={"collection": collection})
-    
-    try:
 
         # Debug: log the search parameters
         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
@@ -3276,8 +3272,8 @@ async def context_answer(
         try:
             if sym_arg and ("/" in str(sym_arg) or "." in str(sym_arg)):
                 sym_arg = None
-        except (AttributeError, TypeError) as e:
-            logger.debug("Failed to sanitize symbol argument", exc_info=e, extra={"symbol": sym_arg})
+        except Exception:
+            pass
 
         items = run_hybrid_search(
             queries=queries,
@@ -3383,10 +3379,9 @@ async def context_answer(
                                     _seen.add(k)
                                     added += 1
                             if os.environ.get("DEBUG_CONTEXT_ANSWER"):
-                            print(f"DEBUG TARGETED_SEARCH: found {len(targeted_items)} items, added {len([it for it in targeted_items if _ikey(it) not in _seen])}")
-                            except (re.error, AttributeError, KeyError) as _e:
-                            logger.debug("Usage augmentation failed", exc_info=_e, extra={"identifier": _asked})
-                            if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                                print(f"DEBUG TARGETED_SEARCH: found {len(targeted_items)} items, added {len([it for it in targeted_items if _ikey(it) not in _seen])}")
+        except Exception as _e:
+            if os.environ.get("DEBUG_CONTEXT_ANSWER"):
                 print(f"DEBUG USAGE_AUGMENT failed: {_e}")
 
         # Debug: log top retrieval results before any post-filters/budgeting
