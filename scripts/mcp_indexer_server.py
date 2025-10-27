@@ -3342,10 +3342,10 @@ async def context_answer(
             for i, item in enumerate(items[:3]):
                 print(f"  Item {i+1}: {item.get('path')} lines {item.get('start_line')}-{item.get('end_line')}")
 
-        # Fallback: only if no strict filters like language were provided
+        # Tier 2 fallback: broader hybrid search without gating (only if no strict filters)
         if (not items) and (not req_language):
             if os.environ.get("DEBUG_CONTEXT_ANSWER"):
-                print("DEBUG: 0 items after gate-first; retrying without gating")
+                print("DEBUG TIER 2: 0 items after gate-first; retrying without gating")
             _prev_gate = os.environ.get("REFRAG_GATE_FIRST")
             os.environ["REFRAG_GATE_FIRST"] = "0"
             try:
@@ -3366,11 +3366,77 @@ async def context_answer(
                     expand=str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower() in {"1","true","yes","on"},
                     model=model,
                 )
+                if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                    print(f"DEBUG TIER 2: broader hybrid returned {len(items)} items")
             finally:
                 if _prev_gate is not None:
                     os.environ["REFRAG_GATE_FIRST"] = _prev_gate
                 else:
                     os.environ.pop("REFRAG_GATE_FIRST", None)
+
+        # Tier 3 fallback: filesystem heuristics (deterministic regex scans when vector store has zero)
+        # Only trigger when: (a) still zero items, (b) query looks like identifier search, (c) env allows
+        if (not items) and str(os.environ.get("TIER3_FS_FALLBACK", "1")).strip() in {"1", "true", "yes", "on"}:
+            try:
+                import re as _re
+                # Extract primary identifier from query
+                primary = _primary_identifier_from_queries(queries)
+                if primary and len(primary) >= 3:
+                    if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                        print(f"DEBUG TIER 3: filesystem scan for identifier '{primary}'")
+                    # Deterministic filesystem scan for definition patterns
+                    scan_root = override_under or cwd_root
+                    if not os.path.isabs(scan_root):
+                        scan_root = os.path.join(cwd_root, scan_root)
+                    # Limit scan to reasonable file count to avoid DoS
+                    max_files = int(os.environ.get("TIER3_MAX_FILES", "500") or 500)
+                    scanned = 0
+                    tier3_hits: list[Dict[str, Any]] = []
+                    # Walk filesystem looking for definition patterns
+                    for root, dirs, files in os.walk(scan_root):
+                        # Skip excluded directories
+                        dirs[:] = [d for d in dirs if not any(ex in d for ex in [".git", "node_modules", ".pytest_cache", "__pycache__"])]
+                        for fname in files:
+                            if scanned >= max_files:
+                                break
+                            # Only scan code files
+                            if not any(fname.endswith(ext) for ext in [".py", ".js", ".ts", ".go", ".rs", ".java", ".cpp", ".c", ".h"]):
+                                continue
+                            fpath = os.path.join(root, fname)
+                            try:
+                                with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
+                                    lines = f.readlines()
+                                scanned += 1
+                                # Look for definition patterns: IDENT = value
+                                for idx, line in enumerate(lines, 1):
+                                    if _re.match(rf"\s*{_re.escape(primary)}\s*=", line):
+                                        # Found definition - create a synthetic item
+                                        rel_path = os.path.relpath(fpath, cwd_root)
+                                        snippet_start = max(1, idx - 2)
+                                        snippet_end = min(len(lines), idx + 2)
+                                        snippet_text = "".join(lines[snippet_start - 1:snippet_end])
+                                        tier3_hits.append({
+                                            "path": rel_path,
+                                            "start_line": idx,
+                                            "end_line": idx,
+                                            "text": snippet_text.strip(),
+                                            "score": 1.0,  # Deterministic match
+                                            "tier": "filesystem_scan",
+                                        })
+                                        if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                                            print(f"DEBUG TIER 3: found {primary} in {rel_path}:{idx}")
+                                        break  # One hit per file is enough
+                            except Exception:
+                                continue
+                        if scanned >= max_files:
+                            break
+                    if tier3_hits:
+                        items = tier3_hits[:int(max(lim, 4))]  # Respect limit
+                        if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                            print(f"DEBUG TIER 3: filesystem scan returned {len(items)} items (scanned {scanned} files)")
+            except Exception as e:
+                if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                    print(f"DEBUG TIER 3: filesystem scan failed: {e}")
 
         # Filter out memory-like items without a valid path to avoid empty citations
         items = [it for it in items if str(it.get("path") or "").strip()]
@@ -3603,7 +3669,6 @@ async def context_answer(
                 if not _os.path.isabs(fp):
                     fp = _os.path.join("/work", fp)
                 realp = _os.path.realpath(fp)
-                # SECURITY: Verify the resolved path stays within /work to prevent path traversal
                 if not realp.startswith("/work/"):
                     if _os.environ.get("DEBUG_CONTEXT_ANSWER"):
                         print(f"DEBUG: Blocked path traversal attempt: {path} -> {realp}")
@@ -3676,7 +3741,12 @@ async def context_answer(
 
     # Stop sequences for Granite-4.0-Micro + optional env overrides
     stop_env = os.environ.get("DECODER_STOP", "")
-    default_stops = ["<|end_of_text|>", "<|start_of_role|>"]  # Granite format tokens
+    default_stops = [
+        "<|end_of_text|>",
+        "<|start_of_role|>",
+        "<|end_of_response|>",  # Prevent response marker leakage
+        "\n\n\n",  # Stop on excessive newlines
+    ]
     stops = default_stops + [s for s in (stop_env.split(",") if stop_env else []) if s]
 
     # Decoder parameter tuning for small models (defaults can be overridden via args or env)
@@ -3735,20 +3805,35 @@ async def context_answer(
 
         key_terms_str = ", ".join(sorted(key_terms)[:15]) if key_terms else "none found"
 
-        # Use Granite's proven RAG pattern for strict document grounding
-        # Based on official Granite 4.0 RAG examples that enforce "strictly aligning with facts"
+        # Use official Granite 4.0 RAG pattern with <documents> tags
+        # Based on https://huggingface.co/ibm-granite/granite-4.0-3b-instruct#rag
+        # Format code snippets as documents list
+        documents = []
+        for idx, block in enumerate(context_blocks, 1):
+            # Extract path and snippet from block
+            lines = block.split('\n', 1)
+            header = lines[0] if lines else f"[{idx}]"
+            snippet_text = lines[1] if len(lines) > 1 else "(no code)"
+            documents.append({
+                "doc_id": idx,
+                "title": header,
+                "text": snippet_text.strip(),
+                "source": ""
+            })
+
+        import json as _json
+        docs_json = "\n".join([_json.dumps(d) for d in documents])
+
         system_msg = (
             "You are a helpful assistant with access to the following code snippets. "
             "You may use one or more snippets to assist with the user query.\n\n"
-            "You are given code snippets with [ID] path:lines format:\n"
-            f"{all_context}\n\n"
-            + (f"Key identifiers: {key_terms_str}\n" if key_terms_str != "none found" else "")
-            + (f"Hint: {extra_hint}\n\n" if extra_hint else "")
-            + "Write the response to the user's input by strictly aligning with the facts in the provided code snippets. "
-            "Always answer in exactly two lines with citations: "
-            "Definition: \"<exact code definition line(s) verbatim>\" [ID]\n"
-            "Usage: <one-sentence summary of how/where it is used based only on the snippets> [ID]. "
-            "If the definition or usage is not present in the snippets, state 'Not found in provided snippets.' for that line."
+            "You are given a list of code snippets within <documents></documents> XML tags:\n"
+            "<documents>\n"
+            f"{docs_json}\n"
+            "</documents>\n\n"
+            "Write the response to the user's input by strictly aligning with the facts in the provided code snippets. "
+            "If the information needed to answer the question is not available in the snippets, "
+            "inform the user that the question cannot be answered based on the available data."
         )
         if sources_footer:
             system_msg += f"\nSources:\n{sources_footer}"
@@ -3787,6 +3872,11 @@ async def context_answer(
             _cap = int(_cap_env) if _cap_env not in {"", None} else 0
         except Exception:
             _cap = 0
+
+        # Cleanup: remove stop tokens, repetition, and optionally cap length
+        # Strip leaked stop tokens that sometimes appear in output
+        for stop_tok in ["<|end_of_text|>", "<|start_of_role|>", "<|end_of_response|>"]:
+            answer = answer.replace(stop_tok, "")
 
         # Cleanup repetition and optionally cap length
         answer = _cleanup_answer(answer, max_chars=(_cap if _cap and _cap > 0 else None))
