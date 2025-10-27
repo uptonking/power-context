@@ -3322,12 +3322,44 @@ async def context_answer(
         source_spans = list(budgeted) if budgeted else list(items)
 
         # Prefer spans that actually contain the main identifier when one is present
+        def _read_span_snippet(span: Dict[str, Any]) -> str:
+            cached = span.get("_ident_snippet")
+            if cached is not None:
+                return str(cached)
+            if not include_snippet:
+                return ""
+            try:
+                path = str(span.get("path") or "")
+                sline = int(span.get("start_line") or 0)
+                eline = int(span.get("end_line") or 0)
+                if not path or sline <= 0:
+                    span["_ident_snippet"] = ""
+                    return ""
+                fp = path
+                if not os.path.isabs(fp):
+                    fp = os.path.join("/work", fp)
+                realp = os.path.realpath(fp)
+                if not realp.startswith("/work/"):
+                    span["_ident_snippet"] = ""
+                    return ""
+                with open(realp, "r", encoding="utf-8", errors="ignore") as f:
+                    lines = f.readlines()
+                si = max(1, sline - 1)
+                ei = min(len(lines), max(sline, eline) + 1)
+                snippet = "".join(lines[si - 1 : ei])
+                span["_ident_snippet"] = snippet
+                return snippet
+            except Exception:
+                span["_ident_snippet"] = ""
+                return ""
+
         def _span_haystack(span: Dict[str, Any]) -> str:
             parts = [
                 str(span.get("text") or ""),
                 str(span.get("symbol") or ""),
                 str((span.get("relations") or {}).get("symbol_path") if isinstance(span.get("relations"), dict) else ""),
                 str(span.get("path") or ""),
+                str(span.get("_ident_snippet") or ""),
             ]
             return " ".join(parts).lower()
 
@@ -3345,10 +3377,21 @@ async def context_answer(
             spans_without_ident: list[Dict[str, Any]] = []
 
             for span in source_spans:
-                if ident_lower in _span_haystack(span):
+                hay = _span_haystack(span)
+                contains = ident_lower in hay
+                if not contains:
+                    extra = _read_span_snippet(span)
+                    if extra:
+                        hay = (hay + " " + extra.lower()).strip()
+                        contains = ident_lower in hay
+                if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                    print(f"DEBUG IDENT HAY path={span.get('path')} contains_ident={'yes' if contains else 'no'} preview={hay[:80]}")
+                if contains:
                     spans_with_ident.append(span)
                 else:
                     spans_without_ident.append(span)
+            if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                print(f"DEBUG IDENT FILTER: ident={primary_ident}, with={len(spans_with_ident)}, without={len(spans_without_ident)}")
             if spans_with_ident:
                 source_spans = spans_with_ident + spans_without_ident
             elif budgeted and items:
@@ -3368,6 +3411,8 @@ async def context_answer(
                         if key not in seen:
                             ident_candidates.append(span)
                             seen.add(key)
+                    if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                        print(f"DEBUG IDENT AUGMENT: pulled {len(ident_candidates)} candidate spans for {primary_ident}")
                     source_spans = ident_candidates
 
         if span_cap:
