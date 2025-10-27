@@ -3039,59 +3039,63 @@ async def context_answer(
             eff_not_glob.append(s)
             seen.add(s)
 
-    items = []
-    err = None
-    try:
-        # Respect 'collection' arg by passing it via env to hybrid_search
-        coll = (collection or kwargs.get("collection") or os.environ.get("COLLECTION_NAME") or "").strip()
-        if coll:
-            os.environ["COLLECTION_NAME"] = coll
+    def _to_glob_list(val: Any) -> list[str]:
+        if not val:
+            return []
+        if isinstance(val, (list, tuple, set)):
+            return [str(x).strip() for x in val if str(x).strip()]
+        vs = str(val).strip()
+        return [vs] if vs else []
 
-        # Debug: log the search parameters
-        if os.environ.get("DEBUG_CONTEXT_ANSWER"):
-            print(f"DEBUG SEARCH PARAMS: queries={queries}, limit={int(max(lim, 4))}, per_path={int(max(ppath, 0))}")
-            print(f"DEBUG ENV: REFRAG_MODE={os.environ.get('REFRAG_MODE')}, COLLECTION_NAME={os.environ.get('COLLECTION_NAME')}")
-            print(f"DEBUG FILTERS: not_glob={eff_not_glob}")
+    req_language = kwargs.get("language") or language or None
+    eff_language = req_language
 
+    user_path_glob = _to_glob_list(kwargs.get("path_glob") or path_glob)
+    eff_path_glob: list[str] = list(user_path_glob)
+    auto_path_glob: list[str] = []
 
-        # Initial search (tighten file/area when hinted and no explicit path_glob)
-        def _to_glob_list(val: Any) -> list[str]:
-            if not val:
-                return []
-            if isinstance(val, (list, tuple, set)):
-                return [str(x).strip() for x in val if str(x).strip()]
-            vs = str(val).strip()
-            return [vs] if vs else []
+    cwd_root = os.path.abspath(os.getcwd()).replace("\\", "/").rstrip("/")
 
-        req_language = kwargs.get("language") or language or None
-        eff_language = req_language or ("python" if ("router" in qtext and not req_language) else None)
+    def _abs_prefix(val: str) -> str:
+        v = (val or "").replace("\\", "/")
+        if not v:
+            return cwd_root
+        if v.startswith(cwd_root + "/") or v == cwd_root:
+            return v.rstrip("/")
+        if v.startswith("/"):
+            return f"{cwd_root}{v.rstrip('/')}"
+        return f"{cwd_root}/{v.lstrip('./').rstrip('/')}"
 
-        user_path_glob = _to_glob_list(kwargs.get("path_glob") or path_glob)
-        eff_path_glob: list[str] = list(user_path_glob)
+    user_under = kwargs.get("under") or under or None
+    override_under = None
+    if isinstance(user_under, str):
+        _uu = user_under.strip()
+        if _uu:
+            _uu_norm = _uu.replace("\\", "/")
+            # Detect file-like under hints (filename with an extension). For those, prefer
+            # a glob filter and avoid injecting an impossible path_prefix equality.
+            _uu_parts = [p for p in _uu_norm.split("/") if p]
+            _uu_last = _uu_parts[-1] if _uu_parts else _uu_norm
+            _looks_like_file = ("." in _uu_last) and not _uu_norm.endswith("/")
+            if _looks_like_file:
+                auto_path_glob.append(f"**/{_uu_last}")
+                if len(_uu_parts) > 1:
+                    auto_path_glob.append(f"**/{_uu_norm}")
+                    parent = "/".join(_uu_parts[:-1])
+                    if parent:
+                        override_under = _abs_prefix(parent)
+                # Bare filename -> no override_under (would not match path_prefix)
+            else:
+                # Treat as directory prefix
+                override_under = _abs_prefix(_uu_norm)
+    elif user_under:
+        override_under = str(user_under)
 
-        user_under = kwargs.get("under") or under or None
-        override_under = None
-        if isinstance(user_under, str):
-            _uu = user_under.strip()
-            if _uu:
-                # Map any 'under' value to an absolute /work-prefixed directory path.
-                # Do NOT append directory globs to path_glob; 'under' is a directory prefix filter
-                # enforced server-side via metadata.path_prefix.
-                if _uu.startswith("/work/"):
-                    override_under = _uu
-                elif _uu.startswith("/"):
-                    override_under = f"/work{_uu}"
-                else:
-                    override_under = f"/work/{_uu.lstrip('./')}"
-        elif user_under:
-            override_under = str(user_under)
+    # No hardcoded keyword-based filtering - keep it truly codebase-agnostic
+    # Let the hybrid search and user-provided filters do the work
 
-        # Router-specific tightening when the word 'router' is present
-        if ("router" in qtext):
-            if not eff_path_glob:
-                eff_path_glob = ["**/mcp_router.py", "**/*router*.py"]
-            if not eff_language:
-                eff_language = "python"
+    if auto_path_glob:
+        eff_path_glob.extend(auto_path_glob)
 
         # Normalize path_glob list -> None when empty
         if eff_path_glob:
@@ -3146,6 +3150,19 @@ async def context_answer(
             except Exception as _e:
                 print(f"DEBUG FILTERS: print failed: {_e}")
 
+    items = []
+    err = None
+    try:
+        # Respect 'collection' arg by passing it via env to hybrid_search
+        coll = (collection or kwargs.get("collection") or os.environ.get("COLLECTION_NAME") or "").strip()
+        if coll:
+            os.environ["COLLECTION_NAME"] = coll
+
+        # Debug: log the search parameters
+        if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+            print(f"DEBUG SEARCH PARAMS: queries={queries}, limit={int(max(lim, 4))}, per_path={int(max(ppath, 0))}")
+            print(f"DEBUG ENV: REFRAG_MODE={os.environ.get('REFRAG_MODE')}, COLLECTION_NAME={os.environ.get('COLLECTION_NAME')}")
+            print(f"DEBUG FILTERS: not_glob={eff_not_glob}")
 
         items = run_hybrid_search(
             queries=queries,
