@@ -83,10 +83,6 @@ _ENV_LOCK = threading.RLock()
 
 # Set default environment variables for context_answer functionality
 # These are set in docker-compose.yml but provide fallbacks for local dev
-os.environ.setdefault("DEBUG_CONTEXT_ANSWER", "0")
-os.environ.setdefault("REFRAG_DECODER", "1")
-os.environ.setdefault("LLAMACPP_URL", "http://localhost:8080")
-os.environ.setdefault("CTX_REQUIRE_IDENTIFIER", "0")  # Disable strict identifier requirement
 
 
 def _primary_identifier_from_queries(qs: list[str]) -> str:
@@ -2802,6 +2798,17 @@ async def context_answer(
     temperature: Any = None,
     mode: Any = None,  # "stitch" (default) or "pack"
     expand: Any = None,  # whether to LLM-expand queries (up to 2 alternates)
+    # Retrieval filter parameters (passed through to hybrid_search)
+    language: Any = None,
+    under: Any = None,
+    kind: Any = None,
+    symbol: Any = None,
+    ext: Any = None,
+    path_regex: Any = None,
+    path_glob: Any = None,
+    not_glob: Any = None,
+    case: Any = None,
+    not_: Any = None,
     **kwargs,
 ) -> Dict[str, Any]:
     """Answer a question using gate-first retrieval (ReFRAG Option B), assembling
@@ -2822,8 +2829,8 @@ async def context_answer(
     - LLAMACPP_URL (default http://localhost:8080)
     - REFRAG_DECODER=1 to enable llama.cpp calls
     """
-    # Unwrap kwargs if MCP client sent everything in a single kwargs string
-    if kwargs and not query:
+    # Unwrap kwargs (overlay) if MCP client sent parameters in a single dict
+    if kwargs:
         query = kwargs.get("query", query)
         limit = kwargs.get("limit", limit)
         per_path = kwargs.get("per_path", per_path)
@@ -2834,6 +2841,16 @@ async def context_answer(
         temperature = kwargs.get("temperature", temperature)
         mode = kwargs.get("mode", mode)
         expand = kwargs.get("expand", expand)
+        language = kwargs.get("language", language)
+        under = kwargs.get("under", under)
+        kind = kwargs.get("kind", kind)
+        symbol = kwargs.get("symbol", symbol)
+        ext = kwargs.get("ext", ext)
+        path_regex = kwargs.get("path_regex", path_regex)
+        path_glob = kwargs.get("path_glob", path_glob)
+        not_glob = kwargs.get("not_glob", not_glob)
+        case = kwargs.get("case", case)
+        not_ = kwargs.get("not_", not_) or kwargs.get("not", not_)
 
     # Normalize query to list[str]
     queries: list[str] = []
@@ -2950,7 +2967,7 @@ async def context_answer(
     # Default exclusions to avoid noisy self-test and cache artifacts
     # Also filter out metadata/config files that pollute Q&A context
     # This significantly improves answer quality by focusing on implementation code
-    user_not_glob = kwargs.get("not_glob")
+    user_not_glob = kwargs.get("not_glob") or not_glob
     if isinstance(user_not_glob, str):
         user_not_glob = [user_not_glob]
     base_excludes = [
@@ -3027,13 +3044,13 @@ async def context_answer(
             vs = str(val).strip()
             return [vs] if vs else []
 
-        req_language = kwargs.get("language") or None
+        req_language = kwargs.get("language") or language or None
         eff_language = req_language or ("python" if ("router" in qtext and not req_language) else None)
 
-        user_path_glob = _to_glob_list(kwargs.get("path_glob"))
+        user_path_glob = _to_glob_list(kwargs.get("path_glob") or path_glob)
         eff_path_glob: list[str] = list(user_path_glob)
 
-        user_under = kwargs.get("under") or None
+        user_under = kwargs.get("under") or under or None
         override_under = None
         if isinstance(user_under, str):
             _uu = user_under.strip()
@@ -3112,12 +3129,12 @@ async def context_answer(
             per_path=int(max(ppath, 0)),
             language=eff_language,
             under=override_under or None,
-            kind=kwargs.get("kind") or None,
+            kind=(kind or kwargs.get("kind") or None),
             symbol=sym_arg,
-            ext=kwargs.get("ext") or None,
-            not_filter=kwargs.get("not_") or kwargs.get("not") or None,
-            case=kwargs.get("case") or None,
-            path_regex=kwargs.get("path_regex") or None,
+            ext=(ext or kwargs.get("ext") or None),
+            not_filter=(not_ or kwargs.get("not_") or kwargs.get("not") or None),
+            case=(case or kwargs.get("case") or None),
+            path_regex=(path_regex or kwargs.get("path_regex") or None),
             path_glob=eff_path_glob,
             not_glob=eff_not_glob,
             expand=str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower() in {"1","true","yes","on"},
@@ -3147,12 +3164,12 @@ async def context_answer(
                         per_path=int(max(ppath, 10)),
                         language=eff_language,
                         under=override_under or None,
-                        kind=kwargs.get("kind") or None,
+                        kind=(kind or kwargs.get("kind") or None),
                         symbol=sym_arg,
-                        ext=kwargs.get("ext") or None,
-                        not_filter=kwargs.get("not_") or kwargs.get("not") or None,
-                        case=kwargs.get("case") or None,
-                        path_regex=kwargs.get("path_regex") or None,
+                        ext=(ext or kwargs.get("ext") or None),
+                        not_filter=(not_ or kwargs.get("not_") or kwargs.get("not") or None),
+                        case=(case or kwargs.get("case") or None),
+                        path_regex=(path_regex or kwargs.get("path_regex") or None),
                         path_glob=eff_path_glob,
                         not_glob=eff_not_glob,
                         expand=str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower() in {"1","true","yes","on"},
@@ -3190,12 +3207,12 @@ async def context_answer(
                                 per_path=5,
                                 language=eff_language,
                                 under=override_under or None,
-                                kind=kwargs.get("kind") or None,
+                                kind=(kind or kwargs.get("kind") or None),
                                 symbol=sym_arg,
-                                ext=kwargs.get("ext") or None,
-                                not_filter=kwargs.get("not_") or kwargs.get("not") or None,
-                                case=kwargs.get("case") or None,
-                                path_regex=kwargs.get("path_regex") or None,
+                                ext=(ext or kwargs.get("ext") or None),
+                                not_filter=(not_ or kwargs.get("not_") or kwargs.get("not") or None),
+                                case=(case or kwargs.get("case") or None),
+                                path_regex=(path_regex or kwargs.get("path_regex") or None),
                                 path_glob=eff_path_glob,
                                 not_glob=eff_not_glob,
                                 expand=str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower() in {"1","true","yes","on"},
@@ -3275,12 +3292,12 @@ async def context_answer(
                     per_path=int(max(ppath, 0)),
                     language=eff_language,
                     under=override_under or None,
-                    kind=kwargs.get("kind") or None,
+                    kind=(kind or kwargs.get("kind") or None),
                     symbol=sym_arg,
-                    ext=kwargs.get("ext") or None,
-                    not_filter=kwargs.get("not_") or kwargs.get("not") or None,
-                    case=kwargs.get("case") or None,
-                    path_regex=kwargs.get("path_regex") or None,
+                    ext=(ext or kwargs.get("ext") or None),
+                    not_filter=(not_ or kwargs.get("not_") or kwargs.get("not") or None),
+                    case=(case or kwargs.get("case") or None),
+                    path_regex=(path_regex or kwargs.get("path_regex") or None),
                     path_glob=eff_path_glob,
                     not_glob=eff_not_glob,
                     expand=str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower() in {"1","true","yes","on"},
@@ -3421,6 +3438,10 @@ async def context_answer(
                     if os.environ.get("DEBUG_CONTEXT_ANSWER"):
                         print(f"DEBUG IDENT AUGMENT: pulled {len(ident_candidates)} candidate spans for {primary_ident}")
                     source_spans = ident_candidates
+                else:
+                    # No identifier-bearing spans found; fall back to original source_spans
+                    if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                        print(f"DEBUG IDENT AUGMENT: no candidates found for {primary_ident}, using original source_spans")
 
         if span_cap:
             spans = source_spans[:span_cap]
@@ -3460,6 +3481,10 @@ async def context_answer(
     except Exception as e:
         err = str(e)
         spans = []
+        if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+            import traceback
+            print(f"DEBUG EXCEPTION: {type(e).__name__}: {err}")
+            traceback.print_exc()
     finally:
         # Restore env to previous values to avoid cross-call bleed
         for k, v in prev.items():
