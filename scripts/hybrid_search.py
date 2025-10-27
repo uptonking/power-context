@@ -55,6 +55,12 @@ _EMBED_QUERY_CACHE: OrderedDict[tuple[str, str], List[float]] = OrderedDict()
 _EMBED_LOCK = _Lock()
 MAX_EMBED_CACHE = int(os.environ.get("MAX_EMBED_CACHE", "4096") or 4096)
 
+# Lightweight recent-results LRU cache for iterative queries
+_RESULTS_CACHE: OrderedDict[tuple, List[Dict[str, Any]]] = OrderedDict()
+_RESULTS_LOCK = _Lock()
+# Set to 0 to disable; default small size to bound memory
+MAX_RESULTS_CACHE = int(os.environ.get("HYBRID_RESULTS_CACHE", "32") or 32)
+
 
 def _coerce_points(result: Any) -> List[Any]:
     """Normalize Qdrant responses to a list of points."""
@@ -1161,6 +1167,44 @@ def run_hybrid_search(
             return None
         if not u.startswith("/"):
             v = "/work/" + u
+    # Results cache: return cached results for identical (queries, filters, knobs)
+    _USE_CACHE = (MAX_RESULTS_CACHE > 0) and _env_truthy(os.environ.get("HYBRID_RESULTS_CACHE_ENABLED"), True)
+    cache_key = None
+    if _USE_CACHE:
+        try:
+            cache_key = (
+                "v1",
+                tuple(clean_queries),
+                int(limit or 0),
+                int(per_path or 0),
+                str(eff_language or ""),
+                str(eff_under or ""),
+                str(eff_kind or ""),
+                str(eff_symbol or ""),
+                str(eff_ext or ""),
+                str(eff_not or ""),
+                str(eff_case or ""),
+                tuple(eff_path_globs_norm or ()),
+                tuple(eff_not_globs_norm or ()),
+                str(eff_repo or ""),
+                str(eff_path_regex or ""),
+                bool(expand),
+                str(vec_name),
+                str(_collection()),
+                _env_truthy(os.environ.get("HYBRID_ADAPTIVE_WEIGHTS"), True),
+                _env_truthy(os.environ.get("HYBRID_MMR"), True),
+            )
+        except Exception:
+            cache_key = None
+        if cache_key is not None:
+            with _RESULTS_LOCK:
+                if cache_key in _RESULTS_CACHE:
+                    val = _RESULTS_CACHE.pop(cache_key)
+                    _RESULTS_CACHE[cache_key] = val
+                    if os.environ.get("DEBUG_HYBRID_SEARCH"):
+                        logger.debug("cache hit for hybrid results")
+                    return val
+
         else:
             v = "/work/" + u.lstrip("/") if not u.startswith("/work/") else u
         return v
