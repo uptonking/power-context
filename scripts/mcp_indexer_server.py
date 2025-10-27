@@ -2841,28 +2841,49 @@ async def context_answer(
     - LLAMACPP_URL (default http://localhost:8080)
     - REFRAG_DECODER=1 to enable llama.cpp calls
     """
-    # Unwrap kwargs (overlay) if MCP client sent parameters in a single dict
-    if kwargs:
-        query = kwargs.get("query", query)
-        limit = kwargs.get("limit", limit)
-        per_path = kwargs.get("per_path", per_path)
-        budget_tokens = kwargs.get("budget_tokens", budget_tokens)
-        include_snippet = kwargs.get("include_snippet", include_snippet)
-        collection = kwargs.get("collection", collection)
-        max_tokens = kwargs.get("max_tokens", max_tokens)
-        temperature = kwargs.get("temperature", temperature)
-        mode = kwargs.get("mode", mode)
-        expand = kwargs.get("expand", expand)
-        language = kwargs.get("language", language)
-        under = kwargs.get("under", under)
-        kind = kwargs.get("kind", kind)
-        symbol = kwargs.get("symbol", symbol)
-        ext = kwargs.get("ext", ext)
-        path_regex = kwargs.get("path_regex", path_regex)
-        path_glob = kwargs.get("path_glob", path_glob)
-        not_glob = kwargs.get("not_glob", not_glob)
-        case = kwargs.get("case", case)
-        not_ = kwargs.get("not_", not_) or kwargs.get("not", not_)
+    # Normalize/unwrap kwargs, supporting nested {"arguments":{...}} or {"kwargs":{...}}
+    _raw = dict(kwargs or {})
+    try:
+        for k in ("arguments", "kwargs"):
+            v = _raw.get(k)
+            if isinstance(v, dict):
+                for kk, vv in v.items():
+                    # Preserve any existing explicit value on _raw
+                    _raw.setdefault(kk, vv)
+    except Exception:
+        pass
+
+    # Overlay helper: prefer non-empty values from wrapper, otherwise keep explicit param
+    def _coalesce(val, fallback):
+        if val is None:
+            return fallback
+        try:
+            if isinstance(val, str) and val.strip() == "":
+                return fallback
+        except Exception:
+            pass
+        return val
+
+    query = _coalesce(_raw.get("query"), query)
+    limit = _coalesce(_raw.get("limit"), limit)
+    per_path = _coalesce(_raw.get("per_path"), per_path)
+    budget_tokens = _coalesce(_raw.get("budget_tokens"), budget_tokens)
+    include_snippet = _coalesce(_raw.get("include_snippet"), include_snippet)
+    collection = _coalesce(_raw.get("collection"), collection)
+    max_tokens = _coalesce(_raw.get("max_tokens"), max_tokens)
+    temperature = _coalesce(_raw.get("temperature"), temperature)
+    mode = _coalesce(_raw.get("mode"), mode)
+    expand = _coalesce(_raw.get("expand"), expand)
+    language = _coalesce(_raw.get("language"), language)
+    under = _coalesce(_raw.get("under"), under)
+    kind = _coalesce(_raw.get("kind"), kind)
+    symbol = _coalesce(_raw.get("symbol"), symbol)
+    ext = _coalesce(_raw.get("ext"), ext)
+    path_regex = _coalesce(_raw.get("path_regex"), path_regex)
+    path_glob = _coalesce(_raw.get("path_glob"), path_glob)
+    not_glob = _coalesce(_raw.get("not_glob"), not_glob)
+    case = _coalesce(_raw.get("case"), case)
+    not_ = _coalesce(_raw.get("not_"), not_) if _raw.get("not_") is not None else _coalesce(_raw.get("not"), not_)
 
     # Normalize query to list[str]
     queries: list[str] = []
