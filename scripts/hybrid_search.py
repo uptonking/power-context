@@ -7,6 +7,7 @@ from qdrant_client import QdrantClient, models
 from fastembed import TextEmbedding
 import re
 import json
+import math
 
 import logging
 
@@ -729,14 +730,16 @@ def rrf(rank: int, k: int = RRF_K) -> float:
     return 1.0 / (k + rank)
 
 
-def lexical_score(phrases: List[str], md: Dict[str, Any]) -> float:
-    """Smarter lexical: split identifiers, weight matches in symbol/path higher."""
+def lexical_score(phrases: List[str], md: Dict[str, Any], token_weights: Dict[str, float] | None = None, bm25_weight: float | None = None) -> float:
+    """Smarter lexical: split identifiers, weight matches in symbol/path higher.
+    If token_weights provided, apply a small BM25-style multiplicative factor per token:
+        factor = 1 + bm25_weight * (w - 1) where w are normalized around 1.0
+    """
     tokens = tokenize_queries(phrases)
     if not tokens:
         return 0.0
     path = str(md.get("path", "")).lower()
     path_segs = re.split(r"[/\\]", path)
-    path_text = " ".join(path_segs)
     sym = str(md.get("symbol", "")).lower()
     symp = str(md.get("symbol_path", "")).lower()
     code = str(md.get("code", ""))[:2000].lower()
@@ -744,12 +747,17 @@ def lexical_score(phrases: List[str], md: Dict[str, Any]) -> float:
     for t in tokens:
         if not t:
             continue
+        contrib = 0.0
         if t in sym or t in symp:
-            s += 2.0
+            contrib += 2.0
         if any(t in seg for seg in path_segs):
-            s += 0.6
+            contrib += 0.6
         if t in code:
-            s += 1.0
+            contrib += 1.0
+        if contrib > 0 and token_weights and bm25_weight:
+            w = float(token_weights.get(t, 1.0) or 1.0)
+            contrib *= (1.0 + float(bm25_weight) * (w - 1.0))
+        s += contrib
     return s
 
 
