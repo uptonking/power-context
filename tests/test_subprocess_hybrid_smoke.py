@@ -22,33 +22,42 @@ def qdrant_container():
     # Disable ryuk to avoid port mapping flakiness in some environments
     os.environ.setdefault("TESTCONTAINERS_RYUK_DISABLED", "true")
     container = DockerContainer("qdrant/qdrant:latest").with_exposed_ports(6333)
-    container.start()
-    host = container.get_container_host_ip()
-    deadline = time.time() + 30
-    last_exc: Exception | None = None
-    while time.time() < deadline:
+    ready = False
+    try:
+        container.start()
+        host = container.get_container_host_ip()
+        deadline = time.time() + 30
+        last_exc: Exception | None = None
+        port = None
+        while time.time() < deadline:
+            try:
+                port = int(container.get_exposed_port(6333))
+                break
+            except Exception as exc:  # pragma: no cover - retry only in flaky envs
+                last_exc = exc
+                time.sleep(0.25)
+        else:
+            raise RuntimeError(f"qdrant port mapping unavailable: {last_exc}")
+        url = f"http://{host}:{port}"
+        # Poll readiness endpoint up to 60s
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            try:
+                with urllib.request.urlopen(url + "/readyz", timeout=2) as r:
+                    if 200 <= r.status < 300:
+                        ready = True
+                        break
+            except Exception:
+                pass
+            time.sleep(1)
+        if not ready:
+            raise RuntimeError("qdrant container failed readiness check within timeout")
+        yield url
+    finally:
         try:
-            port = int(container.get_exposed_port(6333))
-            break
-        except Exception as exc:  # pragma: no cover - retry only in flaky envs
-            last_exc = exc
-            time.sleep(0.25)
-    else:
-        container.stop()
-        raise RuntimeError(f"qdrant port mapping unavailable: {last_exc}")
-    url = f"http://{host}:{port}"
-    # Poll readiness endpoint up to 60s
-    deadline = time.time() + 60
-    while time.time() < deadline:
-        try:
-            with urllib.request.urlopen(url + "/readyz", timeout=2) as r:
-                if 200 <= r.status < 300:
-                    break
+            container.stop()
         except Exception:
             pass
-        time.sleep(1)
-    yield url
-    container.stop()
 
 
 @pytest.mark.integration
