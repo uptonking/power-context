@@ -3110,13 +3110,6 @@ async def context_answer(
             eff_path_glob = dedup_pg
         else:
             eff_path_glob = None
-        # Sanitize symbol: ignore file-like strings passed as symbol
-        sym_arg = kwargs.get("symbol") or None
-        try:
-            if sym_arg and ("/" in str(sym_arg) or "." in str(sym_arg)):
-                sym_arg = None
-        except Exception:
-            pass
         # Query sharpening: extract code identifiers and add targeted search terms
         try:
             qj = " ".join(queries)
