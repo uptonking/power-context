@@ -425,11 +425,11 @@ def _maybe_parse_jsonish(obj: _Any):
         return None
     try:
         return json.loads(s)
-    except Exception:
+    except json.JSONDecodeError:
         pass
     try:
         return json.loads("{" + s + "}")
-    except Exception:
+    except json.JSONDecodeError:
         pass
 
 
@@ -469,12 +469,12 @@ def _coerce_value_string(v: str):
     # Try JSON
     try:
         return json.loads(v)
-    except Exception:
+    except json.JSONDecodeError:
         pass
     # Try Python literal (e.g., "['a','b']")
     try:
         return _ast.literal_eval(v)
-    except Exception:
+    except (ValueError, SyntaxError):
         pass
     # As-is string
     return v
@@ -496,12 +496,12 @@ def _to_str_list_relaxed(x: _Any) -> list[str]:
                 arr = json.loads(s)
                 if isinstance(arr, list):
                     return [str(e) for e in arr if str(e).strip()]
-            except Exception:
+            except json.JSONDecodeError:
                 try:
                     arr = _ast.literal_eval(s)
                     if isinstance(arr, (list, tuple)):
                         return [str(e) for e in arr if str(e).strip()]
-                except Exception:
+                except (ValueError, SyntaxError):
                     pass
         # Comma-separated fallback
         if "," in s:
@@ -562,7 +562,7 @@ def _coerce_int(x, default=0):
         if x is None or (isinstance(x, str) and x.strip() == ""):
             return default
         return int(x)
-    except Exception:
+    except (ValueError, TypeError):
         return default
 
 
@@ -1409,7 +1409,7 @@ async def repo_search(
             try:
                 obj = json.loads(line)
                 json_lines.append(obj)
-            except Exception:
+            except json.JSONDecodeError:
                 continue
         # Fallback: if subprocess yielded nothing (e.g., local dev without /work), try in-process once
         if (not json_lines):
@@ -1569,8 +1569,8 @@ async def repo_search(
                         rcmd += ["--under", under]
                     if os.environ.get("MCP_DEBUG_RERANK", "").strip():
                         try:
-                            print("RERANK_CMD:", " ".join(rcmd))
-                        except Exception:
+                            logger.debug("RERANK_CMD", extra={"cmd": " ".join(rcmd)})
+                        except (ValueError, TypeError):
                             pass
                     _floor_ms = int(os.environ.get("RERANK_TIMEOUT_FLOOR_MS", "1000"))
                     try:
@@ -1581,17 +1581,8 @@ async def repo_search(
                     _t_sec = max(0.1, _eff_ms / 1000.0)
                     rres = await _run_async(rcmd, env=env, timeout=_t_sec)
                     if os.environ.get("MCP_DEBUG_RERANK", "").strip():
-                        try:
-                            print(
-                                "RERANK_RET:",
-                                rres.get("code"),
-                                "OUT_LEN:",
-                                len((rres.get("stdout") or "").strip()),
-                                "ERR_TAIL:",
-                                (rres.get("stderr") or "")[-200:],
-                            )
-                        except Exception:
-                            pass
+
+                            logger.debug("RERANK_RET", extra={"code": rres.get("code"), "out_len": len((rres.get("stdout") or "").strip()), "err_tail": (rres.get("stderr") or "")[-200:]})
                     if rres.get("ok") and (rres.get("stdout") or "").strip():
                         rerank_counters["subprocess"] += 1
                         tmp = []
@@ -1604,12 +1595,12 @@ async def repo_search(
                                 start_s, end_s = range_s.split("-", 1)
                                 start_line = int(start_s)
                                 end_line = int(end_s)
-                            except Exception:
+                            except (ValueError, TypeError):
                                 start_line = 0
                                 end_line = 0
                             try:
                                 score = float(score_s)
-                            except Exception:
+                            except (ValueError, TypeError):
                                 score = 0.0
                             item = {
                                 "score": score,
@@ -1716,12 +1707,7 @@ async def repo_search(
 
     # Compact mode: return only path and line range
     if os.environ.get("DEBUG_REPO_SEARCH"):
-        try:
-            print("DEBUG_REPO_SEARCH: results=", len(results))
-            for i, r in enumerate(results[:5]):
-                print(f"  {i+1}: path={r.get('path')} symbol={r.get('symbol')} range={r.get('start_line')}-{r.get('end_line')}")
-        except Exception:
-            pass
+        logger.debug("DEBUG_REPO_SEARCH", extra={"count": len(results), "sample": [{"path": r.get("path"), "symbol": r.get("symbol"), "range": f"{r.get('start_line')}-{r.get('end_line')}"} for r in results[:5]]})
 
     if compact:
         results = [
@@ -2018,7 +2004,7 @@ async def change_history_for_path(
     coll = str(collection or "").strip() or _default_collection()
     try:
         mcap = int(max_points) if max_points not in (None, "") else 200
-    except Exception:
+    except (ValueError, TypeError):
         mcap = 200
     try:
         from qdrant_client import QdrantClient  # type: ignore
@@ -2229,7 +2215,7 @@ async def context_search(
 
     try:
         lim = int(limit) if (limit is not None and str(limit).strip() != "") else 10
-    except Exception:
+    except (ValueError, TypeError):
         lim = 10
     try:
         per_path_val = (
@@ -2237,7 +2223,7 @@ async def context_search(
             if (per_path is not None and str(per_path).strip() != "")
             else 1
         )
-    except Exception:
+    except (ValueError, TypeError):
         per_path_val = 1
 
     # Normalize queries to list (accept q/text aliases)
@@ -2304,7 +2290,7 @@ async def context_search(
             if isinstance(psl, dict):
                 code_limit = int(psl.get("code", code_limit))
                 mem_limit = int(psl.get("memory", mem_limit))
-        except Exception:
+        except (ValueError, TypeError):
             pass
 
     # First: run code search via internal repo_search for consistent behavior
@@ -2707,7 +2693,7 @@ async def context_search(
             if (memory_weight is not None and str(memory_weight).strip() != "")
             else 0.3
         )
-    except Exception:
+    except (ValueError, TypeError):
         mw = 0.3
 
     # Build per-source lists with adjusted scores
@@ -2785,7 +2771,7 @@ async def expand_query(query: Any = None, max_new: Any = None) -> Dict[str, Any]
         if max_new not in (None, ""):
             try:
                 cap = max(0, min(2, int(max_new)))
-            except Exception:
+            except (ValueError, TypeError):
                 cap = 2
         from scripts.refrag_llamacpp import LlamaCppRefragClient, is_decoder_enabled  # type: ignore
         if not is_decoder_enabled():
@@ -3266,11 +3252,7 @@ async def context_answer(
 
         # Debug: log effective retrieval filters before search
         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
-            try:
-                print(f"DEBUG FILTERS: language={eff_language}, override_under={override_under}, symbol={sym_arg}")
-                print(f"DEBUG FILTERS: path_glob={eff_path_glob}")
-            except Exception as _e:
-                print(f"DEBUG FILTERS: print failed: {_e}")
+            logger.debug("FILTERS", extra={"language": eff_language, "override_under": override_under, "symbol": sym_arg, "path_glob": eff_path_glob})
 
     items = []
     err = None
@@ -3369,7 +3351,7 @@ async def context_answer(
                             _seen.add(k)
                             added += 1
                     if os.environ.get("DEBUG_CONTEXT_ANSWER"):
-                        print(f"DEBUG USAGE_AUGMENT: asked={_asked}, added={added}, total_items={len(items)}")
+                        logger.debug("USAGE_AUGMENT", extra={"asked": _asked, "added": added, "total_items": len(items)})
 
                     # Additional targeted search for specific identifier patterns
                     if _asked and len(_asked) >= 3:
@@ -3405,25 +3387,15 @@ async def context_answer(
                                     _seen.add(k)
                                     added += 1
                             if os.environ.get("DEBUG_CONTEXT_ANSWER"):
-                                print(f"DEBUG TARGETED_SEARCH: found {len(targeted_items)} items, added {len([it for it in targeted_items if _ikey(it) not in _seen])}")
+                                logger.debug("TARGETED_SEARCH", extra={"found": len(targeted_items), "added": len([it for it in targeted_items if _ikey(it) not in _seen])})
         except (re.error, AttributeError, KeyError) as _e:
             logger.debug("Usage augmentation failed", exc_info=_e, extra={"asked": _asked if '_asked' in locals() else None})
             if os.environ.get("DEBUG_CONTEXT_ANSWER"):
-                print(f"DEBUG USAGE_AUGMENT failed: {_e}")
+                logger.debug("USAGE_AUGMENT_FAILED", exc_info=_e, extra={"asked": _asked if '_asked' in locals() else None})
 
         # Debug: log top retrieval results before any post-filters/budgeting
         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
-            try:
-                print(f"DEBUG RETRIEVAL: got {len(items)} items")
-                for i, it in enumerate(items[:5], 1):
-                    p = str(it.get("path") or "")
-                    s = int(it.get("start_line") or 0)
-                    e = int(it.get("end_line") or 0)
-                    score = it.get("score", "N/A")
-                    raw_score = it.get("raw_score", "N/A")
-                    print(f"DEBUG RETRIEVAL ITEM {i}: {p}:{s}-{e} score={score} raw_score={raw_score}")
-            except Exception as _e:
-                print(f"DEBUG RETRIEVAL: print failed: {_e}")
+            logger.debug("RETRIEVAL", extra={"count": len(items), "sample": [{"i": i, "path": str(it.get("path") or ""), "start": int(it.get("start_line") or 0), "end": int(it.get("end_line") or 0), "score": it.get("score", "N/A"), "raw_score": it.get("raw_score", "N/A")} for i, it in enumerate(items[:5], 1)]})
 
         # Post-filter by language using path heuristics when language is provided
         if req_language:
@@ -3469,9 +3441,7 @@ async def context_answer(
 
         # Debug: log search results
         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
-            print(f"DEBUG SEARCH RESULTS: found {len(items)} items")
-            for i, item in enumerate(items[:3]):
-                print(f"  Item {i+1}: {item.get('path')} lines {item.get('start_line')}-{item.get('end_line')}")
+            logger.debug("SEARCH_RESULTS", extra={"count": len(items), "sample": [{"i": i+1, "path": item.get('path'), "start": item.get('start_line'), "end": item.get('end_line')} for i, item in enumerate(items[:3])]})
 
         # Tier 2 fallback: broader hybrid search without gating/tight filters (unconditional when Tier 1 yields zero)
         if not items:
@@ -3592,26 +3562,26 @@ async def context_answer(
         from scripts.hybrid_search import _merge_and_budget_spans  # type: ignore
         try:
             if os.environ.get("DEBUG_CONTEXT_ANSWER"):
-                print(f"DEBUG: Before span budgeting: {len(items)} items")
+                logger.debug("BUDGET_BEFORE", extra={"items": len(items)})
             budgeted = _merge_and_budget_spans(items)
             if os.environ.get("DEBUG_CONTEXT_ANSWER"):
-                print(f"DEBUG: After span budgeting: {len(budgeted)} items")
+                logger.debug("BUDGET_AFTER", extra={"items": len(budgeted)})
             # Safety: if budgeting removed everything, fall back to raw items
             if not budgeted and items:
                 if os.environ.get("DEBUG_CONTEXT_ANSWER"):
-                    print("DEBUG: Span budgeting returned empty, using raw items")
+                    logger.debug("BUDGET_EMPTY_FALLBACK")
                 budgeted = items
         except (ImportError, AttributeError, KeyError) as e:
             logger.warning("Span budgeting failed, using raw items", exc_info=e)
             if os.environ.get("DEBUG_CONTEXT_ANSWER"):
-                print(f"DEBUG: Span budgeting failed: {e}, using raw items")
+                logger.debug("BUDGET_FAILED", exc_info=e)
             budgeted = items
 
         # Enforce an output max spans knob - do this BEFORE env restore
         # Increased default from 8 to 12 for better context coverage
         try:
             out_max = int(os.environ.get("MICRO_OUT_MAX_SPANS", "12") or 12)
-        except Exception:
+        except (ValueError, TypeError):
             out_max = 12
         # Respect caller-provided limit, allowing limit=0 to suppress snippets entirely
         span_cap = max(0, min(out_max, max(0, int(lim))))
@@ -3681,13 +3651,13 @@ async def context_answer(
                         hay = (hay + " " + extra.lower()).strip()
                         contains = ident_lower in hay
                 if os.environ.get("DEBUG_CONTEXT_ANSWER"):
-                    print(f"DEBUG IDENT HAY path={span.get('path')} contains_ident={'yes' if contains else 'no'} preview={hay[:80]}")
+                    logger.debug("IDENT_HAY", extra={"path": span.get('path'), "contains_ident": 'yes' if contains else 'no', "preview": hay[:80]})
                 if contains:
                     spans_with_ident.append(span)
                 else:
                     spans_without_ident.append(span)
             if os.environ.get("DEBUG_CONTEXT_ANSWER"):
-                print(f"DEBUG IDENT FILTER: ident={primary_ident}, with={len(spans_with_ident)}, without={len(spans_without_ident)}")
+                logger.debug("IDENT_FILTER", extra={"ident": primary_ident, "with": len(spans_with_ident), "without": len(spans_without_ident)})
             if spans_with_ident:
                 source_spans = spans_with_ident + spans_without_ident
             elif budgeted and items:
@@ -3713,12 +3683,12 @@ async def context_answer(
                             ident_candidates.append(span)
                             seen.add(key)
                     if os.environ.get("DEBUG_CONTEXT_ANSWER"):
-                        print(f"DEBUG IDENT AUGMENT: pulled {len(ident_candidates)} candidate spans for {primary_ident}")
+                        logger.debug("IDENT_AUGMENT", extra={"candidates": len(ident_candidates), "ident": primary_ident})
                     source_spans = ident_candidates
                 else:
                     # No identifier-bearing spans found; fall back to original source_spans
                     if os.environ.get("DEBUG_CONTEXT_ANSWER"):
-                        print(f"DEBUG IDENT AUGMENT: no candidates found for {primary_ident}, using original source_spans")
+                        logger.debug("IDENT_AUGMENT_NONE", extra={"ident": primary_ident})
 
         if span_cap:
             spans = source_spans[:span_cap]
@@ -3746,22 +3716,20 @@ async def context_answer(
                     if ckey not in keyset:
                         spans = [cand] + (spans[:-1] if span_cap and len(spans) >= span_cap else spans)
                         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
-                            print(f"DEBUG IDENT DEF LIFT: lifted {cand.get('path')}:{cand.get('start_line')}-{cand.get('end_line')}")
+                            logger.debug("IDENT_DEF_LIFT", extra={"path": cand.get('path'), "start": cand.get('start_line'), "end": cand.get('end_line')})
         except Exception as _e:
             if os.environ.get("DEBUG_CONTEXT_ANSWER"):
-                print(f"DEBUG IDENT DEF LIFT failed: {_e}")
+                logger.debug("IDENT_DEF_LIFT_FAILED", exc_info=_e)
 
         # Debug span selection
         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
-            print(f"DEBUG SPAN SELECTION: items={len(items)}, budgeted={len(budgeted)}, out_max={out_max}, lim={lim}, spans={len(spans)}")
+            logger.debug("SPAN_SELECTION", extra={"items": len(items), "budgeted": len(budgeted), "out_max": out_max, "lim": lim, "spans": len(spans)})
 
     except Exception as e:
         err = str(e)
         spans = []
         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
-            import traceback
-            print(f"DEBUG EXCEPTION: {type(e).__name__}: {err}")
-            traceback.print_exc()
+            logger.debug("EXCEPTION", exc_info=e, extra={"error": err})
     finally:
         # Restore env to previous values to avoid cross-call bleed
         for k, v in prev.items():
@@ -3819,14 +3787,14 @@ async def context_answer(
                 realp = _os.path.realpath(fp)
                 if not realp.startswith("/work/"):
                     if _os.environ.get("DEBUG_CONTEXT_ANSWER"):
-                        print(f"DEBUG: Blocked path traversal attempt: {path} -> {realp}")
+                        logger.debug("BLOCKED_PATH_TRAVERSAL", extra={"path": path, "real": realp})
                     snippet = ""
                 else:
                     with open(realp, "r", encoding="utf-8", errors="ignore") as f:
                         lines = f.readlines()
                     try:
                         margin = int(_os.environ.get("CTX_READ_MARGIN", "1") or 1)
-                    except Exception:
+                    except (ValueError, TypeError):
                         margin = 1
                     si = max(1, sline - margin)
                     ei = min(len(lines), max(sline, eline) + margin)
@@ -3842,20 +3810,13 @@ async def context_answer(
 
         snippets_by_id[idx] = snippet
         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
-            print(f"DEBUG: Snippet {idx} {('(payload)' if it.get('text') else '(fs)')} {path}:{sline}-{eline}, length={len(snippet)}")
-            if snippet:
-                print(f"DEBUG: Snippet {idx} content preview: {snippet[:200]}")
-                # Show full content for RRF_K line
-                if "RRF_K" in snippet and len(snippet) < 500:
-                    print(f"DEBUG: Snippet {idx} FULL RRF_K CONTENT: {repr(snippet)}")
-            else:
-                print(f"DEBUG: Snippet {idx} is EMPTY!")
+            logger.debug("SNIPPET", extra={"idx": idx, "source": ("payload" if it.get("text") else "fs"), "path": path, "sline": sline, "eline": eline, "length": len(snippet) if snippet else 0, "has_rrf_k": ("RRF_K" in snippet) if snippet else False, "empty": not bool(snippet)})
         header = f"[{idx}] {path}:{sline}-{eline}"
         # Increased snippet size for better context (was 600, now 1200)
         # This provides ~10-15 lines of code per snippet for better LLM understanding
         try:
             MAX_SNIPPET_CHARS = int(os.environ.get("CTX_SNIPPET_CHARS", "1200") or 1200)
-        except Exception:
+        except (ValueError, TypeError):
             MAX_SNIPPET_CHARS = 1200
         if snippet and len(snippet) > MAX_SNIPPET_CHARS:
             snippet = snippet[:MAX_SNIPPET_CHARS] + "\n..."
@@ -3879,11 +3840,7 @@ async def context_answer(
 
     # Debug: log span details
     if os.environ.get("DEBUG_CONTEXT_ANSWER"):
-        print(f"DEBUG: spans={len(spans)}, context_blocks={len(context_blocks)}")
-        for i, block in enumerate(context_blocks[:3], 1):
-            print(f"DEBUG: Context block {i}:")
-            print(block[:300])
-            print("---")
+        logger.debug("CONTEXT_BLOCKS", extra={"spans": len(spans), "context_blocks": len(context_blocks), "previews": [block[:300] for block in context_blocks[:3]]})
 
 
 
@@ -3901,12 +3858,12 @@ async def context_answer(
     def _to_int(v, d):
         try:
             return int(v)
-        except Exception:
+        except (ValueError, TypeError):
             return d
     def _to_float(v, d):
         try:
             return float(v)
-        except Exception:
+        except (ValueError, TypeError):
             return d
     # Generation params optimized for (code-focused, deterministic)
     mtok = _to_int(max_tokens, _to_int(os.environ.get("DECODER_MAX_TOKENS", "200"), 200))  # Shorter for conciseness
@@ -3989,11 +3946,7 @@ async def context_answer(
         )
 
         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
-            print(f"DEBUG: Single LLM call, prompt length={len(prompt)}")
-            print(f"DEBUG: Full prompt being sent to LLM:")
-            print("="*80)
-            print(prompt)
-            print("="*80)
+            logger.debug("LLM_PROMPT", extra={"length": len(prompt)})
 
         answer = client.generate_with_soft_embeddings(
             prompt=prompt,
@@ -4116,7 +4069,7 @@ async def context_answer(
 
         # Debug: log the cleaned/formatted LLM response
         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
-            print(f"DEBUG: cleaned+formatted LLM answer: '{answer}' (len={len(answer)})")
+            logger.debug("LLM_ANSWER", extra={"len": len(answer), "preview": answer[:200]})
 
         # Simple hallucination detection for tiny models
         # Check if answer contains generic phrases that suggest it's not grounded in the code
@@ -4132,7 +4085,7 @@ async def context_answer(
         has_citation_refs = any(f"[{i}]" in answer for i in range(1, len(citations) + 1))
         if hallucination_score >= 2 and not has_citation_refs:
             if os.environ.get("DEBUG_CONTEXT_ANSWER"):
-                print(f"DEBUG: Possible hallucination detected (score={hallucination_score}, has_refs={has_citation_refs})")
+                logger.debug("HALLUCINATION_DETECTED", extra={"score": hallucination_score, "has_refs": has_citation_refs})
             # Prepend a disclaimer for low-confidence answers
             answer = f"[Low confidence - answer may be generic] {answer}"
 
