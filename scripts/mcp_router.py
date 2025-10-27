@@ -162,6 +162,19 @@ def build_plan(q: str) -> List[Tuple[str, Dict[str, Any]]]:
     search_limit = int(os.environ.get("ROUTER_SEARCH_LIMIT", "8") or 8)
     max_tokens_env = os.environ.get("ROUTER_MAX_TOKENS", "").strip()
 
+    def _reuse_last_filters(args: Dict[str, Any]) -> None:
+        """Optionally hydrate `args` with cached filters when user asks for reuse."""
+        try:
+            if _looks_like_same_filters(q):
+                sp = _load_scratchpad()
+                lf = sp.get("last_filters") if isinstance(sp, dict) else None
+                if isinstance(lf, dict):
+                    for k in ("language", "under", "symbol", "ext", "path_glob", "not_glob"):
+                        if k not in args and lf.get(k) not in (None, ""):
+                            args[k] = lf.get(k)
+        except Exception:
+            pass
+
     # Repeat/redo handling: reuse last plan if asked
     try:
         if _looks_like_repeat(q):
@@ -215,16 +228,7 @@ def build_plan(q: str) -> List[Tuple[str, Dict[str, Any]]]:
             args["include_snippet"] = True
         # Attach safe filters if we inferred them
         # Optionally reuse last filters if requested
-        try:
-            if _looks_like_same_filters(q):
-                sp = _load_scratchpad()
-                lf = sp.get("last_filters") if isinstance(sp, dict) else None
-                if isinstance(lf, dict):
-                    for k in ("language", "under", "symbol", "ext", "path_glob", "not_glob"):
-                        if k not in args and lf.get(k) not in (None, ""):
-                            args[k] = lf.get(k)
-        except Exception:
-            pass
+        _reuse_last_filters(args)
 
         for k in ("language", "under", "symbol", "ext", "path_glob", "not_glob"):
             v = hints.get(k)
@@ -245,16 +249,7 @@ def build_plan(q: str) -> List[Tuple[str, Dict[str, Any]]]:
         if include_snippet:
             args["include_snippet"] = True
         # Optionally reuse last filters if requested
-        try:
-            if _looks_like_same_filters(q):
-                sp = _load_scratchpad()
-                lf = sp.get("last_filters") if isinstance(sp, dict) else None
-                if isinstance(lf, dict):
-                    for k in ("language", "under", "symbol", "ext", "path_glob", "not_glob"):
-                        if k not in args and lf.get(k) not in (None, ""):
-                            args[k] = lf.get(k)
-        except Exception:
-            pass
+        _reuse_last_filters(args)
 
         for k in ("language", "under", "symbol", "ext", "path_glob", "not_glob"):
             v = hints.get(k)
@@ -270,16 +265,7 @@ def build_plan(q: str) -> List[Tuple[str, Dict[str, Any]]]:
         if include_snippet:
             args["include_snippet"] = True
         # Optionally reuse last filters if requested
-        try:
-            if _looks_like_same_filters(q):
-                sp = _load_scratchpad()
-                lf = sp.get("last_filters") if isinstance(sp, dict) else None
-                if isinstance(lf, dict):
-                    for k in ("language", "under", "symbol", "ext", "path_glob", "not_glob"):
-                        if k not in args and lf.get(k) not in (None, ""):
-                            args[k] = lf.get(k)
-        except Exception:
-            pass
+        _reuse_last_filters(args)
 
         for k in ("language", "under", "symbol", "ext", "path_glob", "not_glob"):
             v = hints.get(k)
@@ -303,28 +289,7 @@ def build_plan(q: str) -> List[Tuple[str, Dict[str, Any]]]:
         if search_limit:
             args["limit"] = search_limit
         # Optionally reuse last filters if requested
-        try:
-            if _looks_like_same_filters(q):
-                sp = _load_scratchpad()
-                lf = sp.get("last_filters") if isinstance(sp, dict) else None
-                if isinstance(lf, dict):
-                    for k in ("language", "under", "symbol", "ext", "path_glob", "not_glob"):
-                        if k not in args and lf.get(k) not in (None, ""):
-                            args[k] = lf.get(k)
-        except Exception:
-            pass
-
-        # Optionally reuse last filters if requested
-        try:
-            if _looks_like_same_filters(q):
-                sp = _load_scratchpad()
-                lf = sp.get("last_filters") if isinstance(sp, dict) else None
-                if isinstance(lf, dict):
-                    for k in ("language", "under", "symbol", "ext", "path_glob", "not_glob"):
-                        if k not in args and lf.get(k) not in (None, ""):
-                            args[k] = lf.get(k)
-        except Exception:
-            pass
+        _reuse_last_filters(args)
 
         for k in ("language", "under", "symbol", "ext", "path_glob", "not_glob"):
             v = hints.get(k)
@@ -718,6 +683,22 @@ def _load_scratchpad() -> Dict[str, Any]:
         with open(p, "r", encoding="utf-8") as f:
             j = json.load(f)
             if isinstance(j, dict):
+                try:
+                    ts = float(j.get("timestamp") or 0.0)
+                except Exception:
+                    ts = 0.0
+                if ts and (time.time() - ts) > _scratchpad_ttl_sec():
+                    for stale_key in (
+                        "last_plan",
+                        "last_filters",
+                        "mem_snippets",
+                        "last_answer",
+                        "last_citations",
+                        "last_paths",
+                        "last_metrics",
+                    ):
+                        j.pop(stale_key, None)
+                    j["timestamp"] = 0.0
                 return j
     except Exception:
         pass
@@ -1353,4 +1334,3 @@ def main(argv: List[str]) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv[1:]))
-
