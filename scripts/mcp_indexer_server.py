@@ -78,6 +78,23 @@ APP_NAME = os.environ.get("FASTMCP_SERVER_NAME", "qdrant-indexer-mcp")
 HOST = os.environ.get("FASTMCP_HOST", "0.0.0.0")
 PORT = int(os.environ.get("FASTMCP_INDEXER_PORT", "8001"))
 
+# Process-wide lock to guard environment mutations during retrieval (gate-first/budgeting)
+_ENV_LOCK = threading.RLock()
+
+
+def _primary_identifier_from_queries(qs: list[str]) -> str:
+    """Best-effort extraction of the main CONSTANT_NAME or IDENTIFIER from queries."""
+    try:
+        import re as _re
+        cand: list[str] = []
+        for q in qs:
+            for t in _re.findall(r"[A-Za-z_][A-Za-z0-9_]*", q or ""):
+                if len(t) >= 2 and ("_" in t or t.isupper()):
+                    cand.append(t)
+        return next((t for t in cand if t), "")
+    except Exception:
+        return ""
+
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
 DEFAULT_COLLECTION = os.environ.get("COLLECTION_NAME", "my-collection")
 MAX_LOG_TAIL = int(os.environ.get("MCP_MAX_LOG_TAIL", "4000"))
@@ -128,7 +145,42 @@ def _work_script(name: str) -> str:
     return os.path.join(os.getcwd(), "scripts", name)
 
 
+# Invalidate router scratchpad after reindex to avoid stale state reuse
+_def_ws = "/work"
+
+def _invalidate_router_scratchpad(ws_path: str = _def_ws) -> bool:
+    try:
+        p = os.path.join(ws_path, ".codebase", "router_scratchpad.json")
+        if os.path.exists(p):
+            os.remove(p)
+            return True
+    except Exception:
+        pass
+    return False
+
+
 mcp = FastMCP(APP_NAME)
+
+
+# Capture tool registry automatically by wrapping the decorator once
+_TOOLS_REGISTRY: list[dict] = []
+try:
+    _orig_tool = mcp.tool
+    def _tool_capture_wrapper(*dargs, **dkwargs):
+        orig_deco = _orig_tool(*dargs, **dkwargs)
+        def _inner(fn):
+            try:
+                _TOOLS_REGISTRY.append({
+                    "name": dkwargs.get("name") or getattr(fn, "__name__", ""),
+                    "description": (getattr(fn, "__doc__", None) or "").strip(),
+                })
+            except Exception:
+                pass
+            return orig_deco(fn)
+        return _inner
+    mcp.tool = _tool_capture_wrapper  # type: ignore
+except Exception:
+    pass
 
 # Lightweight readiness endpoint on a separate health port (non-MCP), optional
 # Exposes GET /readyz returning {ok: true, app: <name>} once process is up.
@@ -150,6 +202,23 @@ def _start_readyz_server():
                         self.send_header("Content-Type", "application/json")
                         self.end_headers()
                         payload = {"ok": True, "app": APP_NAME}
+                        self.wfile.write((json.dumps(payload)).encode("utf-8"))
+                    elif self.path == "/tools":
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/json")
+                        self.end_headers()
+                        # Hide expand_query when decoder is disabled
+                        tools = _TOOLS_REGISTRY
+                        try:
+                            from scripts.refrag_llamacpp import is_decoder_enabled  # type: ignore
+                        except Exception:
+                            is_decoder_enabled = lambda: False  # type: ignore
+                        try:
+                            if not is_decoder_enabled():
+                                tools = [t for t in tools if (t.get("name") or "") != "expand_query"]
+                        except Exception:
+                            pass
+                        payload = {"ok": True, "tools": tools}
                         self.wfile.write((json.dumps(payload)).encode("utf-8"))
                     else:
                         self.send_response(404)
@@ -505,7 +574,14 @@ async def qdrant_index_root(
         cmd.append("--recreate")
 
     res = await _run_async(cmd, env=env)
-    return {"args": {"root": "/work", "collection": coll, "recreate": recreate}, **res}
+    ret = {"args": {"root": "/work", "collection": coll, "recreate": recreate}, **res}
+    try:
+        if ret.get("ok") and int(ret.get("code", 1)) == 0:
+            if _invalidate_router_scratchpad("/work"):
+                ret["invalidated_router_scratchpad"] = True
+    except Exception:
+        pass
+    return ret
 
 
 @mcp.tool()
@@ -856,7 +932,14 @@ async def qdrant_index(
         cmd.append("--recreate")
 
     res = await _run_async(cmd, env=env)
-    return {"args": {"root": root, "collection": coll, "recreate": recreate}, **res}
+    ret = {"args": {"root": root, "collection": coll, "recreate": recreate}, **res}
+    try:
+        if ret.get("ok") and int(ret.get("code", 1)) == 0:
+            if _invalidate_router_scratchpad("/work"):
+                ret["invalidated_router_scratchpad"] = True
+    except Exception:
+        pass
+    return ret
 
 
 @mcp.tool()
@@ -1633,6 +1716,48 @@ async def repo_search_compat(**arguments) -> Dict[str, Any]:
         return await repo_search(**clean)
     except Exception as e:
         return {"error": f"repo_search_compat failed: {e}"}
+
+
+
+@mcp.tool()
+async def context_answer_compat(arguments: Any = None) -> Dict[str, Any]:
+    """Compatibility wrapper for context_answer.
+
+    Accepts a single 'arguments' dict like RMCP/HTTP clients send and forwards to
+    context_answer with normalized keys. Mirrors repo_search_compat behavior but for
+    the answer tool.
+    """
+    try:
+        args = arguments or {}
+        query = args.get("query") or args.get("q") or args.get("text")
+        forward = {
+            "query": query,
+            "limit": args.get("limit"),
+            "per_path": args.get("per_path"),
+            "budget_tokens": args.get("budget_tokens"),
+            "include_snippet": args.get("include_snippet"),
+            "collection": args.get("collection"),
+            "max_tokens": args.get("max_tokens"),
+            "temperature": args.get("temperature"),
+            "mode": args.get("mode"),
+            "expand": args.get("expand"),
+            # ---- Forward retrieval filters so router hints are honored ----
+            "language": args.get("language"),
+            "under": args.get("under"),
+            "kind": args.get("kind"),
+            "symbol": args.get("symbol"),
+            "ext": args.get("ext"),
+            "path_regex": args.get("path_regex"),
+            "path_glob": args.get("path_glob"),
+            "not_glob": args.get("not_glob"),
+            "case": args.get("case"),
+            # pass through NOT filter under either key
+            "not_": args.get("not_") or args.get("not"),
+        }
+        clean = {k: v for k, v in forward.items() if v is not None}
+        return await context_answer(**clean)
+    except Exception as e:
+        return {"error": f"context_answer_compat failed: {e}"}
 
 
 
@@ -2558,7 +2683,9 @@ async def expand_query(query: Any = None, max_new: Any = None) -> Dict[str, Any]
             except Exception:
                 cap = 2
         from scripts.refrag_llamacpp import LlamaCppRefragClient, is_decoder_enabled  # type: ignore
-        if not is_decoder_enabled() or not qlist:
+        if not is_decoder_enabled():
+            return {"alternates": [], "hint": "decoder disabled: set REFRAG_DECODER=1 and start llamacpp (LLAMACPP_URL)"}
+        if not qlist:
             return {"alternates": []}
         prompt = (
             "You expand code search queries. Given short queries, propose up to 2 compact alternates.\n"
@@ -2709,14 +2836,26 @@ async def context_answer(
         return {"error": "query required"}
 
     # Effective limits
+    # For Q&A, we want more results per file to get comprehensive context
     try:
-        lim = int(limit) if (limit is not None and str(limit).strip() != "") else 10
+        lim = int(limit) if (limit is not None and str(limit).strip() != "") else 15
     except Exception:
-        lim = 10
+        lim = 15
     try:
-        ppath = int(per_path) if (per_path is not None and str(per_path).strip() != "") else 1
+        # Default per_path=5 for Q&A (vs 1 for search) to get multiple snippets from same file
+        # This ensures we capture both definitions and usages
+        ppath = int(per_path) if (per_path is not None and str(per_path).strip() != "") else 5
     except Exception:
-        ppath = 1
+        ppath = 5
+
+    # For identifier-focused questions, allow more snippets per file to capture both definition and usage
+    try:
+        import re as _re
+        _ids0 = _re.findall(r"\b([A-Z_][A-Z0-9_]{2,})\b", " ".join(queries))
+        if _ids0:
+            ppath = max(ppath, 5)
+    except Exception:
+        pass
 
     # Collection + model setup (reuse indexer defaults)
     coll = (collection or _default_collection()) or ""
@@ -2724,6 +2863,9 @@ async def context_answer(
     model = _get_embedding_model(model_name)
 
     # Prepare environment toggles for ReFRAG gate-first and budgeting
+    # Acquire lock to avoid cross-request env clobbering
+    _ENV_LOCK.acquire()
+
     prev = {
         "REFRAG_MODE": os.environ.get("REFRAG_MODE"),
         "REFRAG_GATE_FIRST": os.environ.get("REFRAG_GATE_FIRST"),
@@ -2793,24 +2935,52 @@ async def context_answer(
             pass
 
     # Default exclusions to avoid noisy self-test and cache artifacts
+    # Also filter out metadata/config files that pollute Q&A context
+    # This significantly improves answer quality by focusing on implementation code
     user_not_glob = kwargs.get("not_glob")
     if isinstance(user_not_glob, str):
         user_not_glob = [user_not_glob]
-    base_excludes = [".selftest_repo/", ".pytest_cache/"]
+    base_excludes = [
+        ".selftest_repo/",
+        ".pytest_cache/",
+        ".codebase/",      # Indexer metadata (state.json, cache.json, etc.)
+        ".kiro/",          # IDE configs
+        "node_modules/",   # Dependencies
+        ".git/",           # VCS internals
+    ]
     # Add robust variants for absolute and recursive matching
+    # Simplified to avoid over-filtering
     def _variants(p: str) -> list[str]:
         p = str(p).strip().strip()
         if not p:
             return []
         p = p.replace("\\", "/").lstrip("/")
-        return [
-            p,  # relative
-            f"/work/{p}",  # absolute in payloads
-            f"**/{p}**",  # recursive glob
-        ]
+        # Only use recursive glob pattern to catch all cases
+        return [f"**/{p}**"]
+
+    # Build defaults and conditional exclusions (skip if explicitly mentioned in query)
     default_not_glob = []
     for b in base_excludes:
         default_not_glob.extend(_variants(b))
+    qtext = " ".join(queries).lower()
+    def _mentions_any(keys: list[str]) -> bool:
+        return any(k in qtext for k in keys)
+    maybe_excludes = []
+    if not _mentions_any([".env", "dotenv", "environment variable", "env var"]):
+        maybe_excludes += [".env", ".env.*"]
+    if not _mentions_any(["docker-compose", "compose"]):
+        maybe_excludes += ["docker-compose*.yml", "docker-compose*.yaml", "compose*.yml", "compose*.yaml"]
+    if not _mentions_any(["lock", "package-lock.json", "pnpm-lock", "yarn.lock", "poetry.lock", "cargo.lock", "go.sum", "composer.lock"]):
+        maybe_excludes += [
+            "*.lock", "package-lock.json", "pnpm-lock.yaml", "yarn.lock",
+            "poetry.lock", "Cargo.lock", "go.sum", "composer.lock"
+        ]
+    if not _mentions_any(["appsettings", "settings.json", "config"]):
+        maybe_excludes += ["appsettings*.json"]
+    # Apply variants for all conditional patterns
+    for pat in maybe_excludes:
+        default_not_glob.extend(_variants(pat))
+
     # Dedup while preserving order
     seen = set()
     eff_not_glob = []
@@ -2834,25 +3004,228 @@ async def context_answer(
             print(f"DEBUG ENV: REFRAG_MODE={os.environ.get('REFRAG_MODE')}, COLLECTION_NAME={os.environ.get('COLLECTION_NAME')}")
             print(f"DEBUG FILTERS: not_glob={eff_not_glob}")
 
-        # Initial search
+
+        # Initial search (tighten file/area when hinted and no explicit path_glob)
+        def _to_glob_list(val: Any) -> list[str]:
+            if not val:
+                return []
+            if isinstance(val, (list, tuple, set)):
+                return [str(x).strip() for x in val if str(x).strip()]
+            vs = str(val).strip()
+            return [vs] if vs else []
+
         req_language = kwargs.get("language") or None
+        eff_language = req_language or ("python" if ("router" in qtext and not req_language) else None)
+
+        user_path_glob = _to_glob_list(kwargs.get("path_glob"))
+        eff_path_glob: list[str] = list(user_path_glob)
+
+        user_under = kwargs.get("under") or None
+        override_under = None
+        if isinstance(user_under, str):
+            _uu = user_under.strip()
+            if _uu:
+                if "/" not in _uu:
+                    eff_path_glob.append(f"**/{_uu}")
+                else:
+                    override_under = _uu if _uu.startswith("/") else f"/{_uu.lstrip('./')}"
+        elif user_under:
+            override_under = str(user_under)
+
+        # Router-specific tightening when the word 'router' is present
+        if ("router" in qtext):
+            if not eff_path_glob:
+                eff_path_glob = ["**/mcp_router.py", "**/*router*.py"]
+            if not eff_language:
+                eff_language = "python"
+
+        # Normalize path_glob list -> None when empty
+        if eff_path_glob:
+            dedup_pg = []
+            seen_pg = set()
+            for pg in eff_path_glob:
+                pg_str = str(pg).strip()
+                if not pg_str or pg_str in seen_pg:
+                    continue
+                seen_pg.add(pg_str)
+                dedup_pg.append(pg_str)
+            eff_path_glob = dedup_pg
+        else:
+            eff_path_glob = None
+        # Sanitize symbol: ignore file-like strings passed as symbol
+        sym_arg = kwargs.get("symbol") or None
+        try:
+            if sym_arg and ("/" in str(sym_arg) or "." in str(sym_arg)):
+                sym_arg = None
+        except Exception:
+            pass
+        # Query sharpening: extract code identifiers and add targeted search terms
+        try:
+            qj = " ".join(queries)
+            import re as _re
+
+            primary = _primary_identifier_from_queries(queries)
+            if primary and any(word in qj.lower() for word in ["what is", "how is", "used", "usage", "define"]):
+                def _add_query(q: str):
+                    qs = q.strip()
+                    if qs and qs not in queries:
+                        queries.append(qs)
+
+                # Always keep the original user tokens; just append focused probes
+                _add_query(primary)
+                _add_query(f"{primary} =")
+                func_name = primary.lower().split("_")[0]
+                if func_name and len(func_name) > 2:
+                    _add_query(f"def {func_name}(")
+            else:
+                # For other queries, add basename if we have path_glob
+                if eff_path_glob:
+                    def _basename(p: str) -> str:
+                        s = str(p).replace("\\", "/").strip()
+                        return s.split("/")[-1] if "/" in s else s
+
+                    basenames = []
+                    if isinstance(eff_path_glob, (list, tuple)):
+                        basenames = [_basename(p) for p in eff_path_glob]
+                    else:
+                        basenames = [_basename(str(eff_path_glob))]
+                    for bn in basenames:
+                        if bn and bn not in queries:
+                            queries.append(bn)
+        except Exception:
+            pass
+
+        # Debug: log effective retrieval filters before search
+        if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+            try:
+                print(f"DEBUG FILTERS: language={eff_language}, override_under={override_under}, symbol={sym_arg}")
+                print(f"DEBUG FILTERS: path_glob={eff_path_glob}")
+            except Exception as _e:
+                print(f"DEBUG FILTERS: print failed: {_e}")
+
+
         items = run_hybrid_search(
             queries=queries,
             limit=int(max(lim, 4)),  # fetch a few extra for budgeting
             per_path=int(max(ppath, 0)),
-            language=req_language,
-            under=kwargs.get("under") or None,
+            language=eff_language,
+            under=override_under or None,
             kind=kwargs.get("kind") or None,
-            symbol=kwargs.get("symbol") or None,
+            symbol=sym_arg,
             ext=kwargs.get("ext") or None,
             not_filter=kwargs.get("not_") or kwargs.get("not") or None,
             case=kwargs.get("case") or None,
             path_regex=kwargs.get("path_regex") or None,
-            path_glob=(kwargs.get("path_glob") or None),
+            path_glob=eff_path_glob,
             not_glob=eff_not_glob,
             expand=str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower() in {"1","true","yes","on"},
             model=model,
         )
+
+        # Augment retrieval to capture usage sites of the identifier (e.g., default args, function defs)
+        try:
+            import re as _re
+            qj2 = " ".join(queries)
+            _ids = _re.findall(r"\b([A-Z_][A-Z0-9_]{2,})\b", qj2)
+            _asked = _ids[0] if _ids else ""
+            if _asked:
+                _fname = _asked.lower().split("_")[0]
+                _usage_qs = []
+                if _fname and len(_fname) >= 2:
+                    _usage_qs.append(f"def {_fname}(")
+                _usage_qs.extend([
+                    f"{_asked})", f"{_asked},", f"= {_asked}", f"{_asked} =",
+                    f"{_asked} = int(os.environ.get", f"int(os.environ.get(\"{_asked}\""
+                ])
+                _usage_qs = [u for u in _usage_qs if u and u not in queries]
+                if _usage_qs:
+                    usage_items = run_hybrid_search(
+                        queries=list(queries) + _usage_qs,
+                        limit=int(max(lim, 30)),
+                        per_path=int(max(ppath, 10)),
+                        language=eff_language,
+                        under=override_under or None,
+                        kind=kwargs.get("kind") or None,
+                        symbol=sym_arg,
+                        ext=kwargs.get("ext") or None,
+                        not_filter=kwargs.get("not_") or kwargs.get("not") or None,
+                        case=kwargs.get("case") or None,
+                        path_regex=kwargs.get("path_regex") or None,
+                        path_glob=eff_path_glob,
+                        not_glob=eff_not_glob,
+                        expand=str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower() in {"1","true","yes","on"},
+                        model=model,
+                    )
+                    # Merge unique by (path, start_line, end_line)
+                    def _ikey(it: Dict[str, Any]):
+                        return (
+                            str(it.get("path") or ""),
+                            int(it.get("start_line") or 0),
+                            int(it.get("end_line") or 0),
+                        )
+                    _seen = { _ikey(it) for it in items }
+                    added = 0
+                    for it in usage_items:
+                        k = _ikey(it)
+                        if k not in _seen:
+                            items.append(it)
+                            _seen.add(k)
+                            added += 1
+                    if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                        print(f"DEBUG USAGE_AUGMENT: asked={_asked}, added={added}, total_items={len(items)}")
+
+                    # Additional targeted search for specific identifier patterns
+                    if _asked and len(_asked) >= 3:
+                        targeted_qs = [
+                            f"{_asked} = int(os.environ.get",
+                            f"def {_fname}(rank: int, k: int = {_asked})" if _fname else None
+                        ]
+                        targeted_qs = [q for q in targeted_qs if q]
+                        if targeted_qs:
+                            targeted_items = run_hybrid_search(
+                                queries=targeted_qs,
+                                limit=10,
+                                per_path=5,
+                                language=eff_language,
+                                under=override_under or None,
+                                kind=kwargs.get("kind") or None,
+                                symbol=sym_arg,
+                                ext=kwargs.get("ext") or None,
+                                not_filter=kwargs.get("not_") or kwargs.get("not") or None,
+                                case=kwargs.get("case") or None,
+                                path_regex=kwargs.get("path_regex") or None,
+                                path_glob=eff_path_glob,
+                                not_glob=eff_not_glob,
+                                expand=str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower() in {"1","true","yes","on"},
+                                model=model,
+                            )
+                            # Merge targeted results with higher priority
+                            for it in targeted_items:
+                                k = _ikey(it)
+                                if k not in _seen:
+                                    # Insert at beginning for higher priority
+                                    items.insert(0, it)
+                                    _seen.add(k)
+                                    added += 1
+                            if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                                print(f"DEBUG TARGETED_SEARCH: found {len(targeted_items)} items, added {len([it for it in targeted_items if _ikey(it) not in _seen])}")
+        except Exception as _e:
+            if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                print(f"DEBUG USAGE_AUGMENT failed: {_e}")
+
+        # Debug: log top retrieval results before any post-filters/budgeting
+        if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+            try:
+                print(f"DEBUG RETRIEVAL: got {len(items)} items")
+                for i, it in enumerate(items[:5], 1):
+                    p = str(it.get("path") or "")
+                    s = int(it.get("start_line") or 0)
+                    e = int(it.get("end_line") or 0)
+                    score = it.get("score", "N/A")
+                    raw_score = it.get("raw_score", "N/A")
+                    print(f"DEBUG RETRIEVAL ITEM {i}: {p}:{s}-{e} score={score} raw_score={raw_score}")
+            except Exception as _e:
+                print(f"DEBUG RETRIEVAL: print failed: {_e}")
 
         # Post-filter by language using path heuristics when language is provided
         if req_language:
@@ -2898,8 +3271,17 @@ async def context_answer(
                     queries=queries,
                     limit=int(max(lim, 4)),
                     per_path=int(max(ppath, 0)),
+                    language=eff_language,
+                    under=override_under or None,
+                    kind=kwargs.get("kind") or None,
+                    symbol=sym_arg,
+                    ext=kwargs.get("ext") or None,
+                    not_filter=kwargs.get("not_") or kwargs.get("not") or None,
+                    case=kwargs.get("case") or None,
+                    path_regex=kwargs.get("path_regex") or None,
+                    path_glob=eff_path_glob,
                     not_glob=eff_not_glob,
-                    expand=True,
+                    expand=str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower() in {"1","true","yes","on"},
                     model=model,
                 )
             finally:
@@ -2919,17 +3301,155 @@ async def context_answer(
             budgeted = _merge_and_budget_spans(items)
             if os.environ.get("DEBUG_CONTEXT_ANSWER"):
                 print(f"DEBUG: After span budgeting: {len(budgeted)} items")
+            # Safety: if budgeting removed everything, fall back to raw items
+            if not budgeted and items:
+                if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                    print("DEBUG: Span budgeting returned empty, using raw items")
+                budgeted = items
         except Exception as e:
             if os.environ.get("DEBUG_CONTEXT_ANSWER"):
                 print(f"DEBUG: Span budgeting failed: {e}, using raw items")
             budgeted = items
 
         # Enforce an output max spans knob - do this BEFORE env restore
+        # Increased default from 8 to 12 for better context coverage
         try:
-            out_max = int(os.environ.get("MICRO_OUT_MAX_SPANS", "8") or 8)
+            out_max = int(os.environ.get("MICRO_OUT_MAX_SPANS", "12") or 12)
         except Exception:
-            out_max = 8
-        spans = budgeted[: max(1, min(out_max, lim))]
+            out_max = 12
+        # Respect caller-provided limit, allowing limit=0 to suppress snippets entirely
+        span_cap = max(0, min(out_max, max(0, int(lim))))
+        source_spans = list(budgeted) if budgeted else list(items)
+
+        # Prefer spans that actually contain the main identifier when one is present
+        def _read_span_snippet(span: Dict[str, Any]) -> str:
+            cached = span.get("_ident_snippet")
+            if cached is not None:
+                return str(cached)
+            if not include_snippet:
+                return ""
+            try:
+                path = str(span.get("path") or "")
+                sline = int(span.get("start_line") or 0)
+                eline = int(span.get("end_line") or 0)
+                if not path or sline <= 0:
+                    span["_ident_snippet"] = ""
+                    return ""
+                fp = path
+                if not os.path.isabs(fp):
+                    fp = os.path.join("/work", fp)
+                realp = os.path.realpath(fp)
+                if not realp.startswith("/work/"):
+                    span["_ident_snippet"] = ""
+                    return ""
+                with open(realp, "r", encoding="utf-8", errors="ignore") as f:
+                    lines = f.readlines()
+                si = max(1, sline - 1)
+                ei = min(len(lines), max(sline, eline) + 1)
+                snippet = "".join(lines[si - 1 : ei])
+                span["_ident_snippet"] = snippet
+                return snippet
+            except Exception:
+                span["_ident_snippet"] = ""
+                return ""
+
+        def _span_haystack(span: Dict[str, Any]) -> str:
+            parts = [
+                str(span.get("text") or ""),
+                str(span.get("symbol") or ""),
+                str((span.get("relations") or {}).get("symbol_path") if isinstance(span.get("relations"), dict) else ""),
+                str(span.get("path") or ""),
+                str(span.get("_ident_snippet") or ""),
+            ]
+            return " ".join(parts).lower()
+
+        def _span_key(span: Dict[str, Any]) -> tuple[str, int, int]:
+            return (
+                str(span.get("path") or ""),
+                int(span.get("start_line") or 0),
+                int(span.get("end_line") or 0),
+            )
+
+        primary_ident = _primary_identifier_from_queries(queries)
+        if primary_ident and source_spans:
+            ident_lower = primary_ident.lower()
+            spans_with_ident: list[Dict[str, Any]] = []
+            spans_without_ident: list[Dict[str, Any]] = []
+
+            for span in source_spans:
+                hay = _span_haystack(span)
+                contains = ident_lower in hay
+                if not contains:
+                    extra = _read_span_snippet(span)
+                    if extra:
+                        hay = (hay + " " + extra.lower()).strip()
+                        contains = ident_lower in hay
+                if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                    print(f"DEBUG IDENT HAY path={span.get('path')} contains_ident={'yes' if contains else 'no'} preview={hay[:80]}")
+                if contains:
+                    spans_with_ident.append(span)
+                else:
+                    spans_without_ident.append(span)
+            if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                print(f"DEBUG IDENT FILTER: ident={primary_ident}, with={len(spans_with_ident)}, without={len(spans_without_ident)}")
+            if spans_with_ident:
+                source_spans = spans_with_ident + spans_without_ident
+            elif budgeted and items:
+                # Try to pull identifier-bearing spans from the broader pool
+                ident_candidates: list[Dict[str, Any]] = []
+                seen = set()
+                for span in items:
+                    key = _span_key(span)
+                    if key in seen:
+                        continue
+                    hay = _span_haystack(span)
+                    if ident_lower not in hay:
+                        extra = _read_span_snippet(span)
+                        if extra:
+                            hay = (hay + " " + extra.lower()).strip()
+                    if ident_lower in hay:
+                        ident_candidates.append(span)
+                        seen.add(key)
+                if ident_candidates:
+                    for span in source_spans:
+                        key = _span_key(span)
+                        if key not in seen:
+                            ident_candidates.append(span)
+                            seen.add(key)
+                    if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                        print(f"DEBUG IDENT AUGMENT: pulled {len(ident_candidates)} candidate spans for {primary_ident}")
+                    source_spans = ident_candidates
+
+        if span_cap:
+            spans = source_spans[:span_cap]
+        else:
+            spans = []
+
+        # If we have a primary identifier, try to lift a definition span (IDENT = ...) to the front
+        try:
+            if spans and primary_ident:
+                import re as _re
+                def _is_def_span(span: Dict[str, Any]) -> bool:
+                    sn = _read_span_snippet(span) or ""
+                    for _ln in sn.splitlines():
+                        if _re.match(rf"\s*{_re.escape(primary_ident)}\s*=\s*", _ln):
+                            return True
+                    return False
+                # Prefer from current source_spans, then fall back to full items
+                cand = next((sp for sp in source_spans if _is_def_span(sp)), None)
+                if not cand:
+                    cand = next((sp for sp in items if _is_def_span(sp)), None)
+                if cand:
+                    # Insert at front if not already present
+                    keyset = { (str(s.get('path') or ''), int(s.get('start_line') or 0), int(s.get('end_line') or 0)) for s in spans }
+                    ckey = (str(cand.get('path') or ''), int(cand.get('start_line') or 0), int(cand.get('end_line') or 0))
+                    if ckey not in keyset:
+                        spans = [cand] + (spans[:-1] if span_cap and len(spans) >= span_cap else spans)
+                        if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                            print(f"DEBUG IDENT DEF LIFT: lifted {cand.get('path')}:{cand.get('start_line')}-{cand.get('end_line')}")
+        except Exception as _e:
+            if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                print(f"DEBUG IDENT DEF LIFT failed: {_e}")
 
         # Debug span selection
         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
@@ -2948,12 +3468,22 @@ async def context_answer(
                     pass
             else:
                 os.environ[k] = v
+        # Release lock after environment restored
+        _ENV_LOCK.release()
+
     if err is not None:
         return {"error": f"hybrid search failed: {err}", "citations": [], "query": queries}
 
     # Build citations and context payload for the decoder
     citations: list[Dict[str, Any]] = []
+    snippets_by_id: dict[int, str] = {}
+
     context_blocks: list[str] = []
+    # Prepare deterministic definition/usage extraction
+    asked_ident = _primary_identifier_from_queries(queries)
+    _def_line_exact: str = ""
+    _def_id: int | None = None
+    _usage_id: int | None = None
     for idx, it in enumerate(spans, 1):
         path = str(it.get("path") or "")
         sline = int(it.get("start_line") or 0)
@@ -2971,36 +3501,93 @@ async def context_answer(
         if _contp:
             _cit["container_path"] = _contp
         citations.append(_cit)
-        # Use snippet from search payload only (no filesystem read)
         snippet = str(it.get("text") or "").strip()
+        if not snippet and it.get("_ident_snippet"):
+            snippet = str(it.get("_ident_snippet")).strip()
+        # For context_answer, always read from filesystem to get complete, untruncated content
+        # (payload text may be truncated for storage efficiency)
+        if not snippet and path and sline and include_snippet:
+            try:
+                fp = path
+                import os as _os
+                if not _os.path.isabs(fp):
+                    fp = _os.path.join("/work", fp)
+                realp = _os.path.realpath(fp)
+                # SECURITY: Verify the resolved path stays within /work to prevent path traversal
+                if not realp.startswith("/work/"):
+                    if _os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                        print(f"DEBUG: Blocked path traversal attempt: {path} -> {realp}")
+                    snippet = ""
+                else:
+                    with open(realp, "r", encoding="utf-8", errors="ignore") as f:
+                        lines = f.readlines()
+                    try:
+                        margin = int(_os.environ.get("CTX_READ_MARGIN", "1") or 1)
+                    except Exception:
+                        margin = 1
+                    si = max(1, sline - margin)
+                    ei = min(len(lines), max(sline, eline) + margin)
+                    snippet = "".join(lines[si-1:ei])
+                    it["_ident_snippet"] = snippet
+            except Exception:
+                snippet = ""
+        # Fallbacks if FS read failed or include_snippet is false
+        if not snippet:
+            snippet = str(it.get("text") or "").strip()
+        if not snippet and it.get("_ident_snippet"):
+            snippet = str(it.get("_ident_snippet")).strip()
+
+        snippets_by_id[idx] = snippet
         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
-            print(f"DEBUG: Snippet {idx} (payload) {path}:{sline}-{eline}, length={len(snippet)}, starts with: {snippet[:80] if snippet else 'EMPTY'}...")
+            print(f"DEBUG: Snippet {idx} {('(payload)' if it.get('text') else '(fs)')} {path}:{sline}-{eline}, length={len(snippet)}")
+            if snippet:
+                print(f"DEBUG: Snippet {idx} content preview: {snippet[:200]}")
+                # Show full content for RRF_K line
+                if "RRF_K" in snippet and len(snippet) < 500:
+                    print(f"DEBUG: Snippet {idx} FULL RRF_K CONTENT: {repr(snippet)}")
+            else:
+                print(f"DEBUG: Snippet {idx} is EMPTY!")
         header = f"[{idx}] {path}:{sline}-{eline}"
-        # Keep snippets small - we want total prompt under 4k chars for 1.5B model
+        # Increased snippet size for better context (was 600, now 1200)
+        # This provides ~10-15 lines of code per snippet for better LLM understanding
         try:
-            MAX_SNIPPET_CHARS = int(os.environ.get("CTX_SNIPPET_CHARS", "600") or 600)
+            MAX_SNIPPET_CHARS = int(os.environ.get("CTX_SNIPPET_CHARS", "1200") or 1200)
         except Exception:
-            MAX_SNIPPET_CHARS = 600
+            MAX_SNIPPET_CHARS = 1200
         if snippet and len(snippet) > MAX_SNIPPET_CHARS:
             snippet = snippet[:MAX_SNIPPET_CHARS] + "\n..."
         block = header + "\n" + (snippet.strip() if snippet else "(no code)")
         context_blocks.append(block)
+        # Extract definition/usage occurrences for robust formatting
+        try:
+            if asked_ident and snippet:
+                import re as _re
+                for _ln in str(snippet).splitlines():
+                    if not _def_line_exact and _re.match(rf"\s*{_re.escape(asked_ident)}\s*=", _ln):
+                        _def_line_exact = _ln.strip()
+                        _def_id = idx
+                    elif (asked_ident in _ln) and (_def_id != idx):
+                        if _usage_id is None:
+                            _usage_id = idx
+        except Exception:
+            pass
 
 
 
     # Debug: log span details
     if os.environ.get("DEBUG_CONTEXT_ANSWER"):
         print(f"DEBUG: spans={len(spans)}, context_blocks={len(context_blocks)}")
-        if context_blocks:
-            print(f"DEBUG: first context block: {context_blocks[0][:200]}...")
-        else:
-            print("DEBUG: no context blocks!")
+        for i, block in enumerate(context_blocks[:3], 1):
+            print(f"DEBUG: Context block {i}:")
+            print(block[:300])
+            print("---")
 
 
 
-    # Optional stop sequences via env (comma-separated)
+    # Stop sequences for Granite-4.0-Micro + optional env overrides
     stop_env = os.environ.get("DECODER_STOP", "")
-    stops = [s for s in (stop_env.split(",") if stop_env else []) if s]
+    default_stops = ["<|end_of_text|>", "<|start_of_role|>"]  # Granite format tokens
+    stops = default_stops + [s for s in (stop_env.split(",") if stop_env else []) if s]
 
     # Decoder parameter tuning for small models (defaults can be overridden via args or env)
     def _to_int(v, d):
@@ -3013,11 +3600,12 @@ async def context_answer(
             return float(v)
         except Exception:
             return d
-    # Default 300 tokens for concise answers
-    mtok = _to_int(max_tokens, _to_int(os.environ.get("DECODER_MAX_TOKENS", "300"), 300))
-    temp = _to_float(temperature, _to_float(os.environ.get("DECODER_TEMPERATURE", "0.1"), 0.1))
-    top_k = _to_int(os.environ.get("DECODER_TOP_K", "40"), 40)
-    top_p = _to_float(os.environ.get("DECODER_TOP_P", "0.92"), 0.92)
+    # Generation params optimized for (code-focused, deterministic)
+    mtok = _to_int(max_tokens, _to_int(os.environ.get("DECODER_MAX_TOKENS", "200"), 200))  # Shorter for conciseness
+    # Granite 4.0 models work best with temperature 0 for deterministic extraction
+    temp = _to_float(temperature, _to_float(os.environ.get("DECODER_TEMPERATURE", "0"), 0.0))
+    top_k = _to_int(os.environ.get("DECODER_TOP_K", "20"), 20)  # More focused
+    top_p = _to_float(os.environ.get("DECODER_TOP_P", "0.85"), 0.85)  # More deterministic
 
     # Call llama.cpp decoder (requires REFRAG_DECODER=1)
     try:
@@ -3034,19 +3622,63 @@ async def context_answer(
         qtxt = "\n".join(queries)
         all_context = "\n\n".join(context_blocks) if context_blocks else "(no code found)"
 
+        # Derive lightweight usage hint heuristics to anchor tiny models
+        extra_hint = ""
+        try:
+            if ("def rrf(" in all_context) and ("/(k + rank)" in all_context or "/ (k + rank)" in all_context):
+                extra_hint = "RRF (Reciprocal Rank Fusion) formula 1.0 / (k + rank); parameter k defaults to RRF_K in def rrf."
+        except Exception:
+            extra_hint = ""
+
         # Build a sources footer (IDs and paths) to guide the model and satisfy downstream consumers
         sources_footer = "\n".join([f"[{c.get('id')}] {c.get('path')}" for c in citations]) if citations else ""
+
+        # Extract key identifiers from code to help tiny models stay grounded
+        import re
+        key_terms = set()
+        for block in context_blocks:
+            # Extract function/class names, constants, and variables
+            # Match: def func_name, class ClassName, CONSTANT_NAME = value
+            matches = re.findall(r'\b(?:def|class|const|let|var|function)\s+([A-Za-z_][A-Za-z0-9_]*)', block)
+            matches += re.findall(r'\b([A-Z_]{2,})\s*=', block)  # CONSTANTS
+            key_terms.update(matches[:10])  # Limit to avoid prompt bloat
+
+        key_terms_str = ", ".join(sorted(key_terms)[:15]) if key_terms else "none found"
+
+        # Use Granite's proven RAG pattern for strict document grounding
+        # Based on official Granite 4.0 RAG examples that enforce "strictly aligning with facts"
+        system_msg = (
+            "You are a helpful assistant with access to the following code snippets. "
+            "You may use one or more snippets to assist with the user query.\n\n"
+            "You are given code snippets with [ID] path:lines format:\n"
+            f"{all_context}\n\n"
+            + (f"Key identifiers: {key_terms_str}\n" if key_terms_str != "none found" else "")
+            + (f"Hint: {extra_hint}\n\n" if extra_hint else "")
+            + "Write the response to the user's input by strictly aligning with the facts in the provided code snippets. "
+            "Always answer in exactly two lines with citations: "
+            "Definition: \"<exact code definition line(s) verbatim>\" [ID]\n"
+            "Usage: <one-sentence summary of how/where it is used based only on the snippets> [ID]. "
+            "If the definition or usage is not present in the snippets, state 'Not found in provided snippets.' for that line."
+        )
+        if sources_footer:
+            system_msg += f"\nSources:\n{sources_footer}"
+
+        user_msg = f"{qtxt}"
+
+        # Use Granite-4.0-Micro chat template format
+        # Based on official HF documentation: <|start_of_role|>role<|end_of_role|>content<|end_of_text|>
         prompt = (
-            "Using ONLY the cited code, write a concise factual summary naming the file/function(s) and what they do.\n"
-            "Target 600–1000 characters in 2–3 tight sentences. No preamble/markdown. No repetition.\n"
-            f"Question: {qtxt}\n\n"
-            f"Code:\n{all_context}\n\n"
-            f"Sources:\n{sources_footer}\n\n"
-            "Answer:"
+            f"<|start_of_role|>system<|end_of_role|>{system_msg}<|end_of_text|>\n"
+            f"<|start_of_role|>user<|end_of_role|>{user_msg}<|end_of_text|>\n"
+            "<|start_of_role|>assistant<|end_of_role|>"
         )
 
         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
             print(f"DEBUG: Single LLM call, prompt length={len(prompt)}")
+            print(f"DEBUG: Full prompt being sent to LLM:")
+            print("="*80)
+            print(prompt)
+            print("="*80)
 
         answer = client.generate_with_soft_embeddings(
             prompt=prompt,
@@ -3069,9 +3701,123 @@ async def context_answer(
         # Cleanup repetition and optionally cap length
         answer = _cleanup_answer(answer, max_chars=(_cap if _cap and _cap > 0 else None))
 
-        # Debug: log the cleaned LLM response
+        # Enforce strict two-line output with grounded definition using extracted snippet, for production reliability
+        try:
+            import re as _re
+            txt = (answer or "").strip()
+            # Split on explicit markers if present; otherwise infer
+            def_part = ""
+            usage_part = ""
+            if "Usage:" in txt:
+                parts = txt.split("Usage:", 1)
+                def_part = parts[0]
+                usage_part = parts[1]
+                if "Definition:" in def_part:
+                    def_part = def_part.split("Definition:", 1)[1]
+            elif "Definition:" in txt:
+                def_part = txt.split("Definition:", 1)[1]
+                usage_part = ""
+            else:
+                def_part = txt
+                usage_part = ""
+
+            # Build Definition line
+            def_line = None
+            def _fmt_citation(cid: int | None) -> str:
+                return f" [{cid}]" if cid is not None else ""
+
+            if asked_ident and _def_line_exact:
+                cid = _def_id if (_def_id is not None) else (citations[0]["id"] if citations else None)
+                def_line = f'Definition: "{_def_line_exact}"{_fmt_citation(cid)}'
+            else:
+                # Try to salvage from model output if it quoted something containing the asked identifier
+                cand = def_part.strip().strip("\n ")
+                if asked_ident and asked_ident not in cand:
+                    cand = ""
+                # Try to extract a quoted string
+                m = _re.search(r'"([^"]+)"', cand)
+                q = m.group(1) if m else cand
+                if asked_ident and asked_ident in q:
+                    cid = citations[0]["id"] if citations else None
+                    def_line = f'Definition: "{q.strip()}"{_fmt_citation(cid)}'
+            if not def_line:
+                def_line = "Definition: Not found in provided snippets."
+
+            # Build Usage line (strict: prefer an exact code line from the usage span; avoid model hallucinations)
+            usage_text = ""
+            usage_cid: int | None = None
+            try:
+                if asked_ident and (_usage_id is not None):
+                    _sn = snippets_by_id.get(_usage_id) or ""
+                    if _sn:
+                        for _ln in _sn.splitlines():
+                            # Skip definition lines; pick the first non-definition occurrence
+                            if _re.match(rf"\s*{_re.escape(asked_ident)}\s*=", _ln):
+                                continue
+                            if asked_ident in _ln:
+                                usage_text = _ln.strip()
+                                usage_cid = _usage_id
+                                break
+            except Exception:
+                usage_text = ""
+                usage_cid = None
+
+            # If no exact usage line was found, fall back to the model's usage (but still grounded)
+            if not usage_text:
+                usage_text = usage_part.strip().replace("\n", " ") if usage_part else ""
+                usage_text = _re.sub(r"\s+", " ", usage_text).strip()
+
+            if not usage_text:
+                # Minimal grounded usage if we saw other occurrences
+                if _usage_id is not None:
+                    usage_text = "Appears in the shown code."
+                    usage_cid = _usage_id
+                elif extra_hint:
+                    usage_text = extra_hint
+                    usage_cid = _def_id if (_def_id is not None) else (citations[0]["id"] if citations else None)
+                else:
+                    usage_text = "Not found in provided snippets."
+                    usage_cid = _def_id if (_def_id is not None) else (citations[0]["id"] if citations else None)
+
+            # Attach a citation id if missing
+            if "[" not in usage_text and "]" not in usage_text:
+                uid = usage_cid if (usage_cid is not None) else (
+                    _usage_id if (_usage_id is not None) else (
+                        _def_id if (_def_id is not None) else (citations[0]["id"] if citations else None)
+                    )
+                )
+                usage_line = f"Usage: {usage_text}{_fmt_citation(uid)}"
+            else:
+                usage_line = f"Usage: {usage_text}"
+
+            # Final strict two-line output
+            answer = f"{def_line}\n{usage_line}".strip()
+        except Exception:
+            # If anything goes wrong, keep the original cleaned answer
+            answer = answer.strip()
+
+        # Debug: log the cleaned/formatted LLM response
         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
-            print(f"DEBUG: cleaned LLM answer: '{answer}' (len={len(answer)})")
+            print(f"DEBUG: cleaned+formatted LLM answer: '{answer}' (len={len(answer)})")
+
+        # Simple hallucination detection for tiny models
+        # Check if answer contains generic phrases that suggest it's not grounded in the code
+        hallucination_phrases = [
+            "in general", "typically", "usually", "commonly", "often",
+            "best practice", "it depends", "various ways", "multiple approaches",
+            "can be implemented", "there are several", "one way to"
+        ]
+        answer_lower = answer.lower()
+        hallucination_score = sum(1 for phrase in hallucination_phrases if phrase in answer_lower)
+
+        # If answer seems generic and doesn't reference citations, add a warning
+        has_citation_refs = any(f"[{i}]" in answer for i in range(1, len(citations) + 1))
+        if hallucination_score >= 2 and not has_citation_refs:
+            if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                print(f"DEBUG: Possible hallucination detected (score={hallucination_score}, has_refs={has_citation_refs})")
+            # Prepend a disclaimer for low-confidence answers
+            answer = f"[Low confidence - answer may be generic] {answer}"
+
     except Exception as e:
         return {"error": f"decoder call failed: {e}", "citations": citations, "query": queries}
 

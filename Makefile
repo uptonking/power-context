@@ -7,6 +7,8 @@ export DOCKER_HOST =
 .PHONY: help up down logs ps restart rebuild index reindex watch env hybrid bootstrap history rerank-local setup-reranker prune warm health
 .PHONY: venv venv-install
 
+.PHONY: qdrant-status qdrant-list qdrant-prune qdrant-index-root
+
 venv: ## create local virtualenv .venv
 	python3 -m venv .venv && . .venv/bin/activate && pip install -U pip
 
@@ -192,7 +194,7 @@ reset-dev-dual: ## bring up BOTH legacy SSE and Streamable HTTP MCPs (dual-compa
 	docker compose ps
 
 # --- llama.cpp tiny model provisioning ---
-LLAMACPP_MODEL_URL ?= https://huggingface.co/Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF/resolve/main/qwen2.5-coder-1.5b-instruct-q4_k_m.gguf
+LLAMACPP_MODEL_URL ?= https://huggingface.co/ibm-granite/granite-4.0-micro-GGUF/resolve/main/granite-4.0-micro-Q4_K_M.gguf
 LLAMACPP_MODEL_PATH ?= models/model.gguf
 
 llama-model: ## download tiny GGUF model into ./models/model.gguf (override with LLAMACPP_MODEL_URL/LLAMACPP_MODEL_PATH)
@@ -216,5 +218,54 @@ tokenizer: ## download tokenizer.json to models/tokenizer.json (override with TO
 	@echo "Downloading: $(TOKENIZER_URL) -> $(TOKENIZER_PATH)" && \
 	curl -L --fail --retry 3 -C - "$(TOKENIZER_URL)" -o "$(TOKENIZER_PATH)"
 
+
+# Router helpers
+Q ?= what is hybrid search?
+route-plan: ## plan-only route for a query: make route-plan Q="your question"
+	python3 scripts/mcp_router.py --plan "$(Q)"
+
+route-run: ## execute routed tool(s) over HTTP: make route-run Q="your question"
+	python3 scripts/mcp_router.py --run "$(Q)"
+router-eval: ## run the mock-based router eval harness
+	python3 scripts/router_eval.py
+
+
+# Live orchestration smoke test (no CI): bring up stack, reindex, run router
+router-smoke: ## spin up compose, reindex, store a memory via router, then answer; exits nonzero on failure
+	set -e; \
+	docker compose down || true; \
+	docker compose up -d qdrant; \
+	./scripts/wait-for-qdrant.sh; \
+	$(MAKE) llama-model; \
+	docker compose up -d mcp_http mcp_indexer_http llamacpp; \
+	echo "Waiting for MCP HTTP health..."; \
+	for i in $$(seq 1 30); do \
+	  code1=$$(curl -s -o /dev/null -w "%{http_code}" http://localhost:$${FASTMCP_HTTP_HEALTH_PORT:-18002}/readyz || true); \
+	  code2=$$(curl -s -o /dev/null -w "%{http_code}" http://localhost:$${FASTMCP_INDEXER_HTTP_HEALTH_PORT:-18003}/readyz || true); \
+	  if [ "$$code1" = "200" ] && [ "$$code2" = "200" ]; then echo "MCP HTTP ready"; break; fi; \
+	  sleep 1; \
+	  if [ $$i -eq 30 ]; then echo "MCP HTTP health timeout"; exit 1; fi; \
+	done; \
+	$(MAKE) reindex; \
+	echo "Storing a smoke memory via router..."; \
+	python3 scripts/mcp_router.py --run "remember this: router smoke memory"; \
+	echo "Running a router answer..."; \
+	python3 scripts/mcp_router.py --run "recap our architecture decisions for the indexer"; \
+	echo "router-smoke: PASS"
+
+
+
+# Qdrant via MCP router convenience targets
+qdrant-status:
+	python3 scripts/mcp_router.py --run "status"
+
+qdrant-list:
+	python3 scripts/mcp_router.py --run "list collections"
+
+qdrant-prune:
+	python3 scripts/mcp_router.py --run "prune"
+
+qdrant-index-root:
+	python3 scripts/mcp_router.py --run "reindex repo"
 
 

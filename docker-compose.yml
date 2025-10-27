@@ -105,12 +105,16 @@ services:
       - FASTMCP_TRANSPORT=${FASTMCP_HTTP_TRANSPORT}
       - QDRANT_URL=${QDRANT_URL}
       - FASTMCP_HEALTH_PORT=18001
+      - DEBUG_CONTEXT_ANSWER=${DEBUG_CONTEXT_ANSWER:-0}
     # Streamable HTTP endpoint for IDE agents at http://localhost:${FASTMCP_INDEXER_HTTP_PORT:-8003}/mcp/
     ports:
       - "${FASTMCP_INDEXER_HTTP_PORT:-8003}:8001"
       - "${FASTMCP_INDEXER_HTTP_HEALTH_PORT:-18003}:18001"
     volumes:
       - ${HOST_INDEX_PATH:-.}:/work
+
+    # Dev override: run server from host code so changes apply without rebuild
+    command: ["python", "/work/scripts/mcp_indexer_server.py"]
 
   llamacpp:
     image: ghcr.io/ggerganov/llama.cpp:server
@@ -164,10 +168,10 @@ services:
       - WATCH_ROOT=/work
       # Watcher-specific backpressure & timeouts (safer defaults)
       - QDRANT_TIMEOUT=60
-      - MAX_MICRO_CHUNKS_PER_FILE=200
+      - MAX_MICRO_CHUNKS_PER_FILE=${MAX_MICRO_CHUNKS_PER_FILE:-200}
       - INDEX_UPSERT_BATCH=128
       - INDEX_UPSERT_RETRIES=5
-      - WATCH_DEBOUNCE_SECS=1.5
+      - WATCH_DEBOUNCE_SECS=${WATCH_DEBOUNCE_SECS:-1.5}
     working_dir: /work
     volumes:
       - ${HOST_INDEX_PATH:-.}:/work:ro

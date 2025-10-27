@@ -83,3 +83,48 @@ def test_context_answer_decoder_disabled(monkeypatch):
     assert "error" in out
     assert isinstance(out.get("citations"), list)
 
+
+def test_context_answer_prefers_identifier_spans(monkeypatch):
+    import scripts.hybrid_search as hs
+
+    def _items():
+        return [
+            {
+                "score": 1.0,
+                "path": "/work/foo.py",
+                "symbol": "foo",
+                "start_line": 10,
+                "end_line": 16,
+                "text": "def helper():\n    return 42\n",
+            },
+            {
+                "score": 0.8,
+                "path": "/work/bar.py",
+                "symbol": "RRF_K",
+                "start_line": 5,
+                "end_line": 9,
+                "text": "RRF_K = 60\n",
+            },
+        ]
+
+    monkeypatch.setattr(hs, "run_hybrid_search", lambda **k: _items())
+
+    import scripts.refrag_llamacpp as ref
+
+    class FakeLlama:
+        def __init__(self, *a, **k):
+            pass
+
+        def generate_with_soft_embeddings(self, prompt: str, max_tokens: int = 256, **kw):
+            return "Definition: \"RRF_K = 60\" [1]\nUsage: Appears in code. [1]"
+
+    monkeypatch.setattr(ref, "LlamaCppRefragClient", FakeLlama)
+    monkeypatch.setattr(ref, "is_decoder_enabled", lambda: True)
+
+    out = srv.asyncio.get_event_loop().run_until_complete(
+        srv.context_answer(query="what is RRF_K in hybrid_search.py?", limit=1, per_path=1)
+    )
+
+    cits = out.get("citations") or []
+    assert len(cits) == 1
+    assert cits[0]["path"] == "/work/bar.py"

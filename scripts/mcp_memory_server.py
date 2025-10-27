@@ -44,6 +44,27 @@ from scripts.utils import lex_hash_vector_text as _lex_hash_vector_text
 VECTOR_NAME = _sanitize_vector_name(EMBEDDING_MODEL)
 
 mcp = FastMCP(name="memory-server")
+
+# Capture tool registry automatically by wrapping the decorator once
+_TOOLS_REGISTRY: list[dict] = []
+try:
+    _orig_tool = mcp.tool
+    def _tool_capture_wrapper(*dargs, **dkwargs):
+        orig_deco = _orig_tool(*dargs, **dkwargs)
+        def _inner(fn):
+            try:
+                _TOOLS_REGISTRY.append({
+                    "name": dkwargs.get("name") or getattr(fn, "__name__", ""),
+                    "description": (getattr(fn, "__doc__", None) or "").strip(),
+                })
+            except Exception:
+                pass
+            return orig_deco(fn)
+        return _inner
+    mcp.tool = _tool_capture_wrapper  # type: ignore
+except Exception:
+    pass
+
 HOST = os.environ.get("FASTMCP_HOST", "0.0.0.0")
 PORT = int(os.environ.get("FASTMCP_PORT", "8000") or 8000)
 
@@ -66,6 +87,12 @@ def _start_readyz_server():
                         self.send_header("Content-Type", "application/json")
                         self.end_headers()
                         payload = {"ok": True, "app": "memory-server"}
+                        self.wfile.write((json.dumps(payload)).encode("utf-8"))
+                    elif self.path == "/tools":
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/json")
+                        self.end_headers()
+                        payload = {"ok": True, "tools": _TOOLS_REGISTRY}
                         self.wfile.write((json.dumps(payload)).encode("utf-8"))
                     else:
                         self.send_response(404)

@@ -96,6 +96,15 @@ CLUSTER_LINES = int(os.environ.get("HYBRID_CLUSTER_LINES", "15") or 15)
 # Penalize test files slightly to prefer implementation over tests
 TEST_FILE_PENALTY = float(os.environ.get("HYBRID_TEST_FILE_PENALTY", "0.15") or 0.15)
 
+# Additional file-type weighting knobs (defaults tuned for Q&A use)
+CONFIG_FILE_PENALTY = float(os.environ.get("HYBRID_CONFIG_FILE_PENALTY", "0.3") or 0.3)
+IMPLEMENTATION_BOOST = float(os.environ.get("HYBRID_IMPLEMENTATION_BOOST", "0.2") or 0.2)
+DOCUMENTATION_PENALTY = float(os.environ.get("HYBRID_DOCUMENTATION_PENALTY", "0.1") or 0.1)
+
+# Penalize comment-heavy snippets so code (not comments) ranks higher
+COMMENT_PENALTY = float(os.environ.get("HYBRID_COMMENT_PENALTY", "0.2") or 0.2)
+COMMENT_RATIO_THRESHOLD = float(os.environ.get("HYBRID_COMMENT_RATIO_THRESHOLD", "0.6") or 0.6)
+
 # Micro-span compaction and budgeting (ReFRAG-lite output shaping)
 MICRO_OUT_MAX_SPANS = int(os.environ.get("MICRO_OUT_MAX_SPANS", "3") or 3)
 MICRO_MERGE_LINES = int(os.environ.get("MICRO_MERGE_LINES", "4") or 4)
@@ -161,13 +170,16 @@ def _merge_and_budget_spans(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]
             continue
         lst = clusters.setdefault(path, [])
         merged = False
+        # Fix: use "raw_score" field (what run_hybrid_search emits) not "s"
+        item_score = float(m.get("raw_score") or m.get("score") or m.get("s") or 0.0)
         for c in lst:
             if (
                 start_line <= c["end"] + merge_lines
                 and end_line >= c["start"] - merge_lines
             ):
                 # expand bounds; keep higher-score rep
-                if float(m.get("s", 0.0)) > float(c["m"].get("s", 0.0)):
+                cluster_score = float(c["m"].get("raw_score") or c["m"].get("score") or c["m"].get("s") or 0.0)
+                if item_score > cluster_score:
                     c["m"] = m
                 c["start"] = min(c["start"], start_line)
                 c["end"] = max(c["end"], end_line)
@@ -195,7 +207,14 @@ def _merge_and_budget_spans(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]
         # Use stored cluster path and start for stable ordering
         path = str(c.get("p") or "")
         start = int(c.get("start") or 0)
-        return (-float(m.get("s", 0.0)), path, start)
+        # Fix: use "raw_score" field (what run_hybrid_search emits) not "s"
+        score = float(m.get("raw_score") or m.get("score") or m.get("s") or 0.0)
+        # Reranker scores are negative (less negative = better), so sort ascending
+        # Positive scores (no reranker) sort descending as before
+        if score < 0:
+            return (score, path, start)  # ascending for negative scores
+        else:
+            return (-score, path, start)  # descending for positive scores
 
     flattened.sort(key=_flat_key)
 
@@ -223,7 +242,14 @@ def _merge_and_budget_spans(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     result: List[Dict[str, Any]] = []
     for c in out:
         m = c["m"]
-        # Attach merged bounds for the downstream emitter to read
+        # Fix: Update the public start_line/end_line fields to reflect merged bounds
+        # so citations and file reads use the expanded range
+        m["start_line"] = c["start"]
+        m["end_line"] = c["end"]
+        # Clear the text field since it no longer matches the merged bounds
+        # This forces context_answer to re-read from the file with correct line range
+        m["text"] = ""
+        # Also keep the internal markers for debugging
         m["_merged_start"] = c["start"]
         m["_merged_end"] = c["end"]
         m["_budget_tokens"] = c["need_tokens"]
@@ -939,6 +965,30 @@ def run_hybrid_search(
     if expand:
         qlist = expand_queries(qlist, eff_language)
 
+    # Query sharpening: derive basename tokens from path_glob to steer retrieval/gating
+    try:
+        if eff_path_globs or eff_path_globs_norm:
+            def _bn(p: str) -> str:
+                s = str(p or "").replace("\\", "/").strip()
+                # drop any trailing slashes and take last segment
+                parts = [t for t in s.split("/") if t]
+                return parts[-1] if parts else ""
+            globs_src = list(eff_path_globs or []) + list(eff_path_globs_norm or [])
+            basenames = []
+            for g in globs_src:
+                b = _bn(g)
+                if b and b not in basenames:
+                    basenames.append(b)
+            for b in basenames:
+                if b and b not in qlist:
+                    qlist.append(b)
+                # also add stem (filename without extension) as a lexical hint
+                stem = b.rsplit(".", 1)[0] if "." in b else b
+                if stem and stem not in qlist:
+                    qlist.append(stem)
+    except Exception:
+        pass
+
     # Lexical vector query
     score_map: Dict[str, Dict[str, Any]] = {}
     try:
@@ -1260,6 +1310,27 @@ def run_hybrid_search(
             rec["test"] -= TEST_FILE_PENALTY
             rec["s"] -= TEST_FILE_PENALTY
 
+        # Additional file-type weighting
+        path_lower = path.lower()
+        ext = ("." + path_lower.rsplit(".", 1)[-1]) if "." in path_lower else ""
+        # Penalize config/metadata files
+        if CONFIG_FILE_PENALTY > 0.0 and path:
+            if ext in {".json", ".yml", ".yaml", ".toml", ".ini"} or "/.codebase/" in path_lower or "/.kiro/" in path_lower:
+                rec["cfg"] = float(rec.get("cfg", 0.0)) - CONFIG_FILE_PENALTY
+                rec["s"] -= CONFIG_FILE_PENALTY
+        # Boost likely implementation files
+        if IMPLEMENTATION_BOOST > 0.0 and path:
+            if ext in {".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".java", ".rs", ".rb", ".php", ".cs", ".cpp", ".c", ".hpp", ".h"}:
+                rec["impl"] = float(rec.get("impl", 0.0)) + IMPLEMENTATION_BOOST
+                rec["s"] += IMPLEMENTATION_BOOST
+        # Penalize docs for implementation-style questions
+        qlow = " ".join(qlist).lower()
+        if DOCUMENTATION_PENALTY > 0.0 and path:
+            if ("readme" in path_lower or "/docs/" in path_lower or "/documentation/" in path_lower or path_lower.endswith(".md")):
+                if any(w in qlow for w in ["how does", "explain", "works", "algorithm"]):
+                    rec["doc"] = float(rec.get("doc", 0.0)) - DOCUMENTATION_PENALTY
+                    rec["s"] -= DOCUMENTATION_PENALTY
+
         if LANG_MATCH_BOOST > 0.0 and path and eff_language:
             lang = str(eff_language).lower()
             md_lang = str((md.get("language") or "")).lower()
@@ -1353,7 +1424,88 @@ def run_hybrid_search(
         if hits > 0 and kb > 0.0:
             bump = min(kcap, kb * float(hits))
             m["s"] += bump
+        # Apply comment-heavy penalty to de-emphasize comments/doc blocks
+        try:
+            if COMMENT_PENALTY > 0.0:
+                ratio = _snippet_comment_ratio(md)
+                thr = float(COMMENT_RATIO_THRESHOLD)
+                if ratio >= thr:
+                    # Scale penalty with how far ratio exceeds threshold (cap at COMMENT_PENALTY)
+                    scale = (ratio - thr) / max(1e-6, 1.0 - thr)
+                    pen = min(float(COMMENT_PENALTY), float(COMMENT_PENALTY) * max(0.0, scale))
+                    if pen > 0:
+                        m["cmt"] = float(m.get("cmt", 0.0)) - pen
+                        m["s"] -= pen
+        except Exception:
+            pass
     # Re-sort after bump
+    def _snippet_comment_ratio(md: dict) -> float:
+        # Estimate fraction of non-blank lines that are comments (language-agnostic heuristics)
+        try:
+            path = str(md.get("path") or "")
+            sline = int(md.get("start_line") or 0)
+            eline = int(md.get("end_line") or 0)
+            txt = (md.get("text") or md.get("code") or "")
+            if not txt and path and sline:
+                p = path
+                try:
+                    if not os.path.isabs(p):
+                        p = os.path.join("/work", p)
+                    realp = os.path.realpath(p)
+                    if realp == "/work" or realp.startswith("/work/"):
+                        with open(realp, "r", encoding="utf-8", errors="ignore") as f:
+                            lines = f.readlines()
+                        si = max(1, sline - 3)
+                        ei = min(len(lines), max(sline, eline) + 3)
+                        txt = "".join(lines[si-1:ei])
+                except Exception:
+                    txt = txt or ""
+            if not txt:
+                return 0.0
+            total = 0
+            comment = 0
+            in_block = False
+            for raw in txt.splitlines():
+                line = raw.strip()
+                if not line:
+                    continue
+                total += 1
+                # HTML/XML comments
+                if line.startswith("<!--"):
+                    in_block = True
+                    comment += 1
+                    continue
+                if in_block:
+                    comment += 1
+                    if "-->" in line:
+                        in_block = False
+                    continue
+                # C/JS block comments
+                if line.startswith("/*"):
+                    in_block = True
+                    comment += 1
+                    continue
+                if in_block:
+                    comment += 1
+                    if "*/" in line:
+                        in_block = False
+                    continue
+                # Single-line comments for many languages
+                if line.startswith("//") or line.startswith("#"):
+                    comment += 1
+                    continue
+                # Python docstring-like lines (treat as comment-ish for ranking)
+                if line.startswith("\"\"\"") or line.startswith("'''"):
+                    comment += 1
+                    continue
+            if total == 0:
+                return 0.0
+            return comment / float(total)
+        except Exception:
+            return 0.0
+
+    # Apply bump to top-N ranked (limited for speed)
+
     ranked = sorted(ranked, key=_tie_key)
 
     # Cluster by path adjacency
@@ -1486,17 +1638,22 @@ def run_hybrid_search(
             "lang_boost": round(float(m.get("langb", 0.0)), 4),
             "recency": round(float(m.get("rec", 0.0)), 4),
             "test_penalty": round(float(m.get("test", 0.0)), 4),
+            # new components
+            "config_penalty": round(float(m.get("cfg", 0.0)), 4),
+            "impl_boost": round(float(m.get("impl", 0.0)), 4),
+            "doc_penalty": round(float(m.get("doc", 0.0)), 4),
         }
         why = []
         if comp["dense_rrf"]:
             why.append(f"dense_rrf:{comp['dense_rrf']}")
-        for k in ("lexical", "symbol_substr", "symbol_exact", "core_boost", "lang_boost"):
+        for k in ("lexical", "symbol_substr", "symbol_exact", "core_boost", "lang_boost", "impl_boost"):
             if comp[k]:
                 why.append(f"{k}:{comp[k]}")
         if comp["vendor_penalty"]:
             why.append(f"vendor_penalty:{comp['vendor_penalty']}")
-        if comp.get("test_penalty"):
-            why.append(f"test_penalty:{comp['test_penalty']}")
+        for k in ("test_penalty", "config_penalty", "doc_penalty"):
+            if comp.get(k):
+                why.append(f"{k}:{comp[k]}")
         if comp["recency"]:
             why.append(f"recency:{comp['recency']}")
         # Related hints
@@ -1624,6 +1781,7 @@ def run_hybrid_search(
         items.append(
             {
                 "score": round(float(m["s"]), 4),
+                "raw_score": float(m["s"]),  # expose raw fused score for downstream budgeter
                 "path": _emit_path,
                 "host_path": _host,
                 "container_path": _cont,
@@ -2090,6 +2248,10 @@ def main():
                     "lang_boost": round(float(m.get("langb", 0.0)), 4),
                     "recency": round(float(m.get("rec", 0.0)), 4),
                     "test_penalty": round(float(m.get("test", 0.0)), 4),
+                    # new components
+                    "config_penalty": round(float(m.get("cfg", 0.0)), 4),
+                    "impl_boost": round(float(m.get("impl", 0.0)), 4),
+                    "doc_penalty": round(float(m.get("doc", 0.0)), 4),
                 },
                 "relations": {"imports": _imports, "calls": _calls, "symbol_path": _symp},
                 "related_paths": _related,
@@ -2104,13 +2266,15 @@ def main():
                 "symbol_exact",
                 "core_boost",
                 "lang_boost",
+                "impl_boost",
             ):
                 if item["components"][k]:
                     why.append(f"{k}:{item['components'][k]}")
             if item["components"]["vendor_penalty"]:
                 why.append(f"vendor_penalty:{item['components']['vendor_penalty']}")
-            if item["components"].get("test_penalty"):
-                why.append(f"test_penalty:{item['components']['test_penalty']}")
+            for k in ("test_penalty", "config_penalty", "doc_penalty"):
+                if item["components"].get(k):
+                    why.append(f"{k}:{item['components'][k]}")
             if item["components"]["recency"]:
                 why.append(f"recency:{item['components']['recency']}")
             item["why"] = why
