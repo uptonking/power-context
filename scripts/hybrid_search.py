@@ -2122,6 +2122,13 @@ def run_hybrid_search(
 
     items: List[Dict[str, Any]] = []
     if not merged:
+        if _USE_CACHE and cache_key is not None:
+            with _RESULTS_LOCK:
+                _RESULTS_CACHE[cache_key] = items
+                if os.environ.get("DEBUG_HYBRID_SEARCH"):
+                    logger.debug("cache store for hybrid results")
+                while len(_RESULTS_CACHE) > MAX_RESULTS_CACHE:
+                    _RESULTS_CACHE.popitem(last=False)
         return items
 
     for m in merged:
@@ -2308,6 +2315,13 @@ def run_hybrid_search(
                 "text": _text,
             }
         )
+    if _USE_CACHE and cache_key is not None:
+        with _RESULTS_LOCK:
+            _RESULTS_CACHE[cache_key] = items
+            if os.environ.get("DEBUG_HYBRID_SEARCH"):
+                logger.debug("cache store for hybrid results")
+            while len(_RESULTS_CACHE) > MAX_RESULTS_CACHE:
+                _RESULTS_CACHE.popitem(last=False)
     return items
 
 
@@ -2429,16 +2443,6 @@ def main():
             if p.is_file():
                 return str(p.parent)
             # Heuristic: if path doesn't exist and looks like a file stem (no dot),
-    # Lightweight BM25-style lexical boost (default ON) for CLI path
-    try:
-        _USE_BM25_CLI = _env_truthy(os.environ.get("HYBRID_BM25"), True)
-    except Exception:
-        _USE_BM25_CLI = True
-    try:
-        _BM25_W2 = float(os.environ.get("HYBRID_BM25_WEIGHT", "0.2") or 0.2)
-    except Exception:
-        _BM25_W2 = 0.2
-    _bm25_tok_w2 = _bm25_token_weights_from_results(queries, lex_results) if _USE_BM25_CLI else {}
 
             # treat it as a file name and use its parent directory
             if (not p.exists()) and p.name and ("." not in p.name):
@@ -2572,10 +2576,21 @@ def main():
             score_map[pid]["s"] += dens
 
     # Lexical bump + symbol boost; also collect recency
+    # Lightweight BM25-style lexical boost (default ON) for CLI path
+    try:
+        _USE_BM25_CLI = _env_truthy(os.environ.get("HYBRID_BM25"), True)
+    except Exception:
+        _USE_BM25_CLI = True
+    try:
+        _BM25_W2 = float(os.environ.get("HYBRID_BM25_WEIGHT", "0.2") or 0.2)
+    except Exception:
+        _BM25_W2 = 0.2
+    _bm25_tok_w2 = _bm25_token_weights_from_results(queries, lex_results) if _USE_BM25_CLI else {}
+
     timestamps: List[int] = []
     for pid, rec in list(score_map.items()):
         md = (rec["pt"].payload or {}).get("metadata") or {}
-        lx = (_AD_LEX_TEXT_W2 * lexical_score(queries, md)) if _USE_ADAPT2 else (LEXICAL_WEIGHT * lexical_score(queries, md))
+        lx = (_AD_LEX_TEXT_W2 * lexical_score(queries, md, token_weights=_bm25_tok_w2, bm25_weight=_BM25_W2)) if _USE_ADAPT2 else (LEXICAL_WEIGHT * lexical_score(queries, md, token_weights=_bm25_tok_w2, bm25_weight=_BM25_W2))
         rec["lx"] += lx
         rec["s"] += lx
         ts = md.get("last_modified_at") or md.get("ingested_at")
