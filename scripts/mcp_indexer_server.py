@@ -3157,6 +3157,14 @@ async def context_answer(
             print(f"DEBUG ENV: REFRAG_MODE={os.environ.get('REFRAG_MODE')}, COLLECTION_NAME={os.environ.get('COLLECTION_NAME')}")
             print(f"DEBUG FILTERS: not_glob={eff_not_glob}")
 
+        # Sanitize symbol: ignore file-like strings passed as symbol
+        sym_arg = kwargs.get("symbol") or None
+        try:
+            if sym_arg and ("/" in str(sym_arg) or "." in str(sym_arg)):
+                sym_arg = None
+        except Exception:
+            pass
+
         items = run_hybrid_search(
             queries=queries,
             limit=int(max(lim, 4)),  # fetch a few extra for budgeting
