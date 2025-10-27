@@ -182,7 +182,15 @@ def classify_intent(q: str) -> str:
             "query": q,
         }
         return ruled
-    return _classify_intent_ml(q)
+    picked = _classify_intent_ml(q)
+    # Emit a debug hint when ML falls back to generic search intent
+    try:
+        if os.environ.get("DEBUG_ROUTER") and isinstance(_LAST_INTENT_DEBUG, dict):
+            if _LAST_INTENT_DEBUG.get("fallback"):
+                print(json.dumps({"router": {"intent_fallback": _LAST_INTENT_DEBUG}}), file=sys.stderr)
+    except Exception:
+        pass
+    return picked
 
 
 # -----------------------------
@@ -298,7 +306,10 @@ def build_plan(q: str) -> List[Tuple[str, Dict[str, Any]]]:
         info, meta = _parse_memory_store_payload(q)
         store_args: Dict[str, Any] = {"information": info or q.strip()}
         if meta:
-            store_args["metadata"] = meta
+            allowed = {"priority", "tags", "topic", "category", "owner"}
+            cleaned = {k: v for k, v in meta.items() if k in allowed and v not in (None, "", [])}
+            if cleaned:
+                store_args["metadata"] = cleaned
         return [("store", store_args), ("qdrant_index_root", idx_args)]
 
     if intent == INTENT_INDEX:
@@ -394,7 +405,10 @@ def build_plan(q: str) -> List[Tuple[str, Dict[str, Any]]]:
         info, meta = _parse_memory_store_payload(q)
         payload: Dict[str, Any] = {"information": info or q.strip()}
         if meta:
-            payload["metadata"] = meta
+            allowed = {"priority", "tags", "topic", "category", "owner"}
+            cleaned = {k: v for k, v in meta.items() if k in allowed and v not in (None, "", [])}
+            if cleaned:
+                payload["metadata"] = cleaned
         return [("store", payload)]
 
     if intent == INTENT_MEMORY_FIND:

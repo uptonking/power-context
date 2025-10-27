@@ -135,6 +135,23 @@ PORT = safe_int(os.environ.get("FASTMCP_INDEXER_PORT", "8001"), default=8001, lo
 # Process-wide lock to guard environment mutations during retrieval (gate-first/budgeting)
 _ENV_LOCK = threading.RLock()
 
+
+# Context manager to temporarily override environment variables safely
+@contextlib.contextmanager
+def _env_overrides(pairs: Dict[str, str]):
+    prev: Dict[str, Optional[str]] = {}
+    try:
+        for k, v in (pairs or {}).items():
+            prev[k] = os.environ.get(k)
+            os.environ[k] = str(v)
+        yield
+    finally:
+        for k, old in prev.items():
+            if old is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = old
+
 # Set default environment variables for context_answer functionality
 # These are set in docker-compose.yml but provide fallbacks for local dev
 
@@ -3268,10 +3285,6 @@ async def context_answer(
 
         # Debug: log effective retrieval filters before search
         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
-            try:
-                print("[DEBUG_CONTEXT_ANSWER] FILTERS:", {"language": eff_language, "override_under": override_under, "symbol": sym_arg, "path_glob": eff_path_glob})
-            except Exception:
-                pass
             logger.debug("FILTERS", extra={"language": eff_language, "override_under": override_under, "symbol": sym_arg, "path_glob": eff_path_glob})
 
     items = []
@@ -3467,9 +3480,8 @@ async def context_answer(
         if not items:
             if os.environ.get("DEBUG_CONTEXT_ANSWER"):
                 logger.debug("TIER2: gate-first returned 0; retrying with relaxed filters", extra={"stage": "tier2"})
-            _prev_gate = os.environ.get("REFRAG_GATE_FIRST")
-            os.environ["REFRAG_GATE_FIRST"] = "0"
-            try:
+            # Ensure env toggle is always restored even if an exception occurs
+            with _env_overrides({"REFRAG_GATE_FIRST": "0"}):
                 # Tier 2: Remove tight filters (symbol, path_glob, path_regex, kind, ext)
                 # Keep only safety filters (language, under, not_glob)
                 items = run_hybrid_search(
@@ -3490,16 +3502,7 @@ async def context_answer(
                     model=model,
                 )
                 if os.environ.get("DEBUG_CONTEXT_ANSWER"):
-                    try:
-                        print("[DEBUG_CONTEXT_ANSWER] TIER2 items:", len(items), [i.get("path") for i in (items or [])][:5])
-                    except Exception:
-                        pass
                     logger.debug("TIER2: broader hybrid returned items", extra={"count": len(items)})
-            finally:
-                if _prev_gate is not None:
-                    os.environ["REFRAG_GATE_FIRST"] = _prev_gate
-                else:
-                    os.environ.pop("REFRAG_GATE_FIRST", None)
 
         # Tier 3 fallback: filesystem heuristics (deterministic regex scans when vector store has zero)
         # Only trigger when: (a) still zero items, (b) query looks like identifier search, (c) env allows,
@@ -3792,11 +3795,6 @@ async def context_answer(
             "start_line": sline,
             "end_line": eline,
         }
-        if os.environ.get("DEBUG_CONTEXT_ANSWER") and idx == 1:
-            try:
-                print("[DEBUG_CONTEXT_ANSWER] first_span:", {"path": path, "s": sline, "e": eline})
-            except Exception:
-                pass
         if _hostp:
             _cit["host_path"] = _hostp
         if _contp:

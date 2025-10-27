@@ -818,6 +818,8 @@ def lex_query(client: QdrantClient, v: List[float], flt, per_query: int) -> List
         return _coerce_points(getattr(qp, "points", qp))
     except TypeError:
         # Older/newer client may expect 'filter' kw
+        if os.environ.get("DEBUG_HYBRID_SEARCH"):
+            logger.debug("QP_FILTER_KWARG_SWITCH", extra={"using": LEX_VECTOR_NAME})
         qp = client.query_points(
             collection_name=_collection(),
             query=v,
@@ -828,8 +830,13 @@ def lex_query(client: QdrantClient, v: List[float], flt, per_query: int) -> List
             with_payload=True,
         )
         return _coerce_points(getattr(qp, "points", qp))
-    except Exception:
+    except Exception as e:
         # Retry without a filter at all (handles servers that reject certain filter shapes)
+        if os.environ.get("DEBUG_HYBRID_SEARCH"):
+            try:
+                logger.debug("QP_FILTER_DROP", extra={"using": LEX_VECTOR_NAME, "reason": str(e)[:200]})
+            except Exception:
+                pass
         try:
             qp = client.query_points(
                 collection_name=_collection(),
@@ -852,7 +859,12 @@ def lex_query(client: QdrantClient, v: List[float], flt, per_query: int) -> List
                 with_payload=True,
             )
             return _coerce_points(getattr(qp, "points", qp))
-        except Exception:
+        except Exception as e2:
+            if os.environ.get("DEBUG_HYBRID_SEARCH"):
+                try:
+                    logger.debug("QP_FILTER_DROP_FAILED", extra={"using": LEX_VECTOR_NAME, "reason": str(e2)[:200]})
+                except Exception:
+                    pass
             return []
 
 
@@ -872,8 +884,10 @@ def dense_query(
             limit=per_query,
             with_payload=True,
         )
-        return getattr(qp, "points", qp)
+        return _coerce_points(getattr(qp, "points", qp))
     except TypeError:
+        if os.environ.get("DEBUG_HYBRID_SEARCH"):
+            logger.debug("QP_FILTER_KWARG_SWITCH", extra={"using": vec_name})
         qp = client.query_points(
             collection_name=_collection(),
             query=v,
@@ -883,9 +897,14 @@ def dense_query(
             limit=per_query,
             with_payload=True,
         )
-        return getattr(qp, "points", qp)
-    except Exception:
+        return _coerce_points(getattr(qp, "points", qp))
+    except Exception as e:
         # Retry without any filter to maximize compatibility across server/client versions
+        if os.environ.get("DEBUG_HYBRID_SEARCH"):
+            try:
+                logger.debug("QP_FILTER_DROP", extra={"using": vec_name, "reason": str(e)[:200]})
+            except Exception:
+                pass
         try:
             qp = client.query_points(
                 collection_name=_collection(),
@@ -896,7 +915,7 @@ def dense_query(
                 limit=per_query,
                 with_payload=True,
             )
-            return getattr(qp, "points", qp)
+            return _coerce_points(getattr(qp, "points", qp))
         except TypeError:
             try:
                 qp = client.query_points(
@@ -909,7 +928,12 @@ def dense_query(
                     with_payload=True,
                 )
                 return _coerce_points(getattr(qp, "points", qp))
-            except Exception:
+            except Exception as e2:
+                if os.environ.get("DEBUG_HYBRID_SEARCH"):
+                    try:
+                        logger.debug("QP_FILTER_DROP_FAILED", extra={"using": vec_name, "reason": str(e2)[:200]})
+                    except Exception:
+                        pass
                 return []
 
 
