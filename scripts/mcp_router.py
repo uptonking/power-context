@@ -38,6 +38,8 @@ HTTP_URL_INDEXER = os.environ.get("MCP_INDEXER_HTTP_URL", "http://localhost:8003
 HTTP_URL_MEMORY = os.environ.get("MCP_MEMORY_HTTP_URL", "http://localhost:8002/mcp").rstrip("/")
 DEFAULT_HTTP_URL = HTTP_URL_INDEXER
 
+_LAST_INTENT_DEBUG: Dict[str, Any] = {}
+
 # -----------------------------
 # Intent classification
 # -----------------------------
@@ -128,11 +130,23 @@ def _intent_prototypes() -> Dict[str, List[str]]:
 
 
 def _classify_intent_ml(q: str) -> str:
+    global _LAST_INTENT_DEBUG
     protos = _intent_prototypes()
     labels = list(protos.keys())
     texts = [q] + ["\n".join(protos[l]) for l in labels]
     vecs = _embed_texts(texts)
     if not vecs or len(vecs) < len(texts):
+        _LAST_INTENT_DEBUG = {
+            "strategy": "ml",
+            "intent": INTENT_SEARCH,
+            "confidence": 0.0,
+            "query": q,
+            "top_candidate": INTENT_SEARCH,
+            "top_score": 0.0,
+            "threshold": 0.25,
+            "candidates": [],
+            "reason": "embed_failed",
+        }
         return INTENT_SEARCH
     qv = vecs[0]
     sims = []
@@ -141,15 +155,99 @@ def _classify_intent_ml(q: str) -> str:
     sims.sort(key=lambda x: x[1], reverse=True)
     top, score = sims[0]
     # light threshold: if nothing is clearly better, default to search
-    return top if score >= 0.25 else INTENT_SEARCH
+    picked = top if score >= 0.25 else INTENT_SEARCH
+    _LAST_INTENT_DEBUG = {
+        "strategy": "ml",
+        "intent": picked,
+        "confidence": float(score),
+        "query": q,
+        "top_candidate": top,
+        "top_score": float(score),
+        "threshold": 0.25,
+        "candidates": [(name, float(val)) for name, val in sims[:5]],
+        "fallback": picked == INTENT_SEARCH and top != INTENT_SEARCH,
+    }
+    return picked
 
 
 def classify_intent(q: str) -> str:
+    global _LAST_INTENT_DEBUG
     # Prefer high-precision rules; fall back to embedding classifier
     ruled = _classify_intent_rules(q)
     if ruled is not None:
+        _LAST_INTENT_DEBUG = {
+            "strategy": "rules",
+            "intent": ruled,
+            "confidence": 1.0,
+            "query": q,
+        }
         return ruled
     return _classify_intent_ml(q)
+
+
+# -----------------------------
+# Memory helper
+# -----------------------------
+_MEMORY_TRIGGER_RE = re.compile(
+    r"^(?:remember(?:\s+(?:this|that|me|to))?|save\s+memory|store\s+memory)\s*[:,\-]?\s*",
+    re.IGNORECASE,
+)
+_MEMORY_INTENT_SPLIT_RE = re.compile(
+    r"\b(?:then|and|also)\s+(?:reindex|index|recreate|prune|clean\s+up)\b",
+    re.IGNORECASE,
+)
+_MEMORY_META_KEYS = {"priority", "tag", "tags", "topic", "category", "owner"}
+
+
+def _parse_memory_store_payload(q: str) -> Tuple[str, Dict[str, Any]]:
+    raw = str(q or "").strip()
+    if not raw:
+        return "", {}
+    cleaned = _MEMORY_TRIGGER_RE.sub("", raw, count=1).lstrip()
+    meta: Dict[str, Any] = {}
+
+    def _assign_meta(key: str, value: str) -> None:
+        k = key.lower()
+        v = value.strip().strip(" \t\r\n,;.")
+        if not v:
+            return
+        if k in {"tag", "tags"}:
+            tags = [t.strip() for t in re.split(r"[,\s/]+", v) if t.strip()]
+            if tags:
+                meta["tags"] = tags
+        else:
+            meta[k] = v
+
+    if cleaned.startswith("["):
+        m = re.match(r"\[([^\]]+)\]\s*(.*)", cleaned, flags=re.S)
+        if m:
+            meta_block = m.group(1)
+            cleaned = m.group(2)
+            for key, val in re.findall(r"(\w+)\s*=\s*([^\s,;]+(?:,[^\s,;]+)*)", meta_block):
+                if key.strip().lower() in _MEMORY_META_KEYS:
+                    _assign_meta(key, val)
+
+    while True:
+        m = re.match(
+            r"^(?P<key>(?:priority|tag|tags|topic|category|owner))\s*=\s*(?P<val>[^\s;:]+)\s*[,;:]?\s*(?P<rest>.*)$",
+            cleaned,
+            flags=re.IGNORECASE | re.S,
+        )
+        if not m:
+            break
+        _assign_meta(m.group("key"), m.group("val"))
+        cleaned = m.group("rest")
+
+    cleaned = cleaned.lstrip(":- ").lstrip()
+
+    split = _MEMORY_INTENT_SPLIT_RE.search(cleaned)
+    if split:
+        cleaned = cleaned[: split.start()].rstrip(" ,;.")
+
+    cleaned = cleaned.strip().strip('"').strip()
+    if not cleaned:
+        cleaned = raw
+    return cleaned, meta
 
 
 # -----------------------------
@@ -197,7 +295,11 @@ def build_plan(q: str) -> List[Tuple[str, Dict[str, Any]]]:
         idx_args: Dict[str, Any] = {}
         if any(w in lowq for w in ["recreate", "fresh", "from scratch", "fresh index"]):
             idx_args["recreate"] = True
-        return [("store", {"information": q}), ("qdrant_index_root", idx_args)]
+        info, meta = _parse_memory_store_payload(q)
+        store_args: Dict[str, Any] = {"information": info or q.strip()}
+        if meta:
+            store_args["metadata"] = meta
+        return [("store", store_args), ("qdrant_index_root", idx_args)]
 
     if intent == INTENT_INDEX:
         # Zero-arg safe default; recreate only if user asked explicitly
@@ -274,8 +376,11 @@ def build_plan(q: str) -> List[Tuple[str, Dict[str, Any]]]:
         return [("search_config_for", args)]
 
     if intent == INTENT_MEMORY_STORE:
-        # Store the raw query as information; clients can pass richer args later
-        return [("store", {"information": q})]
+        info, meta = _parse_memory_store_payload(q)
+        payload: Dict[str, Any] = {"information": info or q.strip()}
+        if meta:
+            payload["metadata"] = meta
+        return [("store", payload)]
 
     if intent == INTENT_MEMORY_FIND:
         args = {"query": q}

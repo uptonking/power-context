@@ -8,6 +8,10 @@ from fastembed import TextEmbedding
 import re
 import json
 
+import logging
+
+logger = logging.getLogger("hybrid_search")
+
 
 def _collection() -> str:
     return os.environ.get("COLLECTION_NAME", "my-collection")
@@ -65,7 +69,7 @@ def _embed_queries_cached(
         )
     except Exception:
         name = os.environ.get("EMBEDDING_MODEL", MODEL_NAME)
-    
+
     # Find missing queries that need embedding (thread-safe read)
     missing_queries = []
     missing_indices = []
@@ -75,7 +79,7 @@ def _embed_queries_cached(
             if key not in _EMBED_QUERY_CACHE:
                 missing_queries.append(str(q))
                 missing_indices.append(i)
-    
+
     # Batch-embed all missing queries in one call
     if missing_queries:
         try:
@@ -104,7 +108,7 @@ def _embed_queries_cached(
                                 _EMBED_QUERY_CACHE.popitem(last=False)
                 except Exception:
                     pass
-    
+
     # Return embeddings in original order from cache (thread-safe read)
     out: List[List[float]] = []
     with _EMBED_LOCK:
@@ -812,15 +816,6 @@ def lex_query(client: QdrantClient, v: List[float], flt, per_query: int) -> List
             with_payload=True,
         )
         return getattr(qp, "points", qp)
-    except AttributeError:
-        # Very old client without query_points: last-resort deprecated path
-        return client.search(
-            collection_name=_collection(),
-            query_vector={"name": LEX_VECTOR_NAME, "vector": v},
-            limit=per_query,
-            with_payload=True,
-            query_filter=flt,
-        )
 
 
 def dense_query(
@@ -868,17 +863,6 @@ def dense_query(
                 return getattr(qp, "points", qp)
             except Exception:
                 pass
-        # Fallback to legacy search API
-        try:
-            return client.search(
-                collection_name=_collection(),
-                query_vector={"name": vec_name, "vector": v},
-                limit=per_query,
-                with_payload=True,
-                query_filter=(None if ("expected some form of condition" in _msg or "format error in json body" in _msg) else flt),
-            )
-        except Exception:
-            raise
 
 
 # In-process API: run hybrid search and return structured items list
@@ -1013,7 +997,7 @@ def run_hybrid_search(
                 key="metadata.symbol", match=models.MatchValue(value=eff_symbol)
             )
         )
-    
+
     # Add ext filter (file extension) - server-side when possible
     if eff_ext:
         ext_clean = eff_ext.lower().lstrip(".")
@@ -1022,7 +1006,7 @@ def run_hybrid_search(
                 key="metadata.ext", match=models.MatchValue(value=ext_clean)
             )
         )
-    
+
     # Add not filter (simple text exclusion on path) - server-side when possible
     must_not = []
     if eff_not:
@@ -1036,7 +1020,7 @@ def run_hybrid_search(
         except Exception:
             # Will be handled by post-filter
             pass
-    
+
     flt = models.Filter(must=must, must_not=must_not) if (must or must_not) else None
     flt = _sanitize_filter_obj(flt)
 
@@ -1045,7 +1029,7 @@ def run_hybrid_search(
     qlist = list(clean_queries)
     try:
         llm_max = int(os.environ.get("LLM_EXPAND_MAX", "4") or 4)
-    except Exception:
+    except (ValueError, TypeError):
         llm_max = 4
     _llm_more = _llm_expand_queries(qlist, eff_language, max_new=llm_max)
     for s in _llm_more:
@@ -1097,7 +1081,7 @@ def run_hybrid_search(
         lex_results = lex_query(client, lex_vec, flt, max(24, limit))
     except Exception:
         lex_results = []
-    
+
     for rank, p in enumerate(lex_results, 1):
         pid = str(p.id)
         score_map.setdefault(
@@ -1146,9 +1130,9 @@ def run_hybrid_search(
             "on",
         }
         cand_n = int(os.environ.get("REFRAG_CANDIDATES", "200") or 200)
-    except Exception:
+    except (ValueError, TypeError):
         gate_first, refrag_on, cand_n = False, False, 200
-    
+
     # Adaptive mini-gate: disable for queries that are too short or lack strong identifiers
     should_bypass_gate = False
     if gate_first and refrag_on:
@@ -1166,15 +1150,15 @@ def run_hybrid_search(
             if total_tokens < 3 and not has_strong_id:
                 should_bypass_gate = True
                 if os.environ.get("DEBUG_HYBRID_SEARCH"):
-                    print(f"DEBUG: Adaptive gate bypass (short query, tokens={total_tokens}, strong_id={has_strong_id})")
+                    logger.debug(f"Adaptive gate bypass (short query, tokens={total_tokens}, strong_id={has_strong_id})")
             # If we have strict filters (language, under, symbol, ext), relax candidate count
             if eff_language or eff_under or eff_symbol or eff_ext:
                 cand_n = max(cand_n, limit * 5)
                 if os.environ.get("DEBUG_HYBRID_SEARCH"):
-                    print(f"DEBUG: Adaptive gate relaxed candidate count to {cand_n} due to filters")
+                    logger.debug(f"Adaptive gate relaxed candidate count to {cand_n} due to filters")
         except Exception:
             pass
-    
+
     if gate_first and refrag_on and not should_bypass_gate:
         try:
             # ReFRAG gate-first: Use MINI vectors to prefilter candidates
@@ -1209,15 +1193,15 @@ def run_hybrid_search(
                     must.append(gating_cond)
                     flt_gated = _models.Filter(must=must, should=flt.should, must_not=flt.must_not)
                 if os.environ.get("DEBUG_HYBRID_SEARCH"):
-                    print(f"DEBUG: ReFRAG gate-first (server-side-{gating_kind}): {len(candidate_ids)} candidates")
-                    print(f"DEBUG: flt_gated.must has {len(flt_gated.must or [])} conditions")
-                    print(f"DEBUG: flt_gated.must_not has {len(flt_gated.must_not or [])} conditions")
+                    logger.debug(f"ReFRAG gate-first (server-side-{gating_kind}): {len(candidate_ids)} candidates")
+                    logger.debug(f"flt_gated.must has {len(flt_gated.must or [])} conditions")
+                    logger.debug(f"flt_gated.must_not has {len(flt_gated.must_not or [])} conditions")
             else:
                 # No candidates -> no gating
                 flt_gated = flt
         except Exception as e:
             if os.environ.get("DEBUG_HYBRID_SEARCH"):
-                print(f"DEBUG: ReFRAG gate-first failed: {e}, proceeding without gating")
+                logger.debug(f"ReFRAG gate-first failed: {e}, proceeding without gating")
             # Fallback to normal search (no gating)
             flt_gated = flt
     else:
@@ -1241,7 +1225,7 @@ def run_hybrid_search(
     ]
     if os.environ.get("DEBUG_HYBRID_SEARCH"):
         total_dense_results = sum(len(rs) for rs in result_sets)
-        print(f"DEBUG: Dense query returned {total_dense_results} total results across {len(result_sets)} queries")
+        logger.debug(f"Dense query returned {total_dense_results} total results across {len(result_sets)} queries")
 
     # Optional ReFRAG-style mini-vector gating: add compact-vector RRF if enabled
     try:
@@ -1468,7 +1452,7 @@ def run_hybrid_search(
             if (lang and md_lang and md_lang == lang) or lang_matches_path(lang, path):
                 rec["langb"] += LANG_MATCH_BOOST
                 rec["s"] += LANG_MATCH_BOOST
-        
+
         # Memory blending: apply penalty to memory-like entries to prevent swamping code results
         # Only apply if query doesn't explicitly ask for memories/notes
         kind = str(md.get("kind") or "").lower()
@@ -1514,10 +1498,10 @@ def run_hybrid_search(
         return (-float(m["s"]), len(sp), path, start_line)
 
     if os.environ.get("DEBUG_HYBRID_SEARCH"):
-        print(f"DEBUG: score_map has {len(score_map)} items before ranking")
+        logger.debug(f"score_map has {len(score_map)} items before ranking")
     ranked = sorted(score_map.values(), key=_tie_key)
     if os.environ.get("DEBUG_HYBRID_SEARCH"):
-        print(f"DEBUG: ranked has {len(ranked)} items after sorting")
+        logger.debug(f"ranked has {len(ranked)} items after sorting")
 
     # Lightweight keyword bump: prefer spans whose local snippet contains query tokens
     try:
@@ -1689,7 +1673,7 @@ def run_hybrid_search(
 
     ranked = sorted([c["m"] for lst in clusters.values() for c in lst], key=_tie_key)
     if os.environ.get("DEBUG_HYBRID_SEARCH"):
-        print(f"DEBUG: ranked has {len(ranked)} items after clustering")
+        logger.debug(f"ranked has {len(ranked)} items after clustering")
 
     # Client-side filters and per-path diversification
     import re as _re, fnmatch as _fnm
@@ -1743,7 +1727,7 @@ def run_hybrid_search(
         counts: Dict[str, int] = {}
         merged: List[Dict[str, Any]] = []
         if os.environ.get("DEBUG_HYBRID_SEARCH"):
-            print(f"DEBUG: Applying per_path={per_path} limiting to {len(ranked)} ranked results")
+            logger.debug(f"Applying per_path={per_path} limiting to {len(ranked)} ranked results")
         for m in ranked:
             md = (m["pt"].payload or {}).get("metadata") or {}
             path = str(md.get("path", ""))
@@ -1754,7 +1738,7 @@ def run_hybrid_search(
             if len(merged) >= limit:
                 break
         if os.environ.get("DEBUG_HYBRID_SEARCH"):
-            print(f"DEBUG: After per_path limiting: {len(merged)} results from {len(counts)} unique paths")
+            logger.debug(f"After per_path limiting: {len(merged)} results from {len(counts)} unique paths")
     else:
         merged = ranked[:limit]
 
@@ -1787,7 +1771,7 @@ def run_hybrid_search(
         # Store both fusion_score (from hybrid) and rerank_score (if available) separately
         fusion_score = float(m.get("s", 0.0))
         rerank_score = m.get("rerank_score")  # None if not reranked
-        
+
         comp = {
             "dense_rrf": round(float(m.get("d", 0.0)), 4),
             "lexical": round(float(m.get("lx", 0.0)), 4),
@@ -1803,7 +1787,7 @@ def run_hybrid_search(
             "impl_boost": round(float(m.get("impl", 0.0)), 4),
             "doc_penalty": round(float(m.get("doc", 0.0)), 4),
         }
-        
+
         # Add reranker info to components if present
         if rerank_score is not None:
             comp["rerank"] = round(float(rerank_score), 4)
@@ -1901,7 +1885,7 @@ def run_hybrid_search(
         # Skip memory-like points without a real file path
         if not _path or not _path.strip():
             if os.environ.get("DEBUG_HYBRID_FILTER"):
-                print(f"DEBUG: Filtered out item with empty path: {_metadata}")
+                logger.debug(f"Filtered out item with empty path: {_metadata}")
             continue
 
         # Emit path: prefer original host path when available; also include container path
