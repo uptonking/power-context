@@ -1356,31 +1356,29 @@ def run_hybrid_search(
             except Exception:
                 pass
 
-    # Normalize and add dense scores
+    # Add dense scores (keep original RRF scoring)
     for res in result_sets:
-        dense_normalized = _normalize_ranks(res)
-        for pid, norm_score in dense_normalized:
-            pt = next((p for p in res if str(p.id) == pid), None)
-            if pt:
-                score_map.setdefault(
-                    pid,
-                    {
-                        "pt": pt,
-                        "s": 0.0,
-                        "d": 0.0,
-                        "lx": 0.0,
-                        "sym_sub": 0.0,
-                        "sym_eq": 0.0,
-                        "core": 0.0,
-                        "vendor": 0.0,
-                        "langb": 0.0,
-                        "rec": 0.0,
-                        "test": 0.0,
-                    },
-                )
-                dens = DENSE_WEIGHT * norm_score
-                score_map[pid]["d"] += dens
-                score_map[pid]["s"] += dens
+        for rank, p in enumerate(res, 1):
+            pid = str(p.id)
+            score_map.setdefault(
+                pid,
+                {
+                    "pt": p,
+                    "s": 0.0,
+                    "d": 0.0,
+                    "lx": 0.0,
+                    "sym_sub": 0.0,
+                    "sym_eq": 0.0,
+                    "core": 0.0,
+                    "vendor": 0.0,
+                    "langb": 0.0,
+                    "rec": 0.0,
+                    "test": 0.0,
+                },
+            )
+            dens = DENSE_WEIGHT * rrf(rank)
+            score_map[pid]["d"] += dens
+            score_map[pid]["s"] += dens
 
     # Lexical + boosts
     timestamps: List[int] = []
