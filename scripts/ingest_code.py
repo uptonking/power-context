@@ -1783,6 +1783,7 @@ def index_single_file(
             "metadata": {
                 "path": str(file_path),
                 "path_prefix": str(file_path.parent),
+                "ext": str(file_path.suffix).lstrip(".").lower(),
                 "language": language,
                 "kind": kind,
                 "symbol": sym,
@@ -2117,6 +2118,7 @@ def index_repo(
                 "metadata": {
                     "path": str(file_path),
                     "path_prefix": str(file_path.parent),
+                    "ext": str(file_path.suffix).lstrip(".").lower(),
                     "language": language,
                     "kind": kind,
                     "symbol": sym,
