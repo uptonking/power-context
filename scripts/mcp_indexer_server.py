@@ -3533,66 +3533,37 @@ async def context_answer(
         except Exception as e:
             logger.error("Unexpected error during query expansion", exc_info=e)
 
-    # Default exclusions to avoid noisy self-test and cache artifacts
-    # Also filter out metadata/config files that pollute Q&A context
-    # This significantly improves answer quality by focusing on implementation code
-    user_not_glob = kwargs.get("not_glob") or not_glob
-    if isinstance(user_not_glob, str):
-        user_not_glob = [user_not_glob]
-    base_excludes = [
-        ".selftest_repo/",
-        ".pytest_cache/",
-        ".codebase/",      # Indexer metadata (state.json, cache.json, etc.)
-        ".kiro/",          # IDE configs
-        "node_modules/",   # Dependencies
-        ".git/",           # VCS internals
-    ]
-    # Add glob patterns for default excludes - less aggressive than **/{pat}**
-    # Use exact path matching to avoid overfiltering
-    def _variants(p: str) -> list[str]:
-        p = str(p).strip()
-        if not p:
-            return []
-        p = p.replace("\\", "/").lstrip("/")
-        # Prefer exact path-prefix patterns; hybrid_search will add absolute (/work) variants
-        if p.endswith("/"):
-            base = p  # directory
-            return [f"{base}*", f"/work/{base}*"]
-        else:
-            # File patterns: keep exact and absolute forms
-            return [p, f"/work/{p}"]
-
-    # Build defaults and conditional exclusions (skip if explicitly mentioned in query)
-    default_not_glob = []
-    for b in base_excludes:
-        default_not_glob.extend(_variants(b))
-    qtext = " ".join(queries).lower()
-    def _mentions_any(keys: list[str]) -> bool:
-        return any(k in qtext for k in keys)
-    maybe_excludes = []
-    if not _mentions_any([".env", "dotenv", "environment variable", "env var"]):
-        maybe_excludes += [".env", ".env.*"]
-    if not _mentions_any(["docker-compose", "compose"]):
-        maybe_excludes += ["docker-compose*.yml", "docker-compose*.yaml", "compose*.yml", "compose*.yaml"]
-    if not _mentions_any(["lock", "package-lock.json", "pnpm-lock", "yarn.lock", "poetry.lock", "cargo.lock", "go.sum", "composer.lock"]):
-        maybe_excludes += [
-            "*.lock", "package-lock.json", "pnpm-lock.yaml", "yarn.lock",
-            "poetry.lock", "Cargo.lock", "go.sum", "composer.lock"
-        ]
-    if not _mentions_any(["appsettings", "settings.json", "config"]):
-        maybe_excludes += ["appsettings*.json"]
-    # Apply variants for all conditional patterns
-    for pat in maybe_excludes:
-        default_not_glob.extend(_variants(pat))
-
-    # Dedup while preserving order
-    seen = set()
-    eff_not_glob = []
-    for g in default_not_glob + (user_not_glob or []):
-        s = str(g).strip()
-        if s and s not in seen:
-            eff_not_glob.append(s)
-            seen.add(s)
+    # Refactored retrieval pipeline (filters + hybrid search)
+    _retr = _ca_prepare_filters_and_retrieve(
+        queries=queries,
+        lim=lim,
+        ppath=ppath,
+        filters=_cfg["filters"],
+        model=model,
+        did_local_expand=did_local_expand,
+        kwargs={
+            "language": _cfg["filters"].get("language"),
+            "under": _cfg["filters"].get("under"),
+            "path_glob": _cfg["filters"].get("path_glob"),
+            "not_glob": _cfg["filters"].get("not_glob"),
+            "path_regex": _cfg["filters"].get("path_regex"),
+            "ext": _cfg["filters"].get("ext"),
+            "kind": _cfg["filters"].get("kind"),
+            "case": _cfg["filters"].get("case"),
+            "symbol": _cfg["filters"].get("symbol"),
+        },
+    )
+    items = _retr["items"]
+    eff_language = _retr["eff_language"]
+    eff_path_glob = _retr["eff_path_glob"]
+    eff_not_glob = _retr["eff_not_glob"]
+    override_under = _retr["override_under"]
+    sym_arg = _retr["sym_arg"]
+    cwd_root = _retr["cwd_root"]
+    path_regex = _retr["path_regex"]
+    ext = _retr["ext"]
+    kind = _retr["kind"]
+    case = _retr["case"]
 
     def _to_glob_list(val: Any) -> list[str]:
         if not val:
@@ -3622,124 +3593,11 @@ async def context_answer(
         return f"{cwd_root}/{v.lstrip('./').rstrip('/')}"
 
     user_under = kwargs.get("under") or under or None
-    override_under = None
-    if isinstance(user_under, str):
-        _uu = user_under.strip()
-        if _uu:
-            _uu_norm = _uu.replace("\\", "/")
-            # Detect file-like under hints (filename with an extension). For those, prefer
-            # a glob filter and avoid injecting an impossible path_prefix equality.
-            _uu_parts = [p for p in _uu_norm.split("/") if p]
-            _uu_last = _uu_parts[-1] if _uu_parts else _uu_norm
-            _looks_like_file = ("." in _uu_last) and not _uu_norm.endswith("/")
-            if _looks_like_file:
-                auto_path_glob.append(f"**/{_uu_last}")
-                if len(_uu_parts) > 1:
-                    auto_path_glob.append(f"**/{_uu_norm}")
-                    parent = "/".join(_uu_parts[:-1])
-                    if parent:
-                        override_under = _abs_prefix(parent)
-                # Bare filename -> no override_under (would not match path_prefix)
-            else:
-                # Treat as directory prefix
-                override_under = _abs_prefix(_uu_norm)
-    elif user_under:
-        override_under = str(user_under)
-
-    # No hardcoded keyword-based filtering - keep it truly codebase-agnostic
-    # Let the hybrid search and user-provided filters do the work
-
-    if auto_path_glob:
-        eff_path_glob.extend(auto_path_glob)
-
-        # Normalize path_glob list -> None when empty
-        if eff_path_glob:
-            dedup_pg = []
-            seen_pg = set()
-            for pg in eff_path_glob:
-                pg_str = str(pg).strip()
-                if not pg_str or pg_str in seen_pg:
-                    continue
-                seen_pg.add(pg_str)
-                dedup_pg.append(pg_str)
-            eff_path_glob = dedup_pg
-        else:
-            eff_path_glob = None
-        # Query sharpening: extract code identifiers and add targeted search terms
-        try:
-            qj = " ".join(queries)
-            import re as _re
-
-            primary = _primary_identifier_from_queries(queries)
-            if primary and any(word in qj.lower() for word in ["what is", "how is", "used", "usage", "define"]):
-                def _add_query(q: str):
-                    qs = q.strip()
-                    if qs and qs not in queries:
-                        queries.append(qs)
-
-                # Always keep the original user tokens; just append focused probes
-                _add_query(primary)
-                _add_query(f"{primary} =")
-                func_name = primary.lower().split("_")[0]
-                if func_name and len(func_name) > 2:
-                    _add_query(f"def {func_name}(")
-            else:
-                # For other queries, DO NOT add basename - it confuses vector search
-                # The path_glob filter is applied at the hybrid_search level, not via query augmentation
-                pass
-        except (AttributeError, IndexError, re.error) as e:
-            logger.debug("Failed to augment query with identifier probes", exc_info=e)
-
-        # Debug: log effective retrieval filters before search
-        if os.environ.get("DEBUG_CONTEXT_ANSWER"):
-            logger.debug("FILTERS", extra={"language": eff_language, "override_under": override_under, "symbol": sym_arg, "path_glob": eff_path_glob})
-
-    items = []
+    # Legacy retrieval block replaced by _ca_prepare_filters_and_retrieve above.
+    items = items  # no-op to keep structure
     err = None
     try:
-        # Respect 'collection' arg by passing it via env to hybrid_search
-        coll = (collection or kwargs.get("collection") or os.environ.get("COLLECTION_NAME") or "").strip()
-        if coll:
-            os.environ["COLLECTION_NAME"] = coll
-
-        # Debug: log the search parameters
-        if os.environ.get("DEBUG_CONTEXT_ANSWER"):
-            logger.debug("SEARCH_PARAMS", extra={
-                "queries": queries,
-                "limit": int(max(lim, 4)),
-                "per_path": int(max(ppath, 0)),
-                "env": {
-                    "REFRAG_MODE": os.environ.get("REFRAG_MODE"),
-                    "COLLECTION_NAME": os.environ.get("COLLECTION_NAME")
-                },
-                "not_glob": eff_not_glob,
-            })
-
-        # Sanitize symbol: ignore file-like strings passed as symbol
-        sym_arg = kwargs.get("symbol") or None
-        try:
-            if sym_arg and ("/" in str(sym_arg) or "." in str(sym_arg)):
-                sym_arg = None
-        except Exception:
-            pass
-
-        items = run_hybrid_search(
-            queries=queries,
-            limit=int(max(lim, 4)),  # fetch a few extra for budgeting
-            per_path=int(max(ppath, 0)),
-            language=eff_language,
-            under=override_under or None,
-            kind=(kind or kwargs.get("kind") or None),
-            symbol=sym_arg,
-            ext=(ext or kwargs.get("ext") or None),
-            not_filter=(not_ or kwargs.get("not_") or kwargs.get("not") or None),
-            case=(case or kwargs.get("case") or None),
-            path_regex=(path_regex or kwargs.get("path_regex") or None),
-            path_glob=eff_path_glob,
-            not_glob=eff_not_glob,
-            expand=False if did_local_expand else (str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower() in {"1","true","yes","on"}),
-            model=model,
-        )
+        pass
 
         # Augment retrieval to capture usage sites of the identifier (e.g., default args, function defs)
         try:
