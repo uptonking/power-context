@@ -100,7 +100,7 @@ def test_context_answer_prefers_identifier_spans(monkeypatch):
             {
                 "score": 0.8,
                 "path": "/work/bar.py",
-                "symbol": "bar",
+                "symbol": "RRF_K",
                 "start_line": 5,
                 "end_line": 9,
                 "text": "RRF_K = 60\n",
