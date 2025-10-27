@@ -128,3 +128,60 @@ def test_context_answer_prefers_identifier_spans(monkeypatch):
     cits = out.get("citations") or []
     assert len(cits) == 1
     assert cits[0]["path"] == "/work/bar.py"
+
+
+def test_context_answer_tier2_retry_without_gating(monkeypatch):
+    """Tier 2 should retry run_hybrid_search with relaxed filters when Tier 1 yields zero."""
+
+    import scripts.hybrid_search as hs
+
+    calls = []
+
+    def _run_hybrid_search(**kwargs):
+        calls.append(kwargs)
+        # First call (Tier 1) returns no results to trigger Tier 2
+        if len(calls) == 1:
+            return []
+        # Second call returns a single identifier-bearing span
+        return [
+            {
+                "score": 0.42,
+                "path": "/work/hybrid_search.py",
+                "symbol": "RRF_K",
+                "start_line": 100,
+                "end_line": 104,
+                "text": "RRF_K = 60\n",
+            }
+        ]
+
+    monkeypatch.setattr(hs, "run_hybrid_search", _run_hybrid_search)
+
+    import scripts.refrag_llamacpp as ref
+
+    class FakeLlama:
+        def __init__(self, *a, **k):
+            pass
+
+        def generate_with_soft_embeddings(self, *a, **kw):
+            return "Definition: \"RRF_K = 60\" [1]\nUsage: Not found in provided snippets. [1]"
+
+    monkeypatch.setattr(ref, "LlamaCppRefragClient", FakeLlama)
+    monkeypatch.setattr(ref, "is_decoder_enabled", lambda: True)
+
+    out = srv.asyncio.get_event_loop().run_until_complete(
+        srv.context_answer(query="RRF_K", limit=1, per_path=1)
+    )
+
+    # Ensure Tier 2 was invoked (run_hybrid_search called twice)
+    assert len(calls) == 2, "Tier 2 fallback should re-run hybrid search"
+
+    tier1_kwargs, tier2_kwargs = calls
+    # Tier 2 should have relaxed filters
+    assert tier2_kwargs.get("path_glob") is None
+    assert tier2_kwargs.get("symbol") is None
+    assert tier2_kwargs.get("kind") is None
+
+    # The final citations should come from the tier-2 hit
+    cits = out.get("citations") or []
+    assert len(cits) == 1
+    assert cits[0]["path"].endswith("hybrid_search.py")

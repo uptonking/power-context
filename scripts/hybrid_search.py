@@ -18,19 +18,37 @@ QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
 API_KEY = os.environ.get("QDRANT_API_KEY")
 
 
+def _safe_int(val: Any, default: int) -> int:
+    try:
+        if val is None or (isinstance(val, str) and val.strip() == ""):
+            return default
+        return int(val)
+    except (ValueError, TypeError):
+        return default
+
+def _safe_float(val: Any, default: float) -> float:
+    try:
+        if val is None or (isinstance(val, str) and val.strip() == ""):
+            return default
+        return float(val)
+    except (ValueError, TypeError):
+        return default
+
 LEX_VECTOR_NAME = os.environ.get("LEX_VECTOR_NAME", "lex")
-LEX_VECTOR_DIM = int(os.environ.get("LEX_VECTOR_DIM", "4096") or 4096)
+LEX_VECTOR_DIM = _safe_int(os.environ.get("LEX_VECTOR_DIM", "4096"), 4096)
 # Optional mini vector (ReFRAG gating)
 MINI_VECTOR_NAME = os.environ.get("MINI_VECTOR_NAME", "mini")
-MINI_VEC_DIM = int(os.environ.get("MINI_VEC_DIM", "64") or 64)
-HYBRID_MINI_WEIGHT = float(os.environ.get("HYBRID_MINI_WEIGHT", "0.5") or 0.5)
+MINI_VEC_DIM = _safe_int(os.environ.get("MINI_VEC_DIM", "64"), 64)
+HYBRID_MINI_WEIGHT = _safe_float(os.environ.get("HYBRID_MINI_WEIGHT", "0.5"), 0.5)
 
 
 # Lightweight embedding cache for query embeddings (model_name, text) -> vector
 from threading import Lock as _Lock
+from collections import OrderedDict
 
-_EMBED_QUERY_CACHE: Dict[tuple[str, str], List[float]] = {}
+_EMBED_QUERY_CACHE: OrderedDict[tuple[str, str], List[float]] = OrderedDict()
 _EMBED_LOCK = _Lock()
+MAX_EMBED_CACHE = int(os.environ.get("MAX_EMBED_CACHE", "4096") or 4096)
 
 
 def _embed_queries_cached(
@@ -38,6 +56,7 @@ def _embed_queries_cached(
 ) -> List[List[float]]:
     """Cache dense query embeddings to avoid repeated compute across expansions/retries.
     Optimized: batch-embeds all missing queries in one model call (2-5x faster).
+    Thread-safe with bounded cache size.
     """
     try:
         # Best-effort model name extraction; fall back to env
@@ -47,14 +66,15 @@ def _embed_queries_cached(
     except Exception:
         name = os.environ.get("EMBEDDING_MODEL", MODEL_NAME)
     
-    # Find missing queries that need embedding
+    # Find missing queries that need embedding (thread-safe read)
     missing_queries = []
     missing_indices = []
-    for i, q in enumerate(queries):
-        key = (str(name), str(q))
-        if key not in _EMBED_QUERY_CACHE:
-            missing_queries.append(str(q))
-            missing_indices.append(i)
+    with _EMBED_LOCK:
+        for i, q in enumerate(queries):
+            key = (str(name), str(q))
+            if key not in _EMBED_QUERY_CACHE:
+                missing_queries.append(str(q))
+                missing_indices.append(i)
     
     # Batch-embed all missing queries in one call
     if missing_queries:
@@ -67,6 +87,9 @@ def _embed_queries_cached(
                     key = (str(name), str(q))
                     if key not in _EMBED_QUERY_CACHE:
                         _EMBED_QUERY_CACHE[key] = vec.tolist()
+                        # Evict oldest entries if cache exceeds limit
+                        while len(_EMBED_QUERY_CACHE) > MAX_EMBED_CACHE:
+                            _EMBED_QUERY_CACHE.popitem(last=False)
         except Exception:
             # Fallback to one-by-one if batch fails
             for q in missing_queries:
@@ -76,16 +99,20 @@ def _embed_queries_cached(
                     with _EMBED_LOCK:
                         if key not in _EMBED_QUERY_CACHE:
                             _EMBED_QUERY_CACHE[key] = vec
+                            # Evict oldest entries if cache exceeds limit
+                            while len(_EMBED_QUERY_CACHE) > MAX_EMBED_CACHE:
+                                _EMBED_QUERY_CACHE.popitem(last=False)
                 except Exception:
                     pass
     
-    # Return embeddings in original order from cache
+    # Return embeddings in original order from cache (thread-safe read)
     out: List[List[float]] = []
-    for q in queries:
-        key = (str(name), str(q))
-        v = _EMBED_QUERY_CACHE.get(key)
-        if v is not None:
-            out.append(v)
+    with _EMBED_LOCK:
+        for q in queries:
+            key = (str(name), str(q))
+            v = _EMBED_QUERY_CACHE.get(key)
+            if v is not None:
+                out.append(v)
     return out
 
 
@@ -102,40 +129,40 @@ from scripts.ingest_code import ensure_collection as _ensure_collection
 from scripts.ingest_code import project_mini as _project_mini
 
 
-RRF_K = int(os.environ.get("HYBRID_RRF_K", "60") or 60)
-DENSE_WEIGHT = float(os.environ.get("HYBRID_DENSE_WEIGHT", "1.0") or 1.0)
-LEXICAL_WEIGHT = float(os.environ.get("HYBRID_LEXICAL_WEIGHT", "0.25") or 0.25)
-LEX_VECTOR_WEIGHT = float(
-    os.environ.get("HYBRID_LEX_VECTOR_WEIGHT", str(LEXICAL_WEIGHT)) or LEXICAL_WEIGHT
+RRF_K = _safe_int(os.environ.get("HYBRID_RRF_K", "60"), 60)
+DENSE_WEIGHT = _safe_float(os.environ.get("HYBRID_DENSE_WEIGHT", "1.0"), 1.0)
+LEXICAL_WEIGHT = _safe_float(os.environ.get("HYBRID_LEXICAL_WEIGHT", "0.25"), 0.25)
+LEX_VECTOR_WEIGHT = _safe_float(
+    os.environ.get("HYBRID_LEX_VECTOR_WEIGHT", str(LEXICAL_WEIGHT)), LEXICAL_WEIGHT
 )
-EF_SEARCH = int(os.environ.get("QDRANT_EF_SEARCH", "128") or 128)
+EF_SEARCH = _safe_int(os.environ.get("QDRANT_EF_SEARCH", "128"), 128)
 # Lightweight, configurable boosts
-SYMBOL_BOOST = float(os.environ.get("HYBRID_SYMBOL_BOOST", "0.15") or 0.15)
-RECENCY_WEIGHT = float(os.environ.get("HYBRID_RECENCY_WEIGHT", "0.1") or 0.1)
-CORE_FILE_BOOST = float(os.environ.get("HYBRID_CORE_FILE_BOOST", "0.1") or 0.1)
-SYMBOL_EQUALITY_BOOST = float(
-    os.environ.get("HYBRID_SYMBOL_EQUALITY_BOOST", "0.25") or 0.25
+SYMBOL_BOOST = _safe_float(os.environ.get("HYBRID_SYMBOL_BOOST", "0.15"), 0.15)
+RECENCY_WEIGHT = _safe_float(os.environ.get("HYBRID_RECENCY_WEIGHT", "0.1"), 0.1)
+CORE_FILE_BOOST = _safe_float(os.environ.get("HYBRID_CORE_FILE_BOOST", "0.1"), 0.1)
+SYMBOL_EQUALITY_BOOST = _safe_float(
+    os.environ.get("HYBRID_SYMBOL_EQUALITY_BOOST", "0.25"), 0.25
 )
-VENDOR_PENALTY = float(os.environ.get("HYBRID_VENDOR_PENALTY", "0.05") or 0.05)
-LANG_MATCH_BOOST = float(os.environ.get("HYBRID_LANG_MATCH_BOOST", "0.05") or 0.05)
-CLUSTER_LINES = int(os.environ.get("HYBRID_CLUSTER_LINES", "15") or 15)
+VENDOR_PENALTY = _safe_float(os.environ.get("HYBRID_VENDOR_PENALTY", "0.05"), 0.05)
+LANG_MATCH_BOOST = _safe_float(os.environ.get("HYBRID_LANG_MATCH_BOOST", "0.05"), 0.05)
+CLUSTER_LINES = _safe_int(os.environ.get("HYBRID_CLUSTER_LINES", "15"), 15)
 # Penalize test files slightly to prefer implementation over tests
-TEST_FILE_PENALTY = float(os.environ.get("HYBRID_TEST_FILE_PENALTY", "0.15") or 0.15)
+TEST_FILE_PENALTY = _safe_float(os.environ.get("HYBRID_TEST_FILE_PENALTY", "0.15"), 0.15)
 
 # Additional file-type weighting knobs (defaults tuned for Q&A use)
-CONFIG_FILE_PENALTY = float(os.environ.get("HYBRID_CONFIG_FILE_PENALTY", "0.3") or 0.3)
-IMPLEMENTATION_BOOST = float(os.environ.get("HYBRID_IMPLEMENTATION_BOOST", "0.2") or 0.2)
-DOCUMENTATION_PENALTY = float(os.environ.get("HYBRID_DOCUMENTATION_PENALTY", "0.1") or 0.1)
+CONFIG_FILE_PENALTY = _safe_float(os.environ.get("HYBRID_CONFIG_FILE_PENALTY", "0.3"), 0.3)
+IMPLEMENTATION_BOOST = _safe_float(os.environ.get("HYBRID_IMPLEMENTATION_BOOST", "0.2"), 0.2)
+DOCUMENTATION_PENALTY = _safe_float(os.environ.get("HYBRID_DOCUMENTATION_PENALTY", "0.1"), 0.1)
 
 # Penalize comment-heavy snippets so code (not comments) ranks higher
-COMMENT_PENALTY = float(os.environ.get("HYBRID_COMMENT_PENALTY", "0.2") or 0.2)
-COMMENT_RATIO_THRESHOLD = float(os.environ.get("HYBRID_COMMENT_RATIO_THRESHOLD", "0.6") or 0.6)
+COMMENT_PENALTY = _safe_float(os.environ.get("HYBRID_COMMENT_PENALTY", "0.2"), 0.2)
+COMMENT_RATIO_THRESHOLD = _safe_float(os.environ.get("HYBRID_COMMENT_RATIO_THRESHOLD", "0.6"), 0.6)
 
 # Micro-span compaction and budgeting (ReFRAG-lite output shaping)
-MICRO_OUT_MAX_SPANS = int(os.environ.get("MICRO_OUT_MAX_SPANS", "3") or 3)
-MICRO_MERGE_LINES = int(os.environ.get("MICRO_MERGE_LINES", "4") or 4)
-MICRO_BUDGET_TOKENS = int(os.environ.get("MICRO_BUDGET_TOKENS", "512") or 512)
-MICRO_TOKENS_PER_LINE = int(os.environ.get("MICRO_TOKENS_PER_LINE", "32") or 32)
+MICRO_OUT_MAX_SPANS = _safe_int(os.environ.get("MICRO_OUT_MAX_SPANS", "3"), 3)
+MICRO_MERGE_LINES = _safe_int(os.environ.get("MICRO_MERGE_LINES", "4"), 4)
+MICRO_BUDGET_TOKENS = _safe_int(os.environ.get("MICRO_BUDGET_TOKENS", "512"), 512)
+MICRO_TOKENS_PER_LINE = _safe_int(os.environ.get("MICRO_TOKENS_PER_LINE", "32"), 32)
 
 
 def _merge_and_budget_spans(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

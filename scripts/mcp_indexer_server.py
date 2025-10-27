@@ -128,7 +128,7 @@ except Exception as e:  # pragma: no cover
 
 APP_NAME = os.environ.get("FASTMCP_SERVER_NAME", "qdrant-indexer-mcp")
 HOST = os.environ.get("FASTMCP_HOST", "0.0.0.0")
-PORT = int(os.environ.get("FASTMCP_INDEXER_PORT", "8001"))
+PORT = safe_int(os.environ.get("FASTMCP_INDEXER_PORT", "8001"), default=8001, logger=logger, context="FASTMCP_INDEXER_PORT")
 
 # Process-wide lock to guard environment mutations during retrieval (gate-first/budgeting)
 _ENV_LOCK = threading.RLock()
@@ -180,10 +180,10 @@ def _primary_identifier_from_queries(qs: list[str]) -> str:
 
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
 DEFAULT_COLLECTION = os.environ.get("COLLECTION_NAME", "my-collection")
-MAX_LOG_TAIL = int(os.environ.get("MCP_MAX_LOG_TAIL", "4000"))
-SNIPPET_MAX_BYTES = int(os.environ.get("MCP_SNIPPET_MAX_BYTES", "8192") or 8192)
+MAX_LOG_TAIL = safe_int(os.environ.get("MCP_MAX_LOG_TAIL", "4000"), default=4000, logger=logger, context="MCP_MAX_LOG_TAIL")
+SNIPPET_MAX_BYTES = safe_int(os.environ.get("MCP_SNIPPET_MAX_BYTES", "8192"), default=8192, logger=logger, context="MCP_SNIPPET_MAX_BYTES")
 
-MCP_TOOL_TIMEOUT_SECS = float(os.environ.get("MCP_TOOL_TIMEOUT_SECS", "3600") or 3600.0)
+MCP_TOOL_TIMEOUT_SECS = safe_float(os.environ.get("MCP_TOOL_TIMEOUT_SECS", "3600"), default=3600.0, logger=logger, context="MCP_TOOL_TIMEOUT_SECS")
 
 # Set default environment variables for context_answer functionality
 os.environ.setdefault("DEBUG_CONTEXT_ANSWER", "1")
@@ -3436,18 +3436,33 @@ async def context_answer(
                         return bool(_lmp(str(req_language), p))
                     except Exception:
                         pass
-                # Fallback simple ext mapping
-                ext = (p.rsplit(".", 1)[-1] if "." in p else "").lower()
+                # Fallback robust ext mapping with multi-part extension support
+                # Extract all possible extensions (e.g., for "foo.d.ts" -> ["ts", "d.ts"])
+                filename = p.split("/")[-1] if "/" in p else p
+                parts = filename.split(".")
+                extensions = set()
+                if len(parts) > 1:
+                    # Single extension: "file.py" -> "py"
+                    extensions.add(parts[-1].lower())
+                    # Multi-part: "file.d.ts" -> "d.ts", "test.py" -> doesn't add extra
+                    if len(parts) > 2:
+                        multi_ext = ".".join(parts[-2:]).lower()
+                        extensions.add(multi_ext)
+                
                 table = {
-                    "python": ["py"],
-                    "typescript": ["ts", "tsx"],
+                    "python": ["py", "pyi"],
+                    "typescript": ["ts", "tsx", "d.ts", "mts", "cts"],
                     "javascript": ["js", "jsx", "mjs", "cjs"],
                     "go": ["go"],
                     "rust": ["rs"],
                     "java": ["java"],
                     "php": ["php"],
+                    "c": ["c", "h"],
+                    "cpp": ["cpp", "cc", "cxx", "hpp", "hxx"],
+                    "csharp": ["cs"],
                 }
-                return ext in table.get(str(req_language).lower(), [])
+                lang_exts = table.get(str(req_language).lower(), [])
+                return any(ext in lang_exts for ext in extensions)
             items = [it for it in items if _ok_lang(it)]
 
         # Debug: log search results
@@ -3491,8 +3506,10 @@ async def context_answer(
                     os.environ.pop("REFRAG_GATE_FIRST", None)
 
         # Tier 3 fallback: filesystem heuristics (deterministic regex scans when vector store has zero)
-        # Only trigger when: (a) still zero items, (b) query looks like identifier search, (c) env allows
-        if (not items) and str(os.environ.get("TIER3_FS_FALLBACK", "1")).strip() in {"1", "true", "yes", "on"}:
+        # Only trigger when: (a) still zero items, (b) query looks like identifier search, (c) env allows,
+        # and (d) no strict filters are applied (language/path_glob/kind/ext/symbol/under)
+        _strict_filters = bool(eff_language or eff_path_glob or path_regex or sym_arg or ext or kind or override_under)
+        if (not items) and (str(os.environ.get("TIER3_FS_FALLBACK", "0")).strip().lower() in {"1", "true", "yes", "on"}) and (not _strict_filters):
             try:
                 import re as _re
                 # Extract primary identifier from query
