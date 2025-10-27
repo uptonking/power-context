@@ -2986,11 +2986,14 @@ async def context_answer(
     # Debug: log raw and normalized query when running over MCP to diagnose null argument issues
     if os.environ.get("DEBUG_CONTEXT_ANSWER"):
         try:
-            print(f"DEBUG ARG-SHAPE: raw_query={repr(query)} type={type(query).__name__}")
-            print(f"DEBUG ARG-SHAPE: normalized_queries={queries}")
+            logger.debug("ARG_SHAPE", extra={
+                "raw_query": repr(query),
+                "query_type": type(query).__name__,
+                "normalized_queries": queries,
+            })
         except (AttributeError, TypeError) as e:
-            logger.debug("Failed to print debug info", exc_info=e)
-    
+            logger.debug("Failed to log debug ARG_SHAPE", exc_info=e)
+
     if not queries:
         raise ValidationError("query required")
 
@@ -3380,7 +3383,8 @@ async def context_answer(
                                     added += 1
                             if os.environ.get("DEBUG_CONTEXT_ANSWER"):
                                 print(f"DEBUG TARGETED_SEARCH: found {len(targeted_items)} items, added {len([it for it in targeted_items if _ikey(it) not in _seen])}")
-        except Exception as _e:
+        except (re.error, AttributeError, KeyError) as _e:
+            logger.debug("Usage augmentation failed", exc_info=_e, extra={"asked": _asked if '_asked' in locals() else None})
             if os.environ.get("DEBUG_CONTEXT_ANSWER"):
                 print(f"DEBUG USAGE_AUGMENT failed: {_e}")
 
