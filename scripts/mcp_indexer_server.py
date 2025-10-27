@@ -217,7 +217,9 @@ def _default_collection() -> str:
         coll = st.get("qdrant_collection")
         if isinstance(coll, str) and coll.strip():
             return coll.strip()
-    return DEFAULT_COLLECTION
+    # Fall back to current environment rather than module-load default so tests
+    # and dynamic collection switching work correctly.
+    return os.environ.get("COLLECTION_NAME", DEFAULT_COLLECTION)
 
 
 
