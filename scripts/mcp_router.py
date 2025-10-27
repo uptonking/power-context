@@ -352,9 +352,6 @@ def build_plan(q: str) -> List[Tuple[str, Dict[str, Any]]]:
 
         # Start with base args and carry through parsed repo hints to answer tools
         args: Dict[str, Any] = {"query": q}
-        # Respect include_snippet for answer tools so the server can read real code for grounding
-        if include_snippet:
-            args["include_snippet"] = True
         if max_tokens_env:
             try:
                 mt = int(max_tokens_env)
