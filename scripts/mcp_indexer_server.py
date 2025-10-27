@@ -102,6 +102,12 @@ SNIPPET_MAX_BYTES = int(os.environ.get("MCP_SNIPPET_MAX_BYTES", "8192") or 8192)
 
 MCP_TOOL_TIMEOUT_SECS = float(os.environ.get("MCP_TOOL_TIMEOUT_SECS", "3600") or 3600.0)
 
+# Set default environment variables for context_answer functionality
+os.environ.setdefault("DEBUG_CONTEXT_ANSWER", "1")
+os.environ.setdefault("REFRAG_DECODER", "1")
+os.environ.setdefault("LLAMACPP_URL", "http://localhost:8080")
+os.environ.setdefault("CTX_REQUIRE_IDENTIFIER", "0")  # Disable strict identifier requirement
+
 # --- Workspace state integration helpers ---
 def _state_file_path(ws_path: str = "/work") -> str:
     try:
