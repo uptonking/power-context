@@ -3051,25 +3051,29 @@ async def context_answer(
             import re as _re
 
             # Extract code identifiers from questions (e.g., "what is RRF_K" -> add "RRF_K")
-            identifiers = _re.findall(r'\b([A-Z_][A-Z0-9_]{2,})\b', qj)
+            identifiers = _re.findall(r"\b([A-Z_][A-Z0-9_]{2,})\b", qj)
 
-            # For identifier-focused questions, simplify to just the identifier
-            # This avoids filename pollution (e.g., "hybrid_search.py" matching imports)
+            # For identifier-focused questions, add helpful probes without discarding the original tokens
             if identifiers and any(word in qj.lower() for word in ["what is", "how is", "used", "usage", "define"]):
-                # Replace the verbose question with just the identifier
-                queries = [identifiers[0]]  # Use the first/main identifier
-                # Add definition pattern
-                queries.append(f"{identifiers[0]} =")
-                # Add potential function usage (e.g., RRF_K -> def rrf)
-                func_name = identifiers[0].lower().split("_")[0]
+                primary = identifiers[0]
+                def _add_query(q: str):
+                    qs = q.strip()
+                    if qs and qs not in queries:
+                        queries.append(qs)
+
+                if primary not in queries:
+                    queries.insert(0, primary)
+                _add_query(f"{primary} =")
+                func_name = primary.lower().split("_")[0]
                 if func_name and len(func_name) > 2:
-                    queries.append(f"def {func_name}(")
+                    _add_query(f"def {func_name}(")
             else:
                 # For other queries, add basename if we have path_glob
                 if eff_path_glob:
                     def _basename(p: str) -> str:
                         s = str(p).replace("\\", "/").strip()
                         return s.split("/")[-1] if "/" in s else s
+
                     basenames = []
                     if isinstance(eff_path_glob, (list, tuple)):
                         basenames = [_basename(p) for p in eff_path_glob]
@@ -3127,8 +3131,8 @@ async def context_answer(
                 if _usage_qs:
                     usage_items = run_hybrid_search(
                         queries=list(queries) + _usage_qs,
-                        limit=int(max(lim, 20)),
-                        per_path=int(max(ppath, 8)),
+                        limit=int(max(lim, 30)),
+                        per_path=int(max(ppath, 10)),
                         language=eff_language,
                         under=override_under or None,
                         kind=kwargs.get("kind") or None,
@@ -3159,6 +3163,41 @@ async def context_answer(
                             added += 1
                     if os.environ.get("DEBUG_CONTEXT_ANSWER"):
                         print(f"DEBUG USAGE_AUGMENT: asked={_asked}, added={added}, total_items={len(items)}")
+
+                    # Additional targeted search for specific identifier patterns
+                    if _asked and len(_asked) >= 3:
+                        targeted_qs = [
+                            f"{_asked} = int(os.environ.get",
+                            f"def {_fname}(rank: int, k: int = {_asked})" if _fname else None
+                        ]
+                        targeted_qs = [q for q in targeted_qs if q]
+                        if targeted_qs:
+                            targeted_items = run_hybrid_search(
+                                queries=targeted_qs,
+                                limit=10,
+                                per_path=5,
+                                language=eff_language,
+                                under=override_under or None,
+                                kind=eff_kind,
+                                symbol=eff_symbol,
+                                ext=eff_ext,
+                                not_=eff_not,
+                                case=eff_case,
+                                path_regex=eff_path_regex,
+                                path_glob=eff_path_glob,
+                                not_glob=eff_not_glob,
+                                collection=collection,
+                            )
+                            # Merge targeted results with higher priority
+                            for it in targeted_items:
+                                k = _ikey(it)
+                                if k not in _seen:
+                                    # Insert at beginning for higher priority
+                                    items.insert(0, it)
+                                    _seen.add(k)
+                                    added += 1
+                            if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                                print(f"DEBUG TARGETED_SEARCH: found {len(targeted_items)} items, added {len([it for it in targeted_items if _ikey(it) not in _seen])}")
         except Exception as _e:
             if os.environ.get("DEBUG_CONTEXT_ANSWER"):
                 print(f"DEBUG USAGE_AUGMENT failed: {_e}")
@@ -3267,8 +3306,12 @@ async def context_answer(
             out_max = int(os.environ.get("MICRO_OUT_MAX_SPANS", "12") or 12)
         except Exception:
             out_max = 12
-        # Ensure we get at least min(out_max, lim) spans, or all items if fewer
-        spans = budgeted[: max(1, min(out_max, lim))] if budgeted else items[: min(len(items), lim)]
+        # Respect caller-provided limit, allowing limit=0 to suppress snippets entirely
+        span_cap = max(0, min(out_max, max(0, int(lim))))
+        if budgeted:
+            spans = budgeted[:span_cap] if span_cap else []
+        else:
+            spans = items[:span_cap] if span_cap else []
 
         # Debug span selection
         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
@@ -3417,7 +3460,7 @@ async def context_answer(
             return float(v)
         except Exception:
             return d
-    # Generation params optimized for Qwen2.5-Coder (code-focused, deterministic)
+    # Generation params optimized for (code-focused, deterministic)
     mtok = _to_int(max_tokens, _to_int(os.environ.get("DECODER_MAX_TOKENS", "200"), 200))  # Shorter for conciseness
     # Granite 4.0 models work best with temperature 0 for deterministic extraction
     temp = _to_float(temperature, _to_float(os.environ.get("DECODER_TEMPERATURE", "0"), 0.0))
