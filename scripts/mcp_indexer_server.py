@@ -3117,7 +3117,7 @@ async def context_answer(
             if _asked:
                 _fname = _asked.lower().split("_")[0]
                 _usage_qs = []
-                if _fname and len(_fname) > 2:
+                if _fname and len(_fname) >= 2:
                     _usage_qs.append(f"def {_fname}(")
                 _usage_qs.extend([f"{_asked})", f"{_asked},", f"= {_asked}", f"{_asked} ="])
                 _usage_qs = [u for u in _usage_qs if u and u not in queries]
