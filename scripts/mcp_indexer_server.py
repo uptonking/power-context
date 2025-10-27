@@ -78,6 +78,9 @@ APP_NAME = os.environ.get("FASTMCP_SERVER_NAME", "qdrant-indexer-mcp")
 HOST = os.environ.get("FASTMCP_HOST", "0.0.0.0")
 PORT = int(os.environ.get("FASTMCP_INDEXER_PORT", "8001"))
 
+# Process-wide lock to guard environment mutations during retrieval (gate-first/budgeting)
+_ENV_LOCK = threading.RLock()
+
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
 DEFAULT_COLLECTION = os.environ.get("COLLECTION_NAME", "my-collection")
 MAX_LOG_TAIL = int(os.environ.get("MCP_MAX_LOG_TAIL", "4000"))
@@ -2846,6 +2849,9 @@ async def context_answer(
     model = _get_embedding_model(model_name)
 
     # Prepare environment toggles for ReFRAG gate-first and budgeting
+    # Acquire lock to avoid cross-request env clobbering
+    _ENV_LOCK.acquire()
+
     prev = {
         "REFRAG_MODE": os.environ.get("REFRAG_MODE"),
         "REFRAG_GATE_FIRST": os.environ.get("REFRAG_GATE_FIRST"),
@@ -3039,39 +3045,39 @@ async def context_answer(
                 sym_arg = None
         except Exception:
             pass
-        # Query sharpening: when we inferred a file-like path_glob, add its basename and key tokens to queries
+        # Query sharpening: extract code identifiers and add targeted search terms
         try:
-            if eff_path_glob:
-                def _basename(p: str) -> str:
-                    s = str(p).replace("\\", "/").strip()
-                    return s.split("/")[-1] if "/" in s else s
-                basenames = []
-                if isinstance(eff_path_glob, (list, tuple)):
-                    basenames = [_basename(p) for p in eff_path_glob]
-                else:
-                    basenames = [_basename(str(eff_path_glob))]
-                for bn in basenames:
-                    if bn and bn not in queries:
-                        queries.append(bn)
             qj = " ".join(queries)
-            # Extract code identifiers from questions (e.g., "what is RRF_K" -> add "RRF_K" and "RRF_K =" and "def rrf")
             import re as _re
-            for match in _re.findall(r'\b([A-Z_][A-Z0-9_]{2,})\b', qj):
-                if match not in queries:
-                    queries.append(match)
-                    # Also add definition pattern to catch assignment lines
-                    def_pattern = f"{match} ="
-                    if def_pattern not in queries:
-                        queries.append(def_pattern)
-            # For questions about constants/variables, also search for functions that might use them
-            if any(word in qj.lower() for word in ["what is", "how is", "used", "usage"]):
-                for match in _re.findall(r'\b([A-Z_][A-Z0-9_]{2,})\b', qj):
-                    # Add potential function name (e.g., RRF_K -> rrf function)
-                    func_name = match.lower().split("_")[0]
-                    if func_name and len(func_name) > 2:
-                        func_query = f"def {func_name}("
-                        if func_query not in queries:
-                            queries.append(func_query)
+
+            # Extract code identifiers from questions (e.g., "what is RRF_K" -> add "RRF_K")
+            identifiers = _re.findall(r'\b([A-Z_][A-Z0-9_]{2,})\b', qj)
+
+            # For identifier-focused questions, simplify to just the identifier
+            # This avoids filename pollution (e.g., "hybrid_search.py" matching imports)
+            if identifiers and any(word in qj.lower() for word in ["what is", "how is", "used", "usage", "define"]):
+                # Replace the verbose question with just the identifier
+                queries = [identifiers[0]]  # Use the first/main identifier
+                # Add definition pattern
+                queries.append(f"{identifiers[0]} =")
+                # Add potential function usage (e.g., RRF_K -> def rrf)
+                func_name = identifiers[0].lower().split("_")[0]
+                if func_name and len(func_name) > 2:
+                    queries.append(f"def {func_name}(")
+            else:
+                # For other queries, add basename if we have path_glob
+                if eff_path_glob:
+                    def _basename(p: str) -> str:
+                        s = str(p).replace("\\", "/").strip()
+                        return s.split("/")[-1] if "/" in s else s
+                    basenames = []
+                    if isinstance(eff_path_glob, (list, tuple)):
+                        basenames = [_basename(p) for p in eff_path_glob]
+                    else:
+                        basenames = [_basename(str(eff_path_glob))]
+                    for bn in basenames:
+                        if bn and bn not in queries:
+                            queries.append(bn)
         except Exception:
             pass
 
@@ -3162,7 +3168,9 @@ async def context_answer(
                     p = str(it.get("path") or "")
                     s = int(it.get("start_line") or 0)
                     e = int(it.get("end_line") or 0)
-                    print(f"DEBUG RETRIEVAL ITEM {i}: {p}:{s}-{e}")
+                    score = it.get("score", "N/A")
+                    raw_score = it.get("raw_score", "N/A")
+                    print(f"DEBUG RETRIEVAL ITEM {i}: {p}:{s}-{e} score={score} raw_score={raw_score}")
             except Exception as _e:
                 print(f"DEBUG RETRIEVAL: print failed: {_e}")
 
@@ -3276,6 +3284,9 @@ async def context_answer(
                     pass
             else:
                 os.environ[k] = v
+        # Release lock after environment restored
+        _ENV_LOCK.release()
+
     if err is not None:
         return {"error": f"hybrid search failed: {err}", "citations": [], "query": queries}
 
@@ -3314,9 +3325,10 @@ async def context_answer(
         if _contp:
             _cit["container_path"] = _contp
         citations.append(_cit)
-        # Prefer snippet from search payload; if missing, read the file slice as fallback
-        snippet = str(it.get("text") or "").strip()
-        if not snippet and path and sline:
+        # For context_answer, always read from filesystem to get complete, untruncated content
+        # (payload text may be truncated for storage efficiency)
+        snippet = ""
+        if path and sline:
             try:
                 fp = path
                 import os as _os
@@ -3338,6 +3350,9 @@ async def context_answer(
             print(f"DEBUG: Snippet {idx} {('(payload)' if it.get('text') else '(fs)')} {path}:{sline}-{eline}, length={len(snippet)}")
             if snippet:
                 print(f"DEBUG: Snippet {idx} content preview: {snippet[:200]}")
+                # Show full content for RRF_K line
+                if "RRF_K" in snippet and len(snippet) < 500:
+                    print(f"DEBUG: Snippet {idx} FULL RRF_K CONTENT: {repr(snippet)}")
             else:
                 print(f"DEBUG: Snippet {idx} is EMPTY!")
         header = f"[{idx}] {path}:{sline}-{eline}"
@@ -3448,9 +3463,10 @@ async def context_answer(
             + (f"Key identifiers: {key_terms_str}\n" if key_terms_str != "none found" else "")
             + (f"Hint: {extra_hint}\n\n" if extra_hint else "")
             + "Write the response to the user's input by strictly aligning with the facts in the provided code snippets. "
-            "Quote exact variable names, function names, and values from the code with [ID] citations. "
-            "If the information needed to answer the question is not available in the code snippets, "
-            "inform the user that the question cannot be answered based on the available code."
+            "Always answer in exactly two lines with citations: "
+            "Definition: \"<exact code definition line(s) verbatim>\" [ID]\n"
+            "Usage: <one-sentence summary of how/where it is used based only on the snippets> [ID]. "
+            "If the definition or usage is not present in the snippets, state 'Not found in provided snippets.' for that line."
         )
 
         user_msg = f"{qtxt}"

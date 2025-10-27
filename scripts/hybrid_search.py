@@ -170,15 +170,15 @@ def _merge_and_budget_spans(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]
             continue
         lst = clusters.setdefault(path, [])
         merged = False
-        # Fix: use "score" field (what run_hybrid_search emits) not "s"
-        item_score = float(m.get("score") or m.get("s") or 0.0)
+        # Fix: use "raw_score" field (what run_hybrid_search emits) not "s"
+        item_score = float(m.get("raw_score") or m.get("score") or m.get("s") or 0.0)
         for c in lst:
             if (
                 start_line <= c["end"] + merge_lines
                 and end_line >= c["start"] - merge_lines
             ):
                 # expand bounds; keep higher-score rep
-                cluster_score = float(c["m"].get("score") or c["m"].get("s") or 0.0)
+                cluster_score = float(c["m"].get("raw_score") or c["m"].get("score") or c["m"].get("s") or 0.0)
                 if item_score > cluster_score:
                     c["m"] = m
                 c["start"] = min(c["start"], start_line)
@@ -207,9 +207,14 @@ def _merge_and_budget_spans(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]
         # Use stored cluster path and start for stable ordering
         path = str(c.get("p") or "")
         start = int(c.get("start") or 0)
-        # Fix: use "score" field (what run_hybrid_search emits) not "s"
-        score = float(m.get("score") or m.get("s") or 0.0)
-        return (-score, path, start)
+        # Fix: use "raw_score" field (what run_hybrid_search emits) not "s"
+        score = float(m.get("raw_score") or m.get("score") or m.get("s") or 0.0)
+        # Reranker scores are negative (less negative = better), so sort ascending
+        # Positive scores (no reranker) sort descending as before
+        if score < 0:
+            return (score, path, start)  # ascending for negative scores
+        else:
+            return (-score, path, start)  # descending for positive scores
 
     flattened.sort(key=_flat_key)
 
@@ -1776,6 +1781,7 @@ def run_hybrid_search(
         items.append(
             {
                 "score": round(float(m["s"]), 4),
+                "raw_score": float(m["s"]),  # expose raw fused score for downstream budgeter
                 "path": _emit_path,
                 "host_path": _host,
                 "container_path": _cont,
