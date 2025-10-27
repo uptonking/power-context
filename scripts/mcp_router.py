@@ -323,18 +323,23 @@ def build_plan(q: str) -> List[Tuple[str, Dict[str, Any]]]:
     if intent == INTENT_SEARCH:
         # Parse lightweight repo hints and choose the best search tool via signature similarity
         hints = _parse_repo_hints(q)
-        args = {"query": q}
+        clean_q, dsl_filters = _clean_query_and_dsl(q)
+        args = {"query": clean_q}
         if search_limit:
             args["limit"] = search_limit
         if include_snippet:
             args["include_snippet"] = True
-        # Attach safe filters if we inferred them
         # Optionally reuse last filters if requested
         _reuse_last_filters(args)
 
+        # Merge filters: DSL tokens take precedence over heuristic hints
+        for k in ("language", "under", "symbol", "ext", "path_glob", "not_glob"):
+            v = dsl_filters.get(k)
+            if v not in (None, "") and k not in args:
+                args[k] = v
         for k in ("language", "under", "symbol", "ext", "path_glob", "not_glob"):
             v = hints.get(k)
-            if v not in (None, ""):
+            if v not in (None, "") and k not in args:
                 args[k] = v
         try:
             tool_servers = _discover_tool_endpoints(allow_network=False)
@@ -345,7 +350,8 @@ def build_plan(q: str) -> List[Tuple[str, Dict[str, Any]]]:
 
     if intent == INTENT_SEARCH_TESTS:
         hints = _parse_repo_hints(q)
-        args = {"query": q}
+        clean_q, dsl_filters = _clean_query_and_dsl(q)
+        args = {"query": clean_q}
         if search_limit:
             args["limit"] = search_limit
         if include_snippet:
@@ -354,14 +360,19 @@ def build_plan(q: str) -> List[Tuple[str, Dict[str, Any]]]:
         _reuse_last_filters(args)
 
         for k in ("language", "under", "symbol", "ext", "path_glob", "not_glob"):
+            v = dsl_filters.get(k)
+            if v not in (None, "") and k not in args:
+                args[k] = v
+        for k in ("language", "under", "symbol", "ext", "path_glob", "not_glob"):
             v = hints.get(k)
-            if v not in (None, ""):
+            if v not in (None, "") and k not in args:
                 args[k] = v
         return [("search_tests_for", args)]
 
     if intent == INTENT_SEARCH_CONFIG:
         hints = _parse_repo_hints(q)
-        args = {"query": q}
+        clean_q, dsl_filters = _clean_query_and_dsl(q)
+        args = {"query": clean_q}
         if search_limit:
             args["limit"] = search_limit
         if include_snippet:
@@ -370,8 +381,12 @@ def build_plan(q: str) -> List[Tuple[str, Dict[str, Any]]]:
         _reuse_last_filters(args)
 
         for k in ("language", "under", "symbol", "ext", "path_glob", "not_glob"):
+            v = dsl_filters.get(k)
+            if v not in (None, "") and k not in args:
+                args[k] = v
+        for k in ("language", "under", "symbol", "ext", "path_glob", "not_glob"):
             v = hints.get(k)
-            if v not in (None, ""):
+            if v not in (None, "") and k not in args:
                 args[k] = v
         return [("search_config_for", args)]
 
@@ -1023,6 +1038,20 @@ def _parse_repo_hints(q: str) -> Dict[str, Any]:
     if not_glob:
         out["not_glob"] = not_glob
     return out
+
+
+def _clean_query_and_dsl(q: str) -> Tuple[str, Dict[str, Any]]:
+    """Strip DSL tokens from the natural-language query and return (clean_query, dsl_filters).
+    Falls back to the raw query if parse_query_dsl is unavailable.
+    """
+    try:
+        # Lazy import to avoid heavy dependencies at module import time
+        from scripts.hybrid_search import parse_query_dsl  # type: ignore
+        clean, extracted = parse_query_dsl([q])
+        return (clean[0] if clean else ""), (extracted or {})
+    except Exception:
+        return q, {}
+
 
 
 
