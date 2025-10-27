@@ -46,24 +46,58 @@ class ChangeQueue:
     def __init__(self, process_cb):
         self._lock = threading.Lock()
         self._paths: Set[Path] = set()
+        self._pending: Set[Path] = set()
         self._timer: threading.Timer | None = None
         self._process_cb = process_cb
+        # Serialize processing to avoid concurrent use of TextEmbedding/QdrantClient
+        self._processing_lock = threading.Lock()
 
     def add(self, p: Path):
         with self._lock:
             self._paths.add(p)
             if self._timer is not None:
-                self._timer.cancel()
+                try:
+                    self._timer.cancel()
+                except Exception:
+                    pass
             self._timer = threading.Timer(DELAY_SECS, self._flush)
             self._timer.daemon = True
             self._timer.start()
 
     def _flush(self):
+        # Grab current batch
         with self._lock:
             paths = list(self._paths)
             self._paths.clear()
             self._timer = None
-        self._process_cb(paths)
+        # Try to run the processor exclusively; if busy, queue and return
+        if not self._processing_lock.acquire(blocking=False):
+            with self._lock:
+                self._pending.update(paths)
+                if self._timer is None:
+                    # schedule a follow-up flush to pick up pending when free
+                    self._timer = threading.Timer(DELAY_SECS, self._flush)
+                    self._timer.daemon = True
+                    self._timer.start()
+            return
+        try:
+            todo = paths
+            while True:
+                try:
+                    self._process_cb(list(todo))
+                except Exception as e:
+                    try:
+                        print(f"[watcher_error] processing batch failed: {e}")
+                    except Exception:
+                        pass
+                # drain any pending accumulated during processing
+                with self._lock:
+                    if not self._pending:
+                        break
+                    todo = list(self._pending)
+                    self._pending.clear()
+        finally:
+            self._processing_lock.release()
 
 
 class IndexHandler(FileSystemEventHandler):

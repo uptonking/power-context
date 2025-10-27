@@ -20,6 +20,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Literal, TypedDict
 import threading
+import time
 
 # Type definitions matching codebase-index-cli patterns
 IndexingState = Literal['idle', 'initializing', 'scanning', 'indexing', 'watching', 'error']
@@ -76,12 +77,15 @@ STATE_FILENAME = "state.json"
 # Use re-entrant locks to avoid deadlocks when helper functions call each other
 _state_locks: Dict[str, threading.RLock] = {}
 _state_lock = threading.Lock()
+# Track last-used timestamps for cleanup of idle workspace locks
+_state_lock_last_used: Dict[str, float] = {}
 
 def _get_state_lock(workspace_path: str) -> threading.RLock:
-    """Get or create a thread-safe lock for a specific workspace."""
+    """Get or create a thread-safe lock for a specific workspace and record last-used time."""
     with _state_lock:
         if workspace_path not in _state_locks:
             _state_locks[workspace_path] = threading.RLock()
+        _state_lock_last_used[workspace_path] = time.time()
         return _state_locks[workspace_path]
 
 def _get_state_path(workspace_path: str) -> Path:
@@ -363,12 +367,44 @@ def list_workspaces(search_root: Optional[str] = None) -> List[Dict[str, Any]]:
 
     return sorted(workspaces, key=lambda x: x.get("last_updated", ""), reverse=True)
 
-def cleanup_old_state_locks():
-    """Clean up unused state locks to prevent memory leaks."""
+def cleanup_old_state_locks(max_idle_seconds: int = 900) -> int:
+    """Best-effort cleanup of idle workspace locks.
+
+    Removes locks that have been idle (not requested via _get_state_lock) for longer than max_idle_seconds
+    and whose lock can be acquired without blocking (i.e., not held).
+    Returns the number of locks removed.
+    """
+    now = time.time()
+    removed = 0
     with _state_lock:
-        # Keep only locks for recently accessed workspaces
-        # In practice, this would need more sophisticated cleanup logic
-        pass
+        stale_keys = []
+        for ws, lock in list(_state_locks.items()):
+            last = _state_lock_last_used.get(ws, 0.0)
+            # Prefer also pruning locks whose workspace no longer exists
+            ws_exists = True
+            try:
+                ws_exists = Path(ws).exists()
+            except Exception:
+                ws_exists = False
+            if (now - last) > max_idle_seconds or not ws_exists:
+                acquired = False
+                try:
+                    acquired = lock.acquire(blocking=False)
+                except Exception:
+                    acquired = False
+                if acquired:
+                    try:
+                        stale_keys.append(ws)
+                    finally:
+                        try:
+                            lock.release()
+                        except Exception:
+                            pass
+        for ws in stale_keys:
+            _state_locks.pop(ws, None)
+            _state_lock_last_used.pop(ws, None)
+            removed += 1
+    return removed
 
 if __name__ == "__main__":
     # Simple CLI for testing
