@@ -2429,6 +2429,17 @@ def main():
             if p.is_file():
                 return str(p.parent)
             # Heuristic: if path doesn't exist and looks like a file stem (no dot),
+    # Lightweight BM25-style lexical boost (default ON) for CLI path
+    try:
+        _USE_BM25_CLI = _env_truthy(os.environ.get("HYBRID_BM25"), True)
+    except Exception:
+        _USE_BM25_CLI = True
+    try:
+        _BM25_W2 = float(os.environ.get("HYBRID_BM25_WEIGHT", "0.2") or 0.2)
+    except Exception:
+        _BM25_W2 = 0.2
+    _bm25_tok_w2 = _bm25_token_weights_from_results(queries, lex_results) if _USE_BM25_CLI else {}
+
             # treat it as a file name and use its parent directory
             if (not p.exists()) and p.name and ("." not in p.name):
                 return str(p.parent) if str(p.parent) else v
