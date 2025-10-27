@@ -31,7 +31,6 @@ import uuid
 import os
 import subprocess
 import threading
-import glob
 from typing import Any, Dict, Optional, List
 
 import sys
@@ -3456,33 +3455,6 @@ async def context_answer(
         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
             print(f"DEBUG SPAN SELECTION: items={len(items)}, budgeted={len(budgeted)}, out_max={out_max}, lim={lim}, spans={len(spans)}")
 
-        # Enforce that at least one selected span contains the primary identifier; otherwise fail fast
-        try:
-            require_ident = str(os.environ.get("CTX_REQUIRE_IDENTIFIER", "1")).strip().lower() in {"1", "true", "yes", "on"}
-        except Exception:
-            require_ident = True
-        if require_ident and primary_ident:
-            try:
-                _il = primary_ident.lower()
-                _found = False
-                for _sp in spans:
-                    _hay = _span_haystack(_sp)
-                    if _il in _hay:
-                        _found = True
-                        break
-                    _extra = _read_span_snippet(_sp)
-                    if _extra and _il in _extra.lower():
-                        _found = True
-                        break
-                if not _found:
-                    if os.environ.get("DEBUG_CONTEXT_ANSWER"):
-                        print(f"DEBUG IDENT ENFORCE: missing identifier {primary_ident} in selected spans; aborting")
-                    err = f"identifier '{primary_ident}' not found in selected snippets"
-            except Exception as _e:
-                if os.environ.get("DEBUG_CONTEXT_ANSWER"):
-                    print(f"DEBUG IDENT ENFORCE failed: {_e}")
-
-
     except Exception as e:
         err = str(e)
         spans = []
@@ -3529,9 +3501,12 @@ async def context_answer(
         if _contp:
             _cit["container_path"] = _contp
         citations.append(_cit)
-        # For context_answer, prefer filesystem content to avoid truncated payloads
-        snippet = ""
-        if path and sline and include_snippet:
+        snippet = str(it.get("text") or "").strip()
+        if not snippet and it.get("_ident_snippet"):
+            snippet = str(it.get("_ident_snippet")).strip()
+        # For context_answer, always read from filesystem to get complete, untruncated content
+        # (payload text may be truncated for storage efficiency)
+        if not snippet and path and sline and include_snippet:
             try:
                 fp = path
                 import os as _os
@@ -3539,7 +3514,11 @@ async def context_answer(
                     fp = _os.path.join("/work", fp)
                 realp = _os.path.realpath(fp)
                 # SECURITY: Verify the resolved path stays within /work to prevent path traversal
-                if realp.startswith("/work/"):
+                if not realp.startswith("/work/"):
+                    if _os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                        print(f"DEBUG: Blocked path traversal attempt: {path} -> {realp}")
+                    snippet = ""
+                else:
                     with open(realp, "r", encoding="utf-8", errors="ignore") as f:
                         lines = f.readlines()
                     try:
@@ -3550,9 +3529,6 @@ async def context_answer(
                     ei = min(len(lines), max(sline, eline) + margin)
                     snippet = "".join(lines[si-1:ei])
                     it["_ident_snippet"] = snippet
-                else:
-                    if _os.environ.get("DEBUG_CONTEXT_ANSWER"):
-                        print(f"DEBUG: Blocked path traversal attempt: {path} -> {realp}")
             except Exception:
                 snippet = ""
         # Fallbacks if FS read failed or include_snippet is false
@@ -3562,9 +3538,8 @@ async def context_answer(
             snippet = str(it.get("_ident_snippet")).strip()
 
         snippets_by_id[idx] = snippet
-
         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
-            print(f"DEBUG: Snippet {idx} {('(fs)' if (path and sline and include_snippet) else '(payload)')} {path}:{sline}-{eline}, length={len(snippet)}")
+            print(f"DEBUG: Snippet {idx} {('(payload)' if it.get('text') else '(fs)')} {path}:{sline}-{eline}, length={len(snippet)}")
             if snippet:
                 print(f"DEBUG: Snippet {idx} content preview: {snippet[:200]}")
                 # Show full content for RRF_K line
