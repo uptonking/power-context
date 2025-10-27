@@ -3504,6 +3504,8 @@ async def context_answer(
 
     # Build citations and context payload for the decoder
     citations: list[Dict[str, Any]] = []
+    snippets_by_id: dict[int, str] = {}
+
     context_blocks: list[str] = []
     # Prepare deterministic definition/usage extraction
     asked_ident = _primary_identifier_from_queries(queries)
@@ -3558,6 +3560,8 @@ async def context_answer(
             snippet = str(it.get("text") or "").strip()
         if not snippet and it.get("_ident_snippet"):
             snippet = str(it.get("_ident_snippet")).strip()
+
+        snippets_by_id[idx] = snippet
 
         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
             print(f"DEBUG: Snippet {idx} {('(fs)' if (path and sline and include_snippet) else '(payload)')} {path}:{sline}-{eline}, length={len(snippet)}")
@@ -3696,6 +3700,10 @@ async def context_answer(
 
         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
             print(f"DEBUG: Single LLM call, prompt length={len(prompt)}")
+            print(f"DEBUG: Full prompt being sent to LLM:")
+            print("="*80)
+            print(prompt)
+            print("="*80)
 
         answer = client.generate_with_soft_embeddings(
             prompt=prompt,
@@ -3760,24 +3768,48 @@ async def context_answer(
             if not def_line:
                 def_line = "Definition: Not found in provided snippets."
 
-            # Build Usage line
-            usage_text = usage_part.strip().replace("\n", " ") if usage_part else ""
-            # Truncate excessive spaces
-            usage_text = _re.sub(r"\s+", " ", usage_text).strip()
+            # Build Usage line (strict: prefer an exact code line from the usage span; avoid model hallucinations)
+            usage_text = ""
+            usage_cid: int | None = None
+            try:
+                if asked_ident and (_usage_id is not None):
+                    _sn = snippets_by_id.get(_usage_id) or ""
+                    if _sn:
+                        for _ln in _sn.splitlines():
+                            # Skip definition lines; pick the first non-definition occurrence
+                            if _re.match(rf"\s*{_re.escape(asked_ident)}\s*=", _ln):
+                                continue
+                            if asked_ident in _ln:
+                                usage_text = _ln.strip()
+                                usage_cid = _usage_id
+                                break
+            except Exception:
+                usage_text = ""
+                usage_cid = None
+
+            # If no exact usage line was found, fall back to the model's usage (but still grounded)
+            if not usage_text:
+                usage_text = usage_part.strip().replace("\n", " ") if usage_part else ""
+                usage_text = _re.sub(r"\s+", " ", usage_text).strip()
+
             if not usage_text:
                 # Minimal grounded usage if we saw other occurrences
                 if _usage_id is not None:
-                    usage_text = "Appears in the shown code."  # keep generic but grounded
+                    usage_text = "Appears in the shown code."
+                    usage_cid = _usage_id
                 elif extra_hint:
                     usage_text = extra_hint
+                    usage_cid = _def_id if (_def_id is not None) else (citations[0]["id"] if citations else None)
                 else:
                     usage_text = "Not found in provided snippets."
+                    usage_cid = _def_id if (_def_id is not None) else (citations[0]["id"] if citations else None)
+
             # Attach a citation id if missing
             if "[" not in usage_text and "]" not in usage_text:
-                uid = (
-                    _usage_id
-                    if (_usage_id is not None)
-                    else (_def_id if (_def_id is not None) else (citations[0]["id"] if citations else None))
+                uid = usage_cid if (usage_cid is not None) else (
+                    _usage_id if (_usage_id is not None) else (
+                        _def_id if (_def_id is not None) else (citations[0]["id"] if citations else None)
+                    )
                 )
                 usage_line = f"Usage: {usage_text}{_fmt_citation(uid)}"
             else:
