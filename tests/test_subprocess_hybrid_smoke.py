@@ -24,7 +24,18 @@ def qdrant_container():
     container = DockerContainer("qdrant/qdrant:latest").with_exposed_ports(6333)
     container.start()
     host = container.get_container_host_ip()
-    port = int(container.get_exposed_port(6333))
+    deadline = time.time() + 30
+    last_exc: Exception | None = None
+    while time.time() < deadline:
+        try:
+            port = int(container.get_exposed_port(6333))
+            break
+        except Exception as exc:  # pragma: no cover - retry only in flaky envs
+            last_exc = exc
+            time.sleep(0.25)
+    else:
+        container.stop()
+        raise RuntimeError(f"qdrant port mapping unavailable: {last_exc}")
     url = f"http://{host}:{port}"
     # Poll readiness endpoint up to 60s
     deadline = time.time() + 60
@@ -44,7 +55,8 @@ def qdrant_container():
 def test_hybrid_cli_runs_basic(tmp_path, qdrant_container):
     env = os.environ.copy()
     env["QDRANT_URL"] = qdrant_container
-    env.setdefault("COLLECTION_NAME", f"test-{uuid.uuid4().hex[:8]}")
+    collection_name = f"test-{uuid.uuid4().hex[:8]}"
+    env["COLLECTION_NAME"] = collection_name
 
     # Warm the FastEmbed model cache to avoid long first-run download inside subprocess
     try:
@@ -60,14 +72,22 @@ def test_hybrid_cli_runs_basic(tmp_path, qdrant_container):
         "def test():\n    return 1\n", encoding="utf-8"
     )
     ing = importlib.import_module("scripts.ingest_code")
-    ing.index_repo(
-        root=tmp_path,
-        qdrant_url=qdrant_container,
-        api_key="",
-        collection=env["COLLECTION_NAME"],
-        model_name="BAAI/bge-base-en-v1.5",
-        recreate=True,
-    )
+    prev_collection = os.environ.get("COLLECTION_NAME")
+    os.environ["COLLECTION_NAME"] = collection_name
+    try:
+        ing.index_repo(
+            root=tmp_path,
+            qdrant_url=qdrant_container,
+            api_key="",
+            collection=collection_name,
+            model_name="BAAI/bge-base-en-v1.5",
+            recreate=True,
+        )
+    finally:
+        if prev_collection is None:
+            os.environ.pop("COLLECTION_NAME", None)
+        else:
+            os.environ["COLLECTION_NAME"] = prev_collection
 
     # Use the real model; allow time to download on first run
     env["EMBEDDING_MODEL"] = "BAAI/bge-base-en-v1.5"
