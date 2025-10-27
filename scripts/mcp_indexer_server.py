@@ -81,6 +81,20 @@ PORT = int(os.environ.get("FASTMCP_INDEXER_PORT", "8001"))
 # Process-wide lock to guard environment mutations during retrieval (gate-first/budgeting)
 _ENV_LOCK = threading.RLock()
 
+
+def _primary_identifier_from_queries(qs: list[str]) -> str:
+    """Best-effort extraction of the main CONSTANT_NAME or IDENTIFIER from queries."""
+    try:
+        import re as _re
+        cand: list[str] = []
+        for q in qs:
+            for t in _re.findall(r"[A-Za-z_][A-Za-z0-9_]*", q or ""):
+                if len(t) >= 2 and ("_" in t or t.isupper()):
+                    cand.append(t)
+        return next((t for t in cand if t), "")
+    except Exception:
+        return ""
+
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
 DEFAULT_COLLECTION = os.environ.get("COLLECTION_NAME", "my-collection")
 MAX_LOG_TAIL = int(os.environ.get("MCP_MAX_LOG_TAIL", "4000"))
@@ -3050,19 +3064,15 @@ async def context_answer(
             qj = " ".join(queries)
             import re as _re
 
-            # Extract code identifiers from questions (e.g., "what is RRF_K" -> add "RRF_K")
-            identifiers = _re.findall(r"\b([A-Z_][A-Z0-9_]{2,})\b", qj)
-
-            # For identifier-focused questions, add helpful probes without discarding the original tokens
-            if identifiers and any(word in qj.lower() for word in ["what is", "how is", "used", "usage", "define"]):
-                primary = identifiers[0]
+            primary = _primary_identifier_from_queries(queries)
+            if primary and any(word in qj.lower() for word in ["what is", "how is", "used", "usage", "define"]):
                 def _add_query(q: str):
                     qs = q.strip()
                     if qs and qs not in queries:
                         queries.append(qs)
 
-                if primary not in queries:
-                    queries.insert(0, primary)
+                # Always keep the original user tokens; just append focused probes
+                _add_query(primary)
                 _add_query(f"{primary} =")
                 func_name = primary.lower().split("_")[0]
                 if func_name and len(func_name) > 2:
@@ -3308,10 +3318,61 @@ async def context_answer(
             out_max = 12
         # Respect caller-provided limit, allowing limit=0 to suppress snippets entirely
         span_cap = max(0, min(out_max, max(0, int(lim))))
-        if budgeted:
-            spans = budgeted[:span_cap] if span_cap else []
+        source_spans = list(budgeted) if budgeted else list(items)
+
+        # Prefer spans that actually contain the main identifier when one is present
+        def _span_haystack(span: Dict[str, Any]) -> str:
+            parts = [
+                str(span.get("text") or ""),
+                str(span.get("symbol") or ""),
+                str((span.get("relations") or {}).get("symbol_path") if isinstance(span.get("relations"), dict) else ""),
+                str(span.get("path") or ""),
+            ]
+            return " ".join(parts).lower()
+
+        def _span_key(span: Dict[str, Any]) -> tuple[str, int, int]:
+            return (
+                str(span.get("path") or ""),
+                int(span.get("start_line") or 0),
+                int(span.get("end_line") or 0),
+            )
+
+        primary_ident = _primary_identifier_from_queries(queries)
+        if primary_ident and source_spans:
+            ident_lower = primary_ident.lower()
+            spans_with_ident: list[Dict[str, Any]] = []
+            spans_without_ident: list[Dict[str, Any]] = []
+
+            for span in source_spans:
+                if ident_lower in _span_haystack(span):
+                    spans_with_ident.append(span)
+                else:
+                    spans_without_ident.append(span)
+            if spans_with_ident:
+                source_spans = spans_with_ident + spans_without_ident
+            elif budgeted and items:
+                # Try to pull identifier-bearing spans from the broader pool
+                ident_candidates: list[Dict[str, Any]] = []
+                seen = set()
+                for span in items:
+                    key = _span_key(span)
+                    if key in seen:
+                        continue
+                    if ident_lower in _span_haystack(span):
+                        ident_candidates.append(span)
+                        seen.add(key)
+                if ident_candidates:
+                    for span in source_spans:
+                        key = _span_key(span)
+                        if key not in seen:
+                            ident_candidates.append(span)
+                            seen.add(key)
+                    source_spans = ident_candidates
+
+        if span_cap:
+            spans = source_spans[:span_cap]
         else:
-            spans = items[:span_cap] if span_cap else []
+            spans = []
 
         # Debug span selection
         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
@@ -3340,17 +3401,7 @@ async def context_answer(
     citations: list[Dict[str, Any]] = []
     context_blocks: list[str] = []
     # Prepare deterministic definition/usage extraction
-    asked_ident = ""
-    try:
-        import re as _re
-        cand: list[str] = []
-        for q in queries:
-            for t in _re.findall(r"[A-Za-z_][A-Za-z0-9_]*", q or ""):
-                if len(t) >= 2 and ("_" in t or t.isupper()):
-                    cand.append(t)
-        asked_ident = next((t for t in cand if t), "")
-    except Exception:
-        asked_ident = ""
+    asked_ident = _primary_identifier_from_queries(queries)
     _def_line_exact: str = ""
     _def_id: int | None = None
     _usage_id: int | None = None
@@ -3520,6 +3571,8 @@ async def context_answer(
             "Usage: <one-sentence summary of how/where it is used based only on the snippets> [ID]. "
             "If the definition or usage is not present in the snippets, state 'Not found in provided snippets.' for that line."
         )
+        if sources_footer:
+            system_msg += f"\nSources:\n{sources_footer}"
 
         user_msg = f"{qtxt}"
 
@@ -3577,9 +3630,12 @@ async def context_answer(
 
             # Build Definition line
             def_line = None
+            def _fmt_citation(cid: int | None) -> str:
+                return f" [{cid}]" if cid is not None else ""
+
             if asked_ident and _def_line_exact:
-                cid = _def_id if (_def_id is not None) else (citations[0]["id"] if citations else 1)
-                def_line = f'Definition: "{_def_line_exact}" [{cid}]'
+                cid = _def_id if (_def_id is not None) else (citations[0]["id"] if citations else None)
+                def_line = f'Definition: "{_def_line_exact}"{_fmt_citation(cid)}'
             else:
                 # Try to salvage from model output if it quoted something containing the asked identifier
                 cand = def_part.strip().strip("\n ")
@@ -3589,8 +3645,8 @@ async def context_answer(
                 m = _re.search(r'"([^"]+)"', cand)
                 q = m.group(1) if m else cand
                 if asked_ident and asked_ident in q:
-                    cid = (citations[0]["id"] if citations else 1)
-                    def_line = f'Definition: "{q.strip()}" [{cid}]'
+                    cid = citations[0]["id"] if citations else None
+                    def_line = f'Definition: "{q.strip()}"{_fmt_citation(cid)}'
             if not def_line:
                 def_line = "Definition: Not found in provided snippets."
 
@@ -3608,8 +3664,12 @@ async def context_answer(
                     usage_text = "Not found in provided snippets."
             # Attach a citation id if missing
             if "[" not in usage_text and "]" not in usage_text:
-                uid = _usage_id if (_usage_id is not None) else (_def_id if (_def_id is not None) else (citations[0]["id"] if citations else 1))
-                usage_line = f"Usage: {usage_text} [{uid}]"
+                uid = (
+                    _usage_id
+                    if (_usage_id is not None)
+                    else (_def_id if (_def_id is not None) else (citations[0]["id"] if citations else None))
+                )
+                usage_line = f"Usage: {usage_text}{_fmt_citation(uid)}"
             else:
                 usage_line = f"Usage: {usage_text}"
 
