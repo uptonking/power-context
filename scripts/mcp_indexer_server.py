@@ -2905,6 +2905,467 @@ def _cleanup_answer(text: str, max_chars: int | None = None) -> str:
         return text
 
 
+# Style and validation helpers for context_answer output
+def _answer_style_guidance() -> str:
+    """Compact instruction to keep answers direct and grounded."""
+    return (
+        "Write a direct answer in 2-4 sentences. No headings or labels. "
+        "Ground non-trivial claims with bracketed citations like [n] using the numbered Sources. "
+        "Quote exact code lines when relevant. If the snippets are insufficient, respond exactly: insufficient context."
+    )
+
+
+def _strip_preamble_labels(text: str) -> str:
+    """Remove 'Definition:'/'Usage:' labels and collapse lines to a single paragraph."""
+    try:
+        t = (text or "").strip()
+        if not t:
+            return t
+        t = t.replace("Definition:", "").replace("Usage:", "")
+        parts = [p.strip() for p in t.splitlines() if p.strip()]
+        return " ".join(parts)
+    except Exception:
+        return text
+
+
+def _validate_answer_output(text: str, citations: list) -> dict:
+    """Lightweight validation for hallucination and truncation.
+
+    Returns a dict with keys: ok, has_citation_refs, hedge_score, looks_cutoff
+    """
+    try:
+        t = (text or "").strip()
+        low = t.lower()
+        has_cite = ("[" in t and "]" in t) or not citations
+        hedge_terms = ["likely", "might", "could", "appears", "seems", "probably"]
+        hedge_score = sum(low.count(w) for w in hedge_terms)
+        looks_cutoff = (len(t) > 120 and not t.endswith((".", "!", "?"))) or t.endswith("\n")
+        ok = bool(t) and (has_cite or not citations) and hedge_score < 4 and not looks_cutoff
+        return {
+            "ok": ok,
+            "has_citation_refs": has_cite,
+            "hedge_score": hedge_score,
+            "looks_cutoff": looks_cutoff,
+        }
+    except Exception:
+        return {"ok": True, "has_citation_refs": True, "hedge_score": 0, "looks_cutoff": False}
+
+
+# ----- context_answer refactor helpers -----
+
+def _ca_unwrap_and_normalize(
+    query: Any,
+    limit: Any,
+    per_path: Any,
+    budget_tokens: Any,
+    include_snippet: Any,
+    collection: Any,
+    max_tokens: Any,
+    temperature: Any,
+    mode: Any,
+    expand: Any,
+    language: Any,
+    under: Any,
+    kind: Any,
+    symbol: Any,
+    ext: Any,
+    path_regex: Any,
+    path_glob: Any,
+    not_glob: Any,
+    case: Any,
+    not_: Any,
+    kwargs: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Normalize user args into a compact config for retrieval and decoding.
+    Mirrors the previous inline normalization logic but returns a structured dict.
+    """
+    # Unwrap nested payloads (e.g., MCP JSON-RPC)
+    _raw = dict(kwargs or {})
+    try:
+        for k in ("arguments", "kwargs"):
+            v = _raw.get(k)
+            if isinstance(v, dict):
+                for kk, vv in v.items():
+                    _raw.setdefault(kk, vv)
+    except (TypeError, AttributeError) as e:
+        logger.warning("Failed to unwrap nested kwargs", exc_info=e, extra={"raw_keys": list(_raw.keys())})
+
+    # Prefer non-empty override from wrapper
+    def _coalesce(val, fallback):
+        if val is None:
+            return fallback
+        try:
+            if isinstance(val, str) and val.strip() == "":
+                return fallback
+        except (AttributeError, TypeError):
+            pass
+        return val
+
+    query = _coalesce(_raw.get("query"), query)
+    limit = _coalesce(_raw.get("limit"), limit)
+    per_path = _coalesce(_raw.get("per_path"), per_path)
+    budget_tokens = _coalesce(_raw.get("budget_tokens"), budget_tokens)
+    include_snippet = _coalesce(_raw.get("include_snippet"), include_snippet)
+    collection = _coalesce(_raw.get("collection"), collection)
+    max_tokens = _coalesce(_raw.get("max_tokens"), max_tokens)
+    temperature = _coalesce(_raw.get("temperature"), temperature)
+    mode = _coalesce(_raw.get("mode"), mode)
+    expand = _coalesce(_raw.get("expand"), expand)
+    language = _coalesce(_raw.get("language"), language)
+    under = _coalesce(_raw.get("under"), under)
+    kind = _coalesce(_raw.get("kind"), kind)
+    symbol = _coalesce(_raw.get("symbol"), symbol)
+    ext = _coalesce(_raw.get("ext"), ext)
+    path_regex = _coalesce(_raw.get("path_regex"), path_regex)
+    path_glob = _coalesce(_raw.get("path_glob"), path_glob)
+    not_glob = _coalesce(_raw.get("not_glob"), not_glob)
+    case = _coalesce(_raw.get("case"), case)
+    not_ = _coalesce(_raw.get("not_"), not_) if _raw.get("not_") is not None else _coalesce(_raw.get("not"), not_)
+
+    # Normalize query to list[str]
+    queries: list[str] = []
+    try:
+        if isinstance(query, (list, tuple)):
+            queries = [str(q).strip() for q in query if str(q).strip()]
+        elif isinstance(query, str):
+            queries = _to_str_list_relaxed(query)
+        elif query is not None:
+            s = str(query).strip()
+            if s:
+                queries = [s]
+    except (TypeError, ValueError) as e:
+        logger.warning("Failed to normalize query", exc_info=e, extra={"raw_query": query})
+        raise ValidationError(f"Invalid query format: {e}")
+
+    if not queries:
+        raise ValidationError("query required")
+
+    # Effective limits
+    lim = safe_int(limit, default=15, logger=logger, context="limit")
+    ppath = safe_int(per_path, default=5, logger=logger, context="per_path")
+
+    # Adjust per_path for identifier-focused questions
+    try:
+        import re as _re
+        _ids0 = _re.findall(r"\b([A-Z_][A-Z0-9_]{2,})\b", " ".join(queries))
+        if _ids0:
+            ppath = max(ppath, 5)
+    except Exception as e:
+        logger.debug("Identifier scan for per_path failed", exc_info=e)
+
+    # Default include_snippet=True for answering
+    if include_snippet in (None, ""):
+        include_snippet = True
+
+    return {
+        "queries": queries,
+        "limit": lim,
+        "per_path": ppath,
+        "budget_tokens": budget_tokens,
+        "include_snippet": include_snippet,
+        "collection": (collection or _default_collection()) or "",
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "mode": mode,
+        "expand": expand,
+        "filters": {
+            "language": language,
+            "under": under,
+            "kind": kind,
+            "symbol": symbol,
+            "ext": ext,
+            "path_regex": path_regex,
+            "path_glob": path_glob,
+            "not_glob": not_glob,
+            "case": case,
+            "not_": not_,
+        },
+    }
+
+
+
+def _ca_prepare_filters_and_retrieve(
+    queries: list[str],
+    lim: int,
+    ppath: int,
+    filters: Dict[str, Any],
+    model: Any,
+    did_local_expand: bool,
+    kwargs: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Build effective filters and run hybrid retrieval with identifier/usage augmentation.
+    Returns a dict with: items, eff_language, eff_path_glob, eff_not_glob, override_under,
+    sym_arg, cwd_root.
+    """
+    # Unpack
+    req_language = kwargs.get("language") or filters.get("language") or None
+    path_glob = kwargs.get("path_glob") or filters.get("path_glob")
+    not_glob = kwargs.get("not_glob") or filters.get("not_glob")
+    path_regex = kwargs.get("path_regex") or filters.get("path_regex")
+    ext = kwargs.get("ext") or filters.get("ext")
+    kind = kwargs.get("kind") or filters.get("kind")
+    case = kwargs.get("case") or filters.get("case")
+    under = kwargs.get("under") or filters.get("under")
+
+    # Defaults to avoid noisy artifacts
+    user_not_glob = not_glob
+    if isinstance(user_not_glob, str):
+        user_not_glob = [user_not_glob]
+    base_excludes = [
+        ".selftest_repo/",
+        ".pytest_cache/",
+        ".codebase/",
+        ".kiro/",
+        "node_modules/",
+        ".git/",
+    ]
+
+    def _variants(p: str) -> list[str]:
+        p = str(p).strip()
+        if not p:
+            return []
+        p = p.replace("\\", "/").lstrip("/")
+        if p.endswith("/"):
+            base = p
+            return [f"{base}*", f"/work/{base}*"]
+        return [p, f"/work/{p}"]
+
+    default_not_glob: list[str] = []
+    for b in base_excludes:
+        default_not_glob.extend(_variants(b))
+
+    qtext = " ".join(queries).lower()
+    def _mentions_any(keys: list[str]) -> bool:
+        return any(k in qtext for k in keys)
+
+    maybe_excludes: list[str] = []
+    if not _mentions_any([".env", "dotenv", "environment variable", "env var"]):
+        maybe_excludes += [".env", ".env.*"]
+    if not _mentions_any(["docker-compose", "compose"]):
+        maybe_excludes += ["docker-compose*.yml", "docker-compose*.yaml", "compose*.yml", "compose*.yaml"]
+    if not _mentions_any(["lock", "package-lock.json", "pnpm-lock", "yarn.lock", "poetry.lock", "cargo.lock", "go.sum", "composer.lock"]):
+        maybe_excludes += [
+            "*.lock", "package-lock.json", "pnpm-lock.yaml", "yarn.lock",
+            "poetry.lock", "Cargo.lock", "go.sum", "composer.lock",
+        ]
+    if not _mentions_any(["appsettings", "settings.json", "config"]):
+        maybe_excludes += ["appsettings*.json"]
+    for pat in maybe_excludes:
+        default_not_glob.extend(_variants(pat))
+
+    # Dedup + merge with user provided
+    seen = set()
+    eff_not_glob: list[str] = []
+    for g in default_not_glob + (user_not_glob or []):
+        s = str(g).strip()
+        if s and s not in seen:
+            eff_not_glob.append(s)
+            seen.add(s)
+
+    def _to_glob_list(val: Any) -> list[str]:
+        if not val:
+            return []
+        if isinstance(val, (list, tuple, set)):
+            return [str(x).strip() for x in val if str(x).strip()]
+        vs = str(val).strip()
+        return [vs] if vs else []
+
+    cwd_root = os.path.abspath(os.getcwd()).replace("\\", "/").rstrip("/")
+    user_path_glob = _to_glob_list(path_glob)
+    eff_path_glob: list[str] = list(user_path_glob)
+    auto_path_glob: list[str] = []
+
+    def _abs_prefix(val: str) -> str:
+        v = (val or "").replace("\\", "/")
+        if not v:
+            return cwd_root
+        if v.startswith(cwd_root + "/") or v == cwd_root:
+            return v.rstrip("/")
+        if v.startswith("/"):
+            return f"{cwd_root}{v.rstrip('/')}"
+        return f"{cwd_root}/{v.lstrip('./').rstrip('/')}"
+
+    user_under = under or None
+    override_under = None
+    if isinstance(user_under, str):
+        _uu = user_under.strip()
+        if _uu:
+            _uu_norm = _uu.replace("\\", "/")
+            _uu_parts = [p for p in _uu_norm.split("/") if p]
+            _uu_last = _uu_parts[-1] if _uu_parts else _uu_norm
+            _looks_like_file = ("." in _uu_last) and not _uu_norm.endswith("/")
+            if _looks_like_file:
+                auto_path_glob.append(f"**/{_uu_last}")
+                if len(_uu_parts) > 1:
+                    auto_path_glob.append(f"**/{_uu_norm}")
+                    parent = "/".join(_uu_parts[:-1])
+                    if parent:
+                        override_under = _abs_prefix(parent)
+            else:
+                override_under = _abs_prefix(_uu_norm)
+    elif user_under:
+        override_under = str(user_under)
+
+    if auto_path_glob:
+        eff_path_glob.extend(auto_path_glob)
+        if eff_path_glob:
+            dedup_pg: list[str] = []
+            seen_pg = set()
+            for pg in eff_path_glob:
+                pg_str = str(pg).strip()
+                if not pg_str or pg_str in seen_pg:
+                    continue
+                seen_pg.add(pg_str)
+                dedup_pg.append(pg_str)
+            eff_path_glob = dedup_pg
+        else:
+            eff_path_glob = None
+
+        # Query sharpening for identifier questions
+        try:
+            qj = " ".join(queries)
+            import re as _re
+            primary = _primary_identifier_from_queries(queries)
+            if primary and any(word in qj.lower() for word in ["what is", "how is", "used", "usage", "define"]):
+                def _add_query(q: str):
+                    qs = q.strip()
+                    if qs and qs not in queries:
+                        queries.append(qs)
+                _add_query(primary)
+                _add_query(f"{primary} =")
+                func_name = primary.lower().split("_")[0]
+                if func_name and len(func_name) > 2:
+                    _add_query(f"def {func_name}(")
+        except Exception as e:
+            logger.debug("Failed to augment query with identifier probes", exc_info=e)
+
+        if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+            logger.debug("FILTERS", extra={"language": req_language, "override_under": override_under, "path_glob": eff_path_glob})
+
+    # Sanitize symbol
+    sym_arg = kwargs.get("symbol") or filters.get("symbol") or None
+    try:
+        if sym_arg and ("/" in str(sym_arg) or "." in str(sym_arg)):
+            sym_arg = None
+    except Exception:
+        pass
+
+    # Run retrieval
+    from scripts.hybrid_search import run_hybrid_search  # type: ignore
+    items = run_hybrid_search(
+        queries=queries,
+        limit=int(max(lim, 4)),
+        per_path=int(max(ppath, 0)),
+        language=req_language,
+        under=override_under or None,
+        kind=(kind or kwargs.get("kind") or None),
+        symbol=sym_arg,
+        ext=(ext or kwargs.get("ext") or None),
+        not_filter=(filters.get("not_") or kwargs.get("not_") or kwargs.get("not") or None),
+        case=(case or kwargs.get("case") or None),
+        path_regex=(path_regex or kwargs.get("path_regex") or None),
+        path_glob=eff_path_glob,
+        not_glob=eff_not_glob,
+        expand=False if did_local_expand else (str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower() in {"1","true","yes","on"}),
+        model=model,
+    )
+
+    # Usage augmentation for identifier
+    try:
+        import re as _re
+        qj2 = " ".join(queries)
+        _ids = _re.findall(r"\b([A-Z_][A-Z0-9_]{2,})\b", qj2)
+        _asked = _ids[0] if _ids else ""
+        if _asked:
+            _fname = _asked.lower().split("_")[0]
+            _usage_qs: list[str] = []
+            if _fname and len(_fname) >= 2:
+                _usage_qs.append(f"def {_fname}(")
+            _usage_qs.extend([
+                f"{_asked})", f"{_asked},", f"= {_asked}", f"{_asked} =",
+                f"{_asked} = int(os.environ.get", f"int(os.environ.get(\"{_asked}\"",
+            ])
+            _usage_qs = [u for u in _usage_qs if u and u not in queries]
+            if _usage_qs:
+                usage_items = run_hybrid_search(
+                    queries=list(queries) + _usage_qs,
+                    limit=int(max(lim, 30)),
+                    per_path=int(max(ppath, 10)),
+                    language=req_language,
+                    under=override_under or None,
+                    kind=(kind or kwargs.get("kind") or None),
+                    symbol=sym_arg,
+                    ext=(ext or kwargs.get("ext") or None),
+                    not_filter=(filters.get("not_") or kwargs.get("not_") or kwargs.get("not") or None),
+                    case=(case or kwargs.get("case") or None),
+                    path_regex=(path_regex or kwargs.get("path_regex") or None),
+                    path_glob=eff_path_glob,
+                    not_glob=eff_not_glob,
+                    expand=False if did_local_expand else (str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower() in {"1","true","yes","on"}),
+                    model=model,
+                )
+                def _ikey(it: Dict[str, Any]):
+                    return (str(it.get("path") or ""), int(it.get("start_line") or 0), int(it.get("end_line") or 0))
+                _seen = { _ikey(it) for it in items }
+                for it in usage_items:
+                    k = _ikey(it)
+                    if k not in _seen:
+                        items.append(it)
+                        _seen.add(k)
+    except Exception as e:
+        logger.debug("Usage augmentation failed", exc_info=e)
+
+    # Language post-filter
+    if req_language:
+        try:
+            from scripts.hybrid_search import lang_matches_path as _lmp  # type: ignore
+        except Exception:
+            _lmp = None
+        def _ok_lang(it: Dict[str, Any]) -> bool:
+            p = str(it.get("path") or "")
+            if callable(_lmp):
+                try:
+                    return bool(_lmp(str(req_language), p))
+                except Exception:
+                    pass
+            filename = p.split("/")[-1] if "/" in p else p
+            parts = filename.split(".")
+            extensions = set()
+            if len(parts) > 1:
+                extensions.add(parts[-1].lower())
+                if len(parts) > 2:
+                    extensions.add(".".join(parts[-2:]).lower())
+            table = {
+                "python": ["py", "pyi"],
+                "typescript": ["ts", "tsx", "d.ts", "mts", "cts"],
+                "javascript": ["js", "jsx", "mjs", "cjs"],
+                "go": ["go"],
+                "rust": ["rs"],
+                "java": ["java"],
+                "php": ["php"],
+                "c": ["c", "h"],
+                "cpp": ["cpp", "cc", "cxx", "hpp", "hxx"],
+                "csharp": ["cs"],
+            }
+            lang_exts = table.get(str(req_language).lower(), [])
+            return any(ext in lang_exts for ext in extensions)
+        items = [it for it in items if _ok_lang(it)]
+
+    return {
+        "items": items,
+        "eff_language": req_language,
+        "eff_path_glob": eff_path_glob,
+        "eff_not_glob": eff_not_glob,
+        "override_under": override_under,
+        "sym_arg": sym_arg,
+        "cwd_root": cwd_root,
+        "path_regex": path_regex,
+        "ext": ext,
+        "kind": kind,
+        "case": case,
+    }
+
+
 
 @mcp.tool()
 async def context_answer(
@@ -2949,95 +3410,36 @@ async def context_answer(
     - LLAMACPP_URL (default http://localhost:8080)
     - REFRAG_DECODER=1 to enable llama.cpp calls
     """
-    # Normalize/unwrap kwargs, supporting nested {"arguments":{...}} or {"kwargs":{...}}
-    _raw = dict(kwargs or {})
-    try:
-        for k in ("arguments", "kwargs"):
-            v = _raw.get(k)
-            if isinstance(v, dict):
-                for kk, vv in v.items():
-                    # Preserve any existing explicit value on _raw
-                    _raw.setdefault(kk, vv)
-    except (TypeError, AttributeError) as e:
-        logger.warning("Failed to unwrap nested kwargs", exc_info=e, extra={"raw_keys": list(_raw.keys())})
+    # Normalize inputs and compute effective limits/flags
+    _cfg = _ca_unwrap_and_normalize(
+        query, limit, per_path, budget_tokens, include_snippet, collection,
+        max_tokens, temperature, mode, expand, language, under, kind, symbol,
+        ext, path_regex, path_glob, not_glob, case, not_, kwargs,
+    )
+    queries = _cfg["queries"]
+    lim = _cfg["limit"]
+    ppath = _cfg["per_path"]
+    include_snippet = _cfg["include_snippet"]
+    collection = _cfg["collection"]
+    budget_tokens = _cfg["budget_tokens"]
+    max_tokens = _cfg["max_tokens"]
+    temperature = _cfg["temperature"]
+    mode = _cfg["mode"]
+    expand = _cfg["expand"]
+    _flt = _cfg["filters"]
+    req_language = _flt.get("language")
+    under = _flt.get("under")
+    kind = _flt.get("kind")
+    symbol = _flt.get("symbol")
+    ext = _flt.get("ext")
+    path_regex = _flt.get("path_regex")
+    path_glob = _flt.get("path_glob")
+    not_glob = _flt.get("not_glob")
+    case = _flt.get("case")
+    not_ = _flt.get("not_")
 
-    # Overlay helper: prefer non-empty values from wrapper, otherwise keep explicit param
-    def _coalesce(val, fallback):
-        if val is None:
-            return fallback
-        try:
-            if isinstance(val, str) and val.strip() == "":
-                return fallback
-        except (AttributeError, TypeError):
-            # val is not a string or doesn't have strip()
-            pass
-        return val
-
-    query = _coalesce(_raw.get("query"), query)
-    limit = _coalesce(_raw.get("limit"), limit)
-    per_path = _coalesce(_raw.get("per_path"), per_path)
-    budget_tokens = _coalesce(_raw.get("budget_tokens"), budget_tokens)
-    include_snippet = _coalesce(_raw.get("include_snippet"), include_snippet)
-    collection = _coalesce(_raw.get("collection"), collection)
-    max_tokens = _coalesce(_raw.get("max_tokens"), max_tokens)
-    temperature = _coalesce(_raw.get("temperature"), temperature)
-    mode = _coalesce(_raw.get("mode"), mode)
-    expand = _coalesce(_raw.get("expand"), expand)
-    language = _coalesce(_raw.get("language"), language)
-    under = _coalesce(_raw.get("under"), under)
-    kind = _coalesce(_raw.get("kind"), kind)
-    symbol = _coalesce(_raw.get("symbol"), symbol)
-    ext = _coalesce(_raw.get("ext"), ext)
-    path_regex = _coalesce(_raw.get("path_regex"), path_regex)
-    path_glob = _coalesce(_raw.get("path_glob"), path_glob)
-    not_glob = _coalesce(_raw.get("not_glob"), not_glob)
-    case = _coalesce(_raw.get("case"), case)
-    not_ = _coalesce(_raw.get("not_"), not_) if _raw.get("not_") is not None else _coalesce(_raw.get("not"), not_)
-
-    # Normalize query to list[str]
-    queries: list[str] = []
-    try:
-        if isinstance(query, (list, tuple)):
-            queries = [str(q).strip() for q in query if str(q).strip()]
-        elif isinstance(query, str):
-            queries = _to_str_list_relaxed(query)
-        elif query is not None:
-            s = str(query).strip()
-            if s:
-                queries = [s]
-    except (TypeError, ValueError) as e:
-        logger.warning("Failed to normalize query", exc_info=e, extra={"raw_query": query})
-        raise ValidationError(f"Invalid query format: {e}")
-
-    # Debug: log raw and normalized query when running over MCP to diagnose null argument issues
     if os.environ.get("DEBUG_CONTEXT_ANSWER"):
-        try:
-            logger.debug("ARG_SHAPE", extra={
-                "raw_query": repr(query),
-                "query_type": type(query).__name__,
-                "normalized_queries": queries,
-            })
-        except (AttributeError, TypeError) as e:
-            logger.debug("Failed to log debug ARG_SHAPE", exc_info=e)
-
-    if not queries:
-        raise ValidationError("query required")
-
-    # Effective limits
-    # For Q&A, we want more results per file to get comprehensive context
-    lim = safe_int(limit, default=15, logger=logger, context="limit")
-    # Default per_path=5 for Q&A (vs 1 for search) to get multiple snippets from same file
-    # This ensures we capture both definitions and usages
-    ppath = safe_int(per_path, default=5, logger=logger, context="per_path")
-
-    # For identifier-focused questions, allow more snippets per file to capture both definition and usage
-    try:
-        import re as _re
-        _ids0 = _re.findall(r"\b([A-Z_][A-Z0-9_]{2,})\b", " ".join(queries))
-        if _ids0:
-            ppath = max(ppath, 5)
-    except (AttributeError, re.error) as e:
-        logger.debug("Failed to extract identifiers for per_path adjustment", exc_info=e)
+        logger.debug("ARG_SHAPE", extra={"normalized_queries": queries, "limit": lim, "per_path": ppath})
 
     # Collection + model setup (reuse indexer defaults)
     coll = (collection or _default_collection()) or ""
@@ -3898,7 +4300,7 @@ async def context_answer(
         except (ValueError, TypeError):
             return d
     # Generation params optimized for (code-focused, deterministic)
-    mtok = _to_int(max_tokens, _to_int(os.environ.get("DECODER_MAX_TOKENS", "200"), 200))  # Shorter for conciseness
+    mtok = _to_int(max_tokens, _to_int(os.environ.get("DECODER_MAX_TOKENS", "240"), 240))  # Slightly higher to avoid truncation
     # Granite models work best with temperature 0 for deterministic extraction
     temp = 0.0  # Always 0 for maximum determinism
     top_k = _to_int(os.environ.get("DECODER_TOP_K", "20"), 20)  # More focused
@@ -3966,6 +4368,10 @@ async def context_answer(
             )
         if sources_footer:
             system_msg += f"\nSources:\n{sources_footer}"
+
+        # Keep answers concise and grounded without labels
+        system_msg += "\n" + _answer_style_guidance()
+
 
         user_msg = f"{qtxt}"
 
@@ -4092,10 +4498,14 @@ async def context_answer(
             else:
                 usage_line = f"Usage: {usage_text}"
 
-            # Final strict two-line output
-            answer = f"{def_line}\n{usage_line}".strip()
+            # Final output selection
+            if str(os.environ.get("CTX_ENFORCE_TWO_LINES", "0")).strip().lower() in {"1", "true", "yes", "on"}:
+                answer = f"{def_line}\n{usage_line}".strip()
+            else:
+                # Prefer the model's cleaned answer; if it contained labels, strip them
+                answer = _strip_preamble_labels(answer)
         except (AttributeError, KeyError, IndexError, ValueError) as e:
-            # If anything goes wrong, keep the original cleaned answer
+            # Keep cleaned model answer
             logger.warning("Failed to format strict two-line answer", exc_info=e)
             answer = answer.strip()
 
@@ -4120,6 +4530,12 @@ async def context_answer(
                 logger.debug("HALLUCINATION_DETECTED", extra={"score": hallucination_score, "has_refs": has_citation_refs})
             # Prepend a disclaimer for low-confidence answers
             answer = f"[Low confidence - answer may be generic] {answer}"
+
+        # Final validation: if output looks ungrounded or cut off and we had context, reject
+        _val = _validate_answer_output(answer, citations)
+        if not _val.get("ok", True) and citations:
+            answer = "insufficient context"
+
 
     except Exception as e:
         return {"error": f"decoder call failed: {e}", "citations": citations, "query": queries}
