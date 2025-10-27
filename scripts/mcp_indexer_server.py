@@ -35,6 +35,22 @@ from typing import Any, Dict, Optional, List
 
 import sys
 
+# Import structured logging and error handling
+from scripts.logger import (
+    get_logger,
+    ContextLogger,
+    RetrievalError,
+    IndexingError,
+    DecoderError,
+    ValidationError,
+    ConfigurationError,
+    safe_int,
+    safe_float,
+    safe_bool,
+)
+
+logger = get_logger(__name__)
+
 # Ensure code roots are on sys.path so absolute imports like 'from scripts.x import y' work
 # when this file is executed directly (sys.path[0] may be /work/scripts).
 # Supports multiple roots via WORK_ROOTS env (comma-separated), defaults to /work and /app.
@@ -86,15 +102,43 @@ _ENV_LOCK = threading.RLock()
 
 
 def _primary_identifier_from_queries(qs: list[str]) -> str:
-    """Best-effort extraction of the main CONSTANT_NAME or IDENTIFIER from queries."""
+    """Best-effort extraction of the main CONSTANT_NAME or IDENTIFIER from queries.
+    Now catches ALL_CAPS, snake_case, camelCase, and lowercase identifiers.
+    """
     try:
         import re as _re
         cand: list[str] = []
         for q in qs:
             for t in _re.findall(r"[A-Za-z_][A-Za-z0-9_]*", q or ""):
-                if len(t) >= 2 and ("_" in t or t.isupper()):
+                if len(t) < 2:
+                    continue
+                # Accept: ALL_CAPS, has_underscore, camelCase (mixed case), or longer lowercase
+                is_all_caps = t.isupper()
+                has_underscore = "_" in t
+                is_camel = any(c.isupper() for c in t[1:]) and any(c.islower() for c in t)
+                is_longer_lower = t.islower() and len(t) >= 3
+                
+                if is_all_caps or has_underscore or is_camel or is_longer_lower:
                     cand.append(t)
-        return next((t for t in cand if t), "")
+        
+        # Prefer stronger identifiers: ALL_CAPS > camelCase > snake_case > lowercase
+        # Using _split_ident scoring: count segments as a heuristic for "strength"
+        if not cand:
+            return ""
+        
+        def _score(token: str) -> int:
+            score = 0
+            if token.isupper():
+                score += 100  # ALL_CAPS highest priority
+            if "_" in token:
+                score += 50   # snake_case
+            if any(c.isupper() for c in token[1:]) and any(c.islower() for c in token):
+                score += 75   # camelCase
+            score += len(token)  # Longer is slightly better
+            return score
+        
+        cand.sort(key=_score, reverse=True)
+        return cand[0] if cand else ""
     except Exception:
         return ""
 
@@ -183,20 +227,22 @@ try:
                     "name": dkwargs.get("name") or getattr(fn, "__name__", ""),
                     "description": (getattr(fn, "__doc__", None) or "").strip(),
                 })
-            except Exception:
-                pass
+            except (AttributeError, TypeError) as e:
+                logger.warning(f"Failed to capture tool metadata for {fn}", exc_info=e)
             return orig_deco(fn)
         return _inner
     mcp.tool = _tool_capture_wrapper  # type: ignore
-except Exception:
-    pass
+except (AttributeError, TypeError) as e:
+    logger.warning("Failed to wrap mcp.tool decorator", exc_info=e)
 
 # Lightweight readiness endpoint on a separate health port (non-MCP), optional
 # Exposes GET /readyz returning {ok: true, app: <name>} once process is up.
-try:
-    HEALTH_PORT = int(os.environ.get("FASTMCP_HEALTH_PORT", "18001") or 18001)
-except Exception:
-    HEALTH_PORT = 18001
+HEALTH_PORT = safe_int(
+    os.environ.get("FASTMCP_HEALTH_PORT", "18001"),
+    default=18001,
+    logger=logger,
+    context="FASTMCP_HEALTH_PORT"
+)
 
 
 def _start_readyz_server():
@@ -2850,8 +2896,8 @@ async def context_answer(
                 for kk, vv in v.items():
                     # Preserve any existing explicit value on _raw
                     _raw.setdefault(kk, vv)
-    except Exception:
-        pass
+    except (TypeError, AttributeError) as e:
+        logger.warning("Failed to unwrap nested kwargs", exc_info=e, extra={"raw_keys": list(_raw.keys())})
 
     # Overlay helper: prefer non-empty values from wrapper, otherwise keep explicit param
     def _coalesce(val, fallback):
@@ -2860,7 +2906,8 @@ async def context_answer(
         try:
             if isinstance(val, str) and val.strip() == "":
                 return fallback
-        except Exception:
+        except (AttributeError, TypeError):
+            # val is not a string or doesn't have strip()
             pass
         return val
 
@@ -2907,16 +2954,10 @@ async def context_answer(
 
     # Effective limits
     # For Q&A, we want more results per file to get comprehensive context
-    try:
-        lim = int(limit) if (limit is not None and str(limit).strip() != "") else 15
-    except Exception:
-        lim = 15
-    try:
-        # Default per_path=5 for Q&A (vs 1 for search) to get multiple snippets from same file
-        # This ensures we capture both definitions and usages
-        ppath = int(per_path) if (per_path is not None and str(per_path).strip() != "") else 5
-    except Exception:
-        ppath = 5
+    lim = safe_int(limit, default=15, logger=logger, context="limit")
+    # Default per_path=5 for Q&A (vs 1 for search) to get multiple snippets from same file
+    # This ensures we capture both definitions and usages
+    ppath = safe_int(per_path, default=5, logger=logger, context="per_path")
 
     # For identifier-focused questions, allow more snippets per file to capture both definition and usage
     try:
@@ -2956,19 +2997,12 @@ async def context_answer(
     # Optionally expand queries via local decoder (tight cap) when requested
     queries = list(queries)
     # For LLM answering, default to include snippets so the model sees actual code
-    try:
-        if include_snippet in (None, ""):
-            include_snippet = True
-    except Exception:
+    if include_snippet in (None, ""):
         include_snippet = True
-    try:
-        do_expand = (
-            (expand is True) or
-            (str(expand).strip().lower() in {"1","true","yes","on"}) or
-            (str(os.environ.get("HYBRID_EXPAND", "0")).strip().lower() in {"1","true","yes","on"})
-        )
-    except Exception:
-        do_expand = False
+
+    do_expand = safe_bool(expand, default=False, logger=logger, context="expand") or \
+                safe_bool(os.environ.get("HYBRID_EXPAND", "0"), default=False, logger=logger, context="HYBRID_EXPAND")
+
     if do_expand:
         try:
             from scripts.refrag_llamacpp import LlamaCppRefragClient, is_decoder_enabled  # type: ignore
@@ -2997,12 +3031,12 @@ async def context_answer(
                                 alts.append(s)
                                 if len(alts) >= 2:
                                     break
-                except Exception:
-                    pass
+                except (_json.JSONDecodeError, TypeError, ValueError) as e:
+                    logger.warning("Failed to parse query expansion JSON", exc_info=e, extra={"output": out[:200]})
                 if alts:
                     queries.extend(alts)
-        except Exception:
-            pass
+        except (ImportError, AttributeError) as e:
+            logger.warning("Query expansion failed", exc_info=e)
 
     # Default exclusions to avoid noisy self-test and cache artifacts
     # Also filter out metadata/config files that pollute Q&A context
@@ -3342,27 +3376,29 @@ async def context_answer(
             for i, item in enumerate(items[:3]):
                 print(f"  Item {i+1}: {item.get('path')} lines {item.get('start_line')}-{item.get('end_line')}")
 
-        # Tier 2 fallback: broader hybrid search without gating (only if no strict filters)
+        # Tier 2 fallback: broader hybrid search without gating/tight filters (only if no strict filters)
         if (not items) and (not req_language):
             if os.environ.get("DEBUG_CONTEXT_ANSWER"):
-                print("DEBUG TIER 2: 0 items after gate-first; retrying without gating")
+                print("DEBUG TIER 2: 0 items after gate-first; retrying with relaxed filters")
             _prev_gate = os.environ.get("REFRAG_GATE_FIRST")
             os.environ["REFRAG_GATE_FIRST"] = "0"
             try:
+                # Tier 2: Remove tight filters (symbol, path_glob, path_regex, kind, ext)
+                # Keep only safety filters (language, under, not_glob)
                 items = run_hybrid_search(
                     queries=queries,
-                    limit=int(max(lim, 4)),
-                    per_path=int(max(ppath, 0)),
+                    limit=int(max(lim * 2, 8)),  # Cast wider net
+                    per_path=int(max(ppath * 2, 4)),
                     language=eff_language,
                     under=override_under or None,
-                    kind=(kind or kwargs.get("kind") or None),
-                    symbol=sym_arg,
-                    ext=(ext or kwargs.get("ext") or None),
+                    kind=None,  # Remove kind filter
+                    symbol=None,  # Remove symbol filter
+                    ext=None,  # Remove ext filter
                     not_filter=(not_ or kwargs.get("not_") or kwargs.get("not") or None),
                     case=(case or kwargs.get("case") or None),
-                    path_regex=(path_regex or kwargs.get("path_regex") or None),
-                    path_glob=eff_path_glob,
-                    not_glob=eff_not_glob,
+                    path_regex=None,  # Remove path_regex filter
+                    path_glob=None,  # Remove path_glob filter
+                    not_glob=eff_not_glob,  # Keep not_glob for safety
                     expand=str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower() in {"1","true","yes","on"},
                     model=model,
                 )
@@ -3407,14 +3443,23 @@ async def context_answer(
                                 with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
                                     lines = f.readlines()
                                 scanned += 1
-                                # Look for definition patterns: IDENT = value
+                                # Look for definition patterns: IDENT = value, def IDENT, class IDENT
                                 for idx, line in enumerate(lines, 1):
-                                    if _re.match(rf"\s*{_re.escape(primary)}\s*=", line):
-                                        # Found definition - create a synthetic item
-                                        rel_path = os.path.relpath(fpath, cwd_root)
+                                    # Match: IDENT = value, def IDENT(, class IDENT:, const IDENT =
+                                    if _re.search(rf"\b{_re.escape(primary)}\b\s*[=:(]", line):
+                                        # Found definition - create a synthetic item compatible with Qdrant schema
+                                        try:
+                                            rel_path = os.path.relpath(fpath, cwd_root)
+                                        except ValueError:
+                                            # Handle cross-drive paths on Windows
+                                            rel_path = fpath.replace(cwd_root, "").lstrip("/\\")
                                         snippet_start = max(1, idx - 2)
-                                        snippet_end = min(len(lines), idx + 2)
+                                        snippet_end = min(len(lines), idx + 3)
                                         snippet_text = "".join(lines[snippet_start - 1:snippet_end])
+                                        # Infer language from extension
+                                        ext_map = {".py": "python", ".js": "javascript", ".ts": "typescript",
+                                                   ".go": "go", ".rs": "rust", ".java": "java", ".cpp": "cpp", ".c": "c", ".h": "c"}
+                                        lang = next((v for k, v in ext_map.items() if fname.endswith(k)), "unknown")
                                         tier3_hits.append({
                                             "path": rel_path,
                                             "start_line": idx,
@@ -3422,11 +3467,14 @@ async def context_answer(
                                             "text": snippet_text.strip(),
                                             "score": 1.0,  # Deterministic match
                                             "tier": "filesystem_scan",
+                                            "language": lang,
+                                            "kind": "definition",  # Mark as definition for downstream processing
                                         })
                                         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
                                             print(f"DEBUG TIER 3: found {primary} in {rel_path}:{idx}")
                                         break  # One hit per file is enough
-                            except Exception:
+                            except (IOError, OSError, UnicodeDecodeError) as e:
+                                logger.debug(f"Tier 3: Failed to scan {fpath}", exc_info=e)
                                 continue
                         if scanned >= max_files:
                             break
@@ -3808,33 +3856,40 @@ async def context_answer(
         # Use official Granite 4.0 RAG pattern with <documents> tags
         # Based on https://huggingface.co/ibm-granite/granite-4.0-3b-instruct#rag
         # Format code snippets as documents list
-        documents = []
-        for idx, block in enumerate(context_blocks, 1):
-            # Extract path and snippet from block
-            lines = block.split('\n', 1)
-            header = lines[0] if lines else f"[{idx}]"
-            snippet_text = lines[1] if len(lines) > 1 else "(no code)"
-            documents.append({
-                "doc_id": idx,
-                "title": header,
-                "text": snippet_text.strip(),
-                "source": ""
-            })
+        if context_blocks:
+            documents = []
+            for idx, block in enumerate(context_blocks, 1):
+                # Extract path and snippet from block
+                lines = block.split('\n', 1)
+                header = lines[0] if lines else f"[{idx}]"
+                snippet_text = lines[1] if len(lines) > 1 else "(no code)"
+                documents.append({
+                    "doc_id": idx,
+                    "title": header,
+                    "text": snippet_text.strip(),
+                    "source": ""
+                })
 
-        import json as _json
-        docs_json = "\n".join([_json.dumps(d) for d in documents])
+            import json as _json
+            docs_json = "\n".join([_json.dumps(d) for d in documents])
 
-        system_msg = (
-            "You are a helpful assistant with access to the following code snippets. "
-            "You may use one or more snippets to assist with the user query.\n\n"
-            "You are given a list of code snippets within <documents></documents> XML tags:\n"
-            "<documents>\n"
-            f"{docs_json}\n"
-            "</documents>\n\n"
-            "Write the response to the user's input by strictly aligning with the facts in the provided code snippets. "
-            "If the information needed to answer the question is not available in the snippets, "
-            "inform the user that the question cannot be answered based on the available data."
-        )
+            system_msg = (
+                "You are a helpful assistant with access to the following code snippets. "
+                "You may use one or more snippets to assist with the user query.\n\n"
+                "You are given a list of code snippets within <documents></documents> XML tags:\n"
+                "<documents>\n"
+                f"{docs_json}\n"
+                "</documents>\n\n"
+                "Write the response to the user's input by strictly aligning with the facts in the provided code snippets. "
+                "If the information needed to answer the question is not available in the snippets, "
+                "inform the user that the question cannot be answered based on the available data."
+            )
+        else:
+            # No context available - inform user directly without LLM call
+            system_msg = (
+                "You are a helpful assistant. "
+                "No code snippets are available to answer this query."
+            )
         if sources_footer:
             system_msg += f"\nSources:\n{sources_footer}"
 
@@ -3867,11 +3922,7 @@ async def context_answer(
         )
 
         # Optional length cap: if CTX_SUMMARY_CHARS is a positive int, apply after cleanup; otherwise don't cap
-        try:
-            _cap_env = str(os.environ.get("CTX_SUMMARY_CHARS", "")).strip()
-            _cap = int(_cap_env) if _cap_env not in {"", None} else 0
-        except Exception:
-            _cap = 0
+        _cap = safe_int(os.environ.get("CTX_SUMMARY_CHARS", ""), default=0, logger=logger, context="CTX_SUMMARY_CHARS")
 
         # Cleanup: remove stop tokens, repetition, and optionally cap length
         # Strip leaked stop tokens that sometimes appear in output
