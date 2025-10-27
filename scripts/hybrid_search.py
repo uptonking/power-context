@@ -1602,8 +1602,10 @@ def run_hybrid_search(
 
     # Pseudo-Relevance Feedback (default-on): mine top terms from current results and run a light second pass
     try:
-
         prf_enabled = _env_truthy(os.environ.get("PRF_ENABLED"), True)
+    except (ValueError, TypeError):
+        prf_enabled = True
+
     # Lightweight BM25-style lexical boost (default ON)
     try:
         _USE_BM25 = _env_truthy(os.environ.get("HYBRID_BM25"), True)
@@ -1615,8 +1617,6 @@ def run_hybrid_search(
         _BM25_W = 0.2
     _bm25_tok_w = _bm25_token_weights_from_results(qlist, (lex_results or []) + (lex_results2 or [])) if _USE_BM25 else {}
 
-    except (ValueError, TypeError):
-        prf_enabled = True
     if prf_enabled and score_map:
         try:
             top_docs = int(os.environ.get("PRF_TOP_DOCS", "8") or 8)
