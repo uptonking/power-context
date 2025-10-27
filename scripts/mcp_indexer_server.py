@@ -3107,18 +3107,17 @@ async def context_answer(
     # Add glob patterns for default excludes - less aggressive than **/{pat}**
     # Use exact path matching to avoid overfiltering
     def _variants(p: str) -> list[str]:
-        p = str(p).strip().strip()
+        p = str(p).strip()
         if not p:
             return []
         p = p.replace("\\", "/").lstrip("/")
-        # Use more specific patterns: match directory prefix or exact paths
-        # Avoid **/{pat}** which is too aggressive (e.g., hides valid .env references)
+        # Prefer exact path-prefix patterns; hybrid_search will add absolute (/work) variants
         if p.endswith("/"):
-            # Directory: match at any level
-            return [f"**/{p}*"]
+            base = p  # directory
+            return [f"{base}*", f"/work/{base}*"]
         else:
-            # File pattern: match exact or as wildcard
-            return [p, f"**/{p}"]
+            # File patterns: keep exact and absolute forms
+            return [p, f"/work/{p}"]
 
     # Build defaults and conditional exclusions (skip if explicitly mentioned in query)
     default_not_glob = []
@@ -3561,7 +3560,8 @@ async def context_answer(
                 if os.environ.get("DEBUG_CONTEXT_ANSWER"):
                     print("DEBUG: Span budgeting returned empty, using raw items")
                 budgeted = items
-        except Exception as e:
+        except (ImportError, AttributeError, KeyError) as e:
+            logger.warning("Span budgeting failed, using raw items", exc_info=e)
             if os.environ.get("DEBUG_CONTEXT_ANSWER"):
                 print(f"DEBUG: Span budgeting failed: {e}, using raw items")
             budgeted = items
@@ -3878,6 +3878,7 @@ async def context_answer(
     try:
         from scripts.refrag_llamacpp import LlamaCppRefragClient, is_decoder_enabled  # type: ignore
         if not is_decoder_enabled():
+            logger.info("Decoder disabled, returning error with citations")
             return {
                 "error": "decoder disabled: set REFRAG_DECODER=1 and start llamacpp",
                 "citations": citations,
