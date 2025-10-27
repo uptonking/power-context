@@ -3402,7 +3402,12 @@ async def context_answer(
                     key = _span_key(span)
                     if key in seen:
                         continue
-                    if ident_lower in _span_haystack(span):
+                    hay = _span_haystack(span)
+                    if ident_lower not in hay:
+                        extra = _read_span_snippet(span)
+                        if extra:
+                            hay = (hay + " " + extra.lower()).strip()
+                    if ident_lower in hay:
                         ident_candidates.append(span)
                         seen.add(key)
                 if ident_candidates:
@@ -3419,6 +3424,32 @@ async def context_answer(
             spans = source_spans[:span_cap]
         else:
             spans = []
+
+        # If we have a primary identifier, try to lift a definition span (IDENT = ...) to the front
+        try:
+            if spans and primary_ident:
+                import re as _re
+                def _is_def_span(span: Dict[str, Any]) -> bool:
+                    sn = _read_span_snippet(span) or ""
+                    for _ln in sn.splitlines():
+                        if _re.match(rf"\s*{_re.escape(primary_ident)}\s*=\s*", _ln):
+                            return True
+                    return False
+                # Prefer from current source_spans, then fall back to full items
+                cand = next((sp for sp in source_spans if _is_def_span(sp)), None)
+                if not cand:
+                    cand = next((sp for sp in items if _is_def_span(sp)), None)
+                if cand:
+                    # Insert at front if not already present
+                    keyset = { (str(s.get('path') or ''), int(s.get('start_line') or 0), int(s.get('end_line') or 0)) for s in spans }
+                    ckey = (str(cand.get('path') or ''), int(cand.get('start_line') or 0), int(cand.get('end_line') or 0))
+                    if ckey not in keyset:
+                        spans = [cand] + (spans[:-1] if span_cap and len(spans) >= span_cap else spans)
+                        if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                            print(f"DEBUG IDENT DEF LIFT: lifted {cand.get('path')}:{cand.get('start_line')}-{cand.get('end_line')}")
+        except Exception as _e:
+            if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                print(f"DEBUG IDENT DEF LIFT failed: {_e}")
 
         # Debug span selection
         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
@@ -3468,10 +3499,12 @@ async def context_answer(
         if _contp:
             _cit["container_path"] = _contp
         citations.append(_cit)
+        snippet = str(it.get("text") or "").strip()
+        if not snippet and it.get("_ident_snippet"):
+            snippet = str(it.get("_ident_snippet")).strip()
         # For context_answer, always read from filesystem to get complete, untruncated content
         # (payload text may be truncated for storage efficiency)
-        snippet = ""
-        if path and sline and include_snippet:
+        if not snippet and path and sline and include_snippet:
             try:
                 fp = path
                 import os as _os
@@ -3493,6 +3526,7 @@ async def context_answer(
                     si = max(1, sline - margin)
                     ei = min(len(lines), max(sline, eline) + margin)
                     snippet = "".join(lines[si-1:ei])
+                    it["_ident_snippet"] = snippet
             except Exception:
                 snippet = snippet or ""
         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
