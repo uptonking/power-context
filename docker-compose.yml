@@ -97,6 +97,7 @@ services:
     container_name: mcp-indexer-http
     depends_on:
       - qdrant
+      - llamacpp
     env_file:
       - .env
     environment:
@@ -105,7 +106,12 @@ services:
       - FASTMCP_TRANSPORT=${FASTMCP_HTTP_TRANSPORT}
       - QDRANT_URL=${QDRANT_URL}
       - FASTMCP_HEALTH_PORT=18001
-      - DEBUG_CONTEXT_ANSWER=${DEBUG_CONTEXT_ANSWER:-0}
+      - DEBUG_CONTEXT_ANSWER=${DEBUG_CONTEXT_ANSWER:-1}
+      - REFRAG_DECODER=${REFRAG_DECODER:-1}
+      - LLAMACPP_URL=${LLAMACPP_URL:-http://llamacpp:8080}
+      - CTX_REQUIRE_IDENTIFIER=${CTX_REQUIRE_IDENTIFIER:-0}
+      - COLLECTION_NAME=${COLLECTION_NAME}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL}
     # Streamable HTTP endpoint for IDE agents at http://localhost:${FASTMCP_INDEXER_HTTP_PORT:-8003}/mcp/
     ports:
       - "${FASTMCP_INDEXER_HTTP_PORT:-8003}:8001"

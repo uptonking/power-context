@@ -81,6 +81,13 @@ PORT = int(os.environ.get("FASTMCP_INDEXER_PORT", "8001"))
 # Process-wide lock to guard environment mutations during retrieval (gate-first/budgeting)
 _ENV_LOCK = threading.RLock()
 
+# Set default environment variables for context_answer functionality
+# These are set in docker-compose.yml but provide fallbacks for local dev
+os.environ.setdefault("DEBUG_CONTEXT_ANSWER", "0")
+os.environ.setdefault("REFRAG_DECODER", "1")
+os.environ.setdefault("LLAMACPP_URL", "http://localhost:8080")
+os.environ.setdefault("CTX_REQUIRE_IDENTIFIER", "0")  # Disable strict identifier requirement
+
 
 def _primary_identifier_from_queries(qs: list[str]) -> str:
     """Best-effort extraction of the main CONSTANT_NAME or IDENTIFIER from queries."""
@@ -3084,20 +3091,9 @@ async def context_answer(
                 if func_name and len(func_name) > 2:
                     _add_query(f"def {func_name}(")
             else:
-                # For other queries, add basename if we have path_glob
-                if eff_path_glob:
-                    def _basename(p: str) -> str:
-                        s = str(p).replace("\\", "/").strip()
-                        return s.split("/")[-1] if "/" in s else s
-
-                    basenames = []
-                    if isinstance(eff_path_glob, (list, tuple)):
-                        basenames = [_basename(p) for p in eff_path_glob]
-                    else:
-                        basenames = [_basename(str(eff_path_glob))]
-                    for bn in basenames:
-                        if bn and bn not in queries:
-                            queries.append(bn)
+                # For other queries, DO NOT add basename - it confuses vector search
+                # The path_glob filter is applied at the hybrid_search level, not via query augmentation
+                pass
         except Exception:
             pass
 
