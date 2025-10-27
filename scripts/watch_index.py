@@ -505,7 +505,7 @@ def _process_paths(paths, client, model, vector_name: str, workspace_path: str):
             mname = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
             model = TextEmbedding(model_name=mname)
         ok = idx.index_single_file(
-            client, model, COLLECTION, vector_name, p, dedupe=True, skip_unchanged=False
+            client, model, COLLECTION, vector_name, p, dedupe=True, skip_unchanged=True
         )
         status = "indexed" if ok else "skipped"
         print(f"[{status}] {p}")
