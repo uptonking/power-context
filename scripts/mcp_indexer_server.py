@@ -153,15 +153,15 @@ def _primary_identifier_from_queries(qs: list[str]) -> str:
                 has_underscore = "_" in t
                 is_camel = any(c.isupper() for c in t[1:]) and any(c.islower() for c in t)
                 is_longer_lower = t.islower() and len(t) >= 3
-                
+
                 if is_all_caps or has_underscore or is_camel or is_longer_lower:
                     cand.append(t)
-        
+
         # Prefer stronger identifiers: ALL_CAPS > camelCase > snake_case > lowercase
         # Using _split_ident scoring: count segments as a heuristic for "strength"
         if not cand:
             return ""
-        
+
         def _score(token: str) -> int:
             score = 0
             if token.isupper():
@@ -172,7 +172,7 @@ def _primary_identifier_from_queries(qs: list[str]) -> str:
                 score += 75   # camelCase
             score += len(token)  # Longer is slightly better
             return score
-        
+
         cand.sort(key=_score, reverse=True)
         return cand[0] if cand else ""
     except Exception:
@@ -3035,6 +3035,8 @@ async def context_answer(
     # For LLM answering, default to include snippets so the model sees actual code
     if include_snippet in (None, ""):
         include_snippet = True
+    did_local_expand = False  # Ensure defined even if expansion is disabled or fails
+
 
     do_expand = safe_bool(expand, default=False, logger=logger, context="expand") or \
                 safe_bool(os.environ.get("HYBRID_EXPAND", "0"), default=False, logger=logger, context="HYBRID_EXPAND")
