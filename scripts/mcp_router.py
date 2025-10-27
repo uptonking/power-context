@@ -405,26 +405,38 @@ def build_plan(q: str) -> List[Tuple[str, Dict[str, Any]]]:
 
     if intent == INTENT_SEARCH_CALLERS:
         hints = _parse_repo_hints(q)
-        args = {"query": q}
+        clean_q, dsl_filters = _clean_query_and_dsl(q)
+        args = {"query": clean_q}
         if search_limit:
             args["limit"] = search_limit
         # Optionally reuse last filters if requested
         _reuse_last_filters(args)
 
         for k in ("language", "under", "symbol", "ext", "path_glob", "not_glob"):
+            v = dsl_filters.get(k)
+            if v not in (None, "") and k not in args:
+                args[k] = v
+        for k in ("language", "under", "symbol", "ext", "path_glob", "not_glob"):
             v = hints.get(k)
-            if v not in (None, ""):
+            if v not in (None, "") and k not in args:
                 args[k] = v
         return [("search_callers_for", args)]
 
     if intent == INTENT_SEARCH_IMPORTERS:
         hints = _parse_repo_hints(q)
-        args = {"query": q}
+        clean_q, dsl_filters = _clean_query_and_dsl(q)
+        args = {"query": clean_q}
         if search_limit:
             args["limit"] = search_limit
+        # Optionally reuse last filters if requested
+        _reuse_last_filters(args)
+        for k in ("language", "under", "symbol", "ext", "path_glob", "not_glob"):
+            v = dsl_filters.get(k)
+            if v not in (None, "") and k not in args:
+                args[k] = v
         for k in ("language", "under", "symbol", "ext", "path_glob", "not_glob"):
             v = hints.get(k)
-            if v not in (None, ""):
+            if v not in (None, "") and k not in args:
                 args[k] = v
         return [("search_importers_for", args)]
 

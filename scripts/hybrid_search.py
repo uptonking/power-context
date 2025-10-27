@@ -1763,6 +1763,16 @@ def run_hybrid_search(
         all_paths = set()
 
     items: List[Dict[str, Any]] = []
+    if not merged:
+        if getattr(args, "json", False):
+            try:
+                print(json.dumps({"results": [], "query": clean_queries}))
+            except Exception:
+                print("[]")
+        else:
+            print("No results found.")
+        return
+
     for m in merged:
         md = (m["pt"].payload or {}).get("metadata") or {}
         # Prefer merged bounds if present

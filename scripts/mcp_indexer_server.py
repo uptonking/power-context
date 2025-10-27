@@ -341,6 +341,7 @@ def _start_readyz_server():
 async def _run_async(
     cmd: list[str], env: Optional[Dict[str, str]] = None, timeout: Optional[float] = None
 ) -> Dict[str, Any]:
+    proc: Optional[asyncio.subprocess.Process] = None
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -387,6 +388,19 @@ async def _run_async(
         }
     except Exception as e:
         return {"ok": False, "code": -2, "stdout": "", "stderr": str(e)}
+    finally:
+        # Explicitly close pipes to avoid unraisable warnings on transport GC
+        try:
+            if proc is not None:
+                if proc.stdout is not None:
+                    proc.stdout.close()
+                if proc.stderr is not None:
+                    proc.stderr.close()
+                # Ensure the process is reaped
+                with contextlib.suppress(Exception):
+                    await proc.wait()
+        except Exception:
+            pass
 
 
 # Embedding model cache to avoid re-initialization costs
