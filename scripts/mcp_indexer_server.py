@@ -3188,15 +3188,16 @@ async def context_answer(
                                 per_path=5,
                                 language=eff_language,
                                 under=override_under or None,
-                                kind=eff_kind,
-                                symbol=eff_symbol,
-                                ext=eff_ext,
-                                not_=eff_not,
-                                case=eff_case,
-                                path_regex=eff_path_regex,
+                                kind=kwargs.get("kind") or None,
+                                symbol=sym_arg,
+                                ext=kwargs.get("ext") or None,
+                                not_filter=kwargs.get("not_") or kwargs.get("not") or None,
+                                case=kwargs.get("case") or None,
+                                path_regex=kwargs.get("path_regex") or None,
                                 path_glob=eff_path_glob,
                                 not_glob=eff_not_glob,
-                                collection=collection,
+                                expand=str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower() in {"1","true","yes","on"},
+                                model=model,
                             )
                             # Merge targeted results with higher priority
                             for it in targeted_items:
