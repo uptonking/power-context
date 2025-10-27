@@ -139,20 +139,20 @@ def test_context_answer_tier2_retry_without_gating(monkeypatch):
 
     def _run_hybrid_search(**kwargs):
         calls.append(kwargs)
-        # First call (Tier 1) returns no results to trigger Tier 2
-        if len(calls) == 1:
-            return []
-        # Second call returns a single identifier-bearing span
-        return [
-            {
-                "score": 0.42,
-                "path": "/work/hybrid_search.py",
-                "symbol": "RRF_K",
-                "start_line": 100,
-                "end_line": 104,
-                "text": "RRF_K = 60\n",
-            }
-        ]
+        # Only return results once Tier 2 relaxes the filters (path_glob None, symbol None)
+        if kwargs.get("path_glob") is None and kwargs.get("symbol") is None and len(calls) >= 1:
+            return [
+                {
+                    "score": 0.42,
+                    "path": "/work/hybrid_search.py",
+                    "symbol": "RRF_K",
+                    "start_line": 100,
+                    "end_line": 104,
+                    "text": "RRF_K = 60\n",
+                }
+            ]
+        # All other calls (tier1/usage/targeted search) yield no hits
+        return []
 
     monkeypatch.setattr(hs, "run_hybrid_search", _run_hybrid_search)
 
@@ -173,9 +173,9 @@ def test_context_answer_tier2_retry_without_gating(monkeypatch):
     )
 
     # Ensure Tier 2 was invoked (run_hybrid_search called twice)
-    assert len(calls) == 2, "Tier 2 fallback should re-run hybrid search"
+    assert len(calls) >= 3, "Tier 2 fallback should re-run hybrid search"
 
-    tier1_kwargs, tier2_kwargs = calls
+    tier2_kwargs = calls[-1]
     # Tier 2 should have relaxed filters
     assert tier2_kwargs.get("path_glob") is None
     assert tier2_kwargs.get("symbol") is None

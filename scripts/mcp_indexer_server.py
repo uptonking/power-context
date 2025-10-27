@@ -3516,7 +3516,7 @@ async def context_answer(
                 primary = _primary_identifier_from_queries(queries)
                 if primary and len(primary) >= 3:
                     if os.environ.get("DEBUG_CONTEXT_ANSWER"):
-                        print(f"DEBUG TIER 3: filesystem scan for identifier '{primary}'")
+                        logger.debug("TIER3: filesystem scan", extra={"identifier": primary})
                     # Deterministic filesystem scan for definition patterns
                     scan_root = override_under or cwd_root
                     if not os.path.isabs(scan_root):
@@ -3568,7 +3568,7 @@ async def context_answer(
                                             "kind": "definition",  # Mark as definition for downstream processing
                                         })
                                         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
-                                            print(f"DEBUG TIER 3: found {primary} in {rel_path}:{idx}")
+                                            logger.debug("TIER3: found", extra={"identifier": primary, "path": rel_path, "line": idx})
                                         break  # One hit per file is enough
                             except (IOError, OSError, UnicodeDecodeError) as e:
                                 logger.debug(f"Tier 3: Failed to scan {fpath}", exc_info=e)
@@ -3578,10 +3578,10 @@ async def context_answer(
                     if tier3_hits:
                         items = tier3_hits[:int(max(lim, 4))]  # Respect limit
                         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
-                            print(f"DEBUG TIER 3: filesystem scan returned {len(items)} items (scanned {scanned} files)")
+                            logger.debug("TIER3: filesystem scan returned", extra={"count": len(items), "scanned": scanned})
             except Exception as e:
                 if os.environ.get("DEBUG_CONTEXT_ANSWER"):
-                    print(f"DEBUG TIER 3: filesystem scan failed: {e}")
+                    logger.debug("TIER3: filesystem scan failed", exc_info=e)
 
         # Filter out memory-like items without a valid path to avoid empty citations
         items = [it for it in items if str(it.get("path") or "").strip()]
