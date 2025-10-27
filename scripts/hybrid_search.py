@@ -986,6 +986,18 @@ def run_hybrid_search(
                 stem = b.rsplit(".", 1)[0] if "." in b else b
                 if stem and stem not in qlist:
                     qlist.append(stem)
+            # Add short path segments (e.g., "scripts/hybrid_search") to steer lexical hashing
+            for g in globs_src:
+                s = str(g or "").replace("\\", "/").strip()
+                parts = [t for t in s.split("/") if t]
+                if len(parts) >= 2:
+                    last2 = "/".join(parts[-2:])
+                    if last2 and last2 not in qlist:
+                        qlist.append(last2)
+                if len(parts) >= 3:
+                    last3 = "/".join(parts[-3:])
+                    if last3 and last3 not in qlist:
+                        qlist.append(last3)
     except Exception:
         pass
 

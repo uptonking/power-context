@@ -1246,25 +1246,37 @@ async def repo_search(
 
             model_name = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
             model = _get_embedding_model(model_name)
-            # In-process path_glob/not_glob accept a single string; reduce list inputs safely
-            items = run_hybrid_search(
-                queries=queries,
-                limit=int(limit),
-                per_path=(int(per_path) if (per_path is not None and str(per_path).strip() != "") else 1),
-                language=language or None,
-                under=under or None,
-                kind=kind or None,
-                symbol=symbol or None,
-                ext=ext or None,
-                not_filter=not_ or None,
-                case=case or None,
-                path_regex=path_regex or None,
-                path_glob=(path_globs or None),
-                not_glob=(not_globs or None),
-                expand=str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower()
-                in {"1", "true", "yes", "on"},
-                model=model,
-            )
+            # Ensure hybrid_search uses the intended collection when running in-process
+            prev_coll = os.environ.get("COLLECTION_NAME")
+            try:
+                os.environ["COLLECTION_NAME"] = collection
+                # In-process path_glob/not_glob accept a single string; reduce list inputs safely
+                items = run_hybrid_search(
+                    queries=queries,
+                    limit=int(limit),
+                    per_path=(int(per_path) if (per_path is not None and str(per_path).strip() != "") else 1),
+                    language=language or None,
+                    under=under or None,
+                    kind=kind or None,
+                    symbol=symbol or None,
+                    ext=ext or None,
+                    not_filter=not_ or None,
+                    case=case or None,
+                    path_regex=path_regex or None,
+                    path_glob=(path_globs or None),
+                    not_glob=(not_globs or None),
+                    expand=str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower()
+                    in {"1", "true", "yes", "on"},
+                    model=model,
+                )
+            finally:
+                if prev_coll is None:
+                    try:
+                        del os.environ["COLLECTION_NAME"]
+                    except Exception:
+                        pass
+                else:
+                    os.environ["COLLECTION_NAME"] = prev_coll
             # items are already in structured dict form
             json_lines = items  # reuse downstream shaping
         except Exception as e:
@@ -2862,6 +2874,13 @@ async def context_answer(
         s = str(query).strip()
         if s:
             queries = [s]
+    # Debug: log raw and normalized query when running over MCP to diagnose null argument issues
+    if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+        try:
+            print(f"DEBUG ARG-SHAPE: raw_query={repr(query)} type={type(query).__name__}")
+            print(f"DEBUG ARG-SHAPE: normalized_queries={queries}")
+        except Exception:
+            pass
     if not queries:
         return {"error": "query required"}
 
@@ -3055,10 +3074,15 @@ async def context_answer(
         if isinstance(user_under, str):
             _uu = user_under.strip()
             if _uu:
-                if "/" not in _uu:
-                    eff_path_glob.append(f"**/{_uu}")
+                # Map any 'under' value to an absolute /work-prefixed directory path.
+                # Do NOT append directory globs to path_glob; 'under' is a directory prefix filter
+                # enforced server-side via metadata.path_prefix.
+                if _uu.startswith("/work/"):
+                    override_under = _uu
+                elif _uu.startswith("/"):
+                    override_under = f"/work{_uu}"
                 else:
-                    override_under = _uu if _uu.startswith("/") else f"/{_uu.lstrip('./')}"
+                    override_under = f"/work/{_uu.lstrip('./')}"
         elif user_under:
             override_under = str(user_under)
 
