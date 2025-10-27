@@ -180,28 +180,28 @@ def _merge_and_budget_spans(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]
             os.environ.get("MICRO_MERGE_LINES", str(MICRO_MERGE_LINES))
             or MICRO_MERGE_LINES
         )
-    except Exception:
+    except (ValueError, TypeError):
         merge_lines = MICRO_MERGE_LINES
     try:
         budget_tokens = int(
             os.environ.get("MICRO_BUDGET_TOKENS", str(MICRO_BUDGET_TOKENS))
             or MICRO_BUDGET_TOKENS
         )
-    except Exception:
+    except (ValueError, TypeError):
         budget_tokens = MICRO_BUDGET_TOKENS
     try:
         tokens_per_line = int(
             os.environ.get("MICRO_TOKENS_PER_LINE", str(MICRO_TOKENS_PER_LINE))
             or MICRO_TOKENS_PER_LINE
         )
-    except Exception:
+    except (ValueError, TypeError):
         tokens_per_line = MICRO_TOKENS_PER_LINE
     try:
         out_max_spans = int(
             os.environ.get("MICRO_OUT_MAX_SPANS", str(MICRO_OUT_MAX_SPANS))
             or MICRO_OUT_MAX_SPANS
         )
-    except Exception:
+    except (ValueError, TypeError):
         out_max_spans = MICRO_OUT_MAX_SPANS
 
     # First cluster adjacent by path using a tighter merge gap for micro spans
@@ -1271,28 +1271,28 @@ def run_hybrid_search(
     # Pseudo-Relevance Feedback (default-on): mine top terms from current results and run a light second pass
     try:
         prf_enabled = _env_truthy(os.environ.get("PRF_ENABLED"), True)
-    except Exception:
+    except (ValueError, TypeError):
         prf_enabled = True
     if prf_enabled and score_map:
         try:
             top_docs = int(os.environ.get("PRF_TOP_DOCS", "8") or 8)
-        except Exception:
+        except (ValueError, TypeError):
             top_docs = 8
         try:
             max_terms = int(os.environ.get("PRF_MAX_TERMS", "6") or 6)
-        except Exception:
+        except (ValueError, TypeError):
             max_terms = 6
         try:
             extra_q = int(os.environ.get("PRF_EXTRA_QUERIES", "4") or 4)
-        except Exception:
+        except (ValueError, TypeError):
             extra_q = 4
         try:
             prf_dw = float(os.environ.get("PRF_DENSE_WEIGHT", "0.4") or 0.4)
-        except Exception:
+        except (ValueError, TypeError):
             prf_dw = 0.4
         try:
             prf_lw = float(os.environ.get("PRF_LEX_WEIGHT", "0.6") or 0.6)
-        except Exception:
+        except (ValueError, TypeError):
             prf_lw = 0.6
         terms = _prf_terms_from_results(
             score_map, top_docs=top_docs, max_terms=max_terms

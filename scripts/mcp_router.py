@@ -632,11 +632,11 @@ def _is_failure_response(resp: Dict[str, Any]) -> bool:
 # Prefer live /tools registry from the servers' health ports when available
 try:
     _HEALTH_PORT_INDEXER = int(os.environ.get("FASTMCP_INDEXER_HTTP_HEALTH_PORT", "18003") or 18003)
-except Exception:
+except (ValueError, TypeError):
     _HEALTH_PORT_INDEXER = 18003
 try:
     _HEALTH_PORT_MEMORY = int(os.environ.get("FASTMCP_HTTP_HEALTH_PORT", "18002") or 18002)
-except Exception:
+except (ValueError, TypeError):
     _HEALTH_PORT_MEMORY = 18002
 
 
