@@ -2824,9 +2824,9 @@ async def context_answer(
     # Effective limits
     # For Q&A, we want more results per file to get comprehensive context
     try:
-        lim = int(limit) if (limit is not None and str(limit).strip() != "") else 10
+        lim = int(limit) if (limit is not None and str(limit).strip() != "") else 15
     except Exception:
-        lim = 10
+        lim = 15
     try:
         # Default per_path=5 for Q&A (vs 1 for search) to get multiple snippets from same file
         # This ensures we capture both definitions and usages
@@ -3119,13 +3119,16 @@ async def context_answer(
                 _usage_qs = []
                 if _fname and len(_fname) >= 2:
                     _usage_qs.append(f"def {_fname}(")
-                _usage_qs.extend([f"{_asked})", f"{_asked},", f"= {_asked}", f"{_asked} ="])
+                _usage_qs.extend([
+                    f"{_asked})", f"{_asked},", f"= {_asked}", f"{_asked} =",
+                    f"{_asked} = int(os.environ.get", f"int(os.environ.get(\"{_asked}\""
+                ])
                 _usage_qs = [u for u in _usage_qs if u and u not in queries]
                 if _usage_qs:
                     usage_items = run_hybrid_search(
                         queries=list(queries) + _usage_qs,
-                        limit=int(max(lim, 6)),
-                        per_path=int(max(ppath, 5)),
+                        limit=int(max(lim, 20)),
+                        per_path=int(max(ppath, 8)),
                         language=eff_language,
                         under=override_under or None,
                         kind=kwargs.get("kind") or None,
@@ -3328,22 +3331,28 @@ async def context_answer(
         # For context_answer, always read from filesystem to get complete, untruncated content
         # (payload text may be truncated for storage efficiency)
         snippet = ""
-        if path and sline:
+        if path and sline and include_snippet:
             try:
                 fp = path
                 import os as _os
                 if not _os.path.isabs(fp):
                     fp = _os.path.join("/work", fp)
                 realp = _os.path.realpath(fp)
-                with open(realp, "r", encoding="utf-8", errors="ignore") as f:
-                    lines = f.readlines()
-                try:
-                    margin = int(_os.environ.get("CTX_READ_MARGIN", "1") or 1)
-                except Exception:
-                    margin = 1
-                si = max(1, sline - margin)
-                ei = min(len(lines), max(sline, eline) + margin)
-                snippet = "".join(lines[si-1:ei])
+                # SECURITY: Verify the resolved path stays within /work to prevent path traversal
+                if not realp.startswith("/work/"):
+                    if _os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                        print(f"DEBUG: Blocked path traversal attempt: {path} -> {realp}")
+                    snippet = ""
+                else:
+                    with open(realp, "r", encoding="utf-8", errors="ignore") as f:
+                        lines = f.readlines()
+                    try:
+                        margin = int(_os.environ.get("CTX_READ_MARGIN", "1") or 1)
+                    except Exception:
+                        margin = 1
+                    si = max(1, sline - margin)
+                    ei = min(len(lines), max(sline, eline) + margin)
+                    snippet = "".join(lines[si-1:ei])
             except Exception:
                 snippet = snippet or ""
         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
