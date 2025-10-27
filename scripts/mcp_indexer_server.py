@@ -2970,14 +2970,19 @@ async def context_answer(
 
     # Normalize query to list[str]
     queries: list[str] = []
-    if isinstance(query, (list, tuple)):
-        queries = [str(q).strip() for q in query if str(q).strip()]
-    elif isinstance(query, str):
-        queries = _to_str_list_relaxed(query)
-    elif query is not None:
-        s = str(query).strip()
-        if s:
-            queries = [s]
+    try:
+        if isinstance(query, (list, tuple)):
+            queries = [str(q).strip() for q in query if str(q).strip()]
+        elif isinstance(query, str):
+            queries = _to_str_list_relaxed(query)
+        elif query is not None:
+            s = str(query).strip()
+            if s:
+                queries = [s]
+    except (TypeError, ValueError) as e:
+        logger.warning("Failed to normalize query", exc_info=e, extra={"raw_query": query})
+        raise ValidationError(f"Invalid query format: {e}")
+    
     # Debug: log raw and normalized query when running over MCP to diagnose null argument issues
     if os.environ.get("DEBUG_CONTEXT_ANSWER"):
         try:
@@ -2985,8 +2990,9 @@ async def context_answer(
             print(f"DEBUG ARG-SHAPE: normalized_queries={queries}")
         except (AttributeError, TypeError) as e:
             logger.debug("Failed to print debug info", exc_info=e)
+    
     if not queries:
-        return {"error": "query required"}
+        raise ValidationError("query required")
 
     # Effective limits
     # For Q&A, we want more results per file to get comprehensive context
@@ -3001,8 +3007,8 @@ async def context_answer(
         _ids0 = _re.findall(r"\b([A-Z_][A-Z0-9_]{2,})\b", " ".join(queries))
         if _ids0:
             ppath = max(ppath, 5)
-    except Exception:
-        pass
+    except (AttributeError, re.error) as e:
+        logger.debug("Failed to extract identifiers for per_path adjustment", exc_info=e)
 
     # Collection + model setup (reuse indexer defaults)
     coll = (collection or _default_collection()) or ""
@@ -3075,7 +3081,11 @@ async def context_answer(
                     queries.extend(alts)
                     did_local_expand = True  # Mark that we already expanded
         except (ImportError, AttributeError) as e:
-            logger.warning("Query expansion failed", exc_info=e)
+            logger.warning("Query expansion failed (decoder unavailable)", exc_info=e)
+        except (TimeoutError, ConnectionError) as e:
+            logger.warning("Query expansion failed (decoder timeout/connection)", exc_info=e)
+        except Exception as e:
+            logger.error("Unexpected error during query expansion", exc_info=e)
 
     # Default exclusions to avoid noisy self-test and cache artifacts
     # Also filter out metadata/config files that pollute Q&A context
@@ -3232,8 +3242,8 @@ async def context_answer(
                 # For other queries, DO NOT add basename - it confuses vector search
                 # The path_glob filter is applied at the hybrid_search level, not via query augmentation
                 pass
-        except Exception:
-            pass
+        except (AttributeError, IndexError, re.error) as e:
+            logger.debug("Failed to augment query with identifier probes", exc_info=e)
 
         # Debug: log effective retrieval filters before search
         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
@@ -3250,6 +3260,10 @@ async def context_answer(
         coll = (collection or kwargs.get("collection") or os.environ.get("COLLECTION_NAME") or "").strip()
         if coll:
             os.environ["COLLECTION_NAME"] = coll
+    except (AttributeError, KeyError) as e:
+        logger.warning("Failed to set collection name", exc_info=e, extra={"collection": collection})
+    
+    try:
 
         # Debug: log the search parameters
         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
@@ -3262,8 +3276,8 @@ async def context_answer(
         try:
             if sym_arg and ("/" in str(sym_arg) or "." in str(sym_arg)):
                 sym_arg = None
-        except Exception:
-            pass
+        except (AttributeError, TypeError) as e:
+            logger.debug("Failed to sanitize symbol argument", exc_info=e, extra={"symbol": sym_arg})
 
         items = run_hybrid_search(
             queries=queries,
@@ -3369,9 +3383,10 @@ async def context_answer(
                                     _seen.add(k)
                                     added += 1
                             if os.environ.get("DEBUG_CONTEXT_ANSWER"):
-                                print(f"DEBUG TARGETED_SEARCH: found {len(targeted_items)} items, added {len([it for it in targeted_items if _ikey(it) not in _seen])}")
-        except Exception as _e:
-            if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                            print(f"DEBUG TARGETED_SEARCH: found {len(targeted_items)} items, added {len([it for it in targeted_items if _ikey(it) not in _seen])}")
+                            except (re.error, AttributeError, KeyError) as _e:
+                            logger.debug("Usage augmentation failed", exc_info=_e, extra={"identifier": _asked})
+                            if os.environ.get("DEBUG_CONTEXT_ANSWER"):
                 print(f"DEBUG USAGE_AUGMENT failed: {_e}")
 
         # Debug: log top retrieval results before any post-filters/budgeting
