@@ -3072,14 +3072,29 @@ async def context_answer(
                 alts = []
                 try:
                     parsed = _json.loads(out)
-                    if isinstance(parsed, list):
-                        for s in parsed:
-                            if isinstance(s, str) and s and s not in queries:
-                                alts.append(s)
-                                if len(alts) >= 2:
-                                    break
-                except (_json.JSONDecodeError, TypeError, ValueError) as e:
-                    logger.warning("Failed to parse query expansion JSON", exc_info=e, extra={"output": out[:200]})
+                except (_json.JSONDecodeError, TypeError, ValueError):
+                    # Salvage: try to extract a JSON array substring
+                    try:
+                        start = out.find("[")
+                        end = out.rfind("]")
+                        if start != -1 and end != -1 and end > start:
+                            parsed = _json.loads(out[start:end+1])
+                        else:
+                            parsed = []
+                    except Exception as e2:
+                        logger.debug("Expand parse salvage failed", exc_info=e2)
+                        parsed = []
+                if isinstance(parsed, list):
+                    for s in parsed:
+                        if isinstance(s, str) and s and s not in queries:
+                            alts.append(s)
+                            if len(alts) >= 2:
+                                break
+                if not alts and out and out.strip():
+                    # Heuristic fallback: split lines, trim bullets, take up to 2
+                    for cand in [t.strip().lstrip("-• ") for t in out.splitlines() if t.strip()][:2]:
+                        if cand and cand not in queries and len(alts) < 2:
+                            alts.append(cand)
                 if alts:
                     queries.extend(alts)
                     did_local_expand = True  # Mark that we already expanded
@@ -3441,10 +3456,10 @@ async def context_answer(
             for i, item in enumerate(items[:3]):
                 print(f"  Item {i+1}: {item.get('path')} lines {item.get('start_line')}-{item.get('end_line')}")
 
-        # Tier 2 fallback: broader hybrid search without gating/tight filters (only if no strict filters)
-        if (not items) and (not req_language):
+        # Tier 2 fallback: broader hybrid search without gating/tight filters (unconditional when Tier 1 yields zero)
+        if not items:
             if os.environ.get("DEBUG_CONTEXT_ANSWER"):
-                print("DEBUG TIER 2: 0 items after gate-first; retrying with relaxed filters")
+                logger.debug("TIER2: gate-first returned 0; retrying with relaxed filters", extra={"stage": "tier2"})
             _prev_gate = os.environ.get("REFRAG_GATE_FIRST")
             os.environ["REFRAG_GATE_FIRST"] = "0"
             try:
@@ -3468,7 +3483,7 @@ async def context_answer(
                     model=model,
                 )
                 if os.environ.get("DEBUG_CONTEXT_ANSWER"):
-                    print(f"DEBUG TIER 2: broader hybrid returned {len(items)} items")
+                    logger.debug("TIER2: broader hybrid returned items", extra={"count": len(items)})
             finally:
                 if _prev_gate is not None:
                     os.environ["REFRAG_GATE_FIRST"] = _prev_gate
