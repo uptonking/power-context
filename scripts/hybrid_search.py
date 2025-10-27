@@ -753,6 +753,130 @@ def lexical_score(phrases: List[str], md: Dict[str, Any]) -> float:
     return s
 
 
+# --- Adaptive weighting and MMR diversification helpers ---
+
+def _compute_query_stats(queries: List[str]) -> Dict[str, Any]:
+    toks = tokenize_queries(queries)
+    total = len(toks)
+    def _is_camel(t: str) -> bool:
+        try:
+            return any(c.isupper() for c in t[1:]) and any(c.islower() for c in t)
+        except Exception:
+            return False
+    def _is_identifier_like(t: str) -> bool:
+        try:
+            return ("_" in t) or t.isupper() or any(ch.isdigit() for ch in t) or _is_camel(t)
+        except Exception:
+            return False
+    id_like = sum(1 for t in toks if _is_identifier_like(t))
+    avg_tok_len = (sum(len(t) for t in toks) / max(1, total)) if total else 0.0
+    qchars = sum(len(q) for q in queries) if queries else 0
+    has_question = any(("?" in q) for q in (queries or []))
+    q0 = (queries[0].strip().lower() if queries else "")
+    wh_start = q0.startswith(("how", "what", "why", "when", "where", "explain", "describe"))
+    stats = {
+        "total_tokens": total,
+        "identifier_density": (id_like / max(1, total)),
+        "avg_token_len": avg_tok_len,
+        "avg_query_chars": (qchars / max(1, len(queries))) if queries else 0.0,
+        "narrative_hint": bool(has_question or wh_start),
+    }
+    return stats
+
+
+def _adaptive_weights(stats: Dict[str, Any]) -> Tuple[float, float, float]:
+    """Return per-query weights (dense_w, lex_vec_w, lex_text_w) with gentle clamps.
+    Dense/lex-vector vary within ±25%; lexical text component within ±20%.
+    """
+    # Base weights
+    base_d = DENSE_WEIGHT
+    base_lv = LEX_VECTOR_WEIGHT
+    base_lx = LEXICAL_WEIGHT
+
+    id_density = float(stats.get("identifier_density", 0.0) or 0.0)
+    total = int(stats.get("total_tokens", 0) or 0)
+    narrative_hint = 1.0 if stats.get("narrative_hint") else 0.0
+    longish = 1.0 if total >= 8 else 0.0
+
+    # Build simple signals
+    narrative_score = 0.6 * narrative_hint + 0.4 * longish
+    id_score = id_density
+    delta = max(-1.0, min(1.0, narrative_score - id_score))
+
+    dens_scale = 1.0 + 0.25 * delta
+    lv_scale = 1.0 - 0.25 * delta
+    lx_scale = 1.0 + 0.20 * (-delta)  # favor lexical text for identifier-heavy queries
+
+    # Clamp
+    dens_scale = max(0.75, min(1.25, dens_scale))
+    lv_scale = max(0.75, min(1.25, lv_scale))
+    lx_scale = max(0.80, min(1.20, lx_scale))
+
+    return base_d * dens_scale, base_lv * lv_scale, base_lx * lx_scale
+
+
+def _mmr_diversify(ranked: List[Dict[str, Any]], k: int = 60, lambda_: float = 0.7) -> List[Dict[str, Any]]:
+    """Maximal Marginal Relevance over fused list.
+    Preserves top-1 by relevance, then balances relevance vs. diversity by path/symbol.
+    Returns a reordered list (top-k diversified, remainder appended in original order).
+    """
+    if not ranked:
+        return []
+    k = max(1, min(int(k or 1), len(ranked)))
+
+    def _path(md: Dict[str, Any]) -> str:
+        return str(md.get("path") or "")
+
+    def _symp(md: Dict[str, Any]) -> str:
+        return str(md.get("symbol_path") or md.get("symbol") or "")
+
+    def _sim(a: Dict[str, Any], b: Dict[str, Any]) -> float:
+        mda = (a["pt"].payload or {}).get("metadata") or {}
+        mdb = (b["pt"].payload or {}).get("metadata") or {}
+        pa, pb = _path(mda), _path(mdb)
+        if pa and pb and pa == pb:
+            return 1.0
+        sa, sb = _symp(mda), _symp(mdb)
+        if sa and sb and sa == sb:
+            return 0.8
+        if pa and pb:
+            ta = set(re.split(r"[/\\]+", pa.lower()))
+            tb = set(re.split(r"[/\\]+", pb.lower()))
+            ta.discard(""); tb.discard("")
+            if ta and tb:
+                inter = len(ta & tb)
+                union = max(1, len(ta | tb))
+                return 0.5 * (inter / union)
+        return 0.0
+
+    rel = [float(m.get("s", 0.0)) for m in ranked]
+    selected_idx = [0]  # preserve top-1
+    candidates = list(range(1, len(ranked)))
+    while len(selected_idx) < k and candidates:
+        best_idx = None
+        best_score = -1e18
+        for i in candidates:
+            # relevance
+            r = rel[i]
+            # max similarity to already selected
+            if selected_idx:
+                max_sim = max(_sim(ranked[i], ranked[j]) for j in selected_idx)
+            else:
+                max_sim = 0.0
+            mmr = lambda_ * r - (1.0 - lambda_) * max_sim
+            if mmr > best_score:
+                best_score = mmr
+                best_idx = i
+        selected_idx.append(best_idx)
+        candidates.remove(best_idx)
+
+    # Build diversified list: selected top-k in chosen order, then remaining by original order
+    sel_set = set(selected_idx)
+    diversified = [ranked[i] for i in selected_idx]
+    diversified.extend([ranked[i] for i in range(len(ranked)) if i not in sel_set])
+    return diversified
+
+
 # --- Lexical vector (hashing trick) for server-side hybrid ---
 def _split_ident_lex(s: str) -> List[str]:
     parts = re.split(r"[^A-Za-z0-9]+", s)
@@ -1019,7 +1143,6 @@ def run_hybrid_search(
     eff_path_globs_norm = _normalize_globs(eff_path_globs)
     eff_not_globs_norm = _normalize_globs(eff_not_globs)
 
-
     # Normalize under
     def _norm_under(u: str | None) -> str | None:
         if not u:
@@ -1154,6 +1277,16 @@ def run_hybrid_search(
     except Exception:
         lex_results = []
 
+    # Per-query adaptive weights (default ON, gentle clamps)
+    _USE_ADAPT = _env_truthy(os.environ.get("HYBRID_ADAPTIVE_WEIGHTS"), True)
+    if _USE_ADAPT:
+        try:
+            _AD_DENSE_W, _AD_LEX_VEC_W, _AD_LEX_TEXT_W = _adaptive_weights(_compute_query_stats(qlist))
+        except Exception:
+            _AD_DENSE_W, _AD_LEX_VEC_W, _AD_LEX_TEXT_W = DENSE_WEIGHT, LEX_VECTOR_WEIGHT, LEXICAL_WEIGHT
+    else:
+        _AD_DENSE_W, _AD_LEX_VEC_W, _AD_LEX_TEXT_W = DENSE_WEIGHT, LEX_VECTOR_WEIGHT, LEXICAL_WEIGHT
+
     for rank, p in enumerate(lex_results, 1):
         pid = str(p.id)
         score_map.setdefault(
@@ -1172,7 +1305,7 @@ def run_hybrid_search(
                 "test": 0.0,
             },
         )
-        lxs = LEX_VECTOR_WEIGHT * rrf(rank)
+        lxs = (_AD_LEX_VEC_W * rrf(rank)) if _USE_ADAPT else (LEX_VECTOR_WEIGHT * rrf(rank))
         score_map[pid]["lx"] += lxs
         score_map[pid]["s"] += lxs
 
@@ -1459,7 +1592,7 @@ def run_hybrid_search(
                     "test": 0.0,
                 },
             )
-            dens = DENSE_WEIGHT * rrf(rank)
+            dens = (_AD_DENSE_W * rrf(rank)) if _USE_ADAPT else (DENSE_WEIGHT * rrf(rank))
             score_map[pid]["d"] += dens
             score_map[pid]["s"] += dens
 
@@ -1467,7 +1600,7 @@ def run_hybrid_search(
     timestamps: List[int] = []
     for pid, rec in list(score_map.items()):
         md = (rec["pt"].payload or {}).get("metadata") or {}
-        lx = LEXICAL_WEIGHT * lexical_score(qlist, md)
+        lx = (_AD_LEX_TEXT_W * lexical_score(qlist, md)) if _USE_ADAPT else (LEXICAL_WEIGHT * lexical_score(qlist, md))
         rec["lx"] += lx
         rec["s"] += lx
         ts = md.get("last_modified_at") or md.get("ingested_at")
@@ -1746,6 +1879,20 @@ def run_hybrid_search(
     ranked = sorted([c["m"] for lst in clusters.values() for c in lst], key=_tie_key)
     if os.environ.get("DEBUG_HYBRID_SEARCH"):
         logger.debug(f"ranked has {len(ranked)} items after clustering")
+
+
+    # Optional MMR diversification (default ON; preserves top-1)
+    if _env_truthy(os.environ.get("HYBRID_MMR"), True):
+        try:
+            _mmr_k = min(len(ranked), max(20, int(os.environ.get("MMR_K", str((limit or 10) * 3)) or 30)))
+        except Exception:
+            _mmr_k = min(len(ranked), max(20, (limit or 10) * 3))
+        try:
+            _mmr_lambda = float(os.environ.get("MMR_LAMBDA", "0.7") or 0.7)
+        except Exception:
+            _mmr_lambda = 0.7
+        if (limit or 0) >= 10 or (not per_path) or (per_path <= 0):
+            ranked = _mmr_diversify(ranked, k=_mmr_k, lambda_=_mmr_lambda)
 
     # Client-side filters and per-path diversification
     import re as _re, fnmatch as _fnm
@@ -2208,6 +2355,17 @@ def main():
     except Exception:
         lex_results = []
 
+    # Per-query adaptive weights for CLI path (default ON)
+    _USE_ADAPT2 = _env_truthy(os.environ.get("HYBRID_ADAPTIVE_WEIGHTS"), True)
+    if _USE_ADAPT2:
+        try:
+            _AD_DENSE_W2, _AD_LEX_VEC_W2, _AD_LEX_TEXT_W2 = _adaptive_weights(_compute_query_stats(queries))
+        except Exception:
+            _AD_DENSE_W2, _AD_LEX_VEC_W2, _AD_LEX_TEXT_W2 = DENSE_WEIGHT, LEX_VECTOR_WEIGHT, LEXICAL_WEIGHT
+    else:
+        _AD_DENSE_W2, _AD_LEX_VEC_W2, _AD_LEX_TEXT_W2 = DENSE_WEIGHT, LEX_VECTOR_WEIGHT, LEXICAL_WEIGHT
+
+
     if args.expand:
         queries = expand_queries(queries, eff_language)
 
@@ -2230,7 +2388,7 @@ def main():
                 "test": 0.0,
             },
         )
-        lxs = LEX_VECTOR_WEIGHT * rrf(rank)
+        lxs = (_AD_LEX_VEC_W2 * rrf(rank)) if _USE_ADAPT2 else (LEX_VECTOR_WEIGHT * rrf(rank))
         score_map[pid]["lx"] += lxs
         score_map[pid]["s"] += lxs
 
@@ -2259,7 +2417,7 @@ def main():
                     "test": 0.0,
                 },
             )
-            dens = DENSE_WEIGHT * rrf(rank)
+            dens = (_AD_DENSE_W2 * rrf(rank)) if _USE_ADAPT2 else (DENSE_WEIGHT * rrf(rank))
             score_map[pid]["d"] += dens
             score_map[pid]["s"] += dens
 
@@ -2267,7 +2425,7 @@ def main():
     timestamps: List[int] = []
     for pid, rec in list(score_map.items()):
         md = (rec["pt"].payload or {}).get("metadata") or {}
-        lx = LEXICAL_WEIGHT * lexical_score(queries, md)
+        lx = (_AD_LEX_TEXT_W2 * lexical_score(queries, md)) if _USE_ADAPT2 else (LEXICAL_WEIGHT * lexical_score(queries, md))
         rec["lx"] += lx
         rec["s"] += lx
         ts = md.get("last_modified_at") or md.get("ingested_at")
@@ -2364,6 +2522,20 @@ def main():
             lst.append({"start": start_line, "end": end_line, "m": m})
 
     ranked = sorted([c["m"] for lst in clusters.values() for c in lst], key=_tie_key)
+
+    # Optional MMR diversification (default ON; preserves top-1)
+    if _env_truthy(os.environ.get("HYBRID_MMR"), True):
+        try:
+            _mmr_k = min(len(ranked), max(20, int(os.environ.get("MMR_K", str((args.limit or 10) * 3)) or 30)))
+        except Exception:
+            _mmr_k = min(len(ranked), max(20, (args.limit or 10) * 3))
+        try:
+            _mmr_lambda = float(os.environ.get("MMR_LAMBDA", "0.7") or 0.7)
+        except Exception:
+            _mmr_lambda = 0.7
+        if (args.limit or 0) >= 10 or (not args.per_path) or (args.per_path <= 0):
+            ranked = _mmr_diversify(ranked, k=_mmr_k, lambda_=_mmr_lambda)
+
 
     # Apply client-side filters: NOT substring, path regex, glob, and ext
     import re as _re, fnmatch as _fnm
