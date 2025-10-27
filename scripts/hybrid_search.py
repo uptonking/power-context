@@ -55,6 +55,18 @@ _EMBED_LOCK = _Lock()
 MAX_EMBED_CACHE = int(os.environ.get("MAX_EMBED_CACHE", "4096") or 4096)
 
 
+def _coerce_points(result: Any) -> List[Any]:
+    """Normalize Qdrant responses to a list of points."""
+    if result is None:
+        return []
+    if isinstance(result, list):
+        return result
+    try:
+        return list(result)
+    except TypeError:
+        return [result]
+
+
 def _embed_queries_cached(
     model: TextEmbedding, queries: List[str]
 ) -> List[List[float]]:
@@ -803,7 +815,7 @@ def lex_query(client: QdrantClient, v: List[float], flt, per_query: int) -> List
             limit=per_query,
             with_payload=True,
         )
-        return getattr(qp, "points", qp)
+        return _coerce_points(getattr(qp, "points", qp))
     except TypeError:
         # Older/newer client may expect 'filter' kw
         qp = client.query_points(
@@ -815,7 +827,33 @@ def lex_query(client: QdrantClient, v: List[float], flt, per_query: int) -> List
             limit=per_query,
             with_payload=True,
         )
-        return getattr(qp, "points", qp)
+        return _coerce_points(getattr(qp, "points", qp))
+    except Exception:
+        # Retry without a filter at all (handles servers that reject certain filter shapes)
+        try:
+            qp = client.query_points(
+                collection_name=_collection(),
+                query=v,
+                using=LEX_VECTOR_NAME,
+                query_filter=None,
+                search_params=models.SearchParams(hnsw_ef=ef),
+                limit=per_query,
+                with_payload=True,
+            )
+            return _coerce_points(getattr(qp, "points", qp))
+        except TypeError:
+            qp = client.query_points(
+                collection_name=_collection(),
+                query=v,
+                using=LEX_VECTOR_NAME,
+                filter=None,
+                search_params=models.SearchParams(hnsw_ef=ef),
+                limit=per_query,
+                with_payload=True,
+            )
+            return _coerce_points(getattr(qp, "points", qp))
+        except Exception:
+            return []
 
 
 def dense_query(
@@ -846,23 +884,33 @@ def dense_query(
             with_payload=True,
         )
         return getattr(qp, "points", qp)
-    except Exception as e:
-        # Some Qdrant versions reject empty/malformed filters with 400: retry without a filter
-        _msg = str(e).lower()
-        if "expected some form of condition" in _msg or "format error in json body" in _msg:
+    except Exception:
+        # Retry without any filter to maximize compatibility across server/client versions
+        try:
+            qp = client.query_points(
+                collection_name=_collection(),
+                query=v,
+                using=vec_name,
+                query_filter=None,
+                search_params=models.SearchParams(hnsw_ef=ef),
+                limit=per_query,
+                with_payload=True,
+            )
+            return getattr(qp, "points", qp)
+        except TypeError:
             try:
                 qp = client.query_points(
                     collection_name=_collection(),
                     query=v,
                     using=vec_name,
-                    query_filter=None,
+                    filter=None,
                     search_params=models.SearchParams(hnsw_ef=ef),
                     limit=per_query,
                     with_payload=True,
                 )
-                return getattr(qp, "points", qp)
+                return _coerce_points(getattr(qp, "points", qp))
             except Exception:
-                pass
+                return []
 
 
 # In-process API: run hybrid search and return structured items list
@@ -1764,14 +1812,7 @@ def run_hybrid_search(
 
     items: List[Dict[str, Any]] = []
     if not merged:
-        if getattr(args, "json", False):
-            try:
-                print(json.dumps({"results": [], "query": clean_queries}))
-            except Exception:
-                print("[]")
-        else:
-            print("No results found.")
-        return
+        return items
 
     for m in merged:
         md = (m["pt"].payload or {}).get("metadata") or {}

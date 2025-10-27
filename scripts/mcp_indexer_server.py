@@ -3268,6 +3268,10 @@ async def context_answer(
 
         # Debug: log effective retrieval filters before search
         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+            try:
+                print("[DEBUG_CONTEXT_ANSWER] FILTERS:", {"language": eff_language, "override_under": override_under, "symbol": sym_arg, "path_glob": eff_path_glob})
+            except Exception:
+                pass
             logger.debug("FILTERS", extra={"language": eff_language, "override_under": override_under, "symbol": sym_arg, "path_glob": eff_path_glob})
 
     items = []
@@ -3486,6 +3490,10 @@ async def context_answer(
                     model=model,
                 )
                 if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                    try:
+                        print("[DEBUG_CONTEXT_ANSWER] TIER2 items:", len(items), [i.get("path") for i in (items or [])][:5])
+                    except Exception:
+                        pass
                     logger.debug("TIER2: broader hybrid returned items", extra={"count": len(items)})
             finally:
                 if _prev_gate is not None:
@@ -3784,6 +3792,11 @@ async def context_answer(
             "start_line": sline,
             "end_line": eline,
         }
+        if os.environ.get("DEBUG_CONTEXT_ANSWER") and idx == 1:
+            try:
+                print("[DEBUG_CONTEXT_ANSWER] first_span:", {"path": path, "s": sline, "e": eline})
+            except Exception:
+                pass
         if _hostp:
             _cit["host_path"] = _hostp
         if _contp:

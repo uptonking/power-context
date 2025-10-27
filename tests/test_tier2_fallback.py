@@ -38,28 +38,44 @@ def qdrant_container():
     import time, urllib.request
 
     container = DockerContainer("qdrant/qdrant:latest").with_exposed_ports(6333)
-    container.start()
-    host = container.get_container_host_ip()
-    port = int(container.get_exposed_port(6333))
-    url = f"http://{host}:{port}"
-
-    # Poll readiness endpoint up to 60s to avoid hanging on log waits
-    deadline = time.time() + 60
     ready = False
-    while time.time() < deadline:
+    try:
+        container.start()
+        host = container.get_container_host_ip()
+        deadline = time.time() + 30
+        port = None
+        last_exc = None
+        while time.time() < deadline:
+            try:
+                port = int(container.get_exposed_port(6333))
+                break
+            except Exception as exc:
+                last_exc = exc
+                time.sleep(0.25)
+        if port is None:
+            raise RuntimeError(f"qdrant port mapping unavailable: {last_exc}")
+        url = f"http://{host}:{port}"
+
+        # Poll readiness endpoint up to 60s to avoid hanging on log waits
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            try:
+                with urllib.request.urlopen(url + "/readyz", timeout=2) as r:
+                    if 200 <= r.status < 300:
+                        ready = True
+                        break
+            except Exception:
+                pass
+            time.sleep(1)
+        if not ready:
+            raise RuntimeError("Qdrant not ready in time")
+
+        yield url
+    finally:
         try:
-            with urllib.request.urlopen(url + "/readyz", timeout=2) as r:
-                if 200 <= r.status < 300:
-                    ready = True
-                    break
+            container.stop()
         except Exception:
             pass
-        time.sleep(1)
-    if not ready:
-        pytest.skip("Qdrant not ready in time")
-
-    yield url
-    container.stop()
 
 
 @pytest.mark.integration
@@ -109,4 +125,3 @@ async def test_tier2_fallback_unconditional_with_language_filter(tmp_path, monke
     cits = out.get("citations") or []
     # Despite Tier-1 returning zero due to path_glob, Tier-2 relaxed search should find a.py
     assert any(str(f1) in (c.get("path") or "") for c in cits)
-

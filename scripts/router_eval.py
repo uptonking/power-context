@@ -1,3 +1,4 @@
+import argparse
 import json, os, threading, time, sys, re, copy
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Dict, Any, List, Tuple
@@ -121,7 +122,7 @@ def tool(name: str, description: str, params: List[str] = None) -> Dict[str, Any
     return {"name": name, "description": description, "inputSchema": schema}
 
 
-def run_eval_suite() -> int:
+def run_eval_suite(verbose: bool = False) -> int:
     # Two mock servers: indexer and memory
     indexer_tools = [
         tool("repo_search", "General code search", ["query", "limit", "include_snippet", "language", "under", "symbol", "ext"]),
@@ -351,6 +352,18 @@ def run_eval_suite() -> int:
                     f"  query={item.get('query')!r} top={item.get('top_candidate')} "
                     f"score={score:.3f} -> intent={item.get('intent')} first_tool={item.get('plan_first_tool')}"
                 )
+        if verbose:
+            print("Intent diagnostics (all):")
+            for item in intent_logs:
+                try:
+                    score = float(item.get("confidence") or 0.0)
+                except Exception:
+                    score = 0.0
+                print(
+                    f"  query={item.get('query')!r} strategy={item.get('strategy')} "
+                    f"intent={item.get('intent')} score={score:.3f} "
+                    f"top={item.get('top_candidate')} first_tool={item.get('plan_first_tool')}"
+                )
 
         if failures:
             print("Router eval: FAIL\n- " + "\n- ".join(failures))
@@ -362,4 +375,11 @@ def run_eval_suite() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(run_eval_suite())
+    parser = argparse.ArgumentParser(description="Run router evaluation suite.")
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print intent confidence diagnostics after the suite completes.",
+    )
+    args = parser.parse_args()
+    raise SystemExit(run_eval_suite(verbose=args.verbose))
