@@ -3573,12 +3573,12 @@ async def context_answer(
             else:
                 print(f"DEBUG: Snippet {idx} is EMPTY!")
         header = f"[{idx}] {path}:{sline}-{eline}"
-        # Increased snippet size for better context (was 600, now 1200)
-        # This provides ~10-15 lines of code per snippet for better LLM understanding
+        # Increased snippet size for better context (was 600, now 3000)
+        # Large spans from merging need more chars to show the relevant code
         try:
-            MAX_SNIPPET_CHARS = int(os.environ.get("CTX_SNIPPET_CHARS", "1200") or 1200)
+            MAX_SNIPPET_CHARS = int(os.environ.get("CTX_SNIPPET_CHARS", "3000") or 3000)
         except Exception:
-            MAX_SNIPPET_CHARS = 1200
+            MAX_SNIPPET_CHARS = 3000
         if snippet and len(snippet) > MAX_SNIPPET_CHARS:
             snippet = snippet[:MAX_SNIPPET_CHARS] + "\n..."
         block = header + "\n" + (snippet.strip() if snippet else "(no code)")
