@@ -53,7 +53,7 @@ from collections import OrderedDict
 
 _EMBED_QUERY_CACHE: OrderedDict[tuple[str, str], List[float]] = OrderedDict()
 _EMBED_LOCK = _Lock()
-MAX_EMBED_CACHE = int(os.environ.get("MAX_EMBED_CACHE", "4096") or 4096)
+MAX_EMBED_CACHE = int(os.environ.get("MAX_EMBED_CACHE", "8192") or 8192)
 
 # Lightweight recent-results LRU cache for iterative queries
 _RESULTS_CACHE: OrderedDict[tuple, List[Dict[str, Any]]] = OrderedDict()

@@ -980,7 +980,8 @@ def _embed_texts(texts: list[str]) -> list[list[float]]:
                 em = _FE_Embedding(model_name=model_name)
                 em._name = model_name  # type: ignore
                 _embedder_singleton["model"] = em
-            vecs = [list(next(em.embed([txt]))) for txt in texts]
+            raw = list(em.embed(texts))
+            vecs = [v.tolist() if hasattr(v, "tolist") else list(v) for v in raw]
             return vecs
         except Exception:
             pass

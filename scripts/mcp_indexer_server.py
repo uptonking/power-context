@@ -440,6 +440,11 @@ def _get_embedding_model(model_name: str):
             m = _EMBED_MODEL_CACHE.get(model_name)
             if m is None:
                 m = TextEmbedding(model_name=model_name)
+                try:
+                    # Warmup with common patterns to optimize internal caches
+                    _ = list(m.embed(["function", "class", "import", "def", "const"]))
+                except Exception:
+                    pass
                 _EMBED_MODEL_CACHE[model_name] = m
     return m
 
@@ -1531,7 +1536,7 @@ async def repo_search(
                             return header
 
                     # Build docs concurrently
-                    max_workers = min(8, (os.cpu_count() or 4) * 2)
+                    max_workers = min(16, (os.cpu_count() or 4) * 4)
                     with _fut.ThreadPoolExecutor(max_workers=max_workers) as ex:
                         docs = list(ex.map(_doc_for, cand_objs))
                     pairs = [(rq, d) for d in docs]
@@ -1723,7 +1728,7 @@ async def repo_search(
             except Exception:
                 return (i, "")
 
-        max_workers = min(8, (os.cpu_count() or 4) * 2)
+        max_workers = min(16, (os.cpu_count() or 4) * 4)
         with _fut.ThreadPoolExecutor(max_workers=max_workers) as ex:
             for i, snip in ex.map(_read_snip, list(enumerate(results))):
                 try:
@@ -2820,7 +2825,7 @@ async def expand_query(query: Any = None, max_new: Any = None) -> Dict[str, Any]
         out = client.generate_with_soft_embeddings(
             prompt=prompt,
             max_tokens=int(os.environ.get("EXPAND_MAX_TOKENS", "64") or 64),
-            temperature=float(os.environ.get("EXPAND_TEMPERATURE", "0.08") or 0.08),
+            temperature=0.0,  # Always 0 for deterministic expansion
             top_k=int(os.environ.get("EXPAND_TOP_K", "30") or 30),
             top_p=float(os.environ.get("EXPAND_TOP_P", "0.9") or 0.9),
             stop=["\n\n"],
@@ -3084,7 +3089,7 @@ async def context_answer(
                 # tight decoding for expansions
                 out = client.generate_with_soft_embeddings(
                     prompt=prompt, max_tokens=int(os.environ.get("EXPAND_MAX_TOKENS", "64") or 64),
-                    temperature=float(os.environ.get("EXPAND_TEMPERATURE", "0.08") or 0.08),
+                    temperature=0.0,  # Always 0 for deterministic expansion
                     top_k=int(os.environ.get("EXPAND_TOP_K", "30") or 30),
                     top_p=float(os.environ.get("EXPAND_TOP_P", "0.9") or 0.9),
                     stop=["\n\n"]
@@ -3894,8 +3899,8 @@ async def context_answer(
             return d
     # Generation params optimized for (code-focused, deterministic)
     mtok = _to_int(max_tokens, _to_int(os.environ.get("DECODER_MAX_TOKENS", "200"), 200))  # Shorter for conciseness
-    # Granite 4.0 models work best with temperature 0 for deterministic extraction
-    temp = _to_float(temperature, _to_float(os.environ.get("DECODER_TEMPERATURE", "0"), 0.0))
+    # Granite models work best with temperature 0 for deterministic extraction
+    temp = 0.0  # Always 0 for maximum determinism
     top_k = _to_int(os.environ.get("DECODER_TOP_K", "20"), 20)  # More focused
     top_p = _to_float(os.environ.get("DECODER_TOP_P", "0.85"), 0.85)  # More deterministic
 
