@@ -1063,13 +1063,14 @@ def run_hybrid_search(
     except Exception:
         pass
 
-    # Lexical vector query
+    # Lexical vector query (keep original RRF scoring)
     score_map: Dict[str, Dict[str, Any]] = {}
     try:
         lex_vec = lex_hash_vector(qlist)
         lex_results = lex_query(client, lex_vec, flt, max(24, limit))
     except Exception:
         lex_results = []
+    
     for rank, p in enumerate(lex_results, 1):
         pid = str(p.id)
         score_map.setdefault(
@@ -1102,6 +1103,7 @@ def run_hybrid_search(
     except Exception:
         pass
     # Optional gate-first using mini vectors to restrict dense search to candidates
+    # Adaptive gating: disable for short/ambiguous queries to avoid over-filtering
     flt_gated = flt
     try:
         gate_first = str(os.environ.get("REFRAG_GATE_FIRST", "0")).strip().lower() in {
@@ -1119,7 +1121,34 @@ def run_hybrid_search(
         cand_n = int(os.environ.get("REFRAG_CANDIDATES", "200") or 200)
     except Exception:
         gate_first, refrag_on, cand_n = False, False, 200
+    
+    # Adaptive mini-gate: disable for queries that are too short or lack strong identifiers
+    should_bypass_gate = False
     if gate_first and refrag_on:
+        # Check query characteristics
+        try:
+            # Count total tokens across queries
+            total_tokens = sum(len(_split_ident(q)) for q in qlist)
+            # Check for strong identifiers (ALL_CAPS, camelCase, or has underscore)
+            has_strong_id = any(
+                any(t.isupper() or "_" in t or any(c.isupper() for c in t[1:]) and any(c.islower() for c in t)
+                    for t in _split_ident(q))
+                for q in qlist
+            )
+            # If query is very short (<3 tokens) and has no strong identifiers, bypass gate
+            if total_tokens < 3 and not has_strong_id:
+                should_bypass_gate = True
+                if os.environ.get("DEBUG_HYBRID_SEARCH"):
+                    print(f"DEBUG: Adaptive gate bypass (short query, tokens={total_tokens}, strong_id={has_strong_id})")
+            # If we have strict filters (language, under, symbol, ext), relax candidate count
+            if eff_language or eff_under or eff_symbol or eff_ext:
+                cand_n = max(cand_n, limit * 5)
+                if os.environ.get("DEBUG_HYBRID_SEARCH"):
+                    print(f"DEBUG: Adaptive gate relaxed candidate count to {cand_n} due to filters")
+        except Exception:
+            pass
+    
+    if gate_first and refrag_on and not should_bypass_gate:
         try:
             # ReFRAG gate-first: Use MINI vectors to prefilter candidates
             mini_queries = [_project_mini(list(v), MINI_VEC_DIM) for v in embedded]
@@ -1327,28 +1356,31 @@ def run_hybrid_search(
             except Exception:
                 pass
 
+    # Normalize and add dense scores
     for res in result_sets:
-        for rank, p in enumerate(res, 1):
-            pid = str(p.id)
-            score_map.setdefault(
-                pid,
-                {
-                    "pt": p,
-                    "s": 0.0,
-                    "d": 0.0,
-                    "lx": 0.0,
-                    "sym_sub": 0.0,
-                    "sym_eq": 0.0,
-                    "core": 0.0,
-                    "vendor": 0.0,
-                    "langb": 0.0,
-                    "rec": 0.0,
-                    "test": 0.0,
-                },
-            )
-            dens = DENSE_WEIGHT * rrf(rank)
-            score_map[pid]["d"] += dens
-            score_map[pid]["s"] += dens
+        dense_normalized = _normalize_ranks(res)
+        for pid, norm_score in dense_normalized:
+            pt = next((p for p in res if str(p.id) == pid), None)
+            if pt:
+                score_map.setdefault(
+                    pid,
+                    {
+                        "pt": pt,
+                        "s": 0.0,
+                        "d": 0.0,
+                        "lx": 0.0,
+                        "sym_sub": 0.0,
+                        "sym_eq": 0.0,
+                        "core": 0.0,
+                        "vendor": 0.0,
+                        "langb": 0.0,
+                        "rec": 0.0,
+                        "test": 0.0,
+                    },
+                )
+                dens = DENSE_WEIGHT * norm_score
+                score_map[pid]["d"] += dens
+                score_map[pid]["s"] += dens
 
     # Lexical + boosts
     timestamps: List[int] = []
@@ -1411,6 +1443,31 @@ def run_hybrid_search(
             if (lang and md_lang and md_lang == lang) or lang_matches_path(lang, path):
                 rec["langb"] += LANG_MATCH_BOOST
                 rec["s"] += LANG_MATCH_BOOST
+        
+        # Memory blending: apply penalty to memory-like entries to prevent swamping code results
+        # Only apply if query doesn't explicitly ask for memories/notes
+        kind = str(md.get("kind") or "").lower()
+        if kind == "memory":
+            qlow = " ".join(qlist).lower()
+            is_memory_query = any(w in qlow for w in ["remember", "note", "recall", "memo", "stored"])
+            if not is_memory_query:
+                # Apply penalty and cap at 1 memory result unless explicitly requested
+                memory_penalty = float(os.environ.get("HYBRID_MEMORY_PENALTY", "0.15") or 0.15)
+                rec["mem_penalty"] = float(rec.get("mem_penalty", 0.0)) - memory_penalty
+                rec["s"] -= memory_penalty
+                # Simple lexical overlap check: drop memories with no query token overlap
+                try:
+                    text_lower = str(md.get("text") or md.get("information") or "").lower()
+                    query_tokens = set()
+                    for q in qlist:
+                        query_tokens.update(_split_ident(q))
+                    has_overlap = any(t in text_lower for t in query_tokens if len(t) >= 3)
+                    if not has_overlap:
+                        # Strong penalty for irrelevant memories
+                        rec["mem_penalty"] -= 0.5
+                        rec["s"] -= 0.5
+                except Exception:
+                    pass
 
     if timestamps and RECENCY_WEIGHT > 0.0:
         tmin, tmax = min(timestamps), max(timestamps)
@@ -1702,6 +1759,10 @@ def run_hybrid_search(
         # Prefer merged bounds if present
         start_line = m.get("_merged_start") or md.get("start_line")
         end_line = m.get("_merged_end") or md.get("end_line")
+        # Store both fusion_score (from hybrid) and rerank_score (if available) separately
+        fusion_score = float(m.get("s", 0.0))
+        rerank_score = m.get("rerank_score")  # None if not reranked
+        
         comp = {
             "dense_rrf": round(float(m.get("d", 0.0)), 4),
             "lexical": round(float(m.get("lx", 0.0)), 4),
@@ -1717,6 +1778,10 @@ def run_hybrid_search(
             "impl_boost": round(float(m.get("impl", 0.0)), 4),
             "doc_penalty": round(float(m.get("doc", 0.0)), 4),
         }
+        
+        # Add reranker info to components if present
+        if rerank_score is not None:
+            comp["rerank"] = round(float(rerank_score), 4)
         why = []
         if comp["dense_rrf"]:
             why.append(f"dense_rrf:{comp['dense_rrf']}")
@@ -1856,6 +1921,8 @@ def run_hybrid_search(
             {
                 "score": round(float(m["s"]), 4),
                 "raw_score": float(m["s"]),  # expose raw fused score for downstream budgeter
+                "fusion_score": round(fusion_score, 4),  # Always store fusion score
+                "rerank_score": round(float(rerank_score), 4) if rerank_score is not None else None,  # Store rerank separately
                 "path": _emit_path,
                 "host_path": _host,
                 "container_path": _cont,
