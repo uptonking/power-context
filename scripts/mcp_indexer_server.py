@@ -3367,6 +3367,562 @@ def _ca_prepare_filters_and_retrieve(
 
 
 
+
+
+def _ca_fallback_and_budget(
+    *,
+    items: list[Dict[str, Any]],
+    queries: list[str],
+    lim: int,
+    ppath: int,
+    eff_language: Any,
+    eff_path_glob: Any,
+    eff_not_glob: Any,
+    path_regex: Any,
+    sym_arg: Any,
+    ext: Any,
+    kind: Any,
+    override_under: Any,
+    did_local_expand: bool,
+    model: Any,
+    req_language: Any,
+    not_: Any,
+    case: Any,
+    cwd_root: str,
+    include_snippet: bool,
+    kwargs: Dict[str, Any],
+) -> list[Dict[str, Any]]:
+    """Run Tier2/Tier3 fallbacks, apply span budgeting, and select prioritized spans.
+    Returns the final list of spans to use for citations/context.
+    """
+    # Post-filter by language using path heuristics when language is provided
+    if req_language:
+        try:
+            from scripts.hybrid_search import lang_matches_path as _lmp  # type: ignore
+        except Exception:
+            _lmp = None
+
+        def _ok_lang(it: Dict[str, Any]) -> bool:
+            p = str(it.get("path") or "")
+            if callable(_lmp):
+                try:
+                    return bool(_lmp(str(req_language), p))
+                except Exception:
+                    pass
+            # Fallback robust ext mapping with multi-part extension support
+            filename = p.split("/")[-1] if "/" in p else p
+            parts = filename.split(".")
+            extensions = set()
+            if len(parts) > 1:
+                extensions.add(parts[-1].lower())
+                if len(parts) > 2:
+                    multi_ext = ".".join(parts[-2:]).lower()
+                    extensions.add(multi_ext)
+            table = {
+                "python": ["py", "pyi"],
+                "typescript": ["ts", "tsx", "d.ts", "mts", "cts"],
+                "javascript": ["js", "jsx", "mjs", "cjs"],
+                "go": ["go"],
+                "rust": ["rs"],
+                "java": ["java"],
+                "php": ["php"],
+                "c": ["c", "h"],
+                "cpp": ["cpp", "cc", "cxx", "hpp", "hxx"],
+                "csharp": ["cs"],
+            }
+            lang_exts = table.get(str(req_language).lower(), [])
+            return any(ext in lang_exts for ext in extensions)
+
+        items = [it for it in items if _ok_lang(it)]
+
+    # Tier 2 fallback: broader hybrid search without gating/tight filters
+    if not items:
+        if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+            logger.debug(
+                "TIER2: gate-first returned 0; retrying with relaxed filters",
+                extra={"stage": "tier2"},
+            )
+        from scripts.hybrid_search import _env_overrides  # type: ignore
+        with _env_overrides({"REFRAG_GATE_FIRST": "0"}):
+            items = run_hybrid_search(
+                queries=queries,
+                limit=int(max(lim * 2, 8)),  # Cast wider net
+                per_path=int(max(ppath * 2, 4)),
+                language=eff_language,
+                under=override_under or None,
+                kind=None,
+                symbol=None,
+                ext=None,
+                not_filter=(not_ or kwargs.get("not_") or kwargs.get("not") or None),
+                case=(case or kwargs.get("case") or None),
+                path_regex=None,
+                path_glob=None,
+                not_glob=eff_not_glob,
+                expand=False
+                if did_local_expand
+                else (
+                    str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower()
+                    in {"1", "true", "yes", "on"}
+                ),
+                model=model,
+            )
+            if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                logger.debug("TIER2: broader hybrid returned items", extra={"count": len(items)})
+
+    # Tier 3 fallback: filesystem heuristics
+    _strict_filters = bool(
+        eff_language
+        or eff_path_glob
+        or path_regex
+        or sym_arg
+        or ext
+        or kind
+        or override_under
+    )
+    if (
+        (not items)
+        and (
+            str(os.environ.get("TIER3_FS_FALLBACK", "0")).strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
+        and (not _strict_filters)
+    ):
+        try:
+            import re as _re
+            primary = _primary_identifier_from_queries(queries)
+            if primary and len(primary) >= 3:
+                if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                    logger.debug("TIER3: filesystem scan", extra={"identifier": primary})
+                scan_root = override_under or cwd_root
+                if not os.path.isabs(scan_root):
+                    scan_root = os.path.join(cwd_root, scan_root)
+                max_files = int(os.environ.get("TIER3_MAX_FILES", "500") or 500)
+                scanned = 0
+                tier3_hits: list[Dict[str, Any]] = []
+                for root, dirs, files in os.walk(scan_root):
+                    dirs[:] = [
+                        d
+                        for d in dirs
+                        if not any(ex in d for ex in [
+                            ".git",
+                            "node_modules",
+                            ".pytest_cache",
+                            "__pycache__",
+                        ])
+                    ]
+                    for fname in files:
+                        if scanned >= max_files:
+                            break
+                        if not any(
+                            fname.endswith(ext)
+                            for ext in [
+                                ".py",
+                                ".js",
+                                ".ts",
+                                ".go",
+                                ".rs",
+                                ".java",
+                                ".cpp",
+                                ".c",
+                                ".h",
+                            ]
+                        ):
+                            continue
+                        fpath = os.path.join(root, fname)
+                        try:
+                            with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
+                                lines = f.readlines()
+                            scanned += 1
+                            for idx, line in enumerate(lines, 1):
+                                if _re.search(rf"\b{_re.escape(primary)}\b\s*[=:(]", line):
+                                    try:
+                                        rel_path = os.path.relpath(fpath, cwd_root)
+                                    except ValueError:
+                                        rel_path = fpath.replace(cwd_root, "").lstrip("/\\")
+                                    snippet_start = max(1, idx - 2)
+                                    snippet_end = min(len(lines), idx + 3)
+                                    snippet_text = "".join(lines[snippet_start - 1 : snippet_end])
+                                    ext_map = {
+                                        ".py": "python",
+                                        ".js": "javascript",
+                                        ".ts": "typescript",
+                                        ".go": "go",
+                                        ".rs": "rust",
+                                        ".java": "java",
+                                        ".cpp": "cpp",
+                                        ".c": "c",
+                                        ".h": "c",
+                                    }
+                                    lang = next(
+                                        (v for k, v in ext_map.items() if fname.endswith(k)),
+                                        "unknown",
+                                    )
+                                    tier3_hits.append(
+                                        {
+                                            "path": rel_path,
+                                            "start_line": idx,
+                                            "end_line": idx,
+                                            "text": snippet_text.strip(),
+                                            "score": 1.0,
+                                            "tier": "filesystem_scan",
+                                            "language": lang,
+                                            "kind": "definition",
+                                        }
+                                    )
+                                    if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                                        logger.debug(
+                                            "TIER3: found",
+                                            extra={
+                                                "identifier": primary,
+                                                "path": rel_path,
+                                                "line": idx,
+                                            },
+                                        )
+                                    break
+                        except (IOError, OSError, UnicodeDecodeError):
+                            continue
+                    if scanned >= max_files:
+                        break
+                if tier3_hits:
+                    items = tier3_hits[: int(max(lim, 4))]
+                    if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                        logger.debug(
+                            "TIER3: filesystem scan returned",
+                            extra={"count": len(items), "scanned": scanned},
+                        )
+        except Exception:
+            if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                logger.debug("TIER3: filesystem scan failed", exc_info=True)
+
+    # Filter out memory-like items without a valid path to avoid empty citations
+    items = [it for it in items if str(it.get("path") or "").strip()]
+
+    # Apply ReFRAG span budgeting to compress context
+    from scripts.hybrid_search import _merge_and_budget_spans  # type: ignore
+    try:
+        if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+            logger.debug("BUDGET_BEFORE", extra={"items": len(items)})
+        budgeted = _merge_and_budget_spans(items)
+        if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+            logger.debug("BUDGET_AFTER", extra={"items": len(budgeted)})
+        if not budgeted and items:
+            if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                logger.debug("BUDGET_EMPTY_FALLBACK")
+            budgeted = items
+    except (ImportError, AttributeError, KeyError):
+        logger.warning("Span budgeting failed, using raw items", exc_info=True)
+        if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+            logger.debug("BUDGET_FAILED", exc_info=True)
+        budgeted = items
+
+    # Enforce an output max spans knob - do this BEFORE env restore
+    try:
+        out_max = int(os.environ.get("MICRO_OUT_MAX_SPANS", "12") or 12)
+    except (ValueError, TypeError):
+        out_max = 12
+    span_cap = max(0, min(out_max, max(0, int(lim))))
+    source_spans = list(budgeted) if budgeted else list(items)
+
+    # Prefer spans that actually contain the main identifier when one is present
+    def _read_span_snippet(span: Dict[str, Any]) -> str:
+        cached = span.get("_ident_snippet")
+        if cached is not None:
+            return str(cached)
+        if not include_snippet:
+            return ""
+        try:
+            path = str(span.get("path") or "")
+            sline = int(span.get("start_line") or 0)
+            eline = int(span.get("end_line") or 0)
+            if not path or sline <= 0:
+                span["_ident_snippet"] = ""
+                return ""
+            fp = path
+            if not os.path.isabs(fp):
+                fp = os.path.join("/work", fp)
+            realp = os.path.realpath(fp)
+            if not realp.startswith("/work/"):
+                span["_ident_snippet"] = ""
+                return ""
+            with open(realp, "r", encoding="utf-8", errors="ignore") as f:
+                lines = f.readlines()
+            si = max(1, sline - 1)
+            ei = min(len(lines), max(sline, eline) + 1)
+            snippet = "".join(lines[si - 1 : ei])
+            span["_ident_snippet"] = snippet
+            return snippet
+        except Exception:
+            span["_ident_snippet"] = ""
+            return ""
+
+    def _span_haystack(span: Dict[str, Any]) -> str:
+        parts = [
+            str(span.get("text") or ""),
+            str(span.get("symbol") or ""),
+            str((span.get("relations") or {}).get("symbol_path") if isinstance(span.get("relations"), dict) else ""),
+            str(span.get("path") or ""),
+            str(span.get("_ident_snippet") or ""),
+        ]
+        return " ".join(parts).lower()
+
+    def _span_key(span: Dict[str, Any]) -> tuple[str, int, int]:
+        return (
+            str(span.get("path") or ""),
+            int(span.get("start_line") or 0),
+            int(span.get("end_line") or 0),
+        )
+
+    primary_ident = _primary_identifier_from_queries(queries)
+    if primary_ident and source_spans:
+        ident_lower = primary_ident.lower()
+        spans_with_ident: list[Dict[str, Any]] = []
+        spans_without_ident: list[Dict[str, Any]] = []
+        for span in source_spans:
+            hay = _span_haystack(span)
+            contains = ident_lower in hay
+            if not contains:
+                extra = _read_span_snippet(span)
+                if extra:
+                    hay = (hay + " " + extra.lower()).strip()
+                    contains = ident_lower in hay
+            if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                logger.debug(
+                    "IDENT_HAY",
+                    extra={
+                        "path": span.get("path"),
+                        "contains_ident": "yes" if contains else "no",
+                        "preview": hay[:80],
+                    },
+                )
+            if contains:
+                spans_with_ident.append(span)
+            else:
+                spans_without_ident.append(span)
+        if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+            logger.debug(
+                "IDENT_FILTER",
+                extra={
+                    "ident": primary_ident,
+                    "with": len(spans_with_ident),
+                    "without": len(spans_without_ident),
+                },
+            )
+        if spans_with_ident:
+            source_spans = spans_with_ident + spans_without_ident
+        elif budgeted and items:
+            ident_candidates: list[Dict[str, Any]] = []
+            seen = set()
+            for span in items:
+                key = _span_key(span)
+                if key in seen:
+                    continue
+                hay = _span_haystack(span)
+                if ident_lower not in hay:
+                    extra = _read_span_snippet(span)
+                    if extra:
+                        hay = (hay + " " + extra.lower()).strip()
+                if ident_lower in hay:
+                    ident_candidates.append(span)
+                    seen.add(key)
+            if ident_candidates:
+                for span in source_spans:
+                    key = _span_key(span)
+                    if key not in seen:
+                        ident_candidates.append(span)
+                        seen.add(key)
+                if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                    logger.debug(
+                        "IDENT_AUGMENT",
+                        extra={"candidates": len(ident_candidates), "ident": primary_ident},
+                    )
+                source_spans = ident_candidates
+            else:
+                if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                    logger.debug("IDENT_AUGMENT_NONE", extra={"ident": primary_ident})
+
+    if span_cap:
+        spans = source_spans[:span_cap]
+    else:
+        spans = []
+
+    # Lift a definition span (IDENT = ...) to the front when possible
+    try:
+        if spans and primary_ident:
+            import re as _re
+
+            def _is_def_span(span: Dict[str, Any]) -> bool:
+                sn = _read_span_snippet(span) or ""
+                for _ln in sn.splitlines():
+                    if _re.match(rf"\s*{_re.escape(primary_ident)}\s*=\s*", _ln):
+                        return True
+                return False
+
+            cand = next((sp for sp in source_spans if _is_def_span(sp)), None)
+            if not cand:
+                cand = next((sp for sp in items if _is_def_span(sp)), None)
+            if cand:
+                keyset = {
+                    (
+                        str(s.get("path") or ""),
+                        int(s.get("start_line") or 0),
+                        int(s.get("end_line") or 0),
+                    )
+                    for s in spans
+                }
+                ckey = (
+                    str(cand.get("path") or ""),
+                    int(cand.get("start_line") or 0),
+                    int(cand.get("end_line") or 0),
+                )
+                if ckey not in keyset:
+                    spans = [cand] + (
+                        spans[:-1] if span_cap and len(spans) >= span_cap else spans
+                    )
+                    if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                        logger.debug(
+                            "IDENT_DEF_LIFT",
+                            extra={
+                                "path": cand.get("path"),
+                                "start": cand.get("start_line"),
+                                "end": cand.get("end_line"),
+                            },
+                        )
+    except Exception:
+        if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+            logger.debug("IDENT_DEF_LIFT_FAILED", exc_info=True)
+
+    if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+        logger.debug(
+            "SPAN_SELECTION",
+            extra={
+                "items": len(items),
+                "budgeted": len(budgeted),
+                "out_max": out_max,
+                "lim": lim,
+                "spans": len(spans),
+            },
+        )
+
+    return spans
+
+
+def _ca_build_citations_and_context(
+    *,
+    spans: list[Dict[str, Any]],
+    include_snippet: bool,
+    queries: list[str],
+) -> tuple[list[Dict[str, Any]], list[str], dict[int, str], str | None, str, int | None, int | None]:
+    """Build citations, read snippets, assemble context blocks, and extract def/usage hints.
+    Returns (citations, context_blocks, snippets_by_id, asked_ident, def_line_exact, def_id, usage_id).
+    """
+    citations: list[Dict[str, Any]] = []
+    snippets_by_id: dict[int, str] = {}
+    context_blocks: list[str] = []
+
+    asked_ident = _primary_identifier_from_queries(queries)
+    _def_line_exact: str = ""
+    _def_id: int | None = None
+    _usage_id: int | None = None
+
+    for idx, it in enumerate(spans, 1):
+        path = str(it.get("path") or "")
+        sline = int(it.get("start_line") or 0)
+        eline = int(it.get("end_line") or 0)
+        _hostp = it.get("host_path")
+        _contp = it.get("container_path")
+        _cit = {
+            "id": idx,
+            "path": path,
+            "start_line": sline,
+            "end_line": eline,
+        }
+        if _hostp:
+            _cit["host_path"] = _hostp
+        if _contp:
+            _cit["container_path"] = _contp
+        citations.append(_cit)
+
+        snippet = str(it.get("text") or "").strip()
+        if not snippet and it.get("_ident_snippet"):
+            snippet = str(it.get("_ident_snippet")).strip()
+        if not snippet and path and sline and include_snippet:
+            try:
+                fp = path
+                import os as _os
+                if not _os.path.isabs(fp):
+                    fp = _os.path.join("/work", fp)
+                realp = _os.path.realpath(fp)
+                if not realp.startswith("/work/"):
+                    snippet = ""
+                else:
+                    with open(realp, "r", encoding="utf-8", errors="ignore") as f:
+                        lines = f.readlines()
+                    try:
+                        margin = int(_os.environ.get("CTX_READ_MARGIN", "1") or 1)
+                    except (ValueError, TypeError):
+                        margin = 1
+                    si = max(1, sline - margin)
+                    ei = min(len(lines), max(sline, eline) + margin)
+                    snippet = "".join(lines[si - 1 : ei])
+                    it["_ident_snippet"] = snippet
+            except Exception:
+                snippet = ""
+        if not snippet:
+            snippet = str(it.get("text") or "").strip()
+        if not snippet and it.get("_ident_snippet"):
+            snippet = str(it.get("_ident_snippet")).strip()
+
+        snippets_by_id[idx] = snippet
+        if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+            logger.debug(
+                "SNIPPET",
+                extra={
+                    "idx": idx,
+                    "source": ("payload" if it.get("text") else "fs"),
+                    "path": path,
+                    "sline": sline,
+                    "eline": eline,
+                    "length": len(snippet) if snippet else 0,
+                    "has_rrf_k": ("RRF_K" in snippet) if snippet else False,
+                    "empty": not bool(snippet),
+                },
+            )
+        header = f"[{idx}] {path}:{sline}-{eline}"
+        try:
+            MAX_SNIPPET_CHARS = int(os.environ.get("CTX_SNIPPET_CHARS", "1200") or 1200)
+        except (ValueError, TypeError):
+            MAX_SNIPPET_CHARS = 1200
+        if snippet and len(snippet) > MAX_SNIPPET_CHARS:
+            snippet = snippet[:MAX_SNIPPET_CHARS] + "\n..."
+        block = header + "\n" + (snippet.strip() if snippet else "(no code)")
+        context_blocks.append(block)
+
+        # Extract definition/usage occurrences for robust formatting
+        try:
+            if asked_ident and snippet:
+                import re as _re
+                for _ln in str(snippet).splitlines():
+                    if not _def_line_exact and _re.match(rf"\s*{_re.escape(asked_ident)}\s*=", _ln):
+                        _def_line_exact = _ln.strip()
+                        _def_id = idx
+                    elif (asked_ident in _ln) and (_def_id != idx):
+                        if _usage_id is None:
+                            _usage_id = idx
+        except Exception:
+            pass
+
+    if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+        logger.debug(
+            "CONTEXT_BLOCKS",
+            extra={
+                "spans": len(spans),
+                "context_blocks": len(context_blocks),
+                "previews": [block[:300] for block in context_blocks[:3]],
+            },
+        )
+
+    return citations, context_blocks, snippets_by_id, asked_ident, _def_line_exact, _def_id, _usage_id
+
 @mcp.tool()
 async def context_answer(
     query: Any = None,
