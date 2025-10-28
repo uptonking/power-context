@@ -1131,7 +1131,7 @@ async def repo_search(
     compact: Any = None,
     **kwargs,
 ) -> Dict[str, Any]:
-    """Hybrid (vector + lexical) code search with RRF fusion and optional reranking.
+    """Zero-config code search over repositories (hybrid: vector + lexical RRF, optional rerank).
 
     When to use:
     - Find relevant code spans quickly; prefer this over embedding-only search.
