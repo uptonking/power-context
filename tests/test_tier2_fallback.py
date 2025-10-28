@@ -31,15 +31,19 @@ class FakeEmbedder:
 
 @pytest.fixture(scope="module")
 def qdrant_container():
+    os.environ.setdefault("TESTCONTAINERS_RYUK_DISABLED", "true")
+    os.environ.setdefault("TESTCONTAINERS_RYUK_TIMEOUT", "0")
     try:
         from testcontainers.core.container import DockerContainer
-    except Exception as e:  # pragma: no cover
+    except Exception:  # pragma: no cover
         pytest.skip("testcontainers not available")
     import time, urllib.request
 
-    container = DockerContainer("qdrant/qdrant:latest").with_exposed_ports(6333)
-    ready = False
+    container = DockerContainer("qdrant/qdrant:latest")
     try:
+        container.with_env("TESTCONTAINERS_RYUK_DISABLED", "true")
+        container.with_env("TESTCONTAINERS_RYUK_TIMEOUT", "0")
+        container.with_exposed_ports(6333)
         container.start()
         host = container.get_container_host_ip()
         deadline = time.time() + 30
@@ -56,19 +60,15 @@ def qdrant_container():
             raise RuntimeError(f"qdrant port mapping unavailable: {last_exc}")
         url = f"http://{host}:{port}"
 
-        # Poll readiness endpoint up to 60s to avoid hanging on log waits
         deadline = time.time() + 60
         while time.time() < deadline:
             try:
                 with urllib.request.urlopen(url + "/readyz", timeout=2) as r:
                     if 200 <= r.status < 300:
-                        ready = True
                         break
             except Exception:
                 pass
             time.sleep(1)
-        if not ready:
-            raise RuntimeError("Qdrant not ready in time")
 
         yield url
     finally:

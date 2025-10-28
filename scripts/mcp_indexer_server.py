@@ -3469,7 +3469,7 @@ def _ca_fallback_and_budget(
                 "TIER2: gate-first returned 0; retrying with relaxed filters",
                 extra={"stage": "tier2"},
             )
-        from scripts.hybrid_search import _env_overrides, run_hybrid_search  # type: ignore
+        from scripts.hybrid_search import run_hybrid_search  # type: ignore
         with _env_overrides({"REFRAG_GATE_FIRST": "0"}):
             items = run_hybrid_search(
                 queries=queries,
@@ -4198,7 +4198,6 @@ async def context_answer(
     # Prepare environment toggles for ReFRAG gate-first and budgeting
     # Acquire lock to avoid cross-request env clobbering
     _ENV_LOCK.acquire()
-
     prev = {
         "REFRAG_MODE": os.environ.get("REFRAG_MODE"),
         "REFRAG_GATE_FIRST": os.environ.get("REFRAG_GATE_FIRST"),
@@ -4309,6 +4308,11 @@ async def context_answer(
     ext = _retr["ext"]
     kind = _retr["kind"]
     case = _retr["case"]
+    req_language = eff_language
+
+    fallback_kwargs = dict(kwargs or {})
+    for key in ("path_glob", "language", "under"):
+        fallback_kwargs.pop(key, None)
 
     def _to_glob_list(val: Any) -> list[str]:
         if not val:
@@ -4318,28 +4322,6 @@ async def context_answer(
         vs = str(val).strip()
         return [vs] if vs else []
 
-    req_language = kwargs.get("language") or language or None
-    eff_language = req_language
-
-    user_path_glob = _to_glob_list(kwargs.get("path_glob") or path_glob)
-    eff_path_glob: list[str] = list(user_path_glob)
-    auto_path_glob: list[str] = []
-
-    cwd_root = os.path.abspath(os.getcwd()).replace("\\", "/").rstrip("/")
-
-    def _abs_prefix(val: str) -> str:
-        v = (val or "").replace("\\", "/")
-        if not v:
-            return cwd_root
-        if v.startswith(cwd_root + "/") or v == cwd_root:
-            return v.rstrip("/")
-        if v.startswith("/"):
-            return f"{cwd_root}{v.rstrip('/')}"
-        return f"{cwd_root}/{v.lstrip('./').rstrip('/')}"
-
-    user_under = kwargs.get("under") or under or None
-    # Legacy retrieval block replaced by _ca_prepare_filters_and_retrieve above.
-    items = items  # no-op to keep structure
     err = None
     try:
         spans = _ca_fallback_and_budget(
@@ -4362,16 +4344,14 @@ async def context_answer(
             case=case,
             cwd_root=cwd_root,
             include_snippet=bool(include_snippet),
-            kwargs=kwargs,
+            kwargs=fallback_kwargs,
         )
-
     except Exception as e:
         err = str(e)
         spans = []
         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
             logger.debug("EXCEPTION", exc_info=e, extra={"error": err})
     finally:
-        # Restore env to previous values to avoid cross-call bleed
         for k, v in prev.items():
             if v is None:
                 try:
@@ -4380,7 +4360,6 @@ async def context_answer(
                     pass
             else:
                 os.environ[k] = v
-        # Release lock after environment restored
         _ENV_LOCK.release()
 
     if err is not None:

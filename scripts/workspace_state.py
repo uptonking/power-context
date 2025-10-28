@@ -193,64 +193,81 @@ def _atomic_write_state(state_path: Path, state: WorkspaceState) -> None:
         raise
 
 def get_workspace_state(workspace_path: str) -> WorkspaceState:
-    """Get the current workspace state, creating it if it doesn't exist."""
+    """Get the current workspace state, creating it if it doesn't exist.
+
+    Uses a cross-process lock to avoid concurrent read-modify-write races across
+    multiple containers/processes.
+    """
     lock = _get_state_lock(workspace_path)
     with lock:
         state_path = _get_state_path(workspace_path)
+        lock_path = state_path.with_suffix(state_path.suffix + ".lock")
+        with _cross_process_lock(lock_path):
+            if state_path.exists():
+                try:
+                    with open(state_path, 'r', encoding='utf-8') as f:
+                        state = json.load(f)
+                        # Ensure required fields exist
+                        if not isinstance(state, dict):
+                            raise ValueError("Invalid state format")
+                        return state
+                except (json.JSONDecodeError, ValueError, OSError):
+                    # Corrupted or invalid state file, recreate
+                    pass
 
-        if state_path.exists():
+            # Create new state
+            now = datetime.now().isoformat()
+            env_coll = os.environ.get("COLLECTION_NAME")
+            if isinstance(env_coll, str) and env_coll.strip() and env_coll.strip() != "my-collection":
+                collection_name = env_coll.strip()
+            else:
+                collection_name = _generate_collection_name(workspace_path)
+
+            state: WorkspaceState = {
+                "workspace_path": str(Path(workspace_path).resolve()),
+                "created_at": now,
+                "updated_at": now,
+                "qdrant_collection": collection_name,
+                "indexing_status": {
+                    "state": "idle"
+                }
+            }
+
+            # Ensure directory exists and write state
+            state_path = _ensure_state_dir(workspace_path)
+            _atomic_write_state(state_path, state)
+            return state
+
+def update_workspace_state(workspace_path: str, updates: Dict[str, Any]) -> WorkspaceState:
+    """Update workspace state with the given changes.
+
+    Cross-process safe using an advisory lock file.
+    """
+    lock = _get_state_lock(workspace_path)
+    with lock:
+        state_path = _ensure_state_dir(workspace_path)
+        lock_path = state_path.with_suffix(state_path.suffix + ".lock")
+        with _cross_process_lock(lock_path):
+            # Read current state (best-effort)
             try:
                 with open(state_path, 'r', encoding='utf-8') as f:
                     state = json.load(f)
-                    # Ensure required fields exist
                     if not isinstance(state, dict):
-                        raise ValueError("Invalid state format")
-                    return state
-            except (json.JSONDecodeError, ValueError, OSError):
-                # Corrupted or invalid state file, recreate
-                pass
+                        state = {}
+            except Exception:
+                state = {}
 
-        # Create new state
-        now = datetime.now().isoformat()
-        env_coll = os.environ.get("COLLECTION_NAME")
-        if isinstance(env_coll, str) and env_coll.strip() and env_coll.strip() != "my-collection":
-            collection_name = env_coll.strip()
-        else:
-            collection_name = _generate_collection_name(workspace_path)
+            # Apply updates (preserve prior behavior: only known or existing keys)
+            for key, value in updates.items():
+                if key in state or key in WorkspaceState.__annotations__:
+                    state[key] = value
 
-        state: WorkspaceState = {
-            "workspace_path": str(Path(workspace_path).resolve()),
-            "created_at": now,
-            "updated_at": now,
-            "qdrant_collection": collection_name,
-            "indexing_status": {
-                "state": "idle"
-            }
-        }
+            # Always update timestamp
+            state["updated_at"] = datetime.now().isoformat()
 
-        # Ensure directory exists and write state
-        state_path = _ensure_state_dir(workspace_path)
-        _atomic_write_state(state_path, state)
-        return state
-
-def update_workspace_state(workspace_path: str, updates: Dict[str, Any]) -> WorkspaceState:
-    """Update workspace state with the given changes."""
-    lock = _get_state_lock(workspace_path)
-    with lock:
-        state = get_workspace_state(workspace_path)
-
-        # Apply updates
-        for key, value in updates.items():
-            if key in state or key in WorkspaceState.__annotations__:
-                state[key] = value
-
-        # Always update timestamp
-        state["updated_at"] = datetime.now().isoformat()
-
-        # Write back to file
-        state_path = _ensure_state_dir(workspace_path)
-        _atomic_write_state(state_path, state)
-        return state
+            # Write back to file atomically
+            _atomic_write_state(state_path, state)
+            return state
 
 def update_indexing_status(workspace_path: str, status: IndexingStatus) -> WorkspaceState:
     """Update the indexing status in workspace state."""
@@ -322,22 +339,27 @@ def _read_cache(workspace_path: str) -> Dict[str, Any]:
 
 
 def _write_cache(workspace_path: str, cache: Dict[str, Any]) -> None:
-    """Atomic write of cache file to avoid corruption under concurrency."""
+    """Atomic write of cache file to avoid corruption under concurrency.
+
+    Uses both an in-process lock and a cross-process lock file to serialize writers.
+    """
     lock = _get_state_lock(workspace_path)
     with lock:
         state_dir = Path(workspace_path).resolve() / STATE_DIRNAME
         state_dir.mkdir(exist_ok=True)
         cache_path = _get_cache_path(workspace_path)
-        tmp = cache_path.with_suffix(f".tmp.{uuid.uuid4().hex[:8]}")
-        try:
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(cache, f, ensure_ascii=False, indent=2)
-            tmp.replace(cache_path)
-        finally:
+        lock_path = cache_path.with_suffix(cache_path.suffix + ".lock")
+        with _cross_process_lock(lock_path):
+            tmp = cache_path.with_suffix(f".tmp.{uuid.uuid4().hex[:8]}")
             try:
-                tmp.unlink(missing_ok=True)
-            except Exception:
-                pass
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(cache, f, ensure_ascii=False, indent=2)
+                tmp.replace(cache_path)
+            finally:
+                try:
+                    tmp.unlink(missing_ok=True)
+                except Exception:
+                    pass
 
 
 def get_cached_file_hash(workspace_path: str, file_path: str) -> str:
