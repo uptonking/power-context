@@ -7,6 +7,11 @@ from qdrant_client import QdrantClient, models
 from fastembed import TextEmbedding
 import re
 import json
+import math
+
+import logging
+
+logger = logging.getLogger("hybrid_search")
 
 
 def _collection() -> str:
@@ -48,7 +53,25 @@ from collections import OrderedDict
 
 _EMBED_QUERY_CACHE: OrderedDict[tuple[str, str], List[float]] = OrderedDict()
 _EMBED_LOCK = _Lock()
-MAX_EMBED_CACHE = int(os.environ.get("MAX_EMBED_CACHE", "4096") or 4096)
+MAX_EMBED_CACHE = int(os.environ.get("MAX_EMBED_CACHE", "8192") or 8192)
+
+# Lightweight recent-results LRU cache for iterative queries
+_RESULTS_CACHE: OrderedDict[tuple, List[Dict[str, Any]]] = OrderedDict()
+_RESULTS_LOCK = _Lock()
+# Set to 0 to disable; default small size to bound memory
+MAX_RESULTS_CACHE = int(os.environ.get("HYBRID_RESULTS_CACHE", "32") or 32)
+
+
+def _coerce_points(result: Any) -> List[Any]:
+    """Normalize Qdrant responses to a list of points."""
+    if result is None:
+        return []
+    if isinstance(result, list):
+        return result
+    try:
+        return list(result)
+    except TypeError:
+        return [result]
 
 
 def _embed_queries_cached(
@@ -65,7 +88,7 @@ def _embed_queries_cached(
         )
     except Exception:
         name = os.environ.get("EMBEDDING_MODEL", MODEL_NAME)
-    
+
     # Find missing queries that need embedding (thread-safe read)
     missing_queries = []
     missing_indices = []
@@ -75,7 +98,7 @@ def _embed_queries_cached(
             if key not in _EMBED_QUERY_CACHE:
                 missing_queries.append(str(q))
                 missing_indices.append(i)
-    
+
     # Batch-embed all missing queries in one call
     if missing_queries:
         try:
@@ -104,7 +127,7 @@ def _embed_queries_cached(
                                 _EMBED_QUERY_CACHE.popitem(last=False)
                 except Exception:
                     pass
-    
+
     # Return embeddings in original order from cache (thread-safe read)
     out: List[List[float]] = []
     with _EMBED_LOCK:
@@ -176,28 +199,28 @@ def _merge_and_budget_spans(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]
             os.environ.get("MICRO_MERGE_LINES", str(MICRO_MERGE_LINES))
             or MICRO_MERGE_LINES
         )
-    except Exception:
+    except (ValueError, TypeError):
         merge_lines = MICRO_MERGE_LINES
     try:
         budget_tokens = int(
             os.environ.get("MICRO_BUDGET_TOKENS", str(MICRO_BUDGET_TOKENS))
             or MICRO_BUDGET_TOKENS
         )
-    except Exception:
+    except (ValueError, TypeError):
         budget_tokens = MICRO_BUDGET_TOKENS
     try:
         tokens_per_line = int(
             os.environ.get("MICRO_TOKENS_PER_LINE", str(MICRO_TOKENS_PER_LINE))
             or MICRO_TOKENS_PER_LINE
         )
-    except Exception:
+    except (ValueError, TypeError):
         tokens_per_line = MICRO_TOKENS_PER_LINE
     try:
         out_max_spans = int(
             os.environ.get("MICRO_OUT_MAX_SPANS", str(MICRO_OUT_MAX_SPANS))
             or MICRO_OUT_MAX_SPANS
         )
-    except Exception:
+    except (ValueError, TypeError):
         out_max_spans = MICRO_OUT_MAX_SPANS
 
     # First cluster adjacent by path using a tighter merge gap for micro spans
@@ -713,14 +736,16 @@ def rrf(rank: int, k: int = RRF_K) -> float:
     return 1.0 / (k + rank)
 
 
-def lexical_score(phrases: List[str], md: Dict[str, Any]) -> float:
-    """Smarter lexical: split identifiers, weight matches in symbol/path higher."""
+def lexical_score(phrases: List[str], md: Dict[str, Any], token_weights: Dict[str, float] | None = None, bm25_weight: float | None = None) -> float:
+    """Smarter lexical: split identifiers, weight matches in symbol/path higher.
+    If token_weights provided, apply a small BM25-style multiplicative factor per token:
+        factor = 1 + bm25_weight * (w - 1) where w are normalized around 1.0
+    """
     tokens = tokenize_queries(phrases)
     if not tokens:
         return 0.0
     path = str(md.get("path", "")).lower()
     path_segs = re.split(r"[/\\]", path)
-    path_text = " ".join(path_segs)
     sym = str(md.get("symbol", "")).lower()
     symp = str(md.get("symbol_path", "")).lower()
     code = str(md.get("code", ""))[:2000].lower()
@@ -728,13 +753,215 @@ def lexical_score(phrases: List[str], md: Dict[str, Any]) -> float:
     for t in tokens:
         if not t:
             continue
+        contrib = 0.0
         if t in sym or t in symp:
-            s += 2.0
+            contrib += 2.0
         if any(t in seg for seg in path_segs):
-            s += 0.6
+            contrib += 0.6
         if t in code:
-            s += 1.0
+            contrib += 1.0
+        if contrib > 0 and token_weights and bm25_weight:
+            w = float(token_weights.get(t, 1.0) or 1.0)
+            contrib *= (1.0 + float(bm25_weight) * (w - 1.0))
+        s += contrib
     return s
+
+
+# --- Adaptive weighting and MMR diversification helpers ---
+
+def _compute_query_stats(queries: List[str]) -> Dict[str, Any]:
+    toks = tokenize_queries(queries)
+    total = len(toks)
+    def _is_camel(t: str) -> bool:
+        try:
+            return any(c.isupper() for c in t[1:]) and any(c.islower() for c in t)
+        except Exception:
+            return False
+    def _is_identifier_like(t: str) -> bool:
+        try:
+            return ("_" in t) or t.isupper() or any(ch.isdigit() for ch in t) or _is_camel(t)
+        except Exception:
+            return False
+    id_like = sum(1 for t in toks if _is_identifier_like(t))
+    avg_tok_len = (sum(len(t) for t in toks) / max(1, total)) if total else 0.0
+    qchars = sum(len(q) for q in queries) if queries else 0
+    has_question = any(("?" in q) for q in (queries or []))
+    q0 = (queries[0].strip().lower() if queries else "")
+    wh_start = q0.startswith(("how", "what", "why", "when", "where", "explain", "describe"))
+    stats = {
+        "total_tokens": total,
+        "identifier_density": (id_like / max(1, total)),
+        "avg_token_len": avg_tok_len,
+        "avg_query_chars": (qchars / max(1, len(queries))) if queries else 0.0,
+        "narrative_hint": bool(has_question or wh_start),
+    }
+    return stats
+
+
+def _adaptive_weights(stats: Dict[str, Any]) -> Tuple[float, float, float]:
+    """Return per-query weights (dense_w, lex_vec_w, lex_text_w) with gentle clamps.
+    Dense/lex-vector vary within ±25%; lexical text component within ±20%.
+    """
+    # Base weights
+    base_d = DENSE_WEIGHT
+    base_lv = LEX_VECTOR_WEIGHT
+    base_lx = LEXICAL_WEIGHT
+
+    id_density = float(stats.get("identifier_density", 0.0) or 0.0)
+    total = int(stats.get("total_tokens", 0) or 0)
+    narrative_hint = 1.0 if stats.get("narrative_hint") else 0.0
+    longish = 1.0 if total >= 8 else 0.0
+
+    # Build simple signals
+    narrative_score = 0.6 * narrative_hint + 0.4 * longish
+    id_score = id_density
+    delta = max(-1.0, min(1.0, narrative_score - id_score))
+
+    dens_scale = 1.0 + 0.25 * delta
+    lv_scale = 1.0 - 0.25 * delta
+    lx_scale = 1.0 + 0.20 * (-delta)  # favor lexical text for identifier-heavy queries
+
+    # Clamp
+    dens_scale = max(0.75, min(1.25, dens_scale))
+    lv_scale = max(0.75, min(1.25, lv_scale))
+    lx_scale = max(0.80, min(1.20, lx_scale))
+
+    return base_d * dens_scale, base_lv * lv_scale, base_lx * lx_scale
+
+
+def _bm25_token_weights_from_results(phrases: List[str], results: List[Any]) -> Dict[str, float]:
+    """Compute lightweight per-token IDF-like weights from a small sample of lex results.
+    Returns weights normalized to mean 1.0 over tokens present in phrases.
+    """
+    try:
+        tokens = [t for t in tokenize_queries(phrases) if t]
+        if not tokens or not results:
+            return {}
+        tok_set = set(tokens)
+        N = max(1, len(results))
+        df: Dict[str, int] = {t: 0 for t in tok_set}
+        for p in results:
+            try:
+                md = (p.payload or {}).get("metadata") or {}
+            except Exception:
+                md = {}
+            text = " ".join(
+                [
+                    str(md.get("symbol") or ""),
+                    str(md.get("symbol_path") or ""),
+                    str(md.get("path") or ""),
+                    str((md.get("code") or ""))[:2000],
+                ]
+            ).lower()
+            doc_toks = set(tokenize_queries([text]))
+            for t in tok_set:
+                if t in doc_toks:
+                    df[t] += 1
+        idf: Dict[str, float] = {t: math.log(1.0 + (N / float(df[t] + 1))) for t in tok_set}
+        mean = sum(idf.values()) / max(1, len(idf))
+        if mean <= 0:
+            return {t: 1.0 for t in tok_set}
+        return {t: (idf[t] / mean) for t in tok_set}
+    except Exception:
+        return {}
+
+
+def _bm25_token_weights_from_results(phrases: List[str], results: List[Any]) -> Dict[str, float]:
+    """Compute lightweight per-token IDF-like weights from a small sample of lex results.
+    Returns weights normalized to mean 1.0 over tokens present in phrases.
+    """
+    try:
+        tokens = [t for t in tokenize_queries(phrases) if t]
+        if not tokens or not results:
+            return {}
+        tok_set = set(tokens)
+        N = max(1, len(results))
+        df: Dict[str, int] = {t: 0 for t in tok_set}
+        for p in results:
+            try:
+                md = (p.payload or {}).get("metadata") or {}
+            except Exception:
+                md = {}
+            text = " ".join(
+                [
+                    str(md.get("symbol") or ""),
+                    str(md.get("symbol_path") or ""),
+                    str(md.get("path") or ""),
+                    str((md.get("code") or ""))[:2000],
+                ]
+            ).lower()
+            doc_toks = set(tokenize_queries([text]))
+            for t in tok_set:
+                if t in doc_toks:
+                    df[t] += 1
+        idf: Dict[str, float] = {t: math.log(1.0 + (N / float(df[t] + 1))) for t in tok_set}
+        mean = sum(idf.values()) / max(1, len(idf))
+        if mean <= 0:
+            return {t: 1.0 for t in tok_set}
+        return {t: (idf[t] / mean) for t in tok_set}
+    except Exception:
+        return {}
+
+def _mmr_diversify(ranked: List[Dict[str, Any]], k: int = 60, lambda_: float = 0.7) -> List[Dict[str, Any]]:
+    """Maximal Marginal Relevance over fused list.
+    Preserves top-1 by relevance, then balances relevance vs. diversity by path/symbol.
+    Returns a reordered list (top-k diversified, remainder appended in original order).
+    """
+    if not ranked:
+        return []
+    k = max(1, min(int(k or 1), len(ranked)))
+
+    def _path(md: Dict[str, Any]) -> str:
+        return str(md.get("path") or "")
+
+    def _symp(md: Dict[str, Any]) -> str:
+        return str(md.get("symbol_path") or md.get("symbol") or "")
+
+    def _sim(a: Dict[str, Any], b: Dict[str, Any]) -> float:
+        mda = (a["pt"].payload or {}).get("metadata") or {}
+        mdb = (b["pt"].payload or {}).get("metadata") or {}
+        pa, pb = _path(mda), _path(mdb)
+        if pa and pb and pa == pb:
+            return 1.0
+        sa, sb = _symp(mda), _symp(mdb)
+        if sa and sb and sa == sb:
+            return 0.8
+        if pa and pb:
+            ta = set(re.split(r"[/\\]+", pa.lower()))
+            tb = set(re.split(r"[/\\]+", pb.lower()))
+            ta.discard(""); tb.discard("")
+            if ta and tb:
+                inter = len(ta & tb)
+                union = max(1, len(ta | tb))
+                return 0.5 * (inter / union)
+        return 0.0
+
+    rel = [float(m.get("s", 0.0)) for m in ranked]
+    selected_idx = [0]  # preserve top-1
+    candidates = list(range(1, len(ranked)))
+    while len(selected_idx) < k and candidates:
+        best_idx = None
+        best_score = -1e18
+        for i in candidates:
+            # relevance
+            r = rel[i]
+            # max similarity to already selected
+            if selected_idx:
+                max_sim = max(_sim(ranked[i], ranked[j]) for j in selected_idx)
+            else:
+                max_sim = 0.0
+            mmr = lambda_ * r - (1.0 - lambda_) * max_sim
+            if mmr > best_score:
+                best_score = mmr
+                best_idx = i
+        selected_idx.append(best_idx)
+        candidates.remove(best_idx)
+
+    # Build diversified list: selected top-k in chosen order, then remaining by original order
+    sel_set = set(selected_idx)
+    diversified = [ranked[i] for i in selected_idx]
+    diversified.extend([ranked[i] for i in range(len(ranked)) if i not in sel_set])
+    return diversified
 
 
 # --- Lexical vector (hashing trick) for server-side hybrid ---
@@ -799,9 +1026,11 @@ def lex_query(client: QdrantClient, v: List[float], flt, per_query: int) -> List
             limit=per_query,
             with_payload=True,
         )
-        return getattr(qp, "points", qp)
+        return _coerce_points(getattr(qp, "points", qp))
     except TypeError:
         # Older/newer client may expect 'filter' kw
+        if os.environ.get("DEBUG_HYBRID_SEARCH"):
+            logger.debug("QP_FILTER_KWARG_SWITCH", extra={"using": LEX_VECTOR_NAME})
         qp = client.query_points(
             collection_name=_collection(),
             query=v,
@@ -811,16 +1040,43 @@ def lex_query(client: QdrantClient, v: List[float], flt, per_query: int) -> List
             limit=per_query,
             with_payload=True,
         )
-        return getattr(qp, "points", qp)
-    except AttributeError:
-        # Very old client without query_points: last-resort deprecated path
-        return client.search(
-            collection_name=_collection(),
-            query_vector={"name": LEX_VECTOR_NAME, "vector": v},
-            limit=per_query,
-            with_payload=True,
-            query_filter=flt,
-        )
+        return _coerce_points(getattr(qp, "points", qp))
+    except Exception as e:
+        # Retry without a filter at all (handles servers that reject certain filter shapes)
+        if os.environ.get("DEBUG_HYBRID_SEARCH"):
+            try:
+                logger.debug("QP_FILTER_DROP", extra={"using": LEX_VECTOR_NAME, "reason": str(e)[:200]})
+            except Exception:
+                pass
+        try:
+            qp = client.query_points(
+                collection_name=_collection(),
+                query=v,
+                using=LEX_VECTOR_NAME,
+                query_filter=None,
+                search_params=models.SearchParams(hnsw_ef=ef),
+                limit=per_query,
+                with_payload=True,
+            )
+            return _coerce_points(getattr(qp, "points", qp))
+        except TypeError:
+            qp = client.query_points(
+                collection_name=_collection(),
+                query=v,
+                using=LEX_VECTOR_NAME,
+                filter=None,
+                search_params=models.SearchParams(hnsw_ef=ef),
+                limit=per_query,
+                with_payload=True,
+            )
+            return _coerce_points(getattr(qp, "points", qp))
+        except Exception as e2:
+            if os.environ.get("DEBUG_HYBRID_SEARCH"):
+                try:
+                    logger.debug("QP_FILTER_DROP_FAILED", extra={"using": LEX_VECTOR_NAME, "reason": str(e2)[:200]})
+                except Exception:
+                    pass
+            return []
 
 
 def dense_query(
@@ -839,8 +1095,10 @@ def dense_query(
             limit=per_query,
             with_payload=True,
         )
-        return getattr(qp, "points", qp)
+        return _coerce_points(getattr(qp, "points", qp))
     except TypeError:
+        if os.environ.get("DEBUG_HYBRID_SEARCH"):
+            logger.debug("QP_FILTER_KWARG_SWITCH", extra={"using": vec_name})
         qp = client.query_points(
             collection_name=_collection(),
             query=v,
@@ -850,35 +1108,44 @@ def dense_query(
             limit=per_query,
             with_payload=True,
         )
-        return getattr(qp, "points", qp)
+        return _coerce_points(getattr(qp, "points", qp))
     except Exception as e:
-        # Some Qdrant versions reject empty/malformed filters with 400: retry without a filter
-        _msg = str(e).lower()
-        if "expected some form of condition" in _msg or "format error in json body" in _msg:
+        # Retry without any filter to maximize compatibility across server/client versions
+        if os.environ.get("DEBUG_HYBRID_SEARCH"):
+            try:
+                logger.debug("QP_FILTER_DROP", extra={"using": vec_name, "reason": str(e)[:200]})
+            except Exception:
+                pass
+        try:
+            qp = client.query_points(
+                collection_name=_collection(),
+                query=v,
+                using=vec_name,
+                query_filter=None,
+                search_params=models.SearchParams(hnsw_ef=ef),
+                limit=per_query,
+                with_payload=True,
+            )
+            return _coerce_points(getattr(qp, "points", qp))
+        except TypeError:
             try:
                 qp = client.query_points(
                     collection_name=_collection(),
                     query=v,
                     using=vec_name,
-                    query_filter=None,
+                    filter=None,
                     search_params=models.SearchParams(hnsw_ef=ef),
                     limit=per_query,
                     with_payload=True,
                 )
-                return getattr(qp, "points", qp)
-            except Exception:
-                pass
-        # Fallback to legacy search API
-        try:
-            return client.search(
-                collection_name=_collection(),
-                query_vector={"name": vec_name, "vector": v},
-                limit=per_query,
-                with_payload=True,
-                query_filter=(None if ("expected some form of condition" in _msg or "format error in json body" in _msg) else flt),
-            )
-        except Exception:
-            raise
+                return _coerce_points(getattr(qp, "points", qp))
+            except Exception as e2:
+                if os.environ.get("DEBUG_HYBRID_SEARCH"):
+                    try:
+                        logger.debug("QP_FILTER_DROP_FAILED", extra={"using": vec_name, "reason": str(e2)[:200]})
+                    except Exception:
+                        pass
+                return []
 
 
 # In-process API: run hybrid search and return structured items list
@@ -963,7 +1230,6 @@ def run_hybrid_search(
     eff_path_globs_norm = _normalize_globs(eff_path_globs)
     eff_not_globs_norm = _normalize_globs(eff_not_globs)
 
-
     # Normalize under
     def _norm_under(u: str | None) -> str | None:
         if not u:
@@ -979,6 +1245,44 @@ def run_hybrid_search(
         return v
 
     eff_under = _norm_under(eff_under)
+
+    # Results cache: return cached results for identical (queries, filters, knobs)
+    _USE_CACHE = (MAX_RESULTS_CACHE > 0) and _env_truthy(os.environ.get("HYBRID_RESULTS_CACHE_ENABLED"), True)
+    cache_key = None
+    if _USE_CACHE:
+        try:
+            cache_key = (
+                "v1",
+                tuple(clean_queries),
+                int(limit or 0),
+                int(per_path or 0),
+                str(eff_language or ""),
+                str(eff_under or ""),
+                str(eff_kind or ""),
+                str(eff_symbol or ""),
+                str(eff_ext or ""),
+                str(eff_not or ""),
+                str(eff_case or ""),
+                tuple(eff_path_globs_norm or ()),
+                tuple(eff_not_globs_norm or ()),
+                str(eff_repo or ""),
+                str(eff_path_regex or ""),
+                bool(expand),
+                str(vec_name),
+                str(_collection()),
+                _env_truthy(os.environ.get("HYBRID_ADAPTIVE_WEIGHTS"), True),
+                _env_truthy(os.environ.get("HYBRID_MMR"), True),
+            )
+        except Exception:
+            cache_key = None
+        if cache_key is not None:
+            with _RESULTS_LOCK:
+                if cache_key in _RESULTS_CACHE:
+                    val = _RESULTS_CACHE.pop(cache_key)
+                    _RESULTS_CACHE[cache_key] = val
+                    if os.environ.get("DEBUG_HYBRID_SEARCH"):
+                        logger.debug("cache hit for hybrid results")
+                    return val
 
     # Build optional filter
     flt = None
@@ -1013,7 +1317,7 @@ def run_hybrid_search(
                 key="metadata.symbol", match=models.MatchValue(value=eff_symbol)
             )
         )
-    
+
     # Add ext filter (file extension) - server-side when possible
     if eff_ext:
         ext_clean = eff_ext.lower().lstrip(".")
@@ -1022,7 +1326,7 @@ def run_hybrid_search(
                 key="metadata.ext", match=models.MatchValue(value=ext_clean)
             )
         )
-    
+
     # Add not filter (simple text exclusion on path) - server-side when possible
     must_not = []
     if eff_not:
@@ -1036,7 +1340,7 @@ def run_hybrid_search(
         except Exception:
             # Will be handled by post-filter
             pass
-    
+
     flt = models.Filter(must=must, must_not=must_not) if (must or must_not) else None
     flt = _sanitize_filter_obj(flt)
 
@@ -1045,7 +1349,7 @@ def run_hybrid_search(
     qlist = list(clean_queries)
     try:
         llm_max = int(os.environ.get("LLM_EXPAND_MAX", "4") or 4)
-    except Exception:
+    except (ValueError, TypeError):
         llm_max = 4
     _llm_more = _llm_expand_queries(qlist, eff_language, max_new=llm_max)
     for s in _llm_more:
@@ -1097,7 +1401,17 @@ def run_hybrid_search(
         lex_results = lex_query(client, lex_vec, flt, max(24, limit))
     except Exception:
         lex_results = []
-    
+
+    # Per-query adaptive weights (default ON, gentle clamps)
+    _USE_ADAPT = _env_truthy(os.environ.get("HYBRID_ADAPTIVE_WEIGHTS"), True)
+    if _USE_ADAPT:
+        try:
+            _AD_DENSE_W, _AD_LEX_VEC_W, _AD_LEX_TEXT_W = _adaptive_weights(_compute_query_stats(qlist))
+        except Exception:
+            _AD_DENSE_W, _AD_LEX_VEC_W, _AD_LEX_TEXT_W = DENSE_WEIGHT, LEX_VECTOR_WEIGHT, LEXICAL_WEIGHT
+    else:
+        _AD_DENSE_W, _AD_LEX_VEC_W, _AD_LEX_TEXT_W = DENSE_WEIGHT, LEX_VECTOR_WEIGHT, LEXICAL_WEIGHT
+
     for rank, p in enumerate(lex_results, 1):
         pid = str(p.id)
         score_map.setdefault(
@@ -1116,7 +1430,7 @@ def run_hybrid_search(
                 "test": 0.0,
             },
         )
-        lxs = LEX_VECTOR_WEIGHT * rrf(rank)
+        lxs = (_AD_LEX_VEC_W * rrf(rank)) if _USE_ADAPT else (LEX_VECTOR_WEIGHT * rrf(rank))
         score_map[pid]["lx"] += lxs
         score_map[pid]["s"] += lxs
 
@@ -1146,9 +1460,9 @@ def run_hybrid_search(
             "on",
         }
         cand_n = int(os.environ.get("REFRAG_CANDIDATES", "200") or 200)
-    except Exception:
+    except (ValueError, TypeError):
         gate_first, refrag_on, cand_n = False, False, 200
-    
+
     # Adaptive mini-gate: disable for queries that are too short or lack strong identifiers
     should_bypass_gate = False
     if gate_first and refrag_on:
@@ -1166,15 +1480,15 @@ def run_hybrid_search(
             if total_tokens < 3 and not has_strong_id:
                 should_bypass_gate = True
                 if os.environ.get("DEBUG_HYBRID_SEARCH"):
-                    print(f"DEBUG: Adaptive gate bypass (short query, tokens={total_tokens}, strong_id={has_strong_id})")
+                    logger.debug(f"Adaptive gate bypass (short query, tokens={total_tokens}, strong_id={has_strong_id})")
             # If we have strict filters (language, under, symbol, ext), relax candidate count
             if eff_language or eff_under or eff_symbol or eff_ext:
                 cand_n = max(cand_n, limit * 5)
                 if os.environ.get("DEBUG_HYBRID_SEARCH"):
-                    print(f"DEBUG: Adaptive gate relaxed candidate count to {cand_n} due to filters")
+                    logger.debug(f"Adaptive gate relaxed candidate count to {cand_n} due to filters")
         except Exception:
             pass
-    
+
     if gate_first and refrag_on and not should_bypass_gate:
         try:
             # ReFRAG gate-first: Use MINI vectors to prefilter candidates
@@ -1209,15 +1523,15 @@ def run_hybrid_search(
                     must.append(gating_cond)
                     flt_gated = _models.Filter(must=must, should=flt.should, must_not=flt.must_not)
                 if os.environ.get("DEBUG_HYBRID_SEARCH"):
-                    print(f"DEBUG: ReFRAG gate-first (server-side-{gating_kind}): {len(candidate_ids)} candidates")
-                    print(f"DEBUG: flt_gated.must has {len(flt_gated.must or [])} conditions")
-                    print(f"DEBUG: flt_gated.must_not has {len(flt_gated.must_not or [])} conditions")
+                    logger.debug(f"ReFRAG gate-first (server-side-{gating_kind}): {len(candidate_ids)} candidates")
+                    logger.debug(f"flt_gated.must has {len(flt_gated.must or [])} conditions")
+                    logger.debug(f"flt_gated.must_not has {len(flt_gated.must_not or [])} conditions")
             else:
                 # No candidates -> no gating
                 flt_gated = flt
         except Exception as e:
             if os.environ.get("DEBUG_HYBRID_SEARCH"):
-                print(f"DEBUG: ReFRAG gate-first failed: {e}, proceeding without gating")
+                logger.debug(f"ReFRAG gate-first failed: {e}, proceeding without gating")
             # Fallback to normal search (no gating)
             flt_gated = flt
     else:
@@ -1241,7 +1555,7 @@ def run_hybrid_search(
     ]
     if os.environ.get("DEBUG_HYBRID_SEARCH"):
         total_dense_results = sum(len(rs) for rs in result_sets)
-        print(f"DEBUG: Dense query returned {total_dense_results} total results across {len(result_sets)} queries")
+        logger.debug(f"Dense query returned {total_dense_results} total results across {len(result_sets)} queries")
 
     # Optional ReFRAG-style mini-vector gating: add compact-vector RRF if enabled
     try:
@@ -1284,31 +1598,45 @@ def run_hybrid_search(
     except Exception:
         pass
 
+    lex_results2: List[Any] = []
+
     # Pseudo-Relevance Feedback (default-on): mine top terms from current results and run a light second pass
     try:
         prf_enabled = _env_truthy(os.environ.get("PRF_ENABLED"), True)
-    except Exception:
+    except (ValueError, TypeError):
         prf_enabled = True
+
+    # Lightweight BM25-style lexical boost (default ON)
+    try:
+        _USE_BM25 = _env_truthy(os.environ.get("HYBRID_BM25"), True)
+    except Exception:
+        _USE_BM25 = True
+    try:
+        _BM25_W = float(os.environ.get("HYBRID_BM25_WEIGHT", "0.2") or 0.2)
+    except Exception:
+        _BM25_W = 0.2
+    _bm25_tok_w = _bm25_token_weights_from_results(qlist, (lex_results or []) + (lex_results2 or [])) if _USE_BM25 else {}
+
     if prf_enabled and score_map:
         try:
             top_docs = int(os.environ.get("PRF_TOP_DOCS", "8") or 8)
-        except Exception:
+        except (ValueError, TypeError):
             top_docs = 8
         try:
             max_terms = int(os.environ.get("PRF_MAX_TERMS", "6") or 6)
-        except Exception:
+        except (ValueError, TypeError):
             max_terms = 6
         try:
             extra_q = int(os.environ.get("PRF_EXTRA_QUERIES", "4") or 4)
-        except Exception:
+        except (ValueError, TypeError):
             extra_q = 4
         try:
             prf_dw = float(os.environ.get("PRF_DENSE_WEIGHT", "0.4") or 0.4)
-        except Exception:
+        except (ValueError, TypeError):
             prf_dw = 0.4
         try:
             prf_lw = float(os.environ.get("PRF_LEX_WEIGHT", "0.6") or 0.6)
-        except Exception:
+        except (ValueError, TypeError):
             prf_lw = 0.6
         terms = _prf_terms_from_results(
             score_map, top_docs=top_docs, max_terms=max_terms
@@ -1403,7 +1731,7 @@ def run_hybrid_search(
                     "test": 0.0,
                 },
             )
-            dens = DENSE_WEIGHT * rrf(rank)
+            dens = (_AD_DENSE_W * rrf(rank)) if _USE_ADAPT else (DENSE_WEIGHT * rrf(rank))
             score_map[pid]["d"] += dens
             score_map[pid]["s"] += dens
 
@@ -1411,7 +1739,7 @@ def run_hybrid_search(
     timestamps: List[int] = []
     for pid, rec in list(score_map.items()):
         md = (rec["pt"].payload or {}).get("metadata") or {}
-        lx = LEXICAL_WEIGHT * lexical_score(qlist, md)
+        lx = (_AD_LEX_TEXT_W * lexical_score(qlist, md, token_weights=_bm25_tok_w, bm25_weight=_BM25_W)) if _USE_ADAPT else (LEXICAL_WEIGHT * lexical_score(qlist, md, token_weights=_bm25_tok_w, bm25_weight=_BM25_W))
         rec["lx"] += lx
         rec["s"] += lx
         ts = md.get("last_modified_at") or md.get("ingested_at")
@@ -1468,7 +1796,7 @@ def run_hybrid_search(
             if (lang and md_lang and md_lang == lang) or lang_matches_path(lang, path):
                 rec["langb"] += LANG_MATCH_BOOST
                 rec["s"] += LANG_MATCH_BOOST
-        
+
         # Memory blending: apply penalty to memory-like entries to prevent swamping code results
         # Only apply if query doesn't explicitly ask for memories/notes
         kind = str(md.get("kind") or "").lower()
@@ -1514,10 +1842,10 @@ def run_hybrid_search(
         return (-float(m["s"]), len(sp), path, start_line)
 
     if os.environ.get("DEBUG_HYBRID_SEARCH"):
-        print(f"DEBUG: score_map has {len(score_map)} items before ranking")
+        logger.debug(f"score_map has {len(score_map)} items before ranking")
     ranked = sorted(score_map.values(), key=_tie_key)
     if os.environ.get("DEBUG_HYBRID_SEARCH"):
-        print(f"DEBUG: ranked has {len(ranked)} items after sorting")
+        logger.debug(f"ranked has {len(ranked)} items after sorting")
 
     # Lightweight keyword bump: prefer spans whose local snippet contains query tokens
     try:
@@ -1689,7 +2017,21 @@ def run_hybrid_search(
 
     ranked = sorted([c["m"] for lst in clusters.values() for c in lst], key=_tie_key)
     if os.environ.get("DEBUG_HYBRID_SEARCH"):
-        print(f"DEBUG: ranked has {len(ranked)} items after clustering")
+        logger.debug(f"ranked has {len(ranked)} items after clustering")
+
+
+    # Optional MMR diversification (default ON; preserves top-1)
+    if _env_truthy(os.environ.get("HYBRID_MMR"), True):
+        try:
+            _mmr_k = min(len(ranked), max(20, int(os.environ.get("MMR_K", str((limit or 10) * 3)) or 30)))
+        except Exception:
+            _mmr_k = min(len(ranked), max(20, (limit or 10) * 3))
+        try:
+            _mmr_lambda = float(os.environ.get("MMR_LAMBDA", "0.7") or 0.7)
+        except Exception:
+            _mmr_lambda = 0.7
+        if (limit or 0) >= 10 or (not per_path) or (per_path <= 0):
+            ranked = _mmr_diversify(ranked, k=_mmr_k, lambda_=_mmr_lambda)
 
     # Client-side filters and per-path diversification
     import re as _re, fnmatch as _fnm
@@ -1743,7 +2085,7 @@ def run_hybrid_search(
         counts: Dict[str, int] = {}
         merged: List[Dict[str, Any]] = []
         if os.environ.get("DEBUG_HYBRID_SEARCH"):
-            print(f"DEBUG: Applying per_path={per_path} limiting to {len(ranked)} ranked results")
+            logger.debug(f"Applying per_path={per_path} limiting to {len(ranked)} ranked results")
         for m in ranked:
             md = (m["pt"].payload or {}).get("metadata") or {}
             path = str(md.get("path", ""))
@@ -1754,7 +2096,7 @@ def run_hybrid_search(
             if len(merged) >= limit:
                 break
         if os.environ.get("DEBUG_HYBRID_SEARCH"):
-            print(f"DEBUG: After per_path limiting: {len(merged)} results from {len(counts)} unique paths")
+            logger.debug(f"After per_path limiting: {len(merged)} results from {len(counts)} unique paths")
     else:
         merged = ranked[:limit]
 
@@ -1779,6 +2121,16 @@ def run_hybrid_search(
         all_paths = set()
 
     items: List[Dict[str, Any]] = []
+    if not merged:
+        if _USE_CACHE and cache_key is not None:
+            with _RESULTS_LOCK:
+                _RESULTS_CACHE[cache_key] = items
+                if os.environ.get("DEBUG_HYBRID_SEARCH"):
+                    logger.debug("cache store for hybrid results")
+                while len(_RESULTS_CACHE) > MAX_RESULTS_CACHE:
+                    _RESULTS_CACHE.popitem(last=False)
+        return items
+
     for m in merged:
         md = (m["pt"].payload or {}).get("metadata") or {}
         # Prefer merged bounds if present
@@ -1787,7 +2139,7 @@ def run_hybrid_search(
         # Store both fusion_score (from hybrid) and rerank_score (if available) separately
         fusion_score = float(m.get("s", 0.0))
         rerank_score = m.get("rerank_score")  # None if not reranked
-        
+
         comp = {
             "dense_rrf": round(float(m.get("d", 0.0)), 4),
             "lexical": round(float(m.get("lx", 0.0)), 4),
@@ -1803,7 +2155,7 @@ def run_hybrid_search(
             "impl_boost": round(float(m.get("impl", 0.0)), 4),
             "doc_penalty": round(float(m.get("doc", 0.0)), 4),
         }
-        
+
         # Add reranker info to components if present
         if rerank_score is not None:
             comp["rerank"] = round(float(rerank_score), 4)
@@ -1901,7 +2253,7 @@ def run_hybrid_search(
         # Skip memory-like points without a real file path
         if not _path or not _path.strip():
             if os.environ.get("DEBUG_HYBRID_FILTER"):
-                print(f"DEBUG: Filtered out item with empty path: {_metadata}")
+                logger.debug(f"Filtered out item with empty path: {_metadata}")
             continue
 
         # Emit path: prefer original host path when available; also include container path
@@ -1963,6 +2315,13 @@ def run_hybrid_search(
                 "text": _text,
             }
         )
+    if _USE_CACHE and cache_key is not None:
+        with _RESULTS_LOCK:
+            _RESULTS_CACHE[cache_key] = items
+            if os.environ.get("DEBUG_HYBRID_SEARCH"):
+                logger.debug("cache store for hybrid results")
+            while len(_RESULTS_CACHE) > MAX_RESULTS_CACHE:
+                _RESULTS_CACHE.popitem(last=False)
     return items
 
 
@@ -2009,6 +2368,13 @@ def main():
         action="store_true",
         help="Emit JSON lines with score breakdown",
     )
+    ap.add_argument(
+        "--quiet",
+        dest="quiet",
+        action="store_true",
+        help="Suppress human output on empty results; exit with code 1 when no matches",
+    )
+
     # Structured filters to mirror MCP tool fields
     ap.add_argument("--ext", type=str, default=None)
     ap.add_argument("--not", dest="not_filter", type=str, default=None)
@@ -2077,6 +2443,7 @@ def main():
             if p.is_file():
                 return str(p.parent)
             # Heuristic: if path doesn't exist and looks like a file stem (no dot),
+
             # treat it as a file name and use its parent directory
             if (not p.exists()) and p.name and ("." not in p.name):
                 return str(p.parent) if str(p.parent) else v
@@ -2142,6 +2509,17 @@ def main():
     except Exception:
         lex_results = []
 
+    # Per-query adaptive weights for CLI path (default ON)
+    _USE_ADAPT2 = _env_truthy(os.environ.get("HYBRID_ADAPTIVE_WEIGHTS"), True)
+    if _USE_ADAPT2:
+        try:
+            _AD_DENSE_W2, _AD_LEX_VEC_W2, _AD_LEX_TEXT_W2 = _adaptive_weights(_compute_query_stats(queries))
+        except Exception:
+            _AD_DENSE_W2, _AD_LEX_VEC_W2, _AD_LEX_TEXT_W2 = DENSE_WEIGHT, LEX_VECTOR_WEIGHT, LEXICAL_WEIGHT
+    else:
+        _AD_DENSE_W2, _AD_LEX_VEC_W2, _AD_LEX_TEXT_W2 = DENSE_WEIGHT, LEX_VECTOR_WEIGHT, LEXICAL_WEIGHT
+
+
     if args.expand:
         queries = expand_queries(queries, eff_language)
 
@@ -2164,7 +2542,7 @@ def main():
                 "test": 0.0,
             },
         )
-        lxs = LEX_VECTOR_WEIGHT * rrf(rank)
+        lxs = (_AD_LEX_VEC_W2 * rrf(rank)) if _USE_ADAPT2 else (LEX_VECTOR_WEIGHT * rrf(rank))
         score_map[pid]["lx"] += lxs
         score_map[pid]["s"] += lxs
 
@@ -2193,15 +2571,26 @@ def main():
                     "test": 0.0,
                 },
             )
-            dens = DENSE_WEIGHT * rrf(rank)
+            dens = (_AD_DENSE_W2 * rrf(rank)) if _USE_ADAPT2 else (DENSE_WEIGHT * rrf(rank))
             score_map[pid]["d"] += dens
             score_map[pid]["s"] += dens
 
     # Lexical bump + symbol boost; also collect recency
+    # Lightweight BM25-style lexical boost (default ON) for CLI path
+    try:
+        _USE_BM25_CLI = _env_truthy(os.environ.get("HYBRID_BM25"), True)
+    except Exception:
+        _USE_BM25_CLI = True
+    try:
+        _BM25_W2 = float(os.environ.get("HYBRID_BM25_WEIGHT", "0.2") or 0.2)
+    except Exception:
+        _BM25_W2 = 0.2
+    _bm25_tok_w2 = _bm25_token_weights_from_results(queries, lex_results) if _USE_BM25_CLI else {}
+
     timestamps: List[int] = []
     for pid, rec in list(score_map.items()):
         md = (rec["pt"].payload or {}).get("metadata") or {}
-        lx = LEXICAL_WEIGHT * lexical_score(queries, md)
+        lx = (_AD_LEX_TEXT_W2 * lexical_score(queries, md, token_weights=_bm25_tok_w2, bm25_weight=_BM25_W2)) if _USE_ADAPT2 else (LEXICAL_WEIGHT * lexical_score(queries, md, token_weights=_bm25_tok_w2, bm25_weight=_BM25_W2))
         rec["lx"] += lx
         rec["s"] += lx
         ts = md.get("last_modified_at") or md.get("ingested_at")
@@ -2299,6 +2688,20 @@ def main():
 
     ranked = sorted([c["m"] for lst in clusters.values() for c in lst], key=_tie_key)
 
+    # Optional MMR diversification (default ON; preserves top-1)
+    if _env_truthy(os.environ.get("HYBRID_MMR"), True):
+        try:
+            _mmr_k = min(len(ranked), max(20, int(os.environ.get("MMR_K", str((args.limit or 10) * 3)) or 30)))
+        except Exception:
+            _mmr_k = min(len(ranked), max(20, (args.limit or 10) * 3))
+        try:
+            _mmr_lambda = float(os.environ.get("MMR_LAMBDA", "0.7") or 0.7)
+        except Exception:
+            _mmr_lambda = 0.7
+        if (args.limit or 0) >= 10 or (not args.per_path) or (args.per_path <= 0):
+            ranked = _mmr_diversify(ranked, k=_mmr_k, lambda_=_mmr_lambda)
+
+
     # Apply client-side filters: NOT substring, path regex, glob, and ext
     import re as _re, fnmatch as _fnm
 
@@ -2377,12 +2780,26 @@ def main():
             pp = str(md.get("path_prefix") or "")
             p = str(md.get("path") or "")
             if pp and p:
+
                 dir_to_paths.setdefault(pp, set()).add(p)
     except Exception:
         dir_to_paths = {}
 
     else:
         merged = ranked[: args.limit]
+
+    # Empty result handling
+    if not merged:
+        if getattr(args, "json", False):
+            try:
+                print(json.dumps({"results": [], "query": clean_queries, "count": 0}))
+            except Exception:
+                print("{}")
+            return
+        if getattr(args, "quiet", False):
+            sys.exit(1)
+        print("No results.")
+        sys.exit(1)
 
     for m in merged:
         md = (m["pt"].payload or {}).get("metadata") or {}
@@ -2395,6 +2812,8 @@ def main():
             _related = []
             try:
                 if _pp in dir_to_paths:
+    # Empty result handling
+
                     _related = [p for p in sorted(dir_to_paths[_pp]) if p != md.get("path")][:5]
             except Exception:
                 _related = []

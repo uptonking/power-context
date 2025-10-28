@@ -1,4 +1,5 @@
-import json, os, threading, time, sys, re
+import argparse
+import json, os, threading, time, sys, re, copy
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Dict, Any, List, Tuple
 
@@ -121,7 +122,7 @@ def tool(name: str, description: str, params: List[str] = None) -> Dict[str, Any
     return {"name": name, "description": description, "inputSchema": schema}
 
 
-def run_eval_suite() -> int:
+def run_eval_suite(verbose: bool = False) -> int:
     # Two mock servers: indexer and memory
     indexer_tools = [
         tool("repo_search", "General code search", ["query", "limit", "include_snippet", "language", "under", "symbol", "ext"]),
@@ -151,9 +152,18 @@ def run_eval_suite() -> int:
         _spec.loader.exec_module(router)  # type: ignore
 
         failures = []
+        intent_logs: List[Dict[str, Any]] = []
 
         def run_plan(q: str) -> List[Tuple[str, Dict[str, Any]]]:
             plan = router.build_plan(q)
+            debug = getattr(router, "_LAST_INTENT_DEBUG", {})
+            if isinstance(debug, dict):
+                log_entry = copy.deepcopy(debug)
+            else:
+                log_entry = {"debug": debug}
+            log_entry["query"] = q
+            log_entry["plan_first_tool"] = plan[0][0] if plan else None
+            intent_logs.append(log_entry)
             return plan
 
         # 1) Signature selection: prefer search_config_for for config changes
@@ -183,10 +193,30 @@ def run_eval_suite() -> int:
         if not p4 or [p4[0][0], p4[1][0]] != ["store", "qdrant_index_root"]:
             failures.append("multi-intent: expected store then index")
         else:
+            store_args = p4[0][1] or {}
+            info4 = (store_args.get("information") or "").lower()
+            if "remember" in info4:
+                failures.append("multi-intent: trigger phrase leaked into stored information")
+            if "reindex" in info4:
+                failures.append("multi-intent: reindex fragment leaked into stored information")
             if not p4[1][1].get("recreate"):
                 failures.append("multi-intent: expected recreate true")
 
-        # 5) Glob/exclude filters
+        # 5) Memory metadata extraction
+        p_meta = run_plan("remember this [priority=high tags=ux,frontend]: update the signup banner copy")
+        if not p_meta or p_meta[0][0] != "store":
+            failures.append("memory metadata: expected store intent")
+        else:
+            store_args = p_meta[0][1] or {}
+            if store_args.get("information") != "update the signup banner copy":
+                failures.append("memory metadata: information not cleaned")
+            md = store_args.get("metadata") or {}
+            if md.get("priority") != "high":
+                failures.append("memory metadata: priority missing")
+            if md.get("tags") != ["ux", "frontend"]:
+                failures.append("memory metadata: tags mismatch")
+
+        # 6) Glob/exclude filters
         p5 = run_plan("search only *.py files exclude vendor")
         if not p5:
             failures.append("glob: plan empty")
@@ -199,7 +229,7 @@ def run_eval_suite() -> int:
             if "**/vendor/**" not in ng:
                 failures.append("glob: missing exclude vendor")
 
-        # 6) Run end-to-end for recap and ensure compat accepted and short answers not rejected
+        # 7) Run end-to-end for recap and ensure compat accepted and short answers not rejected
         # Capture stdout of router.main
         def run_router(args: List[str]) -> str:
             from io import StringIO
@@ -297,6 +327,43 @@ def run_eval_suite() -> int:
         if '"divergence"' not in out_div:
             failures.append("divergence: no divergence flagged on material drop")
 
+        fallback_logs = []
+        for log in intent_logs:
+            if log.get("strategy") == "ml":
+                if "confidence" not in log:
+                    failures.append(f"intent log missing confidence for query: {log.get('query')}")
+                if (
+                    log.get("intent") == router.INTENT_SEARCH
+                    and log.get("top_candidate")
+                    and log.get("top_candidate") != router.INTENT_SEARCH
+                ):
+                    if log.get("confidence", 0.0) >= log.get("threshold", 0.25):
+                        failures.append(f"intent fallback without low confidence for query: {log.get('query')}")
+                    else:
+                        fallback_logs.append(log)
+        if fallback_logs:
+            print("Intent fallback diagnostics:")
+            for item in fallback_logs:
+                try:
+                    score = float(item.get("confidence") or 0.0)
+                except Exception:
+                    score = 0.0
+                print(
+                    f"  query={item.get('query')!r} top={item.get('top_candidate')} "
+                    f"score={score:.3f} -> intent={item.get('intent')} first_tool={item.get('plan_first_tool')}"
+                )
+        if verbose:
+            print("Intent diagnostics (all):")
+            for item in intent_logs:
+                try:
+                    score = float(item.get("confidence") or 0.0)
+                except Exception:
+                    score = 0.0
+                print(
+                    f"  query={item.get('query')!r} strategy={item.get('strategy')} "
+                    f"intent={item.get('intent')} score={score:.3f} "
+                    f"top={item.get('top_candidate')} first_tool={item.get('plan_first_tool')}"
+                )
 
         if failures:
             print("Router eval: FAIL\n- " + "\n- ".join(failures))
@@ -308,5 +375,11 @@ def run_eval_suite() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(run_eval_suite())
-
+    parser = argparse.ArgumentParser(description="Run router evaluation suite.")
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print intent confidence diagnostics after the suite completes.",
+    )
+    args = parser.parse_args()
+    raise SystemExit(run_eval_suite(verbose=args.verbose))

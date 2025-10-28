@@ -194,7 +194,7 @@ reset-dev-dual: ## bring up BOTH legacy SSE and Streamable HTTP MCPs (dual-compa
 	docker compose ps
 
 # --- llama.cpp tiny model provisioning ---
-LLAMACPP_MODEL_URL ?= https://huggingface.co/ibm-granite/granite-4.0-micro-GGUF/resolve/main/granite-4.0-micro-Q4_K_M.gguf
+LLAMACPP_MODEL_URL ?= https://huggingface.co/ibm-granite/granite-4.0-micro-GGUF/resolve/main/granite-4.0-micro-Q6_K.gguf
 LLAMACPP_MODEL_PATH ?= models/model.gguf
 
 llama-model: ## download tiny GGUF model into ./models/model.gguf (override with LLAMACPP_MODEL_URL/LLAMACPP_MODEL_PATH)

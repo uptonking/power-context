@@ -46,24 +46,58 @@ class ChangeQueue:
     def __init__(self, process_cb):
         self._lock = threading.Lock()
         self._paths: Set[Path] = set()
+        self._pending: Set[Path] = set()
         self._timer: threading.Timer | None = None
         self._process_cb = process_cb
+        # Serialize processing to avoid concurrent use of TextEmbedding/QdrantClient
+        self._processing_lock = threading.Lock()
 
     def add(self, p: Path):
         with self._lock:
             self._paths.add(p)
             if self._timer is not None:
-                self._timer.cancel()
+                try:
+                    self._timer.cancel()
+                except Exception:
+                    pass
             self._timer = threading.Timer(DELAY_SECS, self._flush)
             self._timer.daemon = True
             self._timer.start()
 
     def _flush(self):
+        # Grab current batch
         with self._lock:
             paths = list(self._paths)
             self._paths.clear()
             self._timer = None
-        self._process_cb(paths)
+        # Try to run the processor exclusively; if busy, queue and return
+        if not self._processing_lock.acquire(blocking=False):
+            with self._lock:
+                self._pending.update(paths)
+                if self._timer is None:
+                    # schedule a follow-up flush to pick up pending when free
+                    self._timer = threading.Timer(DELAY_SECS, self._flush)
+                    self._timer.daemon = True
+                    self._timer.start()
+            return
+        try:
+            todo = paths
+            while True:
+                try:
+                    self._process_cb(list(todo))
+                except Exception as e:
+                    try:
+                        print(f"[watcher_error] processing batch failed: {e}")
+                    except Exception:
+                        pass
+                # drain any pending accumulated during processing
+                with self._lock:
+                    if not self._pending:
+                        break
+                    todo = list(self._pending)
+                    self._pending.clear()
+        finally:
+            self._processing_lock.release()
 
 
 class IndexHandler(FileSystemEventHandler):
@@ -190,6 +224,11 @@ class IndexHandler(FileSystemEventHandler):
                     try:
                         idx.delete_points_by_path(self.client, self.collection, str(src))
                         print(f"[moved:ignored_dest_deleted_src] {src} -> {dest}")
+                        try:
+                            remove_cached_file(str(self.root), str(src))
+                        except Exception:
+                            pass
+
                     except Exception:
                         pass
                 return
@@ -486,45 +525,58 @@ def _process_paths(paths, client, model, vector_name: str, workspace_path: str):
         pass
 
     processed = 0
-    for p in unique_paths:
-        current = p
-        if not p.exists():
-            # File was removed; ensure its points are deleted
+    try:
+        for p in unique_paths:
+            current = p
+            if not p.exists():
+                # File was removed; ensure its points and cache are deleted
+                try:
+                    idx.delete_points_by_path(client, COLLECTION, str(p))
+                    print(f"[deleted] {p}")
+                except Exception:
+                    pass
+                try:
+                    remove_cached_file(workspace_path, str(p))
+                except Exception:
+                    pass
+                _log_activity(workspace_path, "deleted", p)
+                processed += 1
+                _update_progress(workspace_path, started_at, processed, total, current)
+                continue
+            # Lazily instantiate model if needed
+            if model is None:
+                from fastembed import TextEmbedding
+                mname = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
+                model = TextEmbedding(model_name=mname)
+            ok = False
             try:
-                idx.delete_points_by_path(client, COLLECTION, str(p))
-                print(f"[deleted] {p}")
-            except Exception:
-                pass
-            _log_activity(workspace_path, "deleted", p)
+                ok = idx.index_single_file(
+                    client, model, COLLECTION, vector_name, p, dedupe=True, skip_unchanged=True
+                )
+            except Exception as e:
+                try:
+                    print(f"[index_error] {p}: {e}")
+                except Exception:
+                    pass
+                ok = False
+            status = "indexed" if ok else "skipped"
+            print(f"[{status}] {p}")
+            if ok:
+                try:
+                    size = int(p.stat().st_size)
+                except Exception:
+                    size = None
+                _log_activity(workspace_path, "indexed", p, {"file_size": size})
+            else:
+                _log_activity(workspace_path, "skipped", p, {"reason": "no-change-or-error"})
             processed += 1
             _update_progress(workspace_path, started_at, processed, total, current)
-            continue
-        # Lazily instantiate model if needed
-        if model is None:
-            from fastembed import TextEmbedding
-            mname = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
-            model = TextEmbedding(model_name=mname)
-        ok = idx.index_single_file(
-            client, model, COLLECTION, vector_name, p, dedupe=True, skip_unchanged=True
-        )
-        status = "indexed" if ok else "skipped"
-        print(f"[{status}] {p}")
-        if ok:
-            try:
-                size = int(p.stat().st_size)
-            except Exception:
-                size = None
-            _log_activity(workspace_path, "indexed", p, {"file_size": size})
-        else:
-            _log_activity(workspace_path, "skipped", p, {"reason": "no-change-or-error"})
-        processed += 1
-        _update_progress(workspace_path, started_at, processed, total, current)
-
-    # Return to watching state
-    try:
-        update_indexing_status(workspace_path, {"state": "watching"})
-    except Exception:
-        pass
+    finally:
+        # Always return to watching state even if processing raised
+        try:
+            update_indexing_status(workspace_path, {"state": "watching"})
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

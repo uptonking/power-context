@@ -38,6 +38,8 @@ HTTP_URL_INDEXER = os.environ.get("MCP_INDEXER_HTTP_URL", "http://localhost:8003
 HTTP_URL_MEMORY = os.environ.get("MCP_MEMORY_HTTP_URL", "http://localhost:8002/mcp").rstrip("/")
 DEFAULT_HTTP_URL = HTTP_URL_INDEXER
 
+_LAST_INTENT_DEBUG: Dict[str, Any] = {}
+
 # -----------------------------
 # Intent classification
 # -----------------------------
@@ -128,11 +130,23 @@ def _intent_prototypes() -> Dict[str, List[str]]:
 
 
 def _classify_intent_ml(q: str) -> str:
+    global _LAST_INTENT_DEBUG
     protos = _intent_prototypes()
     labels = list(protos.keys())
     texts = [q] + ["\n".join(protos[l]) for l in labels]
     vecs = _embed_texts(texts)
     if not vecs or len(vecs) < len(texts):
+        _LAST_INTENT_DEBUG = {
+            "strategy": "ml",
+            "intent": INTENT_SEARCH,
+            "confidence": 0.0,
+            "query": q,
+            "top_candidate": INTENT_SEARCH,
+            "top_score": 0.0,
+            "threshold": 0.25,
+            "candidates": [],
+            "reason": "embed_failed",
+        }
         return INTENT_SEARCH
     qv = vecs[0]
     sims = []
@@ -141,15 +155,107 @@ def _classify_intent_ml(q: str) -> str:
     sims.sort(key=lambda x: x[1], reverse=True)
     top, score = sims[0]
     # light threshold: if nothing is clearly better, default to search
-    return top if score >= 0.25 else INTENT_SEARCH
+    picked = top if score >= 0.25 else INTENT_SEARCH
+    _LAST_INTENT_DEBUG = {
+        "strategy": "ml",
+        "intent": picked,
+        "confidence": float(score),
+        "query": q,
+        "top_candidate": top,
+        "top_score": float(score),
+        "threshold": 0.25,
+        "candidates": [(name, float(val)) for name, val in sims[:5]],
+        "fallback": picked == INTENT_SEARCH and top != INTENT_SEARCH,
+    }
+    return picked
 
 
 def classify_intent(q: str) -> str:
+    global _LAST_INTENT_DEBUG
     # Prefer high-precision rules; fall back to embedding classifier
     ruled = _classify_intent_rules(q)
     if ruled is not None:
+        _LAST_INTENT_DEBUG = {
+            "strategy": "rules",
+            "intent": ruled,
+            "confidence": 1.0,
+            "query": q,
+        }
         return ruled
-    return _classify_intent_ml(q)
+    picked = _classify_intent_ml(q)
+    # Emit a debug hint when ML falls back to generic search intent
+    try:
+        if os.environ.get("DEBUG_ROUTER") and isinstance(_LAST_INTENT_DEBUG, dict):
+            if _LAST_INTENT_DEBUG.get("fallback"):
+                print(json.dumps({"router": {"intent_fallback": _LAST_INTENT_DEBUG}}), file=sys.stderr)
+    except Exception:
+        pass
+    return picked
+
+
+# -----------------------------
+# Memory helper
+# -----------------------------
+_MEMORY_TRIGGER_RE = re.compile(
+    r"^(?:remember(?:\s+(?:this|that|me|to))?|save\s+memory|store\s+memory)\s*[:,\-]?\s*",
+    re.IGNORECASE,
+)
+_MEMORY_INTENT_SPLIT_RE = re.compile(
+    r"\b(?:then|and|also)\s+(?:reindex|index|recreate|prune|clean\s+up)\b",
+    re.IGNORECASE,
+)
+_MEMORY_META_KEYS = {"priority", "tag", "tags", "topic", "category", "owner"}
+
+
+def _parse_memory_store_payload(q: str) -> Tuple[str, Dict[str, Any]]:
+    raw = str(q or "").strip()
+    if not raw:
+        return "", {}
+    cleaned = _MEMORY_TRIGGER_RE.sub("", raw, count=1).lstrip()
+    meta: Dict[str, Any] = {}
+
+    def _assign_meta(key: str, value: str) -> None:
+        k = key.lower()
+        v = value.strip().strip(" \t\r\n,;.")
+        if not v:
+            return
+        if k in {"tag", "tags"}:
+            tags = [t.strip() for t in re.split(r"[,\s/]+", v) if t.strip()]
+            if tags:
+                meta["tags"] = tags
+        else:
+            meta[k] = v
+
+    if cleaned.startswith("["):
+        m = re.match(r"\[([^\]]+)\]\s*(.*)", cleaned, flags=re.S)
+        if m:
+            meta_block = m.group(1)
+            cleaned = m.group(2)
+            for key, val in re.findall(r"(\w+)\s*=\s*([^\s,;]+(?:,[^\s,;]+)*)", meta_block):
+                if key.strip().lower() in _MEMORY_META_KEYS:
+                    _assign_meta(key, val)
+
+    while True:
+        m = re.match(
+            r"^(?P<key>(?:priority|tag|tags|topic|category|owner))\s*=\s*(?P<val>[^\s;:]+)\s*[,;:]?\s*(?P<rest>.*)$",
+            cleaned,
+            flags=re.IGNORECASE | re.S,
+        )
+        if not m:
+            break
+        _assign_meta(m.group("key"), m.group("val"))
+        cleaned = m.group("rest")
+
+    cleaned = cleaned.lstrip(":- ").lstrip()
+
+    split = _MEMORY_INTENT_SPLIT_RE.search(cleaned)
+    if split:
+        cleaned = cleaned[: split.start()].rstrip(" ,;.")
+
+    cleaned = cleaned.strip().strip('"').strip()
+    if not cleaned:
+        cleaned = raw
+    return cleaned, meta
 
 
 # -----------------------------
@@ -161,6 +267,19 @@ def build_plan(q: str) -> List[Tuple[str, Dict[str, Any]]]:
     include_snippet = str(os.environ.get("ROUTER_INCLUDE_SNIPPET", "1")).lower() in {"1", "true", "yes", "on"}
     search_limit = int(os.environ.get("ROUTER_SEARCH_LIMIT", "8") or 8)
     max_tokens_env = os.environ.get("ROUTER_MAX_TOKENS", "").strip()
+
+    def _reuse_last_filters(args: Dict[str, Any]) -> None:
+        """Optionally hydrate `args` with cached filters when user asks for reuse."""
+        try:
+            if _looks_like_same_filters(q):
+                sp = _load_scratchpad()
+                lf = sp.get("last_filters") if isinstance(sp, dict) else None
+                if isinstance(lf, dict):
+                    for k in ("language", "under", "symbol", "ext", "path_glob", "not_glob"):
+                        if k not in args and lf.get(k) not in (None, ""):
+                            args[k] = lf.get(k)
+        except Exception:
+            pass
 
     # Repeat/redo handling: reuse last plan if asked
     try:
@@ -184,7 +303,14 @@ def build_plan(q: str) -> List[Tuple[str, Dict[str, Any]]]:
         idx_args: Dict[str, Any] = {}
         if any(w in lowq for w in ["recreate", "fresh", "from scratch", "fresh index"]):
             idx_args["recreate"] = True
-        return [("store", {"information": q}), ("qdrant_index_root", idx_args)]
+        info, meta = _parse_memory_store_payload(q)
+        store_args: Dict[str, Any] = {"information": info or q.strip()}
+        if meta:
+            allowed = {"priority", "tags", "topic", "category", "owner"}
+            cleaned = {k: v for k, v in meta.items() if k in allowed and v not in (None, "", [])}
+            if cleaned:
+                store_args["metadata"] = cleaned
+        return [("store", store_args), ("qdrant_index_root", idx_args)]
 
     if intent == INTENT_INDEX:
         # Zero-arg safe default; recreate only if user asked explicitly
@@ -208,27 +334,23 @@ def build_plan(q: str) -> List[Tuple[str, Dict[str, Any]]]:
     if intent == INTENT_SEARCH:
         # Parse lightweight repo hints and choose the best search tool via signature similarity
         hints = _parse_repo_hints(q)
-        args = {"query": q}
+        clean_q, dsl_filters = _clean_query_and_dsl(q)
+        args = {"query": clean_q}
         if search_limit:
             args["limit"] = search_limit
         if include_snippet:
             args["include_snippet"] = True
-        # Attach safe filters if we inferred them
         # Optionally reuse last filters if requested
-        try:
-            if _looks_like_same_filters(q):
-                sp = _load_scratchpad()
-                lf = sp.get("last_filters") if isinstance(sp, dict) else None
-                if isinstance(lf, dict):
-                    for k in ("language", "under", "symbol", "ext", "path_glob", "not_glob"):
-                        if k not in args and lf.get(k) not in (None, ""):
-                            args[k] = lf.get(k)
-        except Exception:
-            pass
+        _reuse_last_filters(args)
 
+        # Merge filters: DSL tokens take precedence over heuristic hints
+        for k in ("language", "under", "symbol", "ext", "path_glob", "not_glob"):
+            v = dsl_filters.get(k)
+            if v not in (None, "") and k not in args:
+                args[k] = v
         for k in ("language", "under", "symbol", "ext", "path_glob", "not_glob"):
             v = hints.get(k)
-            if v not in (None, ""):
+            if v not in (None, "") and k not in args:
                 args[k] = v
         try:
             tool_servers = _discover_tool_endpoints(allow_network=False)
@@ -239,57 +361,55 @@ def build_plan(q: str) -> List[Tuple[str, Dict[str, Any]]]:
 
     if intent == INTENT_SEARCH_TESTS:
         hints = _parse_repo_hints(q)
-        args = {"query": q}
+        clean_q, dsl_filters = _clean_query_and_dsl(q)
+        args = {"query": clean_q}
         if search_limit:
             args["limit"] = search_limit
         if include_snippet:
             args["include_snippet"] = True
         # Optionally reuse last filters if requested
-        try:
-            if _looks_like_same_filters(q):
-                sp = _load_scratchpad()
-                lf = sp.get("last_filters") if isinstance(sp, dict) else None
-                if isinstance(lf, dict):
-                    for k in ("language", "under", "symbol", "ext", "path_glob", "not_glob"):
-                        if k not in args and lf.get(k) not in (None, ""):
-                            args[k] = lf.get(k)
-        except Exception:
-            pass
+        _reuse_last_filters(args)
 
         for k in ("language", "under", "symbol", "ext", "path_glob", "not_glob"):
+            v = dsl_filters.get(k)
+            if v not in (None, "") and k not in args:
+                args[k] = v
+        for k in ("language", "under", "symbol", "ext", "path_glob", "not_glob"):
             v = hints.get(k)
-            if v not in (None, ""):
+            if v not in (None, "") and k not in args:
                 args[k] = v
         return [("search_tests_for", args)]
 
     if intent == INTENT_SEARCH_CONFIG:
         hints = _parse_repo_hints(q)
-        args = {"query": q}
+        clean_q, dsl_filters = _clean_query_and_dsl(q)
+        args = {"query": clean_q}
         if search_limit:
             args["limit"] = search_limit
         if include_snippet:
             args["include_snippet"] = True
         # Optionally reuse last filters if requested
-        try:
-            if _looks_like_same_filters(q):
-                sp = _load_scratchpad()
-                lf = sp.get("last_filters") if isinstance(sp, dict) else None
-                if isinstance(lf, dict):
-                    for k in ("language", "under", "symbol", "ext", "path_glob", "not_glob"):
-                        if k not in args and lf.get(k) not in (None, ""):
-                            args[k] = lf.get(k)
-        except Exception:
-            pass
+        _reuse_last_filters(args)
 
         for k in ("language", "under", "symbol", "ext", "path_glob", "not_glob"):
+            v = dsl_filters.get(k)
+            if v not in (None, "") and k not in args:
+                args[k] = v
+        for k in ("language", "under", "symbol", "ext", "path_glob", "not_glob"):
             v = hints.get(k)
-            if v not in (None, ""):
+            if v not in (None, "") and k not in args:
                 args[k] = v
         return [("search_config_for", args)]
 
     if intent == INTENT_MEMORY_STORE:
-        # Store the raw query as information; clients can pass richer args later
-        return [("store", {"information": q})]
+        info, meta = _parse_memory_store_payload(q)
+        payload: Dict[str, Any] = {"information": info or q.strip()}
+        if meta:
+            allowed = {"priority", "tags", "topic", "category", "owner"}
+            cleaned = {k: v for k, v in meta.items() if k in allowed and v not in (None, "", [])}
+            if cleaned:
+                payload["metadata"] = cleaned
+        return [("store", payload)]
 
     if intent == INTENT_MEMORY_FIND:
         args = {"query": q}
@@ -299,47 +419,38 @@ def build_plan(q: str) -> List[Tuple[str, Dict[str, Any]]]:
 
     if intent == INTENT_SEARCH_CALLERS:
         hints = _parse_repo_hints(q)
-        args = {"query": q}
+        clean_q, dsl_filters = _clean_query_and_dsl(q)
+        args = {"query": clean_q}
         if search_limit:
             args["limit"] = search_limit
         # Optionally reuse last filters if requested
-        try:
-            if _looks_like_same_filters(q):
-                sp = _load_scratchpad()
-                lf = sp.get("last_filters") if isinstance(sp, dict) else None
-                if isinstance(lf, dict):
-                    for k in ("language", "under", "symbol", "ext", "path_glob", "not_glob"):
-                        if k not in args and lf.get(k) not in (None, ""):
-                            args[k] = lf.get(k)
-        except Exception:
-            pass
-
-        # Optionally reuse last filters if requested
-        try:
-            if _looks_like_same_filters(q):
-                sp = _load_scratchpad()
-                lf = sp.get("last_filters") if isinstance(sp, dict) else None
-                if isinstance(lf, dict):
-                    for k in ("language", "under", "symbol", "ext", "path_glob", "not_glob"):
-                        if k not in args and lf.get(k) not in (None, ""):
-                            args[k] = lf.get(k)
-        except Exception:
-            pass
+        _reuse_last_filters(args)
 
         for k in ("language", "under", "symbol", "ext", "path_glob", "not_glob"):
+            v = dsl_filters.get(k)
+            if v not in (None, "") and k not in args:
+                args[k] = v
+        for k in ("language", "under", "symbol", "ext", "path_glob", "not_glob"):
             v = hints.get(k)
-            if v not in (None, ""):
+            if v not in (None, "") and k not in args:
                 args[k] = v
         return [("search_callers_for", args)]
 
     if intent == INTENT_SEARCH_IMPORTERS:
         hints = _parse_repo_hints(q)
-        args = {"query": q}
+        clean_q, dsl_filters = _clean_query_and_dsl(q)
+        args = {"query": clean_q}
         if search_limit:
             args["limit"] = search_limit
+        # Optionally reuse last filters if requested
+        _reuse_last_filters(args)
+        for k in ("language", "under", "symbol", "ext", "path_glob", "not_glob"):
+            v = dsl_filters.get(k)
+            if v not in (None, "") and k not in args:
+                args[k] = v
         for k in ("language", "under", "symbol", "ext", "path_glob", "not_glob"):
             v = hints.get(k)
-            if v not in (None, ""):
+            if v not in (None, "") and k not in args:
                 args[k] = v
         return [("search_importers_for", args)]
 
@@ -562,11 +673,11 @@ def _is_failure_response(resp: Dict[str, Any]) -> bool:
 # Prefer live /tools registry from the servers' health ports when available
 try:
     _HEALTH_PORT_INDEXER = int(os.environ.get("FASTMCP_INDEXER_HTTP_HEALTH_PORT", "18003") or 18003)
-except Exception:
+except (ValueError, TypeError):
     _HEALTH_PORT_INDEXER = 18003
 try:
     _HEALTH_PORT_MEMORY = int(os.environ.get("FASTMCP_HTTP_HEALTH_PORT", "18002") or 18002)
-except Exception:
+except (ValueError, TypeError):
     _HEALTH_PORT_MEMORY = 18002
 
 
@@ -718,6 +829,42 @@ def _load_scratchpad() -> Dict[str, Any]:
         with open(p, "r", encoding="utf-8") as f:
             j = json.load(f)
             if isinstance(j, dict):
+                try:
+                    ts = float(j.get("timestamp") or 0.0)
+                except Exception:
+                    ts = 0.0
+                ttl = _scratchpad_ttl_sec()
+                if ts and ttl >= 0 and (time.time() - ts) > ttl:
+                    stale_keys = (
+                        "last_plan",
+                        "last_filters",
+                        "mem_snippets",
+                        "last_answer",
+                        "last_citations",
+                        "last_paths",
+                        "last_metrics",
+                    )
+                    removed = False
+                    for stale_key in stale_keys:
+                        if stale_key in j:
+                            j.pop(stale_key, None)
+                            removed = True
+                    if removed:
+                        j["timestamp"] = 0.0
+                        try:
+                            print(
+                                json.dumps(
+                                    {
+                                        "router": {
+                                            "scratchpad": "stale_cleared",
+                                            "age_sec": round(time.time() - ts, 2),
+                                        }
+                                    }
+                                ),
+                                file=sys.stderr,
+                            )
+                        except Exception:
+                            pass
                 return j
     except Exception:
         pass
@@ -726,11 +873,22 @@ def _load_scratchpad() -> Dict[str, Any]:
 
 def _save_scratchpad(d: Dict[str, Any]) -> None:
     p = _scratchpad_path()
+    tmp = p + ".tmp"
     try:
-        with open(p, "w", encoding="utf-8") as f:
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(d, f)
+            try:
+                f.flush()
+                os.fsync(f.fileno())
+            except Exception:
+                pass
+        os.replace(tmp, p)
     except Exception:
-        pass
+        try:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        except Exception:
+            pass
 
 
 def _looks_like_repeat(q: str) -> bool:
@@ -822,7 +980,8 @@ def _embed_texts(texts: list[str]) -> list[list[float]]:
                 em = _FE_Embedding(model_name=model_name)
                 em._name = model_name  # type: ignore
                 _embedder_singleton["model"] = em
-            vecs = [list(next(em.embed([txt]))) for txt in texts]
+            raw = list(em.embed(texts))
+            vecs = [v.tolist() if hasattr(v, "tolist") else list(v) for v in raw]
             return vecs
         except Exception:
             pass
@@ -937,6 +1096,20 @@ def _parse_repo_hints(q: str) -> Dict[str, Any]:
     if not_glob:
         out["not_glob"] = not_glob
     return out
+
+
+def _clean_query_and_dsl(q: str) -> Tuple[str, Dict[str, Any]]:
+    """Strip DSL tokens from the natural-language query and return (clean_query, dsl_filters).
+    Falls back to the raw query if parse_query_dsl is unavailable.
+    """
+    try:
+        # Lazy import to avoid heavy dependencies at module import time
+        from scripts.hybrid_search import parse_query_dsl  # type: ignore
+        clean, extracted = parse_query_dsl([q])
+        return (clean[0] if clean else ""), (extracted or {})
+    except Exception:
+        return q, {}
+
 
 
 
@@ -1353,4 +1526,3 @@ def main(argv: List[str]) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv[1:]))
-
