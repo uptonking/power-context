@@ -297,6 +297,8 @@ def _git_metadata(file_path: Path) -> tuple[int, int, int]:
 _DEFAULT_EXCLUDE_DIRS = [
     "/models",
     "/.vs",
+    "/.cache",
+    "/.codebase",
 
     "/node_modules",
     "/dist",
