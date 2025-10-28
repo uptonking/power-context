@@ -1735,10 +1735,7 @@ async def repo_search(
                         if tmp:
                             results = tmp
                             used_rerank = True
-                            rerank_counters["inproc_hybrid"] += 1
-                except subprocess.TimeoutExpired:
-                    rerank_counters["timeout"] += 1
-                    used_rerank = False
+                            rerank_counters["subprocess"] += 1
                 except Exception:
                     rerank_counters["error"] += 1
                     used_rerank = False
