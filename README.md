@@ -44,12 +44,18 @@ Alternative (compose only)
 HOST_INDEX_PATH="$(pwd)" FASTMCP_INDEXER_PORT=8001 docker compose up -d qdrant mcp mcp_indexer indexer watcher
 ```
 
+### Recommended development flow
+1. Bring the stack up with the reset target that matches your client (`make reset-dev`, `make reset-dev-codex`, or `make reset-dev-dual`).
+2. When you need a clean ingest (after large edits or when the `qdrant_status` tool/`make qdrant-status` reports zero points), run `make reindex-hard`. This clears `.codebase/cache.json` before recreating the collection so unchanged files cannot be skipped.
+3. Confirm collection health with `make qdrant-status` (calls the MCP router to print counts and timestamps).
+4. Iterate using search helpers such as `make hybrid ARGS="--query 'async file watcher'"` or invoke the MCP tools directly from your client.
+
 ### Make targets (quick reference)
 - reset-dev: SSE stack on 8000/8001; seeds Qdrant, downloads tokenizer + tiny llama.cpp model, reindexes, brings up memory + indexer + watcher
 - reset-dev-codex: RMCP stack on 8002/8003; same seeding + bring-up for Codex/Qodo
 - reset-dev-dual: SSE + RMCP together (8000/8001 and 8002/8003)
 - up / down / logs / ps: Docker Compose lifecycle helpers
-- index / reindex: Index current repo; reindex recreates the collection first
+- index / reindex / reindex-hard: Index current repo; `reindex` recreates the collection; `reindex-hard` also clears the local cache so unchanged files are re-uploaded
 - index-here / index-path: Index arbitrary host path without cloning into this repo
 - watch: Watch-and-reindex on file changes
 - warm / health: Warm caches and run health checks
@@ -57,6 +63,7 @@ HOST_INDEX_PATH="$(pwd)" FASTMCP_INDEXER_PORT=8001 docker compose up -d qdrant m
 - setup-reranker / rerank-local / quantize-reranker: Manage ONNX reranker assets and local runs
 - prune / prune-path: Remove stale points (missing files or hash mismatch)
 - llama-model / tokenizer: Fetch tiny GGUF model and tokenizer.json
+- qdrant-status / qdrant-list / qdrant-prune / qdrant-index-root: Convenience wrappers that route through the MCP bridge to inspect or maintain collections
 
 ## Index another codebase (outside this repo)
 
@@ -218,7 +225,8 @@ curl -sI http://localhost:8001/sse | head -n1
 4) Single command to index + search
 ```bash
 # Fresh index of your repo and a quick hybrid example
-make reindex
+make reindex-hard
+make qdrant-status
 make hybrid ARGS="--query 'async file watcher' --limit 5 --include-snippet"
 ```
 
