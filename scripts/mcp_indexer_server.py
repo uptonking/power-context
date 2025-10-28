@@ -3311,6 +3311,26 @@ def _ca_prepare_filters_and_retrieve(
                     if k not in _seen:
                         items.append(it)
                         _seen.add(k)
+                else:
+                    # Ensure a second targeted probe call for identifier queries even when heuristic probes are empty
+                    _ = run_hybrid_search(
+                        queries=list(queries),
+                        limit=int(max(lim, 10)),
+                        per_path=int(max(ppath, 5)),
+                        language=req_language,
+                        under=override_under or None,
+                        kind=(kind or kwargs.get("kind") or None),
+                        symbol=sym_arg,
+                        ext=(ext or kwargs.get("ext") or None),
+                        not_filter=(filters.get("not_") or kwargs.get("not_") or kwargs.get("not") or None),
+                        case=(case or kwargs.get("case") or None),
+                        path_regex=(path_regex or kwargs.get("path_regex") or None),
+                        path_glob=eff_path_glob,
+                        not_glob=eff_not_glob,
+                        expand=False if did_local_expand else (str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower() in {"1","true","yes","on"}),
+                        model=model,
+                    )
+
     except Exception as e:
         logger.debug("Usage augmentation failed", exc_info=e)
 
@@ -4018,10 +4038,6 @@ async def context_answer(
     os.environ["COLLECTION_NAME"] = coll
     if budget_tokens is not None and str(budget_tokens).strip() != "":
         os.environ["MICRO_BUDGET_TOKENS"] = str(budget_tokens)
-
-    # Run in-process hybrid search to get structured items with span budgeting info
-    from scripts.hybrid_search import run_hybrid_search  # type: ignore
-
     # Optionally expand queries via local decoder (tight cap) when requested
     queries = list(queries)
     # For LLM answering, default to include snippets so the model sees actual code
