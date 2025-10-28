@@ -50,6 +50,11 @@ index: ## index code into Qdrant without dropping the collection
 reindex: ## recreate collection then index from scratch (will remove existing points!)
 	docker compose run --rm indexer --root /work --recreate
 
+reindex-hard: ## clear .codebase/cache.json then recreate collection and index from scratch
+	@rm -f .codebase/cache.json || true
+	docker compose run --rm indexer --root /work --recreate
+
+
 # Index an arbitrary local path without cloning into this repo
 index-path: ## index an arbitrary repo: make index-path REPO_PATH=/abs/path [RECREATE=1] [REPO_NAME=name] [COLLECTION=name]
 	@if [ -z "$(REPO_PATH)" ]; then \

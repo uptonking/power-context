@@ -1706,7 +1706,22 @@ def index_single_file(
             _cap = int(os.environ.get("MAX_MICRO_CHUNKS_PER_FILE", "500") or 500)
             if _cap > 0 and len(chunks) > _cap:
                 _before = len(chunks)
-                chunks = chunks[:_cap]
+                # Priority: keep ALL_CAPS assignments near top so constants survive capping
+                try:
+                    import re as _re
+                    if os.environ.get("INGEST_CONSTANT_PRIORITY", "1").lower() not in {"0", "false", "off", "no"}:
+                        _pat = _re.compile(r"\b[A-Z_]{2,}\s*=\s*")
+                        _important = []
+                        _rest = []
+                        for c in chunks:
+                            txt = c.get("text", "")
+                            (_important if _pat.search(txt) else _rest).append(c)
+                        # Preserve relative order within groups
+                        chunks = (_important + _rest)[:_cap]
+                    else:
+                        chunks = chunks[:_cap]
+                except Exception:
+                    chunks = chunks[:_cap]
                 try:
                     print(
                         f"[ingest] micro-chunks capped path={file_path} count={_before}->{len(chunks)} cap={_cap}"
@@ -2064,7 +2079,21 @@ def index_repo(
                 _cap = int(os.environ.get("MAX_MICRO_CHUNKS_PER_FILE", "500") or 500)
                 if _cap > 0 and len(chunks) > _cap:
                     _before = len(chunks)
-                    chunks = chunks[:_cap]
+                    # Priority: keep ALL_CAPS assignments near top so constants survive capping
+                    try:
+                        import re as _re
+                        if os.environ.get("INGEST_CONSTANT_PRIORITY", "1").lower() not in {"0", "false", "off", "no"}:
+                            _pat = _re.compile(r"\b[A-Z_]{2,}\s*=\s*")
+                            _important = []
+                            _rest = []
+                            for c in chunks:
+                                txt = c.get("text", "")
+                                (_important if _pat.search(txt) else _rest).append(c)
+                            chunks = (_important + _rest)[:_cap]
+                        else:
+                            chunks = chunks[:_cap]
+                    except Exception:
+                        chunks = chunks[:_cap]
                     try:
                         print(
                             f"[ingest] micro-chunks capped path={file_path} count={_before}->{len(chunks)} cap={_cap}"
