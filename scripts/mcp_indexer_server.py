@@ -1735,10 +1735,7 @@ async def repo_search(
                         if tmp:
                             results = tmp
                             used_rerank = True
-                            rerank_counters["inproc_hybrid"] += 1
-                except subprocess.TimeoutExpired:
-                    rerank_counters["timeout"] += 1
-                    used_rerank = False
+                            rerank_counters["subprocess"] += 1
                 except Exception:
                     rerank_counters["error"] += 1
                     used_rerank = False
@@ -4109,6 +4106,73 @@ def _ca_build_citations_and_context(
 
     return citations, context_blocks, snippets_by_id, asked_ident, _def_line_exact, _def_id, _usage_id
 
+
+def _ca_ident_supplement(paths: list[str], ident: str, *, include_snippet: bool, max_hits: int = 4) -> list[Dict[str, Any]]:
+    """Lightweight FS supplement: when an identifier is asked but the retrieved spans
+    missed its definition/usage, scan a small set of candidate files for that identifier
+    and return minimal spans around the hits. Keeps scope tiny and safe.
+    """
+    import os as _os
+    import re as _re
+    out: list[Dict[str, Any]] = []
+    seen: set[tuple[str, int, int]] = set()
+    ident = str(ident or "").strip()
+    if not ident:
+        return out
+    try:
+        margin = int(_os.environ.get("CTX_READ_MARGIN", "1") or 1)
+    except Exception:
+        margin = 1
+    pat_def = _re.compile(rf"\b{_re.escape(ident)}\b\s*=")
+    pat_any = _re.compile(rf"\b{_re.escape(ident)}\b")
+
+    for p in (paths or []):
+        if len(out) >= max_hits:
+            break
+        try:
+            fp = str(p)
+            if not fp:
+                continue
+            if not _os.path.isabs(fp):
+                fp = _os.path.join("/work", fp)
+            realp = _os.path.realpath(fp)
+            if not realp.startswith("/work/") or not _os.path.exists(realp):
+                continue
+            with open(realp, "r", encoding="utf-8", errors="ignore") as f:
+                lines = f.readlines()
+            # Prefer explicit definitions first
+            hits: list[tuple[str, int]] = []
+            for idx, line in enumerate(lines, start=1):
+                if pat_def.search(line):
+                    hits.append(("def", idx))
+            if not hits:
+                for idx, line in enumerate(lines, start=1):
+                    if pat_any.search(line):
+                        hits.append(("use", idx))
+            for kind, idx in hits:
+                key = (p, idx, idx)
+                if key in seen:
+                    continue
+                snippet = ""
+                if include_snippet:
+                    si = max(1, idx - margin)
+                    ei = min(len(lines), idx + margin)
+                    snippet = "".join(lines[si - 1 : ei])
+                out.append({
+                    "path": p,
+                    "start_line": idx,
+                    "end_line": idx,
+                    "_ident_snippet": snippet,
+                })
+                seen.add(key)
+                if len(out) >= max_hits:
+                    break
+        except Exception:
+            # Best-effort supplement; ignore errors
+            continue
+    return out
+
+
 def _ca_decoder_params(max_tokens: Any) -> tuple[int, float, int, float, list[str]]:
     def _to_int(v, d):
         try:
@@ -4534,6 +4598,46 @@ async def context_answer(
         include_snippet=bool(include_snippet),
         queries=queries,
     )
+
+    # If an identifier was asked and we didn't capture its definition yet,
+    # do a tiny FS supplement over candidate paths (from retrieved items and explicit filename in query).
+    if asked_ident and not _def_line_exact:
+        cand_paths: list[str] = []
+        for it in (items or []):
+            p = it.get("path") or it.get("host_path") or it.get("container_path")
+            if p and str(p) not in cand_paths:
+                cand_paths.append(str(p))
+        # Also honor explicit "in <file>.py" hints in the query text
+        try:
+            qj3 = " ".join(queries)
+            import re as _re
+            m = _re.search(r"in\s+([\w./-]+\.py)\b", qj3)
+            if m:
+                fp = m.group(1)
+                if fp not in cand_paths:
+                    cand_paths.append(fp)
+        except Exception:
+            pass
+        supplements = _ca_ident_supplement(cand_paths, asked_ident, include_snippet=bool(include_snippet), max_hits=3)
+        if supplements:
+            # Prepend supplements so the decoder sees them first
+            def _k(s: Dict[str, Any]):
+                return (str(s.get("path") or ""), int(s.get("start_line") or 0), int(s.get("end_line") or 0))
+            seen_keys = {_k(s) for s in spans}
+            new_spans = []
+            for s in supplements:
+                k = _k(s)
+                if k not in seen_keys:
+                    new_spans.append(s)
+                    seen_keys.add(k)
+            if new_spans:
+                spans = new_spans + spans
+                citations, context_blocks, snippets_by_id, asked_ident, _def_line_exact, _def_id, _usage_id = _ca_build_citations_and_context(
+                    spans=spans,
+                    include_snippet=bool(include_snippet),
+                    queries=queries,
+                )
+
     # Debug: log span details
     if os.environ.get("DEBUG_CONTEXT_ANSWER"):
         logger.debug("CONTEXT_BLOCKS", extra={"spans": len(spans), "context_blocks": len(context_blocks), "previews": [block[:300] for block in context_blocks[:3]]})
