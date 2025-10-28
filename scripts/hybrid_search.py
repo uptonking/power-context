@@ -1348,7 +1348,7 @@ def run_hybrid_search(
     # Build query list (LLM-assisted first, then synonym expansion)
     qlist = list(clean_queries)
     try:
-        llm_max = int(os.environ.get("LLM_EXPAND_MAX", "4") or 4)
+        llm_max = int(os.environ.get("LLM_EXPAND_MAX", "0") or 0)
     except (ValueError, TypeError):
         llm_max = 4
     _llm_more = _llm_expand_queries(qlist, eff_language, max_new=llm_max)
@@ -2338,12 +2338,12 @@ def main():
     ap.add_argument("--under", type=str, default=None)
     ap.add_argument("--kind", type=str, default=None)
     ap.add_argument("--symbol", type=str, default=None)
-    # Expansion enabled by default; allow disabling via --no-expand or HYBRID_EXPAND=0
+    # Expansion disabled by default; enable via --expand or HYBRID_EXPAND=1
     ap.add_argument(
         "--expand",
         dest="expand",
         action="store_true",
-        default=_env_truthy(os.environ.get("HYBRID_EXPAND"), True),
+        default=_env_truthy(os.environ.get("HYBRID_EXPAND"), False),
         help="Enable simple query expansion",
     )
     ap.add_argument(
