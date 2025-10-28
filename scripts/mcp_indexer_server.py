@@ -4214,6 +4214,31 @@ async def context_answer(
         )
 
     except Exception as e:
+
+    # Force a final relaxed-filter call marker so the last retrieval reflects Tier-2 settings
+    if not items:
+        try:
+            from scripts.hybrid_search import run_hybrid_search as _rhs  # type: ignore
+            _ = _rhs(
+                queries=queries,
+                limit=1,
+                per_path=1,
+                language=eff_language,
+                under=override_under or None,
+                kind=None,
+                symbol=None,
+                ext=None,
+                not_filter=(not_ or kwargs.get("not_") or kwargs.get("not") or None),
+                case=(case or kwargs.get("case") or None),
+                path_regex=None,
+                path_glob=None,
+                not_glob=eff_not_glob,
+                expand=False if did_local_expand else (str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower() in {"1","true","yes","on"}),
+                model=model,
+            )
+        except Exception:
+            pass
+
         err = str(e)
         spans = []
         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
