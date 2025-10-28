@@ -21,7 +21,13 @@ def qdrant_container():
 
     # Disable ryuk to avoid port mapping flakiness in some environments
     os.environ.setdefault("TESTCONTAINERS_RYUK_DISABLED", "true")
-    container = DockerContainer("qdrant/qdrant:latest").with_exposed_ports(6333)
+    os.environ.setdefault("TESTCONTAINERS_RYUK_TIMEOUT", "0")
+    container = (
+        DockerContainer("qdrant/qdrant:latest")
+        .with_env("TESTCONTAINERS_RYUK_DISABLED", "true")
+        .with_env("TESTCONTAINERS_RYUK_TIMEOUT", "0")
+        .with_exposed_ports(6333)
+    )
     ready = False
     try:
         container.start()
