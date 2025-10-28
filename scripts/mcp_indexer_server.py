@@ -662,13 +662,21 @@ def _tokens_from_queries(qs):
 async def qdrant_index_root(
     recreate: Optional[bool] = None, collection: Optional[str] = None
 ) -> Dict[str, Any]:
-    """Index the mounted root path (/work) with zero-arg safe defaults.
-    Notes for IDE agents (Cursor/Windsurf/Augment):
-    - Prefer this tool when you want to index the repo root without specifying params.
-    - Do NOT send null values to tools; either omit a field or pass an empty string "".
-    - Args:
-      - recreate (bool, default false): drop and recreate collection schema if needed
-      - collection (string, optional): defaults to env COLLECTION_NAME
+    """Initialize or refresh the vector index for the workspace root (/work).
+
+    When to use:
+    - First-time setup for a repo, or to reindex the whole workspace
+    - After large refactors or schema changes (set recreate=true)
+    - If you want a clean collection or to switch the target collection
+
+    Parameters:
+    - recreate: bool (default: false). Drop/recreate the collection before indexing.
+    - collection: str (optional). Target collection; defaults to workspace state or env COLLECTION_NAME.
+
+    Returns: subprocess result from ingest_code.py with args echoed. On success code==0.
+    Notes:
+    - Omit fields instead of sending null values.
+    - Safe to call repeatedly; unchanged files are skipped by the indexer.
     """
     # Leniency: if clients embed JSON in 'collection' (and include 'recreate'), parse it
     try:
@@ -997,12 +1005,20 @@ async def qdrant_index(
     recreate: Optional[bool] = None,
     collection: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Index the mounted path (/work) or a subdirectory.
-    Important for IDE agents (Cursor/Windsurf/Augment):
-    - Do NOT pass null values; omit a field or pass empty string "".
-    - subdir: "" or omit to index repo root; or a relative path like "scripts"
-    - recreate: bool (default false)
-    - collection: string (optional; defaults to env COLLECTION_NAME)
+    """Index the workspace (/work) or a specific subdirectory.
+
+    Use this when you want to index only part of the repo (e.g., "scripts" or "backend/api").
+    For full-repo indexing, prefer qdrant_index_root.
+
+    Parameters:
+    - subdir: str. "" or omit to index the root; or a relative path under /work (e.g., "scripts").
+    - recreate: bool (default: false). Drop/recreate the collection before indexing.
+    - collection: str (optional). Target collection; defaults to workspace state or env COLLECTION_NAME.
+
+    Returns: subprocess result from ingest_code.py with args echoed. On success code==0.
+    Notes:
+    - Paths are sandboxed to /work; attempts to escape will be rejected.
+    - Omit fields rather than sending null values.
     """
     # Leniency: parse JSON-ish payloads mistakenly sent in 'collection' or 'subdir'
     try:
@@ -1115,20 +1131,30 @@ async def repo_search(
     compact: Any = None,
     **kwargs,
 ) -> Dict[str, Any]:
-    """Zero-config code search over the mounted repo via Qdrant hybrid search.
+    """Hybrid (vector + lexical) code search with RRF fusion and optional reranking.
 
-    Args:
-      - query: string or list of strings
-      - limit: total results (default 10)
-      - per_path: max results per file (default 2)
-      - include_snippet/context_lines: include snippet near hit lines
-      - rerank_*: optional ONNX reranker; timeouts fall back to hybrid
-      - collection: override target collection (default env COLLECTION_NAME)
-      - language/under/kind/symbol/path_regex/path_glob/not_glob/ext/not_/case: optional filters
-      - compact: if true, return only path and line range
+    When to use:
+    - Find relevant code spans quickly; prefer this over embedding-only search.
+    - Use context_answer when you need a synthesized explanation; use context_search to blend with memory notes.
+
+    Key parameters:
+    - query: str or list[str]. Multiple queries are fused; accepts "queries" alias.
+    - limit: int (default 10). Total results across files.
+    - per_path: int (default 2). Max results per file.
+    - include_snippet: bool. If true, returns a short snippet near the hit; control length with context_lines.
+    - collection: str. Target collection; defaults to workspace state or env COLLECTION_NAME.
+    - Filters (optional): language, under (path prefix), kind, symbol, ext, path_regex,
+      path_glob (str or list[str]), not_glob (str or list[str]), not_ (negative text), case.
 
     Returns:
-      - {"results": [...], "total": N}
+    - Dict with keys:
+      - results: list of {score, path, symbol, start_line, end_line, why[, components][, relations][, related_paths][, snippet]}
+      - total: int; used_rerank: bool; rerank_counters: dict
+    - If compact=true (and snippets not requested), results contain only {path,start_line,end_line}.
+
+    Examples:
+    - path_glob=["scripts/**","**/*.py"], language="python"
+    - symbol="context_answer", under="scripts"
     """
     # Accept common alias keys from clients (top-level)
     try:
@@ -2131,14 +2157,25 @@ async def context_search(
     compact: Any = None,
     **kwargs,
 ) -> Dict[str, Any]:
-    """Context-aware search that optionally blends code hits with memory hits.
+    """Blend code search results with memory-store entries (notes, docs) for richer context.
 
-    - Applies memory-derived defaults (safe subset) automatically:
-      * compact=true if multi-query and compact not explicitly provided
-      * per_path=1 if not explicitly provided
-    - When include_memories is true, queries Qdrant directly for memory-like points
-      (payloads lacking code path metadata) and blends them with code results.
-    - memory_weight scales memory scores when merging.
+    When to use:
+    - You want code spans plus relevant memories in one response.
+    - Prefer repo_search for code-only; use context_answer when you need an LLM-written answer.
+
+    Key parameters:
+    - query: str or list[str]
+    - include_memories: bool (opt-in). If true, queries the memory collection and merges with code results.
+    - memory_weight: float (default 1.0). Scales memory scores relative to code.
+    - per_source_limits: dict, e.g. {"code": 5, "memory": 3}
+    - All repo_search filters are supported and passed through.
+
+    Returns:
+    - {"results": [{"source": "code"| "memory", ...}, ...], "total": N[, "memory_note": str]}
+    - In compact mode, results are reduced to lightweight records.
+
+    Example:
+    - include_memories=true, per_source_limits={"code": 6, "memory": 2}, path_glob="docs/**"
     """
     # Unwrap kwargs if MCP client sent everything in a single kwargs string
     if kwargs and not query and not limit:
@@ -3530,7 +3567,7 @@ def _ca_fallback_and_budget(
         or override_under
     )
     # If Tier-1 and Tier-2 yielded nothing, do a tiny filesystem scan as a last resort
-    if (not items):
+    if (not items) and not did_local_expand and not _strict_filters:
         try:
             import re as _re
             primary = _primary_identifier_from_queries(queries)
@@ -4141,23 +4178,33 @@ async def context_answer(
     not_: Any = None,
     **kwargs,
 ) -> Dict[str, Any]:
-    """Answer a question using gate-first retrieval (ReFRAG Option B), assembling
-    context spans with citations and synthesizing an answer via llama.cpp.
+    """Natural-language Q&A over the repo using retrieval + local LLM (llama.cpp).
 
-    Behavior:
-    - Runs hybrid retrieval with optional ReFRAG gate-first using MINI vectors.
-    - Applies micro-span merge + token budgeting (REFRAG_MODE=1) in-process.
-    - Builds citations (path + line range) from the budgeted spans.
-    - Calls llama.cpp to synthesize an answer from the assembled context.
+    What it does:
+    - Retrieves relevant code (hybrid vector+lexical with ReFRAG gate-first).
+    - Budgets/merges micro-spans, builds citations, and asks the LLM to answer.
+    - Returns a concise answer plus file/line citations.
 
-    Env knobs (read at call time):
-    - REFRAG_MODE=1 to enable span budgeting
-    - REFRAG_GATE_FIRST=1 to enable MINI-vector gating
-    - REFRAG_CANDIDATES (default 200) to size the gated candidate set
-    - MICRO_BUDGET_TOKENS (e.g., 1200) total token budget across spans
-    - MICRO_OUT_MAX_SPANS (e.g., 8) max number of citation spans to return
-    - LLAMACPP_URL (default http://localhost:8080)
-    - REFRAG_DECODER=1 to enable llama.cpp calls
+    When to use:
+    - You need an explanation or "how to" grounded in code.
+    - Prefer repo_search for raw hits; prefer context_search to blend code + memory.
+
+    Key parameters:
+    - query: str or list[str]; may be expanded if expand=true.
+    - budget_tokens: int. Token budget across code spans (defaults from MICRO_BUDGET_TOKENS).
+    - include_snippet: bool (default true). Include code snippets sent to the LLM and return them when requested.
+    - max_tokens, temperature: decoding controls.
+    - mode: "stitch" (default) or "pack" for prompt assembly.
+    - expand: bool. Use tiny local LLM to propose up to 2 alternate queries.
+    - Filters: language, under, kind, symbol, ext, path_regex, path_glob, not_glob, not_, case.
+
+    Returns:
+    - {"answer": str, "citations": [{"path": str, "start_line": int, "end_line": int}], "query": list[str], "used": {...}}
+    - On decoder disabled/error, returns {"error": "...", "citations": [...], "query": [...]}
+
+    Notes:
+    - Honors env knobs such as REFRAG_MODE, REFRAG_GATE_FIRST, MICRO_BUDGET_TOKENS, DECODER_*.
+    - Keeps answers brief (2–4 sentences) and grounded; rejects ungrounded output.
     """
     # Normalize inputs and compute effective limits/flags
     _cfg = _ca_unwrap_and_normalize(
@@ -4512,7 +4559,11 @@ async def code_search(
     compact: Any = None,
     **kwargs,
 ) -> Dict[str, Any]:
-    """Alias of repo_search with the same arguments; provided for better discoverability."""
+    """Exact alias of repo_search (hybrid code search).
+
+    Prefer repo_search; this name exists for discoverability in some IDEs/agents.
+    Same parameters and return shape as repo_search.
+    """
     return await repo_search(
         query=query,
         limit=limit,
