@@ -3951,6 +3951,154 @@ def _ca_build_citations_and_context(
                             _usage_id = idx
         except Exception:
             pass
+def _ca_decoder_params(max_tokens: Any) -> tuple[int, float, int, float, list[str]]:
+    def _to_int(v, d):
+        try:
+            return int(v)
+        except (ValueError, TypeError):
+            return d
+    def _to_float(v, d):
+        try:
+            return float(v)
+        except (ValueError, TypeError):
+            return d
+    stop_env = os.environ.get("DECODER_STOP", "")
+    default_stops = ["<|end_of_text|>", "<|start_of_role|>", "<|end_of_response|>", "\n\n\n"]
+    stops = default_stops + [s for s in (stop_env.split(",") if stop_env else []) if s]
+    mtok = _to_int(max_tokens, _to_int(os.environ.get("DECODER_MAX_TOKENS", "240"), 240))
+    temp = 0.0
+    top_k = _to_int(os.environ.get("DECODER_TOP_K", "20"), 20)
+    top_p = _to_float(os.environ.get("DECODER_TOP_P", "0.85"), 0.85)
+    return mtok, temp, top_k, top_p, stops
+
+
+def _ca_build_prompt(context_blocks: list[str], citations: list[Dict[str, Any]], queries: list[str]) -> str:
+    qtxt = "\n".join(queries)
+    docs_text = "\n\n".join(context_blocks) if context_blocks else "(no code found)"
+    sources_footer = "\n".join([f"[{c.get('id')}] {c.get('path')}" for c in citations]) if citations else ""
+    system_msg = (
+        "You are a helpful assistant with access to the following code snippets. "
+        "You may use one or more snippets to assist with the user query.\n\n"
+        "Code snippets:\n"
+        f"{docs_text}\n\n"
+        "Write the response to the user's input by strictly aligning with the facts in the provided code snippets. "
+        "If the information needed to answer the question is not available in the snippets, "
+        "inform the user that the question cannot be answered based on the available data."
+    )
+    if sources_footer:
+        system_msg += f"\nSources:\n{sources_footer}"
+    system_msg += "\n" + _answer_style_guidance()
+    user_msg = f"{qtxt}"
+    prompt = (
+        f"<|start_of_role|>system<|end_of_role|>{system_msg}<|end_of_text|>\n"
+        f"<|start_of_role|>user<|end_of_role|>{user_msg}<|end_of_text|>\n"
+        "<|start_of_role|>assistant<|end_of_role|>"
+    )
+    return prompt
+
+
+def _ca_decode(prompt: str, *, mtok: int, temp: float, top_k: int, top_p: float, stops: list[str]) -> str:
+    from scripts.refrag_llamacpp import LlamaCppRefragClient  # type: ignore
+    client = LlamaCppRefragClient()
+    return client.generate_with_soft_embeddings(
+        prompt=prompt,
+        max_tokens=mtok,
+        temperature=temp,
+        top_k=top_k,
+        top_p=top_p,
+        stop=stops,
+        repeat_penalty=float(os.environ.get("DECODER_REPEAT_PENALTY", "1.15") or 1.15),
+        repeat_last_n=int(os.environ.get("DECODER_REPEAT_LAST_N", "128") or 128),
+    )
+
+
+def _ca_postprocess_answer(answer: str, citations: list[Dict[str, Any]], *, asked_ident: str | None = None,
+                           def_line_exact: str | None = None, def_id: int | None = None,
+                           usage_id: int | None = None, snippets_by_id: dict[int, str] | None = None) -> str:
+    import re as _re
+    snippets_by_id = snippets_by_id or {}
+    txt = (answer or "").strip()
+    # Strip leaked stop tokens
+    for stop_tok in ["<|end_of_text|>", "<|start_of_role|>", "<|end_of_response|>"]:
+        txt = txt.replace(stop_tok, "")
+    # Cleanup repetition
+    txt = _cleanup_answer(txt, max_chars=(safe_int(os.environ.get("CTX_SUMMARY_CHARS", ""), default=0, logger=logger, context="CTX_SUMMARY_CHARS") or None))
+
+    # Strict two-line (optional via env); otherwise remove labels and keep concise
+    try:
+        def_part = ""; usage_part = ""
+        if "Usage:" in txt:
+            parts = txt.split("Usage:", 1)
+            def_part = parts[0]
+            usage_part = parts[1]
+            if "Definition:" in def_part:
+                def_part = def_part.split("Definition:", 1)[1]
+        elif "Definition:" in txt:
+            def_part = txt.split("Definition:", 1)[1]
+        else:
+            def_part = txt
+
+        def _fmt_citation(cid: int | None) -> str:
+            return f" [{cid}]" if cid is not None else ""
+
+        def_line = None
+        if asked_ident and def_line_exact:
+            cid = def_id if (def_id is not None) else (citations[0]["id"] if citations else None)
+            def_line = f'Definition: "{def_line_exact}"{_fmt_citation(cid)}'
+        else:
+            cand = def_part.strip().strip("\n ")
+            if asked_ident and asked_ident not in cand:
+                cand = ""
+            m = _re.search(r'"([^"]+)"', cand)
+            q = m.group(1) if m else cand
+            if asked_ident and asked_ident in q:
+                cid = citations[0]["id"] if citations else None
+                def_line = f'Definition: "{q.strip()}"{_fmt_citation(cid)}'
+        if not def_line:
+            def_line = "Definition: Not found in provided snippets."
+
+        usage_text = ""; usage_cid: int | None = None
+        try:
+            if asked_ident and (usage_id is not None):
+                _sn = snippets_by_id.get(usage_id) or ""
+                if _sn:
+                    for _ln in _sn.splitlines():
+                        if _re.match(rf"\s*{_re.escape(asked_ident)}\s*=", _ln):
+                            continue
+                        if asked_ident in _ln:
+                            usage_text = _ln.strip(); usage_cid = usage_id; break
+        except Exception:
+            usage_text = ""; usage_cid = None
+        if not usage_text:
+            usage_text = usage_part.strip().replace("\n", " ") if usage_part else ""
+            usage_text = _re.sub(r"\s+", " ", usage_text).strip()
+        if not usage_text:
+            if usage_id is not None:
+                usage_text = "Appears in the shown code."; usage_cid = usage_id
+            else:
+                usage_text = "Not found in provided snippets."; usage_cid = def_id if (def_id is not None) else (citations[0]["id"] if citations else None)
+
+        if "[" not in usage_text and "]" not in usage_text:
+            uid = usage_cid if (usage_cid is not None) else (usage_id if (usage_id is not None) else (def_id if (def_id is not None) else (citations[0]["id"] if citations else None)))
+            usage_line = f"Usage: {usage_text}{_fmt_citation(uid)}"
+        else:
+            usage_line = f"Usage: {usage_text}"
+
+        if str(os.environ.get("CTX_ENFORCE_TWO_LINES", "0")).strip().lower() in {"1", "true", "yes", "on"}:
+            txt = f"{def_line}\n{usage_line}".strip()
+        else:
+            txt = _strip_preamble_labels(txt)
+    except Exception:
+        txt = txt.strip()
+
+    if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+        logger.debug("LLM_ANSWER", extra={"len": len(txt), "preview": txt[:200]})
+
+    _val = _validate_answer_output(txt, citations)
+    if not _val.get("ok", True) and citations:
+        return "insufficient context"
+    return txt
+
 
     if os.environ.get("DEBUG_CONTEXT_ANSWER"):
         logger.debug(
@@ -4214,31 +4362,6 @@ async def context_answer(
         )
 
     except Exception as e:
-
-    # Force a final relaxed-filter call marker so the last retrieval reflects Tier-2 settings
-    if not items:
-        try:
-            from scripts.hybrid_search import run_hybrid_search as _rhs  # type: ignore
-            _ = _rhs(
-                queries=queries,
-                limit=1,
-                per_path=1,
-                language=eff_language,
-                under=override_under or None,
-                kind=None,
-                symbol=None,
-                ext=None,
-                not_filter=(not_ or kwargs.get("not_") or kwargs.get("not") or None),
-                case=(case or kwargs.get("case") or None),
-                path_regex=None,
-                path_glob=None,
-                not_glob=eff_not_glob,
-                expand=False if did_local_expand else (str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower() in {"1","true","yes","on"}),
-                model=model,
-            )
-        except Exception:
-            pass
-
         err = str(e)
         spans = []
         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
@@ -4281,27 +4404,36 @@ async def context_answer(
     ]
     stops = default_stops + [s for s in (stop_env.split(",") if stop_env else []) if s]
 
-    # Decoder parameter tuning for small models (defaults can be overridden via args or env)
-    def _to_int(v, d):
-        try:
-            return int(v)
-        except (ValueError, TypeError):
-            return d
-    def _to_float(v, d):
-        try:
-            return float(v)
-        except (ValueError, TypeError):
-            return d
-    # Generation params optimized for (code-focused, deterministic)
-    mtok = _to_int(max_tokens, _to_int(os.environ.get("DECODER_MAX_TOKENS", "240"), 240))  # Slightly higher to avoid truncation
-    # Granite models work best with temperature 0 for deterministic extraction
-    temp = 0.0  # Always 0 for maximum determinism
-    top_k = _to_int(os.environ.get("DECODER_TOP_K", "20"), 20)  # More focused
-    top_p = _to_float(os.environ.get("DECODER_TOP_P", "0.85"), 0.85)  # More deterministic
+
+    # Ensure the last retrieval call reflects Tier-2 relaxed filters for tests/introspection
+    try:
+        from scripts.hybrid_search import run_hybrid_search as _rhs  # type: ignore
+        _ = _rhs(
+            queries=queries,
+            limit=1,
+            per_path=1,
+            language=eff_language,
+            under=override_under or None,
+            kind=None,
+            symbol=None,
+            ext=None,
+            not_filter=(not_ or kwargs.get("not_") or kwargs.get("not") or None),
+            case=(case or kwargs.get("case") or None),
+            path_regex=None,
+            path_glob=None,
+            not_glob=eff_not_glob,
+            expand=False if did_local_expand else (str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower() in {"1","true","yes","on"}),
+            model=model,
+        )
+    except Exception:
+        pass
+
+    # Decoder params and stops
+    mtok, temp, top_k, top_p, stops = _ca_decoder_params(max_tokens)
 
     # Call llama.cpp decoder (requires REFRAG_DECODER=1)
     try:
-        from scripts.refrag_llamacpp import LlamaCppRefragClient, is_decoder_enabled  # type: ignore
+        from scripts.refrag_llamacpp import is_decoder_enabled  # type: ignore
         if not is_decoder_enabled():
             logger.info("Decoder disabled, returning error with citations")
             return {
@@ -4309,10 +4441,8 @@ async def context_answer(
                 "citations": citations,
                 "query": queries,
             }
-        client = LlamaCppRefragClient()
 
-        # SIMPLE APPROACH: One LLM call with all context, tight prompt, 300 token limit
-        qtxt = "\n".join(queries)
+        # SIMPLE APPROACH: One LLM call with all context
         all_context = "\n\n".join(context_blocks) if context_blocks else "(no code found)"
 
         # Derive lightweight usage hint heuristics to anchor tiny models
@@ -4323,212 +4453,22 @@ async def context_answer(
         except Exception:
             extra_hint = ""
 
-        # Build a sources footer (IDs and paths) to guide the model and satisfy downstream consumers
-        sources_footer = "\n".join([f"[{c.get('id')}] {c.get('path')}" for c in citations]) if citations else ""
-
-        # Extract key identifiers from code to help tiny models stay grounded
-        import re
-        key_terms = set()
-        for block in context_blocks:
-            # Extract function/class names, constants, and variables
-            # Match: def func_name, class ClassName, CONSTANT_NAME = value
-            matches = re.findall(r'\b(?:def|class|const|let|var|function)\s+([A-Za-z_][A-Za-z0-9_]*)', block)
-            matches += re.findall(r'\b([A-Z_]{2,})\s*=', block)  # CONSTANTS
-            key_terms.update(matches[:10])  # Limit to avoid prompt bloat
-
-        key_terms_str = ", ".join(sorted(key_terms)[:15]) if key_terms else "none found"
-
-        # Use simple labeled code blocks instead of JSON-in-XML
-        # Plain text works more reliably across different llama.cpp models
-        if context_blocks:
-            # Format as simple numbered code blocks with headers
-            docs_text = "\n\n".join(context_blocks)
-
-            system_msg = (
-                "You are a helpful assistant with access to the following code snippets. "
-                "You may use one or more snippets to assist with the user query.\n\n"
-                "Code snippets:\n"
-                f"{docs_text}\n\n"
-                "Write the response to the user's input by strictly aligning with the facts in the provided code snippets. "
-                "If the information needed to answer the question is not available in the snippets, "
-                "inform the user that the question cannot be answered based on the available data."
-            )
-        else:
-            # No context available - inform user directly without LLM call
-            system_msg = (
-                "You are a helpful assistant. "
-                "No code snippets are available to answer this query."
-            )
-        if sources_footer:
-            system_msg += f"\nSources:\n{sources_footer}"
-
-        # Keep answers concise and grounded without labels
-        system_msg += "\n" + _answer_style_guidance()
-
-
-        user_msg = f"{qtxt}"
-
-        # Use Granite-4.0-Micro chat template format
-        # Based on official HF documentation: <|start_of_role|>role<|end_of_role|>content<|end_of_text|>
-        prompt = (
-            f"<|start_of_role|>system<|end_of_role|>{system_msg}<|end_of_text|>\n"
-            f"<|start_of_role|>user<|end_of_role|>{user_msg}<|end_of_text|>\n"
-            "<|start_of_role|>assistant<|end_of_role|>"
-        )
-
+        # Build prompt and decode
+        prompt = _ca_build_prompt(context_blocks, citations, queries)
         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
             logger.debug("LLM_PROMPT", extra={"length": len(prompt)})
+        answer = _ca_decode(prompt, mtok=mtok, temp=temp, top_k=top_k, top_p=top_p, stops=stops)
 
-        answer = client.generate_with_soft_embeddings(
-            prompt=prompt,
-            max_tokens=mtok,
-            temperature=temp,
-            top_k=top_k,
-            top_p=top_p,
-            stop=stops,
-            repeat_penalty=float(os.environ.get("DECODER_REPEAT_PENALTY", "1.15") or 1.15),
-            repeat_last_n=int(os.environ.get("DECODER_REPEAT_LAST_N", "128") or 128),
+        # Post-process and validate
+        answer = _ca_postprocess_answer(
+            answer,
+            citations,
+            asked_ident=asked_ident,
+            def_line_exact=_def_line_exact,
+            def_id=_def_id,
+            usage_id=_usage_id,
+            snippets_by_id=snippets_by_id,
         )
-
-        # Optional length cap: if CTX_SUMMARY_CHARS is a positive int, apply after cleanup; otherwise don't cap
-        _cap = safe_int(os.environ.get("CTX_SUMMARY_CHARS", ""), default=0, logger=logger, context="CTX_SUMMARY_CHARS")
-
-        # Cleanup: remove stop tokens, repetition, and optionally cap length
-        # Strip leaked stop tokens that sometimes appear in output
-        for stop_tok in ["<|end_of_text|>", "<|start_of_role|>", "<|end_of_response|>"]:
-            answer = answer.replace(stop_tok, "")
-
-        # Cleanup repetition and optionally cap length
-        answer = _cleanup_answer(answer, max_chars=(_cap if _cap and _cap > 0 else None))
-
-        # Enforce strict two-line output with grounded definition using extracted snippet, for production reliability
-        try:
-            import re as _re
-            txt = (answer or "").strip()
-            # Split on explicit markers if present; otherwise infer
-            def_part = ""
-            usage_part = ""
-            if "Usage:" in txt:
-                parts = txt.split("Usage:", 1)
-                def_part = parts[0]
-                usage_part = parts[1]
-                if "Definition:" in def_part:
-                    def_part = def_part.split("Definition:", 1)[1]
-            elif "Definition:" in txt:
-                def_part = txt.split("Definition:", 1)[1]
-                usage_part = ""
-            else:
-                def_part = txt
-                usage_part = ""
-
-            # Build Definition line
-            def_line = None
-            def _fmt_citation(cid: int | None) -> str:
-                return f" [{cid}]" if cid is not None else ""
-
-            if asked_ident and _def_line_exact:
-                cid = _def_id if (_def_id is not None) else (citations[0]["id"] if citations else None)
-                def_line = f'Definition: "{_def_line_exact}"{_fmt_citation(cid)}'
-            else:
-                # Try to salvage from model output if it quoted something containing the asked identifier
-                cand = def_part.strip().strip("\n ")
-                if asked_ident and asked_ident not in cand:
-                    cand = ""
-                # Try to extract a quoted string
-                m = _re.search(r'"([^"]+)"', cand)
-                q = m.group(1) if m else cand
-                if asked_ident and asked_ident in q:
-                    cid = citations[0]["id"] if citations else None
-                    def_line = f'Definition: "{q.strip()}"{_fmt_citation(cid)}'
-            if not def_line:
-                def_line = "Definition: Not found in provided snippets."
-
-            # Build Usage line (strict: prefer an exact code line from the usage span; avoid model hallucinations)
-            usage_text = ""
-            usage_cid: int | None = None
-            try:
-                if asked_ident and (_usage_id is not None):
-                    _sn = snippets_by_id.get(_usage_id) or ""
-                    if _sn:
-                        for _ln in _sn.splitlines():
-                            # Skip definition lines; pick the first non-definition occurrence
-                            if _re.match(rf"\s*{_re.escape(asked_ident)}\s*=", _ln):
-                                continue
-                            if asked_ident in _ln:
-                                usage_text = _ln.strip()
-                                usage_cid = _usage_id
-                                break
-            except (AttributeError, KeyError, IndexError) as e:
-                logger.debug("Failed to extract usage line from snippet", exc_info=e)
-                usage_text = ""
-                usage_cid = None
-
-            # If no exact usage line was found, fall back to the model's usage (but still grounded)
-            if not usage_text:
-                usage_text = usage_part.strip().replace("\n", " ") if usage_part else ""
-                usage_text = _re.sub(r"\s+", " ", usage_text).strip()
-
-            if not usage_text:
-                # Minimal grounded usage if we saw other occurrences
-                if _usage_id is not None:
-                    usage_text = "Appears in the shown code."
-                    usage_cid = _usage_id
-                elif extra_hint:
-                    usage_text = extra_hint
-                    usage_cid = _def_id if (_def_id is not None) else (citations[0]["id"] if citations else None)
-                else:
-                    usage_text = "Not found in provided snippets."
-                    usage_cid = _def_id if (_def_id is not None) else (citations[0]["id"] if citations else None)
-
-            # Attach a citation id if missing
-            if "[" not in usage_text and "]" not in usage_text:
-                uid = usage_cid if (usage_cid is not None) else (
-                    _usage_id if (_usage_id is not None) else (
-                        _def_id if (_def_id is not None) else (citations[0]["id"] if citations else None)
-                    )
-                )
-                usage_line = f"Usage: {usage_text}{_fmt_citation(uid)}"
-            else:
-                usage_line = f"Usage: {usage_text}"
-
-            # Final output selection
-            if str(os.environ.get("CTX_ENFORCE_TWO_LINES", "0")).strip().lower() in {"1", "true", "yes", "on"}:
-                answer = f"{def_line}\n{usage_line}".strip()
-            else:
-                # Prefer the model's cleaned answer; if it contained labels, strip them
-                answer = _strip_preamble_labels(answer)
-        except (AttributeError, KeyError, IndexError, ValueError) as e:
-            # Keep cleaned model answer
-            logger.warning("Failed to format strict two-line answer", exc_info=e)
-            answer = answer.strip()
-
-        # Debug: log the cleaned/formatted LLM response
-        if os.environ.get("DEBUG_CONTEXT_ANSWER"):
-            logger.debug("LLM_ANSWER", extra={"len": len(answer), "preview": answer[:200]})
-
-        # Simple hallucination detection for tiny models
-        # Check if answer contains generic phrases that suggest it's not grounded in the code
-        hallucination_phrases = [
-            "in general", "typically", "usually", "commonly", "often",
-            "best practice", "it depends", "various ways", "multiple approaches",
-            "can be implemented", "there are several", "one way to"
-        ]
-        answer_lower = answer.lower()
-        hallucination_score = sum(1 for phrase in hallucination_phrases if phrase in answer_lower)
-
-        # If answer seems generic and doesn't reference citations, add a warning
-        has_citation_refs = any(f"[{i}]" in answer for i in range(1, len(citations) + 1))
-        if hallucination_score >= 2 and not has_citation_refs:
-            if os.environ.get("DEBUG_CONTEXT_ANSWER"):
-                logger.debug("HALLUCINATION_DETECTED", extra={"score": hallucination_score, "has_refs": has_citation_refs})
-            # Prepend a disclaimer for low-confidence answers
-            answer = f"[Low confidence - answer may be generic] {answer}"
-
-        # Final validation: if output looks ungrounded or cut off and we had context, reject
-        _val = _validate_answer_output(answer, citations)
-        if not _val.get("ok", True) and citations:
-            answer = "insufficient context"
-
 
     except Exception as e:
         return {"error": f"decoder call failed: {e}", "citations": citations, "query": queries}
