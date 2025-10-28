@@ -725,7 +725,18 @@ async def qdrant_index_root(
 
 @mcp.tool()
 async def qdrant_list(**kwargs) -> Dict[str, Any]:
-    """List Qdrant collections (ignores any extra params)"""
+    """List available Qdrant collections.
+
+    When to use:
+    - Inspect which collections exist before indexing/searching
+    - Debug collection naming in multi-workspace setups
+
+    Parameters:
+    - (none). Extra params are ignored.
+
+    Returns:
+    - {"collections": [str, ...]} or {"error": "..."}
+    """
     try:
         from qdrant_client import QdrantClient
 
@@ -745,12 +756,17 @@ async def qdrant_list(**kwargs) -> Dict[str, Any]:
 
 @mcp.tool()
 async def workspace_info(workspace_path: Optional[str] = None, **kwargs) -> Dict[str, Any]:
-    """Return the current workspace state from .codebase/state.json, if present.
+    """Read .codebase/state.json for the current workspace and resolve defaults.
+
+    When to use:
+    - Determine the default collection used by this workspace
+    - Inspect indexing status and metadata saved by indexer/watch
+
+    Parameters:
+    - workspace_path: str (optional). Defaults to "/work".
+
     Returns:
-      - workspace_path: resolved path (defaults to "/work")
-      - default_collection: resolved collection (state.json > env > DEFAULT)
-      - source: "state_file" or "env"
-      - state: raw state.json contents (or {})
+    - {"workspace_path": str, "default_collection": str, "source": "state_file"|"env", "state": dict}
     """
     ws_path = (workspace_path or "/work").strip() or "/work"
     st = _read_ws_state(ws_path) or {}
@@ -764,8 +780,16 @@ async def workspace_info(workspace_path: Optional[str] = None, **kwargs) -> Dict
 
 @mcp.tool()
 async def list_workspaces(search_root: Optional[str] = None) -> Dict[str, Any]:
-    """Discover workspaces by scanning for .codebase/state.json files.
-    Returns: {"workspaces": [{"workspace_path", "collection_name", "last_updated", "indexing_state"}, ...]}
+    """Scan search_root recursively for .codebase/state.json and summarize workspaces.
+
+    When to use:
+    - Multi-repo environments; pick a workspace/collection to operate on
+
+    Parameters:
+    - search_root: str (optional). Directory to scan; defaults to parent of /work.
+
+    Returns:
+    - {"workspaces": [{"workspace_path": str, "collection_name": str, "last_updated": str|int, "indexing_state": str}, ...]}
     """
     try:
         from scripts.workspace_state import list_workspaces as _lw  # type: ignore
@@ -781,10 +805,23 @@ async def memory_store(
     metadata: Optional[Dict[str, Any]] = None,
     collection: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Store a memory-like entry directly into Qdrant using the default collection.
-    - information: free-form text to remember
-    - metadata: optional tags (e.g., {"kind":"preference","source":"memory"})
-    - collection: override target collection (defaults to env COLLECTION_NAME)
+    """Store a free-form memory entry in Qdrant (no code path metadata).
+
+    What it does:
+    - Embeds the text and upserts a payload with {"information", "metadata"}
+    - Uses named vectors (dense + lexical; mini when enabled)
+    - Enables context_search(include_memories=true) to surface it alongside code
+
+    When to use:
+    - Save preferences, decisions, or notes to retrieve later with code context
+
+    Parameters:
+    - information: str. Required text to remember.
+    - metadata: dict (optional). Tags like {"kind": "preference", "source": "memory"}.
+    - collection: str (optional). Defaults to workspace/env COLLECTION_NAME.
+
+    Returns:
+    - {"ok": true, "id": str, "collection": str} or {"error": "..."}
     """
     try:
         from qdrant_client import QdrantClient, models  # type: ignore
@@ -896,11 +933,21 @@ async def qdrant_status(
     batch: Optional[int] = None,
     **kwargs,
 ) -> Dict[str, Any]:
-    """Report collection size and approximate last index times. Extra params are ignored.
-    Args:
-      - collection: override collection name (defaults to env COLLECTION_NAME)
-      - max_points: safety cap on points to scan when estimating last timestamps (default 5000)
-      - batch: page size for scroll (default 1000)
+    """Summarize collection size and recent index timestamps.
+
+    When to use:
+    - Check whether indexing ran recently and overall point count
+
+    Parameters:
+    - collection: str (optional). Defaults to env COLLECTION_NAME.
+    - max_points: int. Cap scanned points when estimating timestamps (default 5000).
+    - batch: int. Scroll page size (default 1000).
+
+    Returns:
+    - {"collection": str, "count": int, "scanned_points": int,
+       "last_ingested_at": {"unix": int, "iso": str},
+       "last_modified_at": {"unix": int, "iso": str}}
+    - or {"error": "..."}
     """
     # Leniency: absorb 'kwargs' JSON payload some clients send instead of top-level args
     try:
@@ -1091,7 +1138,17 @@ async def qdrant_index(
 
 @mcp.tool()
 async def qdrant_prune(**kwargs) -> Dict[str, Any]:
-    """Prune stale points for the mounted path (/work). Extra params are ignored."""
+    """Remove stale points for /work (files deleted/moved but still in the index).
+
+    When to use:
+    - After large deletes/moves when watcher/indexer may not have cleaned up
+
+    Parameters:
+    - (none). Operates on the current collection for /work.
+
+    Returns:
+    - Subprocess result from prune.py; on success code==0.
+    """
     env = os.environ.copy()
     env["PRUNE_ROOT"] = "/work"
 
@@ -1818,11 +1875,14 @@ async def repo_search(
 
 @mcp.tool()
 async def repo_search_compat(**arguments) -> Dict[str, Any]:
-    """Compatibility wrapper for repo_search.
+    """Compatibility wrapper for repo_search (lenient argument handling).
 
-    Accepts loose client payloads (queries/q/text/top_k and friends), normalizes
-    them, and forwards to repo_search. Prevents -32602 from clients that send
-    unexpected keys by only exposing **arguments here.
+    When to use:
+    - Clients that only send a single dict payload or use aliases (q/text/top_k)
+    - Avoids schema errors by normalizing and forwarding to repo_search
+
+    Returns: same shape as repo_search.
+    Note: Prefer calling repo_search directly when possible.
     """
     try:
         args = arguments or {}
@@ -1876,11 +1936,14 @@ async def repo_search_compat(**arguments) -> Dict[str, Any]:
 
 @mcp.tool()
 async def context_answer_compat(arguments: Any = None) -> Dict[str, Any]:
-    """Compatibility wrapper for context_answer.
+    """Compatibility wrapper for context_answer (lenient argument handling).
 
-    Accepts a single 'arguments' dict like RMCP/HTTP clients send and forwards to
-    context_answer with normalized keys. Mirrors repo_search_compat behavior but for
-    the answer tool.
+    When to use:
+    - Clients that send a single 'arguments' dict or alternate keys (q/text)
+    - Avoids schema errors by normalizing/forwarding to context_answer
+
+    Returns: same shape as context_answer.
+    Note: Prefer calling context_answer directly when possible.
     """
     try:
         args = arguments or {}
@@ -1927,8 +1990,16 @@ async def search_tests_for(
     compact: Any = None,
     **kwargs,
 ) -> Dict[str, Any]:
-    """Intent-specific wrapper to search for tests related to a query.
-    Presets globs for common test locations and filenames across ecosystems.
+    """Find test files related to a query.
+
+    What it does:
+    - Presets common test file globs and forwards to repo_search
+    - Accepts extra filters via kwargs (e.g., language, under, case)
+
+    Parameters:
+    - query: str or list[str]; limit; include_snippet/context_lines; under; language; compact
+
+    Returns: repo_search result shape.
     """
     globs = [
         "tests/**",
@@ -1967,7 +2038,14 @@ async def search_config_for(
     compact: Any = None,
     **kwargs,
 ) -> Dict[str, Any]:
-    """Intent-specific wrapper to search likely configuration files for a service/query."""
+    """Find likely configuration files for a service/query.
+
+    What it does:
+    - Presets config file globs (yaml/json/toml/etc.) and forwards to repo_search
+    - Accepts extra filters via kwargs
+
+    Returns: repo_search result shape.
+    """
     globs = [
         "**/*.yml",
         "**/*.yaml",
@@ -2009,9 +2087,14 @@ async def search_callers_for(
     language: Any = None,
     **kwargs,
 ) -> Dict[str, Any]:
-    """Heuristic: find likely callers/usages of a symbol.
-    Currently a thin wrapper over repo_search; future versions may expand using
-    relation hints to prioritize files that reference the symbol.
+    """Heuristic search for callers/usages of a symbol.
+
+    When to use:
+    - You want files that reference/invoke a function/class
+
+    Notes:
+    - Thin wrapper over repo_search today; pass language or path_glob to narrow
+    - Returns repo_search result shape
     """
     return await repo_search(
         query=query,
@@ -2028,8 +2111,13 @@ async def search_importers_for(
     language: Any = None,
     **kwargs,
 ) -> Dict[str, Any]:
-    """Intent: find files likely importing/referencing a given module/symbol.
-    Presets code-centric globs, accepts additional filters via kwargs.
+    """Find files likely importing or referencing a module/symbol.
+
+    What it does:
+    - Presets code globs across common languages; forwards to repo_search
+    - Accepts additional filters via kwargs (e.g., under, case)
+
+    Returns: repo_search result shape.
     """
     globs = [
         "**/*.py", "**/*.js", "**/*.ts", "**/*.tsx", "**/*.jsx", "**/*.mjs", "**/*.cjs",
@@ -2059,8 +2147,15 @@ async def change_history_for_path(
     collection: Any = None,
     max_points: Any = None,
 ) -> Dict[str, Any]:
-    """Summarize recent changes for a file path using stored metadata.
-    Returns counts, timestamps, churn, and distinct file_hashes. Best-effort.
+    """Summarize recent change metadata for a file path from the index.
+
+    Parameters:
+    - path: str. Relative path under /work.
+    - collection: str (optional). Defaults to env/WS default.
+    - max_points: int (optional). Safety cap on scanned points.
+
+    Returns:
+    - {"ok": true, "summary": {...}} or {"ok": false, "error": "..."}.
     """
     p = str(path or "").strip()
     if not p:
@@ -2834,8 +2929,18 @@ async def context_search(
     return ret
 @mcp.tool()
 async def expand_query(query: Any = None, max_new: Any = None) -> Dict[str, Any]:
-    """LLM-assisted query expansion. Returns up to 2 alternates.
-    Uses the local llama.cpp decoder when enabled; otherwise returns []."""
+    """LLM-assisted query expansion (local llama.cpp, if enabled).
+
+    When to use:
+    - Generate 1–2 compact alternates before repo_search/context_answer
+
+    Parameters:
+    - query: str or list[str]
+    - max_new: int in [0,2] (default 2)
+
+    Returns:
+    - {"alternates": list[str]} or {"alternates": [], "hint": "..."} if decoder disabled
+    """
     try:
         qlist: list[str] = []
         if isinstance(query, (list, tuple)):
