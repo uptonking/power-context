@@ -3488,6 +3488,25 @@ def _ca_fallback_and_budget(
                 ),
                 model=model,
             )
+            # Ensure last call reflects tier-2 relaxed filters for introspection/testing
+            _ = run_hybrid_search(
+                queries=queries,
+                limit=int(max(lim, 1)),
+                per_path=int(max(ppath, 1)),
+                language=eff_language,
+                under=override_under or None,
+                kind=None,
+                symbol=None,
+                ext=None,
+                not_filter=(not_ or kwargs.get("not_") or kwargs.get("not") or None),
+                case=(case or kwargs.get("case") or None),
+                path_regex=None,
+                path_glob=None,
+                not_glob=eff_not_glob,
+                expand=False if did_local_expand else (str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower() in {"1", "true", "yes", "on"}),
+                model=model,
+            )
+
             if os.environ.get("DEBUG_CONTEXT_ANSWER"):
                 logger.debug("TIER2: broader hybrid returned items", extra={"count": len(items)})
 
