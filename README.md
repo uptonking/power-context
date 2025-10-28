@@ -30,7 +30,7 @@ INDEX_MICRO_CHUNKS=1 MAX_MICRO_CHUNKS_PER_FILE=200 make reset-dev-dual
 
 - You can skip the decoder; it’s feature-flagged off by default.
 ### Switch decoder model (llama.cpp)
-- Default tiny model: Qwen2.5 Coder 1.5B (GGUF)
+- Default tiny model: Granite 4.0 Micro (Q4_K_M GGUF)
 - Change the model by overriding Make vars (downloads to ./models/model.gguf):
 ```bash
 LLAMACPP_MODEL_URL="https://huggingface.co/ORG/MODEL/resolve/main/model.gguf" \
