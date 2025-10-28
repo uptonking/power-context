@@ -3435,6 +3435,9 @@ def _ca_fallback_and_budget(
             if len(parts) > 1:
                 extensions.add(parts[-1].lower())
                 if len(parts) > 2:
+    # DEBUG: marker to observe fallback invocation in tests
+    # print will be captured by pytest -s only
+
                     multi_ext = ".".join(parts[-2:]).lower()
                     extensions.add(multi_ext)
             table = {
