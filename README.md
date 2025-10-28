@@ -151,6 +151,7 @@ Ports
 | HOST_INDEX_PATH | Host path mounted at /work in containers | current repo (.) |
 | QDRANT_URL | Qdrant base URL | container: http://qdrant:6333; local: http://localhost:6333 |
 | INDEX_MICRO_CHUNKS | Enable token-based micro-chunking | 0 (off) |
+| HYBRID_EXPAND | Enable heuristic multi-query expansion | 0 (off) |
 | MAX_MICRO_CHUNKS_PER_FILE | Cap micro-chunks per file | 200 |
 | TOKENIZER_URL | HF tokenizer.json URL (for Make download) | n/a (use Make target) |
 | TOKENIZER_PATH | Local path where tokenizer is saved (Make) | models/tokenizer.json |
@@ -170,6 +171,7 @@ Ports
 | FASTMCP_HTTP_PORT | Memory RMCP host port mapping | 8002 |
 | FASTMCP_INDEXER_HTTP_PORT | Indexer RMCP host port mapping | 8003 |
 | FASTMCP_HEALTH_PORT | Health port (memory/indexer) | memory: 18000; indexer: 18001 |
+| LLM_EXPAND_MAX | Max alternate queries generated via LLM | 0 |
 
 ## Running tests
 
