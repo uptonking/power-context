@@ -110,6 +110,41 @@ def _sanitize_name(s: str, max_len: int = 64) -> str:
     return s[:max_len]
 
 
+# Cross-process file locking (POSIX fcntl), falls back to no-op if unavailable
+try:
+    import fcntl  # type: ignore
+except Exception:  # pragma: no cover
+    fcntl = None  # type: ignore
+
+from contextlib import contextmanager
+
+@contextmanager
+def _cross_process_lock(lock_path: Path):
+    """Advisory cross-process exclusive lock using a companion .lock file.
+    Safe across container/process boundaries; pairs with atomic rename writes.
+    """
+    lock_path.parent.mkdir(exist_ok=True)
+    f = open(lock_path, "a+")
+    try:
+        if fcntl is not None:
+            try:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            except Exception:
+                pass
+        yield
+    finally:
+        try:
+            if fcntl is not None:
+                try:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                except Exception:
+                    pass
+        finally:
+            try:
+                f.close()
+            except Exception:
+                pass
+
 def _detect_repo_name_from_path(path: Path) -> str:
     try:
         base = path if path.is_dir() else path.parent
