@@ -24,7 +24,7 @@ services:
       - FASTMCP_HOST=${FASTMCP_HOST}
       - FASTMCP_PORT=${FASTMCP_PORT}
       - QDRANT_URL=${QDRANT_URL}
-      - COLLECTION_NAME=${COLLECTION_NAME:-default}
+      - COLLECTION_NAME=${COLLECTION_NAME:-my-collection}
       - EMBEDDING_MODEL=${EMBEDDING_MODEL}
       - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER}
       - TOOL_STORE_DESCRIPTION=${TOOL_STORE_DESCRIPTION}
@@ -77,7 +77,7 @@ services:
       - FASTMCP_PORT=8000
       - FASTMCP_TRANSPORT=${FASTMCP_HTTP_TRANSPORT}
       - QDRANT_URL=${QDRANT_URL}
-      - COLLECTION_NAME=${COLLECTION_NAME:-default}
+      - COLLECTION_NAME=${COLLECTION_NAME:-my-collection}
       - EMBEDDING_MODEL=${EMBEDDING_MODEL}
       - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER}
       - TOOL_STORE_DESCRIPTION=${TOOL_STORE_DESCRIPTION}
@@ -110,7 +110,7 @@ services:
       - REFRAG_DECODER=${REFRAG_DECODER:-1}
       - LLAMACPP_URL=${LLAMACPP_URL:-http://llamacpp:8080}
       - CTX_REQUIRE_IDENTIFIER=${CTX_REQUIRE_IDENTIFIER:-0}
-      - COLLECTION_NAME=${COLLECTION_NAME:-default}
+      - COLLECTION_NAME=${COLLECTION_NAME:-my-collection}
       - EMBEDDING_MODEL=${EMBEDDING_MODEL}
     # Streamable HTTP endpoint for IDE agents at http://localhost:${FASTMCP_INDEXER_HTTP_PORT:-8003}/mcp/
     ports:
@@ -150,7 +150,7 @@ services:
       - .env
     environment:
       - QDRANT_URL=${QDRANT_URL}
-      - COLLECTION_NAME=${COLLECTION_NAME:-default}
+      - COLLECTION_NAME=${COLLECTION_NAME:-my-collection}
       - EMBEDDING_MODEL=${EMBEDDING_MODEL}
     working_dir: /work
     volumes:
@@ -169,7 +169,7 @@ services:
       - .env
     environment:
       - QDRANT_URL=${QDRANT_URL}
-      - COLLECTION_NAME=${COLLECTION_NAME:-default}
+      - COLLECTION_NAME=${COLLECTION_NAME:-my-collection}
       - EMBEDDING_MODEL=${EMBEDDING_MODEL}
       - WATCH_ROOT=/work
       # Watcher-specific backpressure & timeouts (safer defaults)
@@ -195,7 +195,7 @@ services:
       - .env
     environment:
       - QDRANT_URL=${QDRANT_URL}
-      - COLLECTION_NAME=${COLLECTION_NAME:-default}
+      - COLLECTION_NAME=${COLLECTION_NAME:-my-collection}
     working_dir: /work
     volumes:
       - ${HOST_INDEX_PATH:-.}:/work:ro
@@ -206,4 +206,3 @@ services:
 volumes:
   qdrant_storage:
     driver: local
-
