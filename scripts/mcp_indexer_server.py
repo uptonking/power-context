@@ -4629,6 +4629,10 @@ def _ca_postprocess_answer(answer: str, citations: list[Dict[str, Any]], *, aske
             if asked_ident and asked_ident not in cand:
                 cand = ""
             m = _re.search(r'"([^"]+)"', cand)
+
+
+
+
             q = m.group(1) if m else cand
             if asked_ident and asked_ident in q:
                 cid = citations[0]["id"] if citations else None
@@ -4683,8 +4687,104 @@ def _ca_postprocess_answer(answer: str, citations: list[Dict[str, Any]], *, aske
 
     _val = _validate_answer_output(txt, citations)
     if not _val.get("ok", True) and citations:
+        try:
+            fallback = _synthesize_from_citations(
+                asked_ident=asked_ident,
+                def_line_exact=def_line_exact,
+                def_id=def_id,
+                usage_id=usage_id,
+                snippets_by_id=snippets_by_id,
+                citations=citations,
+            )
+            if fallback and fallback.strip():
+                return fallback
+        except Exception:
+            pass
         return "insufficient context"
     return txt
+
+
+
+def _synthesize_from_citations(
+    *,
+    asked_ident: str | None,
+    def_line_exact: str | None,
+    def_id: int | None,
+    usage_id: int | None,
+    snippets_by_id: dict[int, str] | None,
+    citations: list[Dict[str, Any]],
+) -> str:
+    """Build a concise, extractive fallback answer from available snippets/citations.
+    Returns 1–2 short lines with inline bracket citations when possible.
+    """
+    import re as _re
+    snippets_by_id = snippets_by_id or {}
+
+    def _fmt(cid: int | None) -> str:
+        return f" [{cid}]" if cid is not None else ""
+
+    lines: list[str] = []
+
+    # Prefer a definition-style line when an identifier is asked
+    if asked_ident:
+        if def_line_exact:
+            cid = def_id if (def_id is not None) else (citations[0].get("id") if citations else None)
+            lines.append(f'Definition: "{def_line_exact}"{_fmt(cid)}')
+        else:
+            # Try to harvest a definition-like line from snippets
+            best_line = ""
+            best_cid: int | None = None
+            for c in citations:
+                sid = c.get("id")
+                sn = snippets_by_id.get(int(sid) if sid is not None else -1) or ""
+                for ln in sn.splitlines():
+                    if asked_ident in ln and _re.search(r"\b=\b|def |class ", ln):
+                        best_line = ln.strip()
+                        best_cid = sid
+                        break
+                if best_line:
+                    break
+            if best_line:
+                lines.append(f'Definition: "{best_line}"{_fmt(best_cid)}')
+
+        # Usage line when possible
+        use_line = ""; use_cid: int | None = None
+        if usage_id is not None:
+            sn = snippets_by_id.get(int(usage_id), "") or ""
+            for ln in sn.splitlines():
+                if asked_ident in ln and not _re.match(rf"\s*{_re.escape(asked_ident)}\s*=", ln):
+                    use_line = ln.strip(); use_cid = usage_id; break
+        if not use_line:
+            # fall back to first citation line mentioning the ident
+            for c in citations:
+                sid = c.get("id")
+                sn = snippets_by_id.get(int(sid) if sid is not None else -1) or ""
+                for ln in sn.splitlines():
+                    if asked_ident in ln:
+                        use_line = ln.strip(); use_cid = sid; break
+                if use_line:
+                    break
+        if use_line:
+            lines.append(f"Usage: {use_line}{_fmt(use_cid)}")
+
+    # For non-identifier broad queries, provide a brief pointer to the most relevant snippet
+    if not lines:
+        if citations:
+            sid = citations[0].get("id")
+            path = citations[0].get("path")
+            sn = snippets_by_id.get(int(sid) if sid is not None else -1) or ""
+            first = next((ln.strip() for ln in sn.splitlines() if ln.strip()), "")
+            if first:
+                # Trim to a compact preview
+                if len(first) > 160:
+                    first = first[:160].rstrip() + "…"
+                lines.append(f"Summary: {first}{_fmt(sid)}")
+            else:
+                lines.append(f"Summary: See {path}{_fmt(sid)}")
+        else:
+            lines.append("Summary: No code context available.")
+
+    return "\n".join([ln for ln in lines if ln]).strip()
 
 
 @mcp.tool()
