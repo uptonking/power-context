@@ -196,7 +196,7 @@ def store(
 @mcp.tool()
 def find(
     query: str,
-    limit: int = 5,
+    limit: Optional[int] = None,
     collection: Optional[str] = None,
     top_k: Optional[int] = None,
 ) -> Dict[str, Any]:
@@ -207,7 +207,7 @@ def find(
     lex = _lex_hash_vector_text(str(query), LEX_VECTOR_DIM)
 
     # Harmonize alias: top_k -> limit
-    lim = int(limit or top_k or 5)
+    lim = int(limit if limit is not None else (top_k if top_k is not None else 5))
 
     # Two searches (prefer query_points) then simple RRF-like merge
     try:
