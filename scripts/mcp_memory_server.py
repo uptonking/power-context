@@ -17,9 +17,25 @@ EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
 # Minimal embedding via fastembed (CPU)
 from fastembed import TextEmbedding
 
-# Simple hashing trick for lexical vector to match indexer
-import hashlib
+# Single-process embedding model cache (avoid re-initializing fastembed on each call)
+_EMBED_MODEL = None
+_EMBED_LOCK = threading.Lock()
 
+def _get_embedding_model():
+    global _EMBED_MODEL
+    m = _EMBED_MODEL
+    if m is None:
+        with _EMBED_LOCK:
+            m = _EMBED_MODEL
+            if m is None:
+                m = TextEmbedding(model_name=EMBEDDING_MODEL)
+                # Best-effort warmup to load weights once
+                try:
+                    _ = list(m.embed(["memory", "search"]))
+                except Exception:
+                    pass
+                _EMBED_MODEL = m
+    return m
 
 
 
@@ -160,7 +176,7 @@ def store(
 ) -> Dict[str, Any]:
     """Store a memory entry into Qdrant (dual vectors consistent with indexer)."""
     coll = collection or DEFAULT_COLLECTION
-    model = TextEmbedding(model_name=EMBEDDING_MODEL)
+    model = _get_embedding_model()
     dense = next(model.embed([str(information)])).tolist()
     lex = _lex_hash_vector_text(str(information), LEX_VECTOR_DIM)
     # Use UUID to avoid point ID collisions under concurrent load
@@ -186,7 +202,7 @@ def find(
 ) -> Dict[str, Any]:
     """Find memory-like entries by vector similarity (dense + lexical fusion)."""
     coll = collection or DEFAULT_COLLECTION
-    model = TextEmbedding(model_name=EMBEDDING_MODEL)
+    model = _get_embedding_model()
     dense = next(model.embed([str(query)])).tolist()
     lex = _lex_hash_vector_text(str(query), LEX_VECTOR_DIM)
 
@@ -267,7 +283,7 @@ def find(
 
     ordered = sorted(
         items.values(), key=lambda x: scores.get(str(x["id"]), 0.0), reverse=True
-    )[:limit]
+    )[:lim]
     return {"ok": True, "results": ordered, "count": len(ordered)}
 
 
