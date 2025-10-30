@@ -4085,6 +4085,9 @@ def _ca_fallback_and_budget(
         _broad_tokens = ("how", "explain", "overview", "architecture", "design", "work", "works", "guide", "readme")
         _looks_broad = any(t in _qtext for t in _broad_tokens)
 
+        _pre_doc_len = len(items or [])
+
+
         # Consider docs pass when results are thin OR the query looks broad
         if _doc_enabled and ((len(items) < max(3, int(lim) // 2)) or _looks_broad):
             # Skip if the user provided strict filters; this is for broad prompts
@@ -4147,6 +4150,50 @@ def _ca_fallback_and_budget(
                             logger.debug("DOC_PASS", extra={"count": len(_merged), "first": (_merged[0].get("path") if _merged else None)})
                         except Exception:
                             pass
+                    # If broad prompt and doc pass added nothing, try top-docs fallback
+                    try:
+                        _doc_top_enabled = str(os.environ.get("CTX_DOC_TOP_FALLBACK", "1")).strip().lower() in {"1","true","yes","on"}
+                        if _doc_top_enabled and _looks_broad and len(items or []) == _pre_doc_len:
+                            _fallback_qs = ["overview", "architecture", "readme"]
+                            _top = _rhs(
+                                queries=_fallback_qs,
+                                limit=int(max(lim, 6)),
+                                per_path=int(max(ppath, 2)),
+                                language=None,
+                                under=override_under or None,
+                                kind=None,
+                                symbol=None,
+                                ext=None,
+                                not_filter=not_ or None,
+                                case=case or None,
+                                path_regex=None,
+                                path_glob=_doc_globs,
+                                not_glob=not_glob or None,
+                                expand=False,
+                                model=model,
+                            ) or []
+                            if _top:
+                                _seen2 = set((str(it.get("path") or ""), int(it.get("start_line") or 0), int(it.get("end_line") or 0)) for it in (items or []))
+                                _merged2 = []
+                                for it in _top:
+                                    if not isinstance(it, dict):
+                                        continue
+                                    _k = (str(it.get("path") or ""), int(it.get("start_line") or 0), int(it.get("end_line") or 0))
+                                    if _k[0] and _k not in _seen2:
+                                        _seen2.add(_k)
+                                        _merged2.append(it)
+                                _merged2.sort(key=lambda x: float(x.get("score") or x.get("fusion_score") or x.get("raw_score") or 0.0), reverse=True)
+                                _cap2 = max(1, min(2, int(lim) // 3))
+                                items = (items or []) + _merged2[:_cap2]
+                                if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                                    try:
+                                        logger.debug("DOC_TOP_FALLBACK", extra={"count": len(_merged2), "first": (_merged2[0].get("path") if _merged2 else None)})
+                                    except Exception:
+                                        pass
+                    except Exception:
+                        if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                            logger.debug("DOC_TOP_FALLBACK_FAIL", exc_info=True)
+
     except Exception:
         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
             logger.debug("DOC_PASS_FAIL", exc_info=True)
@@ -4990,6 +5037,7 @@ async def context_answer(
     # Normalize inputs and compute effective limits/flags
     _cfg = _ca_unwrap_and_normalize(
         query, limit, per_path, budget_tokens, include_snippet, collection,
+
         max_tokens, temperature, mode, expand, language, under, kind, symbol,
         ext, path_regex, path_glob, not_glob, case, not_, kwargs,
     )
@@ -5017,6 +5065,31 @@ async def context_answer(
 
     if os.environ.get("DEBUG_CONTEXT_ANSWER"):
         logger.debug("ARG_SHAPE", extra={"normalized_queries": queries, "limit": lim, "per_path": ppath})
+
+    # Broad-query budget bump (gated). If user didn't pass budget, scale env default; else scale provided value.
+    try:
+        _qtext = " ".join([q for q in (queries or []) if isinstance(q, str)]).lower()
+        _broad_tokens = ("how","explain","overview","architecture","design","work","works","guide","readme")
+        _broad = any(t in _qtext for t in _broad_tokens)
+    except Exception:
+        _broad = False
+    if _broad:
+        try:
+            _factor = float(os.environ.get("CTX_BROAD_BUDGET_FACTOR", "1.4"))
+        except Exception:
+            _factor = 1.0
+        if _factor > 1.0:
+            if budget_tokens is not None and str(budget_tokens).strip() != "":
+                try:
+                    budget_tokens = int(max(128, int(float(budget_tokens) * _factor)))
+                except Exception:
+                    pass
+            else:
+                try:
+                    _base = int(float(os.environ.get("MICRO_BUDGET_TOKENS", "1024")))
+                    budget_tokens = int(max(128, int(_base * _factor)))
+                except Exception:
+                    pass
 
     # Collection + model setup (reuse indexer defaults)
     coll = (collection or _default_collection()) or ""
