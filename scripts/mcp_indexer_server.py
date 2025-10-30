@@ -2298,6 +2298,176 @@ async def context_search(
         case = kwargs.get("case", case)
         compact = kwargs.get("compact", compact)
 
+    # Unwrap nested payloads that some MCP clients send (kwargs/arguments fields or json strings)
+    def _maybe_dict(val: Any) -> Dict[str, Any]:
+        if isinstance(val, dict):
+            return val
+        if isinstance(val, str) and _looks_jsonish_string(val):
+            parsed = _maybe_parse_jsonish(val)
+            if isinstance(parsed, dict):
+                return parsed
+        return {}
+
+    payloads: List[Dict[str, Any]] = []
+    if isinstance(kwargs, dict):
+        arg_payload = _maybe_dict(kwargs.get("arguments"))
+        if arg_payload:
+            payloads.append(arg_payload)
+        nested_kwargs = _extract_kwargs_payload(kwargs)
+        if nested_kwargs:
+            payloads.append(nested_kwargs)
+    for payload in payloads:
+        if not isinstance(payload, dict):
+            continue
+        if (query is None or (isinstance(query, str) and query.strip() == "")) and payload.get("query") is not None:
+            query = payload.get("query")
+        if (query is None or (isinstance(query, str) and query.strip() == "")) and payload.get("queries") is not None:
+            query = payload.get("queries")
+        if (limit is None or (isinstance(limit, str) and limit.strip() == "")) and payload.get("limit") is not None:
+            limit = payload.get("limit")
+        if (per_path is None or (isinstance(per_path, str) and str(per_path).strip() == "")) and payload.get("per_path") is not None:
+            per_path = payload.get("per_path")
+        if include_memories is None and payload.get("include_memories") is not None:
+            include_memories = payload.get("include_memories")
+        if include_memories is None and payload.get("includeMemories") is not None:
+            include_memories = payload.get("includeMemories")
+        if memory_weight is None and payload.get("memory_weight") is not None:
+            memory_weight = payload.get("memory_weight")
+        if memory_weight is None and payload.get("memoryWeight") is not None:
+            memory_weight = payload.get("memoryWeight")
+        if per_source_limits is None and payload.get("per_source_limits") is not None:
+            per_source_limits = payload.get("per_source_limits")
+        if per_source_limits is None and payload.get("perSourceLimits") is not None:
+            per_source_limits = payload.get("perSourceLimits")
+        if (include_snippet is None or include_snippet == "") and payload.get("include_snippet") is not None:
+            include_snippet = payload.get("include_snippet")
+        if (include_snippet is None or include_snippet == "") and payload.get("includeSnippet") is not None:
+            include_snippet = payload.get("includeSnippet")
+        if (context_lines is None or (isinstance(context_lines, str) and context_lines.strip() == "")) and payload.get("context_lines") is not None:
+            context_lines = payload.get("context_lines")
+        if (context_lines is None or (isinstance(context_lines, str) and context_lines.strip() == "")) and payload.get("contextLines") is not None:
+            context_lines = payload.get("contextLines")
+        if (rerank_enabled is None or rerank_enabled == "") and payload.get("rerank_enabled") is not None:
+            rerank_enabled = payload.get("rerank_enabled")
+        if (rerank_enabled is None or rerank_enabled == "") and payload.get("rerankEnabled") is not None:
+            rerank_enabled = payload.get("rerankEnabled")
+        if (rerank_top_n is None or (isinstance(rerank_top_n, str) and rerank_top_n.strip() == "")) and payload.get("rerank_top_n") is not None:
+            rerank_top_n = payload.get("rerank_top_n")
+        if (rerank_top_n is None or (isinstance(rerank_top_n, str) and rerank_top_n.strip() == "")) and payload.get("rerankTopN") is not None:
+            rerank_top_n = payload.get("rerankTopN")
+        if (rerank_return_m is None or (isinstance(rerank_return_m, str) and rerank_return_m.strip() == "")) and payload.get("rerank_return_m") is not None:
+            rerank_return_m = payload.get("rerank_return_m")
+        if (rerank_return_m is None or (isinstance(rerank_return_m, str) and rerank_return_m.strip() == "")) and payload.get("rerankReturnM") is not None:
+            rerank_return_m = payload.get("rerankReturnM")
+        if (rerank_timeout_ms is None or (isinstance(rerank_timeout_ms, str) and rerank_timeout_ms.strip() == "")) and payload.get("rerank_timeout_ms") is not None:
+            rerank_timeout_ms = payload.get("rerank_timeout_ms")
+        if (rerank_timeout_ms is None or (isinstance(rerank_timeout_ms, str) and rerank_timeout_ms.strip() == "")) and payload.get("rerankTimeoutMs") is not None:
+            rerank_timeout_ms = payload.get("rerankTimeoutMs")
+        if (highlight_snippet is None or highlight_snippet == "") and payload.get("highlight_snippet") is not None:
+            highlight_snippet = payload.get("highlight_snippet")
+        if (highlight_snippet is None or highlight_snippet == "") and payload.get("highlightSnippet") is not None:
+            highlight_snippet = payload.get("highlightSnippet")
+        if (collection is None or (isinstance(collection, str) and collection.strip() == "")) and payload.get("collection") is not None:
+            collection = payload.get("collection")
+        if (language is None or (isinstance(language, str) and language.strip() == "")) and payload.get("language") is not None:
+            language = payload.get("language")
+        if (under is None or (isinstance(under, str) and under.strip() == "")) and payload.get("under") is not None:
+            under = payload.get("under")
+        if (kind is None or (isinstance(kind, str) and kind.strip() == "")) and payload.get("kind") is not None:
+            kind = payload.get("kind")
+        if (symbol is None or (isinstance(symbol, str) and symbol.strip() == "")) and payload.get("symbol") is not None:
+            symbol = payload.get("symbol")
+        if (path_regex is None or (isinstance(path_regex, str) and path_regex.strip() == "")) and payload.get("path_regex") is not None:
+            path_regex = payload.get("path_regex")
+        if (path_regex is None or (isinstance(path_regex, str) and path_regex.strip() == "")) and payload.get("pathRegex") is not None:
+            path_regex = payload.get("pathRegex")
+        if (path_glob is None or (isinstance(path_glob, str) and str(path_glob).strip() == "")) and payload.get("path_glob") is not None:
+            path_glob = payload.get("path_glob")
+        if (path_glob is None or (isinstance(path_glob, str) and str(path_glob).strip() == "")) and payload.get("pathGlob") is not None:
+            path_glob = payload.get("pathGlob")
+        if (not_glob is None or (isinstance(not_glob, str) and str(not_glob).strip() == "")) and payload.get("not_glob") is not None:
+            not_glob = payload.get("not_glob")
+        if (not_glob is None or (isinstance(not_glob, str) and str(not_glob).strip() == "")) and payload.get("notGlob") is not None:
+            not_glob = payload.get("notGlob")
+        if (ext is None or (isinstance(ext, str) and ext.strip() == "")) and payload.get("ext") is not None:
+            ext = payload.get("ext")
+        if (not_ is None or (isinstance(not_, str) and not_.strip() == "")) and payload.get("not") is not None:
+            not_ = payload.get("not")
+        if (not_ is None or (isinstance(not_, str) and not_.strip() == "")) and payload.get("not_") is not None:
+            not_ = payload.get("not_")
+        if (case is None or (isinstance(case, str) and case.strip() == "")) and payload.get("case") is not None:
+            case = payload.get("case")
+        if (compact is None or (isinstance(compact, str) and compact.strip() == "")) and payload.get("compact") is not None:
+            compact = payload.get("compact")
+
+
+    # Leniency: absorb nested 'kwargs' JSON payload some clients send (string or dict)
+    try:
+        _extra = _extract_kwargs_payload(kwargs)
+        if _extra:
+            if (query is None) or (isinstance(query, str) and query.strip() == ""):
+                query = _extra.get("query") or _extra.get("queries") or query
+            if (limit in (None, "")) and (_extra.get("limit") is not None):
+                limit = _extra.get("limit")
+            if (per_path in (None, "")) and (_extra.get("per_path") is not None):
+                per_path = _extra.get("per_path")
+            # Memory blending controls
+            if include_memories is None and (
+                (_extra.get("include_memories") is not None) or (_extra.get("includeMemories") is not None)
+            ):
+                include_memories = _extra.get("include_memories", _extra.get("includeMemories"))
+            if memory_weight is None and (
+                (_extra.get("memory_weight") is not None) or (_extra.get("memoryWeight") is not None)
+            ):
+                memory_weight = _extra.get("memory_weight", _extra.get("memoryWeight"))
+            if per_source_limits is None and (
+                (_extra.get("per_source_limits") is not None) or (_extra.get("perSourceLimits") is not None)
+            ):
+                per_source_limits = _extra.get("per_source_limits", _extra.get("perSourceLimits"))
+            # Passthrough search filters
+            if (include_snippet in (None, "")) and (_extra.get("include_snippet") is not None):
+                include_snippet = _extra.get("include_snippet")
+            if (context_lines in (None, "")) and (_extra.get("context_lines") is not None):
+                context_lines = _extra.get("context_lines")
+            if (rerank_enabled in (None, "")) and (_extra.get("rerank_enabled") is not None):
+                rerank_enabled = _extra.get("rerank_enabled")
+            if (rerank_top_n in (None, "")) and (_extra.get("rerank_top_n") is not None):
+                rerank_top_n = _extra.get("rerank_top_n")
+            if (rerank_return_m in (None, "")) and (_extra.get("rerank_return_m") is not None):
+                rerank_return_m = _extra.get("rerank_return_m")
+            if (rerank_timeout_ms in (None, "")) and (_extra.get("rerank_timeout_ms") is not None):
+                rerank_timeout_ms = _extra.get("rerank_timeout_ms")
+            if (highlight_snippet in (None, "")) and (_extra.get("highlight_snippet") is not None):
+                highlight_snippet = _extra.get("highlight_snippet")
+            if (collection is None or (isinstance(collection, str) and collection.strip() == "")) and _extra.get("collection"):
+                collection = _extra.get("collection")
+            if (language is None or (isinstance(language, str) and language.strip() == "")) and _extra.get("language"):
+                language = _extra.get("language")
+            if (under is None or (isinstance(under, str) and under.strip() == "")) and _extra.get("under"):
+                under = _extra.get("under")
+            if (kind is None or (isinstance(kind, str) and kind.strip() == "")) and _extra.get("kind"):
+                kind = _extra.get("kind")
+            if (symbol is None or (isinstance(symbol, str) and symbol.strip() == "")) and _extra.get("symbol"):
+                symbol = _extra.get("symbol")
+            if (path_regex is None or (isinstance(path_regex, str) and path_regex.strip() == "")) and _extra.get("path_regex"):
+                path_regex = _extra.get("path_regex")
+            if (path_glob in (None, "")) and (_extra.get("path_glob") is not None):
+                path_glob = _extra.get("path_glob")
+            if (not_glob in (None, "")) and (_extra.get("not_glob") is not None):
+                not_glob = _extra.get("not_glob")
+            if (ext is None or (isinstance(ext, str) and ext.strip() == "")) and _extra.get("ext"):
+                ext = _extra.get("ext")
+            if (not_ is None or (isinstance(not_, str) and not_.strip() == "")) and (
+                _extra.get("not") or _extra.get("not_")
+            ):
+                not_ = _extra.get("not") or _extra.get("not_")
+            if (case is None or (isinstance(case, str) and case.strip() == "")) and _extra.get("case"):
+                case = _extra.get("case")
+            if (compact in (None, "")) and (_extra.get("compact") is not None):
+                compact = _extra.get("compact")
+    except Exception:
+        pass
+
     # Normalize inputs
     coll = (collection or _default_collection()) or ""
     mcoll = (os.environ.get("MEMORY_COLLECTION_NAME") or coll) or ""
@@ -2388,10 +2558,10 @@ async def context_search(
         per_path_val = (
             int(per_path)
             if (per_path is not None and str(per_path).strip() != "")
-            else 1
+            else 2
         )
     except (ValueError, TypeError):
-        per_path_val = 1
+        per_path_val = 2
 
     # Normalize queries to list (accept q/text aliases)
     queries: List[str] = []
@@ -2483,8 +2653,23 @@ async def context_search(
         ext=ext,
         not_=not_,
         case=case,
-        compact=eff_compact,
+        compact=False,
     )
+
+    # Optional debug
+    if os.environ.get("DEBUG_CONTEXT_SEARCH"):
+        try:
+            logger.debug(
+                "DBG_CTX_SRCH_START",
+                extra={
+                    "queries": queries,
+                    "coll": coll,
+                    "limit": int(code_limit),
+                    "per_path": int(per_path_val),
+                },
+            )
+        except Exception:
+            pass
 
     # Shape code results to a common schema
     code_hits: List[Dict[str, Any]] = []
@@ -2508,6 +2693,129 @@ async def context_search(
                     "_raw": r,
                 }
                 code_hits.append(ch)
+    # More debug after shaping
+    if os.environ.get("DEBUG_CONTEXT_SEARCH"):
+        try:
+            logger.debug(
+                "DBG_CTX_SRCH_CODE_RES",
+                extra={
+                    "type": type(code_res).__name__,
+                    "has_results": bool(isinstance(code_res, dict) and isinstance(code_res.get("results"), list)),
+                    "len_results": (
+                        len(code_res.get("results"))
+                        if isinstance(code_res, dict) and isinstance(code_res.get("results"), list)
+                        else None
+                    ),
+                    "code_hits": len(code_hits),
+                },
+            )
+        except Exception:
+            pass
+
+    # HTTP fallback: if still empty, call our own repo_search over HTTP (safeguarded)
+    used_http_fallback = False
+    if not code_hits:
+        try:
+            from scripts.mcp_router import call_tool_http  # type: ignore
+            base = (os.environ.get("MCP_INDEXER_HTTP_URL") or "http://localhost:8003/mcp").rstrip("/")
+            http_args = {
+                "query": (queries if len(queries) > 1 else (queries[0] if queries else "")),
+                "limit": int(code_limit),
+                "per_path": int(per_path_val),
+                "include_snippet": bool(include_snippet),
+                "context_lines": int(context_lines) if context_lines not in (None, "") else 2,
+                "collection": coll,
+                "language": language or "",
+                "under": under or "",
+                "kind": kind or "",
+                "symbol": symbol or "",
+                "path_regex": path_regex or "",
+                "path_glob": path_glob or [],
+                "not_glob": not_glob or [],
+                "ext": ext or "",
+                "not": not_ or "",
+                "case": case or "",
+                "compact": bool(eff_compact),
+            }
+            timeout = float(os.environ.get("CONTEXT_SEARCH_HTTP_TIMEOUT", "20") or 20)
+            resp = await asyncio.to_thread(lambda: call_tool_http(base, "repo_search", http_args, timeout=timeout))
+            r = ((resp.get("result") or {}).get("structuredContent") or {}).get("result") or {}
+            http_items = r.get("results") or []
+            if isinstance(http_items, list):
+                for obj in http_items:
+                    if isinstance(obj, dict):
+                        code_hits.append(
+                            {
+                                "source": "code",
+                                "score": float(obj.get("score") or obj.get("s") or 0.0),
+                                "path": obj.get("path"),
+                                "symbol": obj.get("symbol", ""),
+                                "start_line": int(obj.get("start_line") or 0),
+                                "end_line": int(obj.get("end_line") or 0),
+                                "_raw": obj,
+                            }
+                        )
+            used_http_fallback = True
+            if os.environ.get("DEBUG_CONTEXT_SEARCH"):
+                try:
+                    logger.debug("DBG_CTX_SRCH_HTTP_FALLBACK", extra={"count": len(code_hits)})
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    # Fallback: if internal repo_search yielded no code hits, try direct in-process hybrid search
+    used_hybrid_fallback = False
+    if not code_hits and queries:
+        try:
+            from scripts.hybrid_search import run_hybrid_search  # type: ignore
+            model_name = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
+            model = _get_embedding_model(model_name)
+            prev_coll = os.environ.get("COLLECTION_NAME")
+            try:
+                os.environ["COLLECTION_NAME"] = coll
+                items2 = run_hybrid_search(
+                    queries=queries,
+                    limit=int(code_limit),
+                    per_path=int(per_path_val),
+                    language=language or None,
+                    under=under or None,
+                    kind=kind or None,
+                    symbol=symbol or None,
+                    ext=ext or None,
+                    not_filter=not_ or None,
+                    case=case or None,
+                    path_regex=path_regex or None,
+                    path_glob=path_glob or None,
+                    not_glob=not_glob or None,
+                    expand=str(os.environ.get("HYBRID_EXPAND", "0")).strip().lower() in {"1", "true", "yes", "on"},
+                    model=model,
+                )
+            finally:
+                if prev_coll is None:
+                    try:
+                        del os.environ["COLLECTION_NAME"]
+                    except Exception:
+                        pass
+                else:
+                    os.environ["COLLECTION_NAME"] = prev_coll
+            if isinstance(items2, list):
+                for obj in items2:
+                    if isinstance(obj, dict):
+                        code_hits.append(
+                            {
+                                "source": "code",
+                                "score": float(obj.get("score") or obj.get("s") or 0.0),
+                                "path": obj.get("path"),
+                                "symbol": obj.get("symbol", ""),
+                                "start_line": int(obj.get("start_line") or 0),
+                                "end_line": int(obj.get("end_line") or 0),
+                                "_raw": obj,
+                            }
+                        )
+            used_hybrid_fallback = True
+        except Exception:
+            pass
 
     # Option A: Query the memory MCP server over SSE and blend results (real integration)
     mem_hits: List[Dict[str, Any]] = []
@@ -2918,11 +3226,45 @@ async def context_search(
         ret = {"results": compacted, "total": len(compacted)}
         if memory_note:
             ret["memory_note"] = memory_note
+        ret["diag"] = {
+            "code_hits": len(code_hits),
+            "mem_hits": len(mem_hits),
+            "used_http_fallback": bool(locals().get("used_http_fallback", False)),
+            "used_hybrid_fallback": bool(locals().get("used_hybrid_fallback", False)),
+        }
+        ret["args"] = {
+            "queries": queries,
+            "collection": coll,
+            "limit": int(code_limit),
+            "per_path": int(per_path_val),
+            "include_memories": bool(include_mem),
+            "memory_weight": float(mw),
+            "include_snippet": bool(include_snippet),
+            "context_lines": int(context_lines) if context_lines not in (None, "") else 2,
+            "compact": bool(eff_compact),
+        }
         return ret
 
     ret = {"results": blended, "total": len(blended)}
     if memory_note:
         ret["memory_note"] = memory_note
+    ret["diag"] = {
+        "code_hits": len(code_hits),
+        "mem_hits": len(mem_hits),
+        "used_http_fallback": bool(locals().get("used_http_fallback", False)),
+        "used_hybrid_fallback": bool(locals().get("used_hybrid_fallback", False)),
+    }
+    ret["args"] = {
+        "queries": queries,
+        "collection": coll,
+        "limit": int(code_limit),
+        "per_path": int(per_path_val),
+        "include_memories": bool(include_mem),
+        "memory_weight": float(mw),
+        "include_snippet": bool(include_snippet),
+        "context_lines": int(context_lines) if context_lines not in (None, "") else 2,
+        "compact": bool(eff_compact),
+    }
     return ret
 @mcp.tool()
 async def expand_query(query: Any = None, max_new: Any = None) -> Dict[str, Any]:
