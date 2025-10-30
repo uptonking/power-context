@@ -30,7 +30,7 @@ INDEX_MICRO_CHUNKS=1 MAX_MICRO_CHUNKS_PER_FILE=200 make reset-dev-dual
 
 - You can skip the decoder; it’s feature-flagged off by default.
 ### Switch decoder model (llama.cpp)
-- Default tiny model: Qwen2.5 Coder 1.5B (GGUF)
+- Default tiny model: Granite 4.0 Micro (Q4_K_M GGUF)
 - Change the model by overriding Make vars (downloads to ./models/model.gguf):
 ```bash
 LLAMACPP_MODEL_URL="https://huggingface.co/ORG/MODEL/resolve/main/model.gguf" \
@@ -44,12 +44,18 @@ Alternative (compose only)
 HOST_INDEX_PATH="$(pwd)" FASTMCP_INDEXER_PORT=8001 docker compose up -d qdrant mcp mcp_indexer indexer watcher
 ```
 
+### Recommended development flow
+1. Bring the stack up with the reset target that matches your client (`make reset-dev`, `make reset-dev-codex`, or `make reset-dev-dual`).
+2. When you need a clean ingest (after large edits or when the `qdrant_status` tool/`make qdrant-status` reports zero points), run `make reindex-hard`. This clears `.codebase/cache.json` before recreating the collection so unchanged files cannot be skipped.
+3. Confirm collection health with `make qdrant-status` (calls the MCP router to print counts and timestamps).
+4. Iterate using search helpers such as `make hybrid ARGS="--query 'async file watcher'"` or invoke the MCP tools directly from your client.
+
 ### Make targets (quick reference)
 - reset-dev: SSE stack on 8000/8001; seeds Qdrant, downloads tokenizer + tiny llama.cpp model, reindexes, brings up memory + indexer + watcher
 - reset-dev-codex: RMCP stack on 8002/8003; same seeding + bring-up for Codex/Qodo
 - reset-dev-dual: SSE + RMCP together (8000/8001 and 8002/8003)
 - up / down / logs / ps: Docker Compose lifecycle helpers
-- index / reindex: Index current repo; reindex recreates the collection first
+- index / reindex / reindex-hard: Index current repo; `reindex` recreates the collection; `reindex-hard` also clears the local cache so unchanged files are re-uploaded
 - index-here / index-path: Index arbitrary host path without cloning into this repo
 - watch: Watch-and-reindex on file changes
 - warm / health: Warm caches and run health checks
@@ -57,6 +63,7 @@ HOST_INDEX_PATH="$(pwd)" FASTMCP_INDEXER_PORT=8001 docker compose up -d qdrant m
 - setup-reranker / rerank-local / quantize-reranker: Manage ONNX reranker assets and local runs
 - prune / prune-path: Remove stale points (missing files or hash mismatch)
 - llama-model / tokenizer: Fetch tiny GGUF model and tokenizer.json
+- qdrant-status / qdrant-list / qdrant-prune / qdrant-index-root: Convenience wrappers that route through the MCP bridge to inspect or maintain collections
 
 ## Index another codebase (outside this repo)
 
@@ -146,6 +153,7 @@ Ports
 | HOST_INDEX_PATH | Host path mounted at /work in containers | current repo (.) |
 | QDRANT_URL | Qdrant base URL | container: http://qdrant:6333; local: http://localhost:6333 |
 | INDEX_MICRO_CHUNKS | Enable token-based micro-chunking | 0 (off) |
+| HYBRID_EXPAND | Enable heuristic multi-query expansion | 0 (off) |
 | MAX_MICRO_CHUNKS_PER_FILE | Cap micro-chunks per file | 200 |
 | TOKENIZER_URL | HF tokenizer.json URL (for Make download) | n/a (use Make target) |
 | TOKENIZER_PATH | Local path where tokenizer is saved (Make) | models/tokenizer.json |
@@ -165,6 +173,7 @@ Ports
 | FASTMCP_HTTP_PORT | Memory RMCP host port mapping | 8002 |
 | FASTMCP_INDEXER_HTTP_PORT | Indexer RMCP host port mapping | 8003 |
 | FASTMCP_HEALTH_PORT | Health port (memory/indexer) | memory: 18000; indexer: 18001 |
+| LLM_EXPAND_MAX | Max alternate queries generated via LLM | 0 |
 
 ## Running tests
 
@@ -220,7 +229,8 @@ curl -sI http://localhost:8001/sse | head -n1
 4) Single command to index + search
 ```bash
 # Fresh index of your repo and a quick hybrid example
-make reindex
+make reindex-hard
+make qdrant-status
 make hybrid ARGS="--query 'async file watcher' --limit 5 --include-snippet"
 ```
 

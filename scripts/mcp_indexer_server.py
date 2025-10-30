@@ -1470,7 +1470,7 @@ async def repo_search(
                     path_regex=path_regex or None,
                     path_glob=(path_globs or None),
                     not_glob=(not_globs or None),
-                    expand=str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower()
+                    expand=str(os.environ.get("HYBRID_EXPAND", "0")).strip().lower()
                     in {"1", "true", "yes", "on"},
                     model=model,
                 )
@@ -1553,7 +1553,7 @@ async def repo_search(
                     path_regex=path_regex or None,
                     path_glob=(path_globs or None),
                     not_glob=(not_globs or None),
-                    expand=str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower() in {"1", "true", "yes", "on"},
+                    expand=str(os.environ.get("HYBRID_EXPAND", "0")).strip().lower() in {"1", "true", "yes", "on"},
                     model=model,
                 )
                 json_lines = items
@@ -3404,7 +3404,7 @@ def _ca_prepare_filters_and_retrieve(
         path_regex=(path_regex or kwargs.get("path_regex") or None),
         path_glob=(eff_path_glob or None),
         not_glob=eff_not_glob,
-        expand=False if did_local_expand else (str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower() in {"1","true","yes","on"}),
+        expand=False if did_local_expand else (str(os.environ.get("HYBRID_EXPAND", "0")).strip().lower() in {"1","true","yes","on"}),
         model=model,
     )
     if os.environ.get("DEBUG_CONTEXT_ANSWER"):
@@ -3444,7 +3444,7 @@ def _ca_prepare_filters_and_retrieve(
                     path_regex=(path_regex or kwargs.get("path_regex") or None),
                     path_glob=(eff_path_glob or None),
                     not_glob=eff_not_glob,
-                    expand=False if did_local_expand else (str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower() in {"1","true","yes","on"}),
+                    expand=False if did_local_expand else (str(os.environ.get("HYBRID_EXPAND", "0")).strip().lower() in {"1","true","yes","on"}),
                     model=model,
                 )
                 def _ikey(it: Dict[str, Any]):
@@ -3471,7 +3471,7 @@ def _ca_prepare_filters_and_retrieve(
                         path_regex=(path_regex or kwargs.get("path_regex") or None),
                         path_glob=(eff_path_glob or None),
                         not_glob=eff_not_glob,
-                        expand=False if did_local_expand else (str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower() in {"1","true","yes","on"}),
+                        expand=False if did_local_expand else (str(os.environ.get("HYBRID_EXPAND", "0")).strip().lower() in {"1","true","yes","on"}),
                         model=model,
                     )
 
@@ -3627,7 +3627,7 @@ def _ca_fallback_and_budget(
                 expand=False
                 if did_local_expand
                 else (
-                    str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower()
+                    str(os.environ.get("HYBRID_EXPAND", "0")).strip().lower()
                     in {"1", "true", "yes", "on"}
                 ),
                 model=model,
@@ -3647,7 +3647,7 @@ def _ca_fallback_and_budget(
                 path_regex=None,
                 path_glob=None,
                 not_glob=eff_not_glob,
-                expand=False if did_local_expand else (str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower() in {"1", "true", "yes", "on"}),
+                expand=False if did_local_expand else (str(os.environ.get("HYBRID_EXPAND", "0")).strip().lower() in {"1", "true", "yes", "on"}),
                 model=model,
             )
 
@@ -4672,7 +4672,7 @@ async def context_answer(
             path_regex=None,
             path_glob=None,
             not_glob=eff_not_glob,
-            expand=False if did_local_expand else (str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower() in {"1","true","yes","on"}),
+            expand=False if did_local_expand else (str(os.environ.get("HYBRID_EXPAND", "0")).strip().lower() in {"1","true","yes","on"}),
             model=model,
         )
     except Exception:
