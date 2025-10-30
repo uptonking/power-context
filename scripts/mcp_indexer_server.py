@@ -3078,8 +3078,11 @@ def _validate_answer_output(text: str, citations: list) -> dict:
         has_cite = ("[" in t and "]" in t) or not citations
         hedge_terms = ["likely", "might", "could", "appears", "seems", "probably"]
         hedge_score = sum(low.count(w) for w in hedge_terms)
-        # Loosen cutoff: allow bracket/quote as valid ending to accommodate short model outputs
-        looks_cutoff = (len(t) > 120 and not t.endswith((".", "!", "?", "]", '"'))) or t.endswith("\n")
+        # Configurable cutoff: allow citation/quote/paren endings and tune min length via CTX_CUTOFF_MIN_CHARS (default 220)
+        MIN = safe_int(os.environ.get("CTX_CUTOFF_MIN_CHARS", ""), default=220, logger=logger, context="CTX_CUTOFF_MIN_CHARS")
+        valid_end = (".", "!", "?", "]", '"', "'", "”", "’", ")")
+        tail = t.rstrip()
+        looks_cutoff = (len(tail) > MIN and not tail.endswith(valid_end))
         ok = bool(t) and (has_cite or not citations) and hedge_score < 4 and not looks_cutoff
         return {
             "ok": ok,
@@ -3786,7 +3789,18 @@ def _ca_fallback_and_budget(
     try:
         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
             logger.debug("BUDGET_BEFORE", extra={"items": len(items)})
-        budgeted = _merge_and_budget_spans(items)
+        _pairs = {}
+        try:
+            # Relax budgets for context_answer unless explicitly disabled via CTX_RELAX_BUDGETS=0
+            if str(os.environ.get("CTX_RELAX_BUDGETS", "1")).strip().lower() in {"1", "true", "yes", "on"}:
+                _pairs = {
+                    "MICRO_BUDGET_TOKENS": os.environ.get("MICRO_BUDGET_TOKENS", "1024"),
+                    "MICRO_OUT_MAX_SPANS": os.environ.get("MICRO_OUT_MAX_SPANS", "8"),
+                }
+        except Exception:
+            _pairs = {"MICRO_BUDGET_TOKENS": "1024", "MICRO_OUT_MAX_SPANS": "8"}
+        with _env_overrides(_pairs):
+            budgeted = _merge_and_budget_spans(items)
         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
             logger.debug("BUDGET_AFTER", extra={"items": len(budgeted)})
         if not budgeted and items:
