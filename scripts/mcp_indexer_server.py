@@ -33,6 +33,7 @@ import subprocess
 import threading
 from typing import Any, Dict, Optional, List
 
+from pathlib import Path
 import sys
 
 # Import structured logging and error handling (after sys.path setup)
@@ -4004,6 +4005,152 @@ def _ca_fallback_and_budget(
                 except Exception:
                     pass
 
+    # Multi-collection fallback: index-only search across other workspaces/collections
+    try:
+        _mc_enabled = str(os.environ.get("CTX_MULTI_COLLECTION", "1")).strip().lower() in {"1","true","yes","on"}
+        if _mc_enabled and (len(items) < max(2, int(lim) // 2)):
+            # Discover other workspace collections (search parent of cwd by default)
+            from scripts.workspace_state import list_workspaces as _ws_list_workspaces  # type: ignore
+            try:
+                _sr = os.environ.get("WORKSPACE_SEARCH_ROOT")
+                if not _sr:
+                    from pathlib import Path as _Path
+                    _sr = str(_Path(os.getcwd()).resolve().parent)
+            except Exception:
+                _sr = "/work"
+            _workspaces = _ws_list_workspaces(_sr) or []
+            _current_coll = os.environ.get("COLLECTION_NAME") or ""
+            _colls = [w.get("collection_name") for w in _workspaces if isinstance(w, dict) and w.get("collection_name")]
+            _colls = [c for c in _colls if isinstance(c, str) and c.strip() and c.strip() != _current_coll]
+            _maxc = safe_int(os.environ.get("CTX_MAX_COLLECTIONS", "4"), default=4, logger=logger, context="CTX_MAX_COLLECTIONS")
+            _colls = _colls[: max(0, _maxc)]
+            if _colls:
+                from scripts.hybrid_search import run_hybrid_search as _rhs  # type: ignore
+                _agg: list[Dict[str, Any]] = []
+                for _c in _colls:
+                    try:
+                        with _env_overrides({"COLLECTION_NAME": _c}):
+                            _res = _rhs(
+                                queries=queries,
+                                limit=int(max(lim, 8)),
+                                per_path=int(max(ppath, 2)),
+                                language=eff_language,
+                                under=override_under or None,
+                                kind=kind or None,
+                                symbol=sym_arg or None,
+                                ext=ext or None,
+                                not_filter=not_ or None,
+                                case=case or None,
+                                path_regex=path_regex or None,
+                                path_glob=eff_path_glob,
+                                not_glob=not_glob or None,
+                                expand=str(os.environ.get("HYBRID_EXPAND", "0")).strip().lower() in {"1","true","yes","on"},
+                                model=model,
+                            ) or []
+                            for _it in _res:
+                                if isinstance(_it, dict):
+                                    _agg.append(_it)
+                    except Exception:
+                        if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                            try:
+                                logger.debug("MULTI_COLLECTION_ONE_FAILED", extra={"collection": _c})
+                            except Exception:
+                                pass
+                if _agg:
+                    _seen = set()
+                    _ded = []
+                    for _it in _agg:
+                        _k = (
+                            str(_it.get("path") or ""),
+                            int(_it.get("start_line") or 0),
+                            int(_it.get("end_line") or 0),
+                        )
+                        if _k[0] and _k not in _seen:
+                            _seen.add(_k)
+                            _ded.append(_it)
+                    _ded.sort(key=lambda x: float(x.get("score") or x.get("fusion_score") or x.get("raw_score") or 0.0), reverse=True)
+                    items = (items or []) + _ded[: int(max(lim, 4))]
+                    if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                        try:
+                            logger.debug("MULTI_COLLECTION", extra={"count": len(_ded), "first": (_ded[0].get("path") if _ded else None)})
+                        except Exception:
+                            pass
+    except Exception:
+        if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+            logger.debug("MULTI_COLLECTION_FAIL", exc_info=True)
+    # Doc-aware retrieval pass: pull READMEs/docs when results are thin (index-only)
+    try:
+        _doc_enabled = str(os.environ.get("CTX_DOC_PASS", "1")).strip().lower() in {"1","true","yes","on"}
+        _qtext = " ".join([q for q in (queries or []) if isinstance(q, str)]).lower()
+        _broad_tokens = ("how", "explain", "overview", "architecture", "design", "work", "works", "guide", "readme")
+        _looks_broad = any(t in _qtext for t in _broad_tokens)
+
+        # Consider docs pass when results are thin OR the query looks broad
+        if _doc_enabled and ((len(items) < max(3, int(lim) // 2)) or _looks_broad):
+            # Skip if the user provided strict filters; this is for broad prompts
+            _doc_strict_filters = bool(
+                eff_language or eff_path_glob or path_regex or sym_arg or ext or kind or override_under
+            )
+            if not _doc_strict_filters:
+                from scripts.hybrid_search import run_hybrid_search as _rhs  # type: ignore
+                _doc_globs = [
+                    "**/README*",
+                    "README*",
+                    "docs/**",
+                    "**/docs/**",
+                    "**/*ARCHITECTURE*",
+                    "**/*architecture*",
+                    "**/*DESIGN*",
+                    "**/*design*",
+                    "**/*.md",
+                    "**/*.rst",
+                    "**/*.txt",
+                    "**/*.adoc",
+                ]
+                _doc_results = _rhs(
+                    queries=queries,
+                    limit=int(max(lim, 8)),
+                    per_path=int(max(ppath, 2)),
+                    language=None,
+                    under=override_under or None,
+                    kind=None,
+                    symbol=None,
+                    ext=None,
+                    not_filter=not_ or None,
+                    case=case or None,
+                    path_regex=None,
+                    path_glob=_doc_globs,
+                    not_glob=not_glob or None,
+                    expand=str(os.environ.get("HYBRID_EXPAND", "0")).strip().lower() in {"1","true","yes","on"},
+                    model=model,
+                ) or []
+                if _doc_results:
+                    _seen = set((str(it.get("path") or ""), int(it.get("start_line") or 0), int(it.get("end_line") or 0)) for it in (items or []))
+                    _merged = []
+                    for it in _doc_results:
+                        if not isinstance(it, dict):
+                            continue
+                        _k = (
+                            str(it.get("path") or ""),
+                            int(it.get("start_line") or 0),
+                            int(it.get("end_line") or 0),
+                        )
+                        if _k[0] and _k not in _seen:
+                            _seen.add(_k)
+                            _merged.append(it)
+                    # Prefer highest scoring doc snippets, but cap to avoid crowding out code spans
+                    _merged.sort(key=lambda x: float(x.get("score") or x.get("fusion_score") or x.get("raw_score") or 0.0), reverse=True)
+                    _cap = max(2, int(lim) // 2)
+                    items = (items or []) + _merged[:_cap]
+                    if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                        try:
+                            logger.debug("DOC_PASS", extra={"count": len(_merged), "first": (_merged[0].get("path") if _merged else None)})
+                        except Exception:
+                            pass
+    except Exception:
+        if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+            logger.debug("DOC_PASS_FAIL", exc_info=True)
+
     # Tier 3 fallback: filesystem heuristics
     _strict_filters = bool(
         eff_language
@@ -4015,7 +4162,7 @@ def _ca_fallback_and_budget(
         or override_under
     )
     # If Tier-1 and Tier-2 yielded nothing, do a tiny filesystem scan as a last resort
-    if (not items) and not did_local_expand and not _strict_filters:
+    if (not items) and not did_local_expand and not _strict_filters and str(os.environ.get("CTX_TIER3_FS", "0")).strip().lower() in {"1","true","yes","on"}:
         try:
             import re as _re
             primary = _primary_identifier_from_queries(queries)
@@ -5083,7 +5230,9 @@ async def context_answer(
                     cand_paths.append(fp)
         except Exception:
             pass
-        supplements = _ca_ident_supplement(cand_paths, asked_ident, include_snippet=bool(include_snippet), max_hits=3)
+        supplements = []
+        if str(os.environ.get("CTX_TIER3_FS", "0")).strip().lower() in {"1","true","yes","on"}:
+            supplements = _ca_ident_supplement(cand_paths, asked_ident, include_snippet=bool(include_snippet), max_hits=3)
         if supplements:
             # Prepend supplements so the decoder sees them first
             def _k(s: Dict[str, Any]):
