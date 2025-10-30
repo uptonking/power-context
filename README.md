@@ -1,3 +1,22 @@
+## Context-Engine at a Glance
+
+Context-Engine is a plug-and-play MCP retrieval stack that unifies code indexing, hybrid search, and optional llama.cpp decoding so product teams can ship context-aware agents in minutes, not weeks.
+
+**Key differentiators**
+- One-command bring-up delivers dual SSE/RMCP endpoints, seeded Qdrant, and live watch/reindex loops for fast local validation.
+- ReFRAG-inspired micro-chunking, token budgeting, and gate-first filtering surface precise spans while keeping prompts lean.
+- Shared memory/indexer schema and reranker tooling make it easy to mix dense, lexical, and semantic signals without bespoke glue code.
+- Operational playbooks (prune, warm, health, cache) plus rich tests give teams confidence to take the stack from laptop to production.
+
+**Built for**
+- AI platform and IDE tooling teams that need an MCP-compliant context layer without rebuilding indexing, embeddings, or retrieval heuristics.
+- DevEx and documentation groups standing up internal assistants that must ingest large or fast-changing codebases with minimal babysitting.
+
+**Solves**
+- Slow agent onboarding caused by fractured infra—ship a consistent stack for memory, search, and decoding under one config.
+- Context drift in monorepos—automatic micro-chunking and watcher-driven reindexing keep embeddings aligned with reality.
+- Fragmented client compatibility—serve both legacy SSE and modern HTTP RMCP clients from the same deployment.
+
 ## Context-Engine
 
 
