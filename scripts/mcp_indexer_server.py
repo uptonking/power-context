@@ -31,6 +31,7 @@ import uuid
 import os
 import subprocess
 import threading
+import time
 from typing import Any, Dict, Optional, List
 
 from pathlib import Path
@@ -141,6 +142,7 @@ _ENV_LOCK = threading.RLock()
 @contextlib.contextmanager
 def _env_overrides(pairs: Dict[str, str]):
     prev: Dict[str, Optional[str]] = {}
+    err = None
     try:
         for k, v in (pairs or {}).items():
             prev[k] = os.environ.get(k)
@@ -357,70 +359,87 @@ def _start_readyz_server():
         return False
 
 
+# Import the new subprocess manager
+try:
+    from scripts.subprocess_manager import run_subprocess_async
+except ImportError:
+    # Fallback if subprocess_manager not available
+    logger.warning("subprocess_manager not available, using fallback implementation")
+
+    async def run_subprocess_async(cmd: List[str], timeout: Optional[float] = None, env: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+        """Fallback subprocess runner if subprocess_manager is not available."""
+        proc: Optional[asyncio.subprocess.Process] = None
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=env,
+            )
+            # Default timeout from env if not provided by caller
+            if timeout is None:
+                timeout = MCP_TOOL_TIMEOUT_SECS
+            try:
+                stdout_b, stderr_b = await asyncio.wait_for(
+                    proc.communicate(), timeout=timeout
+                )
+                code = proc.returncode
+            except asyncio.TimeoutError:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                return {
+                    "ok": False,
+                    "code": -1,
+                    "stdout": "",
+                    "stderr": f"Command timed out after {timeout}s",
+                }
+            stdout = (stdout_b or b"").decode("utf-8", errors="ignore")
+            stderr = (stderr_b or b"").decode("utf-8", errors="ignore")
+
+            def _cap_tail(s: str) -> str:
+                if not s:
+                    return s
+                return (
+                    s
+                    if len(s) <= MAX_LOG_TAIL
+                    else ("...[tail truncated]\n" + s[-MAX_LOG_TAIL:])
+                )
+
+            return {
+                "ok": code == 0,
+                "code": code,
+                "stdout": _cap_tail(stdout),
+                "stderr": _cap_tail(stderr),
+            }
+        except Exception as e:
+            return {"ok": False, "code": -2, "stdout": "", "stderr": str(e)}
+        finally:
+            # Explicitly close pipes to avoid unraisable warnings on transport GC
+            try:
+                if proc is not None:
+                    if proc.stdout is not None:
+                        proc.stdout.close()
+                    if proc.stderr is not None:
+                        proc.stderr.close()
+                    # Ensure the process is reaped
+                    with contextlib.suppress(Exception):
+                        await proc.wait()
+            except Exception:
+                pass
+
 # Async subprocess runner to avoid blocking event loop
 async def _run_async(
     cmd: list[str], env: Optional[Dict[str, str]] = None, timeout: Optional[float] = None
 ) -> Dict[str, Any]:
-    proc: Optional[asyncio.subprocess.Process] = None
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
-        )
-        # Default timeout from env if not provided by caller
-        if timeout is None:
-            timeout = MCP_TOOL_TIMEOUT_SECS
-        try:
-            stdout_b, stderr_b = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout
-            )
-            code = proc.returncode
-        except asyncio.TimeoutError:
-            try:
-                proc.kill()
-            except Exception:
-                pass
-            return {
-                "ok": False,
-                "code": -1,
-                "stdout": "",
-                "stderr": f"Command timed out after {timeout}s",
-            }
-        stdout = (stdout_b or b"").decode("utf-8", errors="ignore")
-        stderr = (stderr_b or b"").decode("utf-8", errors="ignore")
+    """Run subprocess with proper resource management using SubprocessManager."""
+    # Default timeout from env if not provided by caller
+    if timeout is None:
+        timeout = MCP_TOOL_TIMEOUT_SECS
 
-        def _cap_tail(s: str) -> str:
-            if not s:
-                return s
-            return (
-                s
-                if len(s) <= MAX_LOG_TAIL
-                else ("...[tail truncated]\n" + s[-MAX_LOG_TAIL:])
-            )
-
-        return {
-            "ok": code == 0,
-            "code": code,
-            "stdout": _cap_tail(stdout),
-            "stderr": _cap_tail(stderr),
-        }
-    except Exception as e:
-        return {"ok": False, "code": -2, "stdout": "", "stderr": str(e)}
-    finally:
-        # Explicitly close pipes to avoid unraisable warnings on transport GC
-        try:
-            if proc is not None:
-                if proc.stdout is not None:
-                    proc.stdout.close()
-                if proc.stderr is not None:
-                    proc.stderr.close()
-                # Ensure the process is reaped
-                with contextlib.suppress(Exception):
-                    await proc.wait()
-        except Exception:
-            pass
+    # Use the new subprocess manager for proper resource cleanup
+    return await run_subprocess_async(cmd, timeout=timeout, env=env)
 
 
 # Embedding model cache to avoid re-initialization costs
@@ -4043,7 +4062,7 @@ def _ca_fallback_and_budget(
                                 case=case or None,
                                 path_regex=path_regex or None,
                                 path_glob=eff_path_glob,
-                                not_glob=not_glob or None,
+                                not_glob=eff_not_glob,
                                 expand=str(os.environ.get("HYBRID_EXPAND", "0")).strip().lower() in {"1","true","yes","on"},
                                 model=model,
                             ) or []
@@ -4123,7 +4142,7 @@ def _ca_fallback_and_budget(
                     case=case or None,
                     path_regex=None,
                     path_glob=_doc_globs,
-                    not_glob=not_glob or None,
+                    not_glob=eff_not_glob,
                     expand=str(os.environ.get("HYBRID_EXPAND", "0")).strip().lower() in {"1","true","yes","on"},
                     model=model,
                 ) or []
@@ -4168,7 +4187,7 @@ def _ca_fallback_and_budget(
                                 case=case or None,
                                 path_regex=None,
                                 path_glob=_doc_globs,
-                                not_glob=not_glob or None,
+                                not_glob=eff_not_glob,
                                 expand=False,
                                 model=model,
                             ) or []
@@ -5063,6 +5082,9 @@ async def context_answer(
     case = _flt.get("case")
     not_ = _flt.get("not_")
 
+    # Soft per-call deadline to avoid client-side 60s timeouts
+    _ca_start_ts = time.time()
+
     if os.environ.get("DEBUG_CONTEXT_ANSWER"):
         logger.debug("ARG_SHAPE", extra={"normalized_queries": queries, "limit": lim, "per_path": ppath})
 
@@ -5106,152 +5128,153 @@ async def context_answer(
         "COLLECTION_NAME": os.environ.get("COLLECTION_NAME"),
         "MICRO_BUDGET_TOKENS": os.environ.get("MICRO_BUDGET_TOKENS"),
     }
-    # Enable ReFRAG gate-first for context compression
-    os.environ["REFRAG_MODE"] = "1"
-    os.environ["REFRAG_GATE_FIRST"] = os.environ.get("REFRAG_GATE_FIRST", "1") or "1"
-    os.environ["COLLECTION_NAME"] = coll
-    if budget_tokens is not None and str(budget_tokens).strip() != "":
-        os.environ["MICRO_BUDGET_TOKENS"] = str(budget_tokens)
-    # Optionally expand queries via local decoder (tight cap) when requested
-    queries = list(queries)
-    # For LLM answering, default to include snippets so the model sees actual code
-    if include_snippet in (None, ""):
-        include_snippet = True
-    did_local_expand = False  # Ensure defined even if expansion is disabled or fails
-
-
-    do_expand = safe_bool(expand, default=False, logger=logger, context="expand") or \
-                safe_bool(os.environ.get("HYBRID_EXPAND", "0"), default=False, logger=logger, context="HYBRID_EXPAND")
-
-    if do_expand:
-        try:
-            from scripts.refrag_llamacpp import LlamaCppRefragClient, is_decoder_enabled  # type: ignore
-            if is_decoder_enabled():
-                prompt = (
-                    "You expand code search queries. Given one or more short queries, "
-                    "propose up to 2 compact alternates. Return JSON array of strings only.\n"
-                    f"Queries: {queries}\n"
-                )
-                client = LlamaCppRefragClient()
-                # tight decoding for expansions
-                out = client.generate_with_soft_embeddings(
-                    prompt=prompt, max_tokens=int(os.environ.get("EXPAND_MAX_TOKENS", "64") or 64),
-                    temperature=0.0,  # Always 0 for deterministic expansion
-                    top_k=int(os.environ.get("EXPAND_TOP_K", "30") or 30),
-                    top_p=float(os.environ.get("EXPAND_TOP_P", "0.9") or 0.9),
-                    stop=["\n\n"]
-                )
-                import json as _json
-                alts = []
-                try:
-                    parsed = _json.loads(out)
-                except (_json.JSONDecodeError, TypeError, ValueError):
-                    # Salvage: try to extract a JSON array substring
-                    try:
-                        start = out.find("[")
-                        end = out.rfind("]")
-                        if start != -1 and end != -1 and end > start:
-                            parsed = _json.loads(out[start:end+1])
-                        else:
-                            parsed = []
-                    except Exception as e2:
-                        logger.debug("Expand parse salvage failed", exc_info=e2)
-                        parsed = []
-                if isinstance(parsed, list):
-                    for s in parsed:
-                        if isinstance(s, str) and s and s not in queries:
-                            alts.append(s)
-                            if len(alts) >= 2:
-                                break
-                if not alts and out and out.strip():
-                    # Heuristic fallback: split lines, trim bullets, take up to 2
-                    for cand in [t.strip().lstrip("-• ") for t in out.splitlines() if t.strip()][:2]:
-                        if cand and cand not in queries and len(alts) < 2:
-                            alts.append(cand)
-                if alts:
-                    queries.extend(alts)
-                    did_local_expand = True  # Mark that we already expanded
-        except (ImportError, AttributeError) as e:
-            logger.warning("Query expansion failed (decoder unavailable)", exc_info=e)
-        except (TimeoutError, ConnectionError) as e:
-            logger.warning("Query expansion failed (decoder timeout/connection)", exc_info=e)
-        except Exception as e:
-            logger.error("Unexpected error during query expansion", exc_info=e)
-
-    # Refactored retrieval pipeline (filters + hybrid search)
-    _retr = _ca_prepare_filters_and_retrieve(
-        queries=queries,
-        lim=lim,
-        ppath=ppath,
-        filters=_cfg["filters"],
-        model=model,
-        did_local_expand=did_local_expand,
-        kwargs={
-            "language": _cfg["filters"].get("language"),
-            "under": _cfg["filters"].get("under"),
-            "path_glob": _cfg["filters"].get("path_glob"),
-            "not_glob": _cfg["filters"].get("not_glob"),
-            "path_regex": _cfg["filters"].get("path_regex"),
-            "ext": _cfg["filters"].get("ext"),
-            "kind": _cfg["filters"].get("kind"),
-            "case": _cfg["filters"].get("case"),
-            "symbol": _cfg["filters"].get("symbol"),
-        },
-    )
-    items = _retr["items"]
-    eff_language = _retr["eff_language"]
-    eff_path_glob = _retr["eff_path_glob"]
-    eff_not_glob = _retr["eff_not_glob"]
-    override_under = _retr["override_under"]
-    sym_arg = _retr["sym_arg"]
-    cwd_root = _retr["cwd_root"]
-    path_regex = _retr["path_regex"]
-    ext = _retr["ext"]
-    kind = _retr["kind"]
-    case = _retr["case"]
-    req_language = eff_language
-
-    fallback_kwargs = dict(kwargs or {})
-    for key in ("path_glob", "language", "under"):
-        fallback_kwargs.pop(key, None)
-
-    def _to_glob_list(val: Any) -> list[str]:
-        if not val:
-            return []
-        if isinstance(val, (list, tuple, set)):
-            return [str(x).strip() for x in val if str(x).strip()]
-        vs = str(val).strip()
-        return [vs] if vs else []
-
-    err = None
+    err: Optional[str] = None
     try:
-        spans = _ca_fallback_and_budget(
-            items=items,
-            queries=queries,
-            lim=lim,
-            ppath=ppath,
-            eff_language=eff_language,
-            eff_path_glob=eff_path_glob,
-            eff_not_glob=eff_not_glob,
-            path_regex=path_regex,
-            sym_arg=sym_arg,
-            ext=ext,
-            kind=kind,
-            override_under=override_under,
-            did_local_expand=did_local_expand,
-            model=model,
-            req_language=req_language,
-            not_=not_,
-            case=case,
-            cwd_root=cwd_root,
-            include_snippet=bool(include_snippet),
-            kwargs=fallback_kwargs,
-        )
-    except Exception as e:
-        err = str(e)
-        spans = []
-        if os.environ.get("DEBUG_CONTEXT_ANSWER"):
-            logger.debug("EXCEPTION", exc_info=e, extra={"error": err})
+        # Enable ReFRAG gate-first for context compression
+        os.environ["REFRAG_MODE"] = "1"
+        os.environ["REFRAG_GATE_FIRST"] = os.environ.get("REFRAG_GATE_FIRST", "1") or "1"
+        os.environ["COLLECTION_NAME"] = coll
+        if budget_tokens is not None and str(budget_tokens).strip() != "":
+            os.environ["MICRO_BUDGET_TOKENS"] = str(budget_tokens)
+        # Optionally expand queries via local decoder (tight cap) when requested
+        queries = list(queries)
+        # For LLM answering, default to include snippets so the model sees actual code
+        if include_snippet in (None, ""):
+            include_snippet = True
+        did_local_expand = False  # Ensure defined even if expansion is disabled or fails
+
+
+        do_expand = safe_bool(expand, default=False, logger=logger, context="expand") or \
+                    safe_bool(os.environ.get("HYBRID_EXPAND", "0"), default=False, logger=logger, context="HYBRID_EXPAND")
+
+        if do_expand:
+            try:
+                from scripts.refrag_llamacpp import LlamaCppRefragClient, is_decoder_enabled  # type: ignore
+                if is_decoder_enabled():
+                    prompt = (
+                        "You expand code search queries. Given one or more short queries, "
+                        "propose up to 2 compact alternates. Return JSON array of strings only.\n"
+                        f"Queries: {queries}\n"
+                    )
+                    client = LlamaCppRefragClient()
+                    # tight decoding for expansions
+                    out = client.generate_with_soft_embeddings(
+                        prompt=prompt, max_tokens=int(os.environ.get("EXPAND_MAX_TOKENS", "64") or 64),
+                        temperature=0.0,  # Always 0 for deterministic expansion
+                        top_k=int(os.environ.get("EXPAND_TOP_K", "30") or 30),
+                        top_p=float(os.environ.get("EXPAND_TOP_P", "0.9") or 0.9),
+                        stop=["\n\n"]
+                    )
+                    import json as _json
+                    alts = []
+                    try:
+                        parsed = _json.loads(out)
+                    except (_json.JSONDecodeError, TypeError, ValueError):
+                        # Salvage: try to extract a JSON array substring
+                        try:
+                            start = out.find("[")
+                            end = out.rfind("]")
+                            if start != -1 and end != -1 and end > start:
+                                parsed = _json.loads(out[start:end+1])
+                            else:
+                                parsed = []
+                        except Exception as e2:
+                            logger.debug("Expand parse salvage failed", exc_info=e2)
+                            parsed = []
+                    if isinstance(parsed, list):
+                        for s in parsed:
+                            if isinstance(s, str) and s and s not in queries:
+                                alts.append(s)
+                                if len(alts) >= 2:
+                                    break
+                    if not alts and out and out.strip():
+                        # Heuristic fallback: split lines, trim bullets, take up to 2
+                        for cand in [t.strip().lstrip("-• ") for t in out.splitlines() if t.strip()][:2]:
+                            if cand and cand not in queries and len(alts) < 2:
+                                alts.append(cand)
+                    if alts:
+                        queries.extend(alts)
+                        did_local_expand = True  # Mark that we already expanded
+            except (ImportError, AttributeError) as e:
+                logger.warning("Query expansion failed (decoder unavailable)", exc_info=e)
+            except (TimeoutError, ConnectionError) as e:
+                logger.warning("Query expansion failed (decoder timeout/connection)", exc_info=e)
+            except Exception as e:
+                logger.error("Unexpected error during query expansion", exc_info=e)
+
+        try:
+            # Refactored retrieval pipeline (filters + hybrid search)
+            _retr = _ca_prepare_filters_and_retrieve(
+                queries=queries,
+                lim=lim,
+                ppath=ppath,
+                filters=_cfg["filters"],
+                model=model,
+                did_local_expand=did_local_expand,
+                kwargs={
+                    "language": _cfg["filters"].get("language"),
+                    "under": _cfg["filters"].get("under"),
+                    "path_glob": _cfg["filters"].get("path_glob"),
+                    "not_glob": _cfg["filters"].get("not_glob"),
+                    "path_regex": _cfg["filters"].get("path_regex"),
+                    "ext": _cfg["filters"].get("ext"),
+                    "kind": _cfg["filters"].get("kind"),
+                    "case": _cfg["filters"].get("case"),
+                    "symbol": _cfg["filters"].get("symbol"),
+                },
+            )
+            items = _retr["items"]
+            eff_language = _retr["eff_language"]
+            eff_path_glob = _retr["eff_path_glob"]
+            eff_not_glob = _retr["eff_not_glob"]
+            override_under = _retr["override_under"]
+            sym_arg = _retr["sym_arg"]
+            cwd_root = _retr["cwd_root"]
+            path_regex = _retr["path_regex"]
+            ext = _retr["ext"]
+            kind = _retr["kind"]
+            case = _retr["case"]
+            req_language = eff_language
+
+            fallback_kwargs = dict(kwargs or {})
+            for key in ("path_glob", "language", "under"):
+                fallback_kwargs.pop(key, None)
+
+            def _to_glob_list(val: Any) -> list[str]:
+                if not val:
+                    return []
+                if isinstance(val, (list, tuple, set)):
+                    return [str(x).strip() for x in val if str(x).strip()]
+                vs = str(val).strip()
+                return [vs] if vs else []
+
+            spans = _ca_fallback_and_budget(
+                items=items,
+                queries=queries,
+                lim=lim,
+                ppath=ppath,
+                eff_language=eff_language,
+                eff_path_glob=eff_path_glob,
+                eff_not_glob=eff_not_glob,
+                path_regex=path_regex,
+                sym_arg=sym_arg,
+                ext=ext,
+                kind=kind,
+                override_under=override_under,
+                did_local_expand=did_local_expand,
+                model=model,
+                req_language=req_language,
+                not_=not_,
+                case=case,
+                cwd_root=cwd_root,
+                include_snippet=bool(include_snippet),
+                kwargs=fallback_kwargs,
+            )
+        except Exception as e:
+            err = str(e)
+            spans = []
+            if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                logger.debug("EXCEPTION", exc_info=e, extra={"error": err})
     finally:
         for k, v in prev.items():
             if v is None:
@@ -5364,6 +5387,12 @@ async def context_answer(
         )
     except Exception:
         pass
+    # Deadline-aware decode budgeting
+    _client_deadline_sec = safe_float(os.environ.get("CTX_CLIENT_DEADLINE_SEC", "178"), default=178.0, logger=logger, context="CTX_CLIENT_DEADLINE_SEC")
+    _tokens_per_sec = safe_float(os.environ.get("DECODER_TOKENS_PER_SEC", ""), default=10.0, logger=logger, context="DECODER_TOKENS_PER_SEC")
+    _decoder_timeout_cap = safe_float(os.environ.get("CTX_DECODER_TIMEOUT_CAP", "170"), default=170.0, logger=logger, context="CTX_DECODER_TIMEOUT_CAP")
+    _deadline_margin = safe_float(os.environ.get("CTX_DEADLINE_MARGIN_SEC", "6"), default=6.0, logger=logger, context="CTX_DEADLINE_MARGIN_SEC")
+
 
     # Decoder params and stops
     mtok, temp, top_k, top_p, stops = _ca_decoder_params(max_tokens)
@@ -5372,11 +5401,22 @@ async def context_answer(
     try:
         from scripts.refrag_llamacpp import is_decoder_enabled  # type: ignore
         if not is_decoder_enabled():
-            logger.info("Decoder disabled, returning error with citations")
+            logger.info("Decoder disabled; returning extractive fallback with citations")
+            _fallback_txt = _ca_postprocess_answer(
+                "",
+                citations,
+                asked_ident=asked_ident,
+                def_line_exact=_def_line_exact,
+                def_id=_def_id,
+                usage_id=_usage_id,
+                snippets_by_id=snippets_by_id,
+            )
             return {
                 "error": "decoder disabled: set REFRAG_DECODER=1 and start llamacpp",
+                "answer": _fallback_txt.strip(),
                 "citations": citations,
                 "query": queries,
+                "used": {"decoder": False, "extractive_fallback": True},
             }
 
         # SIMPLE APPROACH: One LLM call with all context
@@ -5390,11 +5430,39 @@ async def context_answer(
         except Exception:
             extra_hint = ""
 
-        # Build prompt and decode
+        # Build prompt and decode (deadline-aware)
         prompt = _ca_build_prompt(context_blocks, citations, queries)
         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
             logger.debug("LLM_PROMPT", extra={"length": len(prompt)})
-        answer = _ca_decode(prompt, mtok=mtok, temp=temp, top_k=top_k, top_p=top_p, stops=stops)
+        _elapsed = time.time() - _ca_start_ts
+        _remain = float(_client_deadline_sec) - _elapsed
+        if _remain <= float(_deadline_margin):
+            # Return extractive fallback to beat client timeout
+            _fallback_txt = _ca_postprocess_answer(
+                "",
+                citations,
+                asked_ident=asked_ident,
+                def_line_exact=_def_line_exact,
+                def_id=_def_id,
+                usage_id=_usage_id,
+                snippets_by_id=snippets_by_id,
+            )
+            return {
+                "answer": _fallback_txt.strip(),
+                "citations": citations,
+                "query": queries,
+                "used": {"gate_first": True, "refrag": True, "deadline_fallback": True},
+            }
+        # Tighten max_tokens and decoder HTTP timeout to fit remaining time
+        try:
+            _allow_tokens = int(max(16.0, min(float(mtok), max(0.0, _remain - max(0.0, float(_deadline_margin) - 2.0)) * float(_tokens_per_sec))))
+        except Exception:
+            _allow_tokens = int(max(16, int(mtok)))
+        mtok = int(_allow_tokens)
+        _llama_timeout = int(
+            max(5.0, min(_decoder_timeout_cap, max(1.0, _remain - 1.0))))
+        with _env_overrides({"LLAMACPP_TIMEOUT_SEC": str(_llama_timeout)}):
+            answer = _ca_decode(prompt, mtok=mtok, temp=temp, top_k=top_k, top_p=top_p, stops=stops)
 
         # Post-process and validate
         answer = _ca_postprocess_answer(

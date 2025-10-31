@@ -185,3 +185,56 @@ def test_context_answer_tier2_retry_without_gating(monkeypatch):
     cits = out.get("citations") or []
     assert len(cits) == 1
     assert cits[0]["path"].endswith("hybrid_search.py")
+
+
+
+def test_context_answer_env_lock_release_on_retrieval_exception(monkeypatch):
+    import os
+    # Force retrieval to raise and ensure env/lock are restored
+    prev = {k: os.environ.get(k) for k in (
+        "REFRAG_MODE", "REFRAG_GATE_FIRST", "REFRAG_CANDIDATES", "COLLECTION_NAME", "MICRO_BUDGET_TOKENS"
+    )}
+
+    def _raise_retrieval(*a, **k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(srv, "_ca_prepare_filters_and_retrieve", _raise_retrieval)
+
+    out = srv.asyncio.get_event_loop().run_until_complete(
+        srv.context_answer(query="x", limit=1, per_path=1)
+    )
+    assert "error" in out
+
+    # Lock should be free after failure
+    assert srv._ENV_LOCK.acquire(blocking=False), "_ENV_LOCK should be released on exception"
+    srv._ENV_LOCK.release()
+
+    # Env should be restored
+    for k, v in prev.items():
+        assert os.environ.get(k) == v
+
+    # Subsequent call should proceed (no deadlock)
+    def _fake_retrieval(*a, **k):
+        return {
+            "items": [],
+            "eff_language": None,
+            "eff_path_glob": None,
+            "eff_not_glob": None,
+            "override_under": False,
+            "sym_arg": None,
+            "cwd_root": "/work",
+            "path_regex": None,
+            "ext": None,
+            "kind": None,
+            "case": None,
+        }
+
+    monkeypatch.setattr(srv, "_ca_prepare_filters_and_retrieve", _fake_retrieval)
+
+    import scripts.refrag_llamacpp as ref
+    monkeypatch.setattr(ref, "is_decoder_enabled", lambda: False)
+
+    out2 = srv.asyncio.get_event_loop().run_until_complete(
+        srv.context_answer(query="x", limit=1, per_path=1)
+    )
+    assert isinstance(out2, dict)
