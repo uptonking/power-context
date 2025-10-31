@@ -112,6 +112,9 @@ Notes:
 - MCP clients can connect to the running servers and operate on whichever folder is mounted at /work.
 
 ## Supported IDE clients/extensions
+- Roo (SSE/RMCP): supports both SSE and RMCP connections; see config examples below
+- Cline (SSE/RMCP): supports both SSE and RMCP connections; see config examples below
+- Windsurf (SSE/RMCP): supports both SSE and RMCP connections; see config examples below
 - Kiro (SSE): uses mcp-remote bridge via command/args; see config below
 - Qodo (RMCP): connects directly to HTTP endpoints; add each tool individually
 - OpenAI Codex (RMCP): TOML config for memory/indexer URLs
@@ -684,6 +687,39 @@ Example calls (semantics vary by client):
 - qdrant-index with args {"subdir":"scripts","recreate":true}
 
 ### MCP client configuration examples
+
+Roo (SSE/RMCP):
+
+```json
+{
+  "mcpServers": {
+    "memory": { "type": "sse", "url": "http://localhost:8000/sse", "disabled": false },
+    "qdrant-indexer": { "type": "sse", "url": "http://localhost:8001/sse", "disabled": false }
+  }
+}
+```
+
+Cline (SSE/RMCP):
+
+```json
+{
+  "mcpServers": {
+    "memory": { "type": "sse", "url": "http://localhost:8000/sse", "disabled": false },
+    "qdrant-indexer": { "type": "sse", "url": "http://localhost:8001/sse", "disabled": false }
+  }
+}
+```
+
+Windsurf (SSE/RMCP):
+
+```json
+{
+  "mcpServers": {
+    "memory": { "type": "sse", "url": "http://localhost:8000/sse", "disabled": false },
+    "qdrant-indexer": { "type": "sse", "url": "http://localhost:8001/sse", "disabled": false }
+  }
+}
+```
 
 Windsurf/Cursor (stdio for search + SSE for indexer):
 
