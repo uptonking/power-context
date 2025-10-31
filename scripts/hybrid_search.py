@@ -10,6 +10,33 @@ import json
 import math
 
 import logging
+import threading
+
+# Import unified caching system
+try:
+    from scripts.cache_manager import get_search_cache, get_embedding_cache, get_expansion_cache
+    UNIFIED_CACHE_AVAILABLE = True
+except ImportError:
+    UNIFIED_CACHE_AVAILABLE = False
+
+# Import request deduplication system
+try:
+    from scripts.deduplication import get_deduplicator, is_duplicate_request
+    DEDUPLICATION_AVAILABLE = True
+except ImportError:
+    DEDUPLICATION_AVAILABLE = False
+
+# Import semantic expansion functionality
+try:
+    from scripts.semantic_expansion import (
+        expand_queries_semantically,
+        expand_queries_with_prf,
+        get_expansion_stats,
+        clear_expansion_cache
+    )
+    SEMANTIC_EXPANSION_AVAILABLE = True
+except ImportError:
+    SEMANTIC_EXPANSION_AVAILABLE = False
 
 logger = logging.getLogger("hybrid_search")
 
@@ -47,19 +74,38 @@ MINI_VEC_DIM = _safe_int(os.environ.get("MINI_VEC_DIM", "64"), 64)
 HYBRID_MINI_WEIGHT = _safe_float(os.environ.get("HYBRID_MINI_WEIGHT", "0.5"), 0.5)
 
 
-# Lightweight embedding cache for query embeddings (model_name, text) -> vector
-from threading import Lock as _Lock
-from collections import OrderedDict
+# Legacy cache compatibility - use unified cache if available
+if UNIFIED_CACHE_AVAILABLE:
+    _EMBED_CACHE = get_embedding_cache()
+    _RESULTS_CACHE = get_search_cache()
+    _EXPANSION_CACHE = get_expansion_cache()
+    MAX_EMBED_CACHE = int(os.environ.get("MAX_EMBED_CACHE", "8192") or 8192)
+    # Lightweight local fallback to ensure deterministic hits in tests
+    try:
+        from collections import OrderedDict as _OD
+    except Exception:
+        _OD = dict  # pragma: no cover
+    _RESULTS_CACHE_OD = _OD()
 
-_EMBED_QUERY_CACHE: OrderedDict[tuple[str, str], List[float]] = OrderedDict()
-_EMBED_LOCK = _Lock()
-MAX_EMBED_CACHE = int(os.environ.get("MAX_EMBED_CACHE", "8192") or 8192)
+    MAX_RESULTS_CACHE = int(os.environ.get("HYBRID_RESULTS_CACHE", "32") or 32)
+else:
+    # Fallback to original caching system
+    from threading import Lock as _Lock
+    from collections import OrderedDict
 
-# Lightweight recent-results LRU cache for iterative queries
-_RESULTS_CACHE: OrderedDict[tuple, List[Dict[str, Any]]] = OrderedDict()
-_RESULTS_LOCK = _Lock()
-# Set to 0 to disable; default small size to bound memory
-MAX_RESULTS_CACHE = int(os.environ.get("HYBRID_RESULTS_CACHE", "32") or 32)
+    _EMBED_QUERY_CACHE: OrderedDict[tuple[str, str], List[float]] = OrderedDict()
+    _EMBED_LOCK = _Lock()
+    MAX_EMBED_CACHE = int(os.environ.get("MAX_EMBED_CACHE", "8192") or 8192)
+
+    _RESULTS_CACHE: OrderedDict[tuple, List[Dict[str, Any]]] = OrderedDict()
+    _RESULTS_LOCK = _Lock()
+    MAX_RESULTS_CACHE = int(os.environ.get("HYBRID_RESULTS_CACHE", "32") or 32)
+
+# Ensure _RESULTS_LOCK exists regardless of cache backend
+try:
+    _RESULTS_LOCK
+except NameError:
+    _RESULTS_LOCK = threading.RLock()
 
 
 def _coerce_points(result: Any) -> List[Any]:
@@ -89,54 +135,93 @@ def _embed_queries_cached(
     except Exception:
         name = os.environ.get("EMBEDDING_MODEL", MODEL_NAME)
 
-    # Find missing queries that need embedding (thread-safe read)
-    missing_queries = []
-    missing_indices = []
-    with _EMBED_LOCK:
+    if UNIFIED_CACHE_AVAILABLE:
+        # Use unified caching system
+        missing_queries = []
+        missing_indices = []
+
+        # Find missing queries
         for i, q in enumerate(queries):
             key = (str(name), str(q))
-            if key not in _EMBED_QUERY_CACHE:
+            if _EMBED_CACHE.get(key) is None:
                 missing_queries.append(str(q))
                 missing_indices.append(i)
 
-    # Batch-embed all missing queries in one call
-    if missing_queries:
-        try:
-            # Embed all missing queries at once
-            vecs = list(model.embed(missing_queries))
-            with _EMBED_LOCK:
+        # Batch-embed all missing queries in one call
+        if missing_queries:
+            try:
+                vecs = list(model.embed(missing_queries))
                 # Cache all new embeddings
                 for q, vec in zip(missing_queries, vecs):
                     key = (str(name), str(q))
-                    if key not in _EMBED_QUERY_CACHE:
-                        _EMBED_QUERY_CACHE[key] = vec.tolist()
-                        # Evict oldest entries if cache exceeds limit
-                        while len(_EMBED_QUERY_CACHE) > MAX_EMBED_CACHE:
-                            _EMBED_QUERY_CACHE.popitem(last=False)
-        except Exception:
-            # Fallback to one-by-one if batch fails
-            for q in missing_queries:
+                    _EMBED_CACHE.set(key, vec.tolist())
+            except Exception:
+                # Fallback to one-by-one if batch fails
+                for q in missing_queries:
+                    key = (str(name), str(q))
+                    try:
+                        vec = next(model.embed([q])).tolist()
+                        _EMBED_CACHE.set(key, vec)
+                    except Exception:
+                        pass
+
+        # Return embeddings in original order from cache
+        out: List[List[float]] = []
+        for q in queries:
+            key = (str(name), str(q))
+            v = _EMBED_CACHE.get(key)
+            if v is not None:
+                out.append(v)
+        return out
+    else:
+        # Fallback to original caching system
+        missing_queries = []
+        missing_indices = []
+        with _EMBED_LOCK:
+            for i, q in enumerate(queries):
                 key = (str(name), str(q))
-                try:
-                    vec = next(model.embed([q])).tolist()
-                    with _EMBED_LOCK:
+                if key not in _EMBED_QUERY_CACHE:
+                    missing_queries.append(str(q))
+                    missing_indices.append(i)
+
+        # Batch-embed all missing queries in one call
+        if missing_queries:
+            try:
+                # Embed all missing queries at once
+                vecs = list(model.embed(missing_queries))
+                with _EMBED_LOCK:
+                    # Cache all new embeddings
+                    for q, vec in zip(missing_queries, vecs):
+                        key = (str(name), str(q))
                         if key not in _EMBED_QUERY_CACHE:
-                            _EMBED_QUERY_CACHE[key] = vec
+                            _EMBED_QUERY_CACHE[key] = vec.tolist()
                             # Evict oldest entries if cache exceeds limit
                             while len(_EMBED_QUERY_CACHE) > MAX_EMBED_CACHE:
                                 _EMBED_QUERY_CACHE.popitem(last=False)
-                except Exception:
-                    pass
+            except Exception:
+                # Fallback to one-by-one if batch fails
+                for q in missing_queries:
+                    key = (str(name), str(q))
+                    try:
+                        vec = next(model.embed([q])).tolist()
+                        with _EMBED_LOCK:
+                            if key not in _EMBED_QUERY_CACHE:
+                                _EMBED_QUERY_CACHE[key] = vec
+                                # Evict oldest entries if cache exceeds limit
+                                while len(_EMBED_QUERY_CACHE) > MAX_EMBED_CACHE:
+                                    _EMBED_QUERY_CACHE.popitem(last=False)
+                    except Exception:
+                        pass
 
-    # Return embeddings in original order from cache (thread-safe read)
-    out: List[List[float]] = []
-    with _EMBED_LOCK:
-        for q in queries:
-            key = (str(name), str(q))
-            v = _EMBED_QUERY_CACHE.get(key)
-            if v is not None:
-                out.append(v)
-    return out
+        # Return embeddings in original order from cache (thread-safe read)
+        out: List[List[float]] = []
+        with _EMBED_LOCK:
+            for q in queries:
+                key = (str(name), str(q))
+                v = _EMBED_QUERY_CACHE.get(key)
+                if v is not None:
+                    out.append(v)
+        return out
 
 
 # Ensure project root is on sys.path when run as a script (so 'scripts' package imports work)
@@ -564,6 +649,69 @@ def expand_queries(
                     if exp not in out:
                         out.append(exp)
     return out[: max(8, len(queries))]
+
+
+# Enhanced query expansion with semantic similarity
+def expand_queries_enhanced(
+    queries: List[str],
+    language: str | None = None,
+    max_extra: int = 2,
+    client: QdrantClient | None = None,
+    model: TextEmbedding | None = None,
+    collection: str | None = None
+) -> List[str]:
+    """
+    Enhanced query expansion combining synonym-based and semantic similarity approaches.
+
+    Args:
+        queries: Original query strings
+        language: Optional programming language hint
+        max_extra: Maximum number of additional expansions per query
+        client: QdrantClient instance for semantic expansion
+        model: TextEmbedding instance for semantic analysis
+        collection: Collection name for semantic expansion
+
+    Returns:
+        List of expanded queries
+    """
+    # Start with original queries
+    out: List[str] = list(queries)
+
+    # 1. Apply traditional synonym-based expansion
+    synonym_expanded = expand_queries(queries, language, max_extra)
+    for q in synonym_expanded:
+        if q not in out:
+            out.append(q)
+
+    # 2. Apply semantic similarity expansion if available
+    if SEMANTIC_EXPANSION_AVAILABLE and client and model:
+        try:
+            semantic_terms = expand_queries_semantically(
+                queries, language, client, model, collection, max_extra
+            )
+
+            # Create expanded queries using semantic terms
+            for q in list(queries):
+                for term in semantic_terms:
+                    # Add term as a standalone query
+                    if term not in out:
+                        out.append(term)
+
+                    # Create combined queries with semantic terms
+                    combined = f"{q} {term}"
+                    if combined not in out:
+                        out.append(combined)
+
+            if os.environ.get("DEBUG_HYBRID_SEARCH"):
+                logger.debug(f"Semantic expansion added {len(semantic_terms)} terms: {semantic_terms}")
+
+        except Exception as e:
+            if os.environ.get("DEBUG_HYBRID_SEARCH"):
+                logger.debug(f"Semantic expansion failed: {e}")
+
+    # Limit total number of queries to prevent explosion
+    max_queries = max(8, len(queries) * 3)
+    return out[:max_queries]
 
 
 # --- LLM-assisted expansion (optional if configured) and PRF (default-on) ---
@@ -1276,13 +1424,29 @@ def run_hybrid_search(
         except Exception:
             cache_key = None
         if cache_key is not None:
-            with _RESULTS_LOCK:
-                if cache_key in _RESULTS_CACHE:
-                    val = _RESULTS_CACHE.pop(cache_key)
-                    _RESULTS_CACHE[cache_key] = val
+            if UNIFIED_CACHE_AVAILABLE:
+                val = _RESULTS_CACHE.get(cache_key)
+                if val is not None:
                     if os.environ.get("DEBUG_HYBRID_SEARCH"):
-                        logger.debug("cache hit for hybrid results")
+                        logger.debug("cache hit for hybrid results (unified)")
                     return val
+                # Fallback to local in-process dict to ensure deterministic hits (esp. in unit tests)
+                try:
+                    with _RESULTS_LOCK:
+                        if cache_key in _RESULTS_CACHE_OD:
+                            if os.environ.get("DEBUG_HYBRID_SEARCH"):
+                                logger.debug("cache hit for hybrid results (fallback OD)")
+                            return _RESULTS_CACHE_OD[cache_key]
+                except Exception:
+                    pass
+            else:
+                with _RESULTS_LOCK:
+                    if cache_key in _RESULTS_CACHE:
+                        val = _RESULTS_CACHE.pop(cache_key)
+                        _RESULTS_CACHE[cache_key] = val
+                        if os.environ.get("DEBUG_HYBRID_SEARCH"):
+                            logger.debug("cache hit for hybrid results (legacy)")
+                        return val
 
     # Build optional filter
     flt = None
@@ -1317,6 +1481,56 @@ def run_hybrid_search(
                 key="metadata.symbol", match=models.MatchValue(value=eff_symbol)
             )
         )
+
+    # After attempting cache get, run deduplication. If duplicate, serve cached result if present.
+    if DEDUPLICATION_AVAILABLE:
+        request_data = {
+            'queries': queries,
+            'limit': limit,
+            'per_path': per_path,
+            'language': language,
+            'under': under,
+            'kind': kind,
+            'symbol': symbol,
+            'ext': ext,
+            'not': not_filter,
+            'case': case,
+            'path_regex': path_regex,
+            'path_glob': path_glob,
+            'not_glob': not_glob,
+            'expand': expand,
+            'collection': _collection(),
+            'vector_name': vec_name,
+        }
+        is_duplicate, similar_fp = is_duplicate_request(request_data)
+        if is_duplicate:
+            # Prefer serving from cache on duplicate
+            if cache_key is not None:
+                if UNIFIED_CACHE_AVAILABLE:
+                    val = _RESULTS_CACHE.get(cache_key)
+                    if val is not None:
+                        if os.environ.get("DEBUG_HYBRID_SEARCH"):
+                            logger.debug("duplicate served from cache (unified)")
+                        return val
+                    try:
+                        with _RESULTS_LOCK:
+                            if cache_key in _RESULTS_CACHE_OD:
+                                if os.environ.get("DEBUG_HYBRID_SEARCH"):
+                                    logger.debug("duplicate served from cache (fallback OD)")
+                                return _RESULTS_CACHE_OD[cache_key]
+                    except Exception:
+                        pass
+                else:
+                    with _RESULTS_LOCK:
+                        if cache_key in _RESULTS_CACHE:
+                            val = _RESULTS_CACHE.pop(cache_key)
+                            _RESULTS_CACHE[cache_key] = val
+                            if os.environ.get("DEBUG_HYBRID_SEARCH"):
+                                logger.debug("duplicate served from cache (legacy)")
+                            return val
+            if os.environ.get("DEBUG_HYBRID_SEARCH"):
+                logger.debug("Duplicate without cache; bypassing dedup and continuing search")
+
 
     # Add ext filter (file extension) - server-side when possible
     if eff_ext:
@@ -1356,7 +1570,17 @@ def run_hybrid_search(
         if s and s not in qlist:
             qlist.append(s)
     if expand:
-        qlist = expand_queries(qlist, eff_language)
+        # Use enhanced expansion with semantic similarity if available
+        if SEMANTIC_EXPANSION_AVAILABLE:
+            qlist = expand_queries_enhanced(
+                qlist, eff_language,
+                max_extra=max(2, int(os.environ.get("SEMANTIC_EXPANSION_MAX_TERMS", "3") or "3")),
+                client=client,
+                model=_model,
+                collection=_collection()
+            )
+        else:
+            qlist = expand_queries(qlist, eff_language)
 
     # Query sharpening: derive basename tokens from path_glob to steer retrieval/gating
     try:
@@ -1597,6 +1821,75 @@ def run_hybrid_search(
                 pass
     except Exception:
         pass
+
+    # Enhanced PRF with semantic similarity
+    if SEMANTIC_EXPANSION_AVAILABLE and score_map:
+        # Local PRF dense weight (fallback if not set later)
+        try:
+            prf_dw = float(os.environ.get("PRF_DENSE_WEIGHT", "0.4") or 0.4)
+        except Exception:
+            prf_dw = 0.4
+
+        try:
+            # Get top results for PRF context
+            top_results = []
+            for pid, rec in score_map.items():
+                top_results.append(rec["pt"])
+                if len(top_results) >= 8:  # Use top 8 for PRF
+                    break
+
+            if top_results:
+                semantic_prf_terms = expand_queries_with_prf(
+                    clean_queries, top_results, _model, max_terms=4
+                )
+
+                # Create PRF queries using semantic terms
+                semantic_prf_qs = []
+                for term in semantic_prf_terms:
+                    base = clean_queries[0] if clean_queries else (qlist[0] if qlist else "")
+                    cand = (base + " " + term).strip()
+                    if cand and cand not in qlist and cand not in semantic_prf_qs:
+                        semantic_prf_qs.append(cand)
+                        if len(semantic_prf_qs) >= 3:  # Limit semantic PRF queries
+                            break
+
+                if semantic_prf_qs:
+                    # Dense semantic PRF pass
+                    embedded_sem_prf = _embed_queries_cached(_model, semantic_prf_qs)
+                    result_sets_sem_prf: List[List[Any]] = [
+                        dense_query(client, vec_name, v, flt, max(8, limit // 3 or 4))
+                        for v in embedded_sem_prf
+                    ]
+                    for res_sem_prf in result_sets_sem_prf:
+                        for rank, p in enumerate(res_sem_prf, 1):
+                            pid = str(p.id)
+                            score_map.setdefault(
+                                pid,
+                                {
+                                    "pt": p,
+                                    "s": 0.0,
+                                    "d": 0.0,
+                                    "lx": 0.0,
+                                    "sym_sub": 0.0,
+                                    "sym_eq": 0.0,
+                                    "core": 0.0,
+                                    "vendor": 0.0,
+                                    "langb": 0.0,
+                                    "rec": 0.0,
+                                    "test": 0.0,
+                                },
+                            )
+                            # Lower weight for semantic PRF to avoid over-diversification
+                            dens = 0.3 * prf_dw * rrf(rank)
+                            score_map[pid]["d"] += dens
+                            score_map[pid]["s"] += dens
+
+                    if os.environ.get("DEBUG_HYBRID_SEARCH"):
+                        logger.debug(f"Semantic PRF added {len(semantic_prf_qs)} queries with terms: {semantic_prf_terms}")
+
+        except Exception as e:
+            if os.environ.get("DEBUG_HYBRID_SEARCH"):
+                logger.debug(f"Semantic PRF failed: {e}")
 
     lex_results2: List[Any] = []
 
@@ -2123,12 +2416,19 @@ def run_hybrid_search(
     items: List[Dict[str, Any]] = []
     if not merged:
         if _USE_CACHE and cache_key is not None:
-            with _RESULTS_LOCK:
-                _RESULTS_CACHE[cache_key] = items
+            if UNIFIED_CACHE_AVAILABLE:
+                # Use unified caching system
+                _RESULTS_CACHE.set(cache_key, items)
                 if os.environ.get("DEBUG_HYBRID_SEARCH"):
                     logger.debug("cache store for hybrid results")
-                while len(_RESULTS_CACHE) > MAX_RESULTS_CACHE:
-                    _RESULTS_CACHE.popitem(last=False)
+            else:
+                # Fallback to original caching system
+                with _RESULTS_LOCK:
+                    _RESULTS_CACHE[cache_key] = items
+                    if os.environ.get("DEBUG_HYBRID_SEARCH"):
+                        logger.debug("cache store for hybrid results")
+                    while len(_RESULTS_CACHE) > MAX_RESULTS_CACHE:
+                        _RESULTS_CACHE.popitem(last=False)
         return items
 
     for m in merged:
@@ -2316,12 +2616,29 @@ def run_hybrid_search(
             }
         )
     if _USE_CACHE and cache_key is not None:
-        with _RESULTS_LOCK:
-            _RESULTS_CACHE[cache_key] = items
+        if UNIFIED_CACHE_AVAILABLE:
+            _RESULTS_CACHE.set(cache_key, items)
+            # Mirror into local fallback dict for deterministic hits in tests
+            try:
+                with _RESULTS_LOCK:
+                    _RESULTS_CACHE_OD[cache_key] = items
+                    while len(_RESULTS_CACHE_OD) > MAX_RESULTS_CACHE:
+                        # pop oldest inserted (like LRU/FIFO)
+                        try:
+                            _RESULTS_CACHE_OD.popitem(last=False)
+                        except Exception:
+                            break
+            except Exception:
+                pass
             if os.environ.get("DEBUG_HYBRID_SEARCH"):
                 logger.debug("cache store for hybrid results")
-            while len(_RESULTS_CACHE) > MAX_RESULTS_CACHE:
-                _RESULTS_CACHE.popitem(last=False)
+        else:
+            with _RESULTS_LOCK:
+                _RESULTS_CACHE[cache_key] = items
+                if os.environ.get("DEBUG_HYBRID_SEARCH"):
+                    logger.debug("cache store for hybrid results")
+                while len(_RESULTS_CACHE) > MAX_RESULTS_CACHE:
+                    _RESULTS_CACHE.popitem(last=False)
     return items
 
 
@@ -2521,7 +2838,16 @@ def main():
 
 
     if args.expand:
-        queries = expand_queries(queries, eff_language)
+        # Use enhanced expansion with semantic similarity if available
+        if SEMANTIC_EXPANSION_AVAILABLE:
+            queries = expand_queries_enhanced(
+                queries, eff_language,
+                max_extra=max(2, int(os.environ.get("SEMANTIC_EXPANSION_MAX_TERMS", "3") or "3")),
+                client=client,
+                model=model
+            )
+        else:
+            queries = expand_queries(queries, eff_language)
 
     # Add server-side lexical vector ranking into fusion
     for rank, p in enumerate(lex_results, 1):
