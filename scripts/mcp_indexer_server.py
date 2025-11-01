@@ -5502,12 +5502,83 @@ async def context_answer(
     except Exception:
         pass
 
-    return {
+    # Optional: provide per-query answers/citations for pack mode by reusing the combined retrieval
+    answers_by_query = None
+    try:
+        if len(queries) > 1 and str(_cfg.get("mode") or "").strip().lower() == "pack":
+            import re as _re
+
+            def _tok2(s: str) -> list[str]:
+                try:
+                    return [w.lower() for w in _re.split(r"[^A-Za-z0-9_]+", str(s or "")) if len(w) >= 3]
+                except Exception:
+                    return []
+
+            # Build quick lookups from the combined retrieval we already computed
+            id_to_cit = {int(c.get("id") or 0): c for c in (citations or []) if int(c.get("id") or 0) > 0}
+            id_to_block = {idx + 1: blk for idx, blk in enumerate(context_blocks or [])}
+
+            answers_by_query = []
+            for q in queries:
+                try:
+                    toks = set(_tok2(q))
+                    picked_ids: list[int] = []
+                    if toks:
+                        for cid, c in id_to_cit.items():
+                            path_l = str(c.get("path") or "").lower()
+                            sn = (snippets_by_id.get(cid) or "").lower()
+                            if any(t in sn or t in path_l for t in toks):
+                                picked_ids.append(cid)
+                                if len(picked_ids) >= 6:  # small cap per query to keep prompt compact
+                                    break
+                    # Fallback if nothing matched: take the first 2 citations
+                    if not picked_ids:
+                        picked_ids = [c.get("id") for c in (citations or [])[:2] if c.get("id")]
+
+                    # Assemble per-query citations and context blocks using the shared retrieval
+                    cits_i = [id_to_cit[cid] for cid in picked_ids if cid in id_to_cit]
+                    ctx_blocks_i = [id_to_block[cid] for cid in picked_ids if cid in id_to_block]
+
+                    # Decode per-query with the subset of shared context
+                    prompt_i = _ca_build_prompt(ctx_blocks_i, cits_i, [q])
+                    ans_raw_i = _ca_decode(prompt_i, mtok=mtok, temp=temp, top_k=top_k, top_p=top_p, stops=stops)
+
+                    # Minimal post-processing with per-query identifier inference
+                    asked_ident_i = _primary_identifier_from_queries([q])
+                    ans_i = _ca_postprocess_answer(
+                        ans_raw_i,
+                        cits_i,
+                        asked_ident=asked_ident_i,
+                        def_line_exact=None,
+                        def_id=None,
+                        usage_id=None,
+                        snippets_by_id={cid: snippets_by_id.get(cid, "") for cid in picked_ids},
+                    )
+
+                    answers_by_query.append({
+                        "query": q,
+                        "answer": ans_i,
+                        "citations": cits_i,
+                    })
+                except Exception as _e:
+                    answers_by_query.append({
+                        "query": q,
+                        "answer": "",
+                        "citations": [],
+                        "error": str(_e),
+                    })
+    except Exception:
+        answers_by_query = None
+
+    out = {
         "answer": answer.strip(),
         "citations": citations,
         "query": queries,
         "used": {"gate_first": True, "refrag": True},
     }
+    if answers_by_query:
+        out["answers_by_query"] = answers_by_query
+    return out
 
 
 @mcp.tool()
