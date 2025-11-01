@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    services:
+      qdrant:
+        image: qdrant/qdrant:latest
+        ports:
+          - 6333:6333
+        options: >-
+          --health-cmd "curl -f http://localhost:6333/health || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+        
+    - name: Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt', '**/pyproject.toml') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+          
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pytest pytest-asyncio
+        pip install qdrant-client fastembed watchdog onnxruntime tokenizers
+        pip install tree_sitter tree_sitter_languages
+        pip install mcp fastmcp
+        
+    - name: Wait for Qdrant to be ready
+      run: |
+        timeout 30 bash -c 'until curl -f http://localhost:6333/health; do sleep 2; done'
+        
+    - name: Set environment variables
+      run: |
+        echo "QDRANT_URL=http://localhost:6333" >> $GITHUB_ENV
+        echo "COLLECTION_NAME=test-ci-${{ github.run_id }}" >> $GITHUB_ENV
+        echo "PYTHONPATH=${{ github.workspace }}/scripts:$PYTHONPATH" >> $GITHUB_ENV
+        
+    - name: Run tests
+      run: pytest -q
+      
+    - name: Upload test results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: test-results
+        path: |
+          .pytest_cache/
+          test-results.xml
+        retention-days: 7
