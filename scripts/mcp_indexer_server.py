@@ -1724,6 +1724,10 @@ async def repo_search(
                     if os.environ.get("MCP_DEBUG_RERANK", "").strip():
 
                             logger.debug("RERANK_RET", extra={"code": rres.get("code"), "out_len": len((rres.get("stdout") or "").strip()), "err_tail": (rres.get("stderr") or "")[-200:]})
+                    if not rres.get("ok"):
+                        _stderr = (rres.get("stderr") or "").lower()
+                        if rres.get("code") == -1 or "timed out" in _stderr:
+                            rerank_counters["timeout"] += 1
                     if rres.get("ok") and (rres.get("stdout") or "").strip():
                         rerank_counters["subprocess"] += 1
                         tmp = []
@@ -2190,6 +2194,7 @@ async def change_history_for_path(
             api_key=os.environ.get("QDRANT_API_KEY"),
             timeout=float(os.environ.get("QDRANT_TIMEOUT", "20") or 20),
         )
+        # Strict exact match on metadata.path (Compose maps to /work)
         filt = qmodels.Filter(
             must=[qmodels.FieldCondition(key="metadata.path", match=qmodels.MatchValue(value=p))]
         )
@@ -3230,6 +3235,7 @@ async def context_search(
             if b.get("source") == "code":
                 compacted.append(
                     {
+
                         "source": "code",
                         "path": b.get("path"),
                         "start_line": b.get("start_line") or 0,
@@ -3263,6 +3269,14 @@ async def context_search(
             "context_lines": int(context_lines) if context_lines not in (None, "") else 2,
             "compact": bool(eff_compact),
         }
+        try:
+            if isinstance(code_res, dict):
+                ret["diag"]["rerank"] = {
+                    "used_rerank": bool(code_res.get("used_rerank")),
+                    "counters": code_res.get("rerank_counters") or {},
+                }
+        except Exception:
+            pass
         return ret
 
     ret = {"results": blended, "total": len(blended)}
