@@ -1,3 +1,5 @@
+[![CI](https://github.com/m1rl0k/Context-Engine/actions/workflows/ci.yml/badge.svg)](https://github.com/m1rl0k/Context-Engine/actions/workflows/ci.yml)
+
 ## Context-Engine at a Glance
 
 Context-Engine is a plug-and-play MCP retrieval stack that unifies code indexing, hybrid search, and optional llama.cpp decoding so product teams can ship context-aware agents in minutes, not weeks.
