@@ -5489,89 +5489,57 @@ async def context_answer(
     except Exception:
         pass
 
-    # Optional: provide per-query answers/citations for pack mode to enable exact router demux
+    # Optional: provide per-query answers/citations for pack mode by reusing the combined retrieval
     answers_by_query = None
     try:
         if len(queries) > 1 and str(_cfg.get("mode") or "").strip().lower() == "pack":
+            import re as _re
+
+            def _tok2(s: str) -> list[str]:
+                try:
+                    return [w.lower() for w in _re.split(r"[^A-Za-z0-9_]+", str(s or "")) if len(w) >= 3]
+                except Exception:
+                    return []
+
+            # Build quick lookups from the combined retrieval we already computed
+            id_to_cit = {int(c.get("id") or 0): c for c in (citations or []) if int(c.get("id") or 0) > 0}
+            id_to_block = {idx + 1: blk for idx, blk in enumerate(context_blocks or [])}
+
             answers_by_query = []
             for q in queries:
                 try:
-                    # Per-query retrieval
-                    _retr_i = _ca_prepare_filters_and_retrieve(
-                        queries=[q],
-                        lim=lim,
-                        ppath=ppath,
-                        filters=_cfg["filters"],
-                        model=model,
-                        did_local_expand=did_local_expand,
-                        kwargs={
-                            "language": _cfg["filters"].get("language"),
-                            "under": _cfg["filters"].get("under"),
-                            "path_glob": _cfg["filters"].get("path_glob"),
-                            "not_glob": _cfg["filters"].get("not_glob"),
-                            "path_regex": _cfg["filters"].get("path_regex"),
-                            "ext": _cfg["filters"].get("ext"),
-                            "kind": _cfg["filters"].get("kind"),
-                            "case": _cfg["filters"].get("case"),
-                            "symbol": _cfg["filters"].get("symbol"),
-                        },
-                    )
-                    items_i = _retr_i["items"]
-                    eff_language_i = _retr_i["eff_language"]
-                    eff_path_glob_i = _retr_i["eff_path_glob"]
-                    eff_not_glob_i = _retr_i["eff_not_glob"]
-                    override_under_i = _retr_i["override_under"]
-                    sym_arg_i = _retr_i["sym_arg"]
-                    cwd_root_i = _retr_i["cwd_root"]
-                    path_regex_i = _retr_i["path_regex"]
-                    ext_i = _retr_i["ext"]
-                    kind_i = _retr_i["kind"]
-                    case_i = _retr_i["case"]
+                    toks = set(_tok2(q))
+                    picked_ids: list[int] = []
+                    if toks:
+                        for cid, c in id_to_cit.items():
+                            path_l = str(c.get("path") or "").lower()
+                            sn = (snippets_by_id.get(cid) or "").lower()
+                            if any(t in sn or t in path_l for t in toks):
+                                picked_ids.append(cid)
+                                if len(picked_ids) >= 6:  # small cap per query to keep prompt compact
+                                    break
+                    # Fallback if nothing matched: take the first 2 citations
+                    if not picked_ids:
+                        picked_ids = [c.get("id") for c in (citations or [])[:2] if c.get("id")]
 
-                    fallback_kwargs_i = dict(kwargs or {})
-                    for key in ("path_glob", "language", "under"):
-                        fallback_kwargs_i.pop(key, None)
+                    # Assemble per-query citations and context blocks using the shared retrieval
+                    cits_i = [id_to_cit[cid] for cid in picked_ids if cid in id_to_cit]
+                    ctx_blocks_i = [id_to_block[cid] for cid in picked_ids if cid in id_to_block]
 
-                    spans_i = _ca_fallback_and_budget(
-                        items=items_i,
-                        queries=[q],
-                        lim=lim,
-                        ppath=ppath,
-                        eff_language=eff_language_i,
-                        eff_path_glob=eff_path_glob_i,
-                        eff_not_glob=eff_not_glob_i,
-                        path_regex=path_regex_i,
-                        sym_arg=sym_arg_i,
-                        ext=ext_i,
-                        kind=kind_i,
-                        override_under=override_under_i,
-                        did_local_expand=did_local_expand,
-                        model=model,
-                        req_language=eff_language_i,
-                        not_=not_,
-                        case=case_i,
-                        cwd_root=cwd_root_i,
-                        include_snippet=bool(include_snippet),
-                        kwargs=fallback_kwargs_i,
-                    )
-
-                    cits_i, ctx_blocks_i, snippets_by_id_i, asked_ident_i, def_line_i, def_id_i, usage_id_i = _ca_build_citations_and_context(
-                        spans=spans_i,
-                        include_snippet=bool(include_snippet),
-                        queries=[q],
-                    )
-
-                    # Decode per-query
+                    # Decode per-query with the subset of shared context
                     prompt_i = _ca_build_prompt(ctx_blocks_i, cits_i, [q])
                     ans_raw_i = _ca_decode(prompt_i, mtok=mtok, temp=temp, top_k=top_k, top_p=top_p, stops=stops)
+
+                    # Minimal post-processing with per-query identifier inference
+                    asked_ident_i = _primary_identifier_from_queries([q])
                     ans_i = _ca_postprocess_answer(
                         ans_raw_i,
                         cits_i,
                         asked_ident=asked_ident_i,
-                        def_line_exact=def_line_i,
-                        def_id=def_id_i,
-                        usage_id=usage_id_i,
-                        snippets_by_id=snippets_by_id_i,
+                        def_line_exact=None,
+                        def_id=None,
+                        usage_id=None,
+                        snippets_by_id={cid: snippets_by_id.get(cid, "") for cid in picked_ids},
                     )
 
                     answers_by_query.append({
@@ -5580,7 +5548,6 @@ async def context_answer(
                         "citations": cits_i,
                     })
                 except Exception as _e:
-                    # Best-effort: if per-query path fails, include empty stub to preserve alignment
                     answers_by_query.append({
                         "query": q,
                         "answer": "",

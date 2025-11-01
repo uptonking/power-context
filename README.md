@@ -276,25 +276,35 @@ Zed (SSE):
 Add to your Zed `settings.json` (accessed via Command Palette → "Settings: Open Settings (JSON)"):
 ````json
 {
-  "mcp": {
-    "servers": {
-      "qdrant-indexer": {
-        "command": "npx",
-        "args": [
-          "mcp-remote",
-          "http://localhost:8001/sse",
-          "--transport",
-          "sse-only"
-        ],
-        "env": {}
-      }
-    }
+  /// The name of your MCP server
+  "qdrant-indexer": {
+    /// The command which runs the MCP server
+    "command": "npx",
+    /// The arguments to pass to the MCP server
+    "args": [
+      "mcp-remote",
+      "http://localhost:8001/sse",
+      "--transport",
+      "sse-only"
+    ],
+    /// The environment variables to set
+    "env": {}
   }
 }
 ````
 Notes:
-- Zed expects command/args (stdio). mcp-remote bridges to remote SSE endpoints.
-- If npx prompts, add -y right after npx.
+- Zed expects MCP servers at the root level of settings.json
+- Uses command/args (stdio). mcp-remote bridges to remote SSE endpoints
+- If npx prompts, add `-y` right after npx: `"command": "npx", "args": ["-y", "mcp-remote", ...]`
+- Alternative: Use direct HTTP connection if mcp-remote has issues:
+  ```json
+  {
+    "qdrant-indexer": {
+      "type": "http",
+      "url": "http://localhost:8001/sse"
+    }
+  }
+  ```
 - For Qodo (RMCP) clients, see "Qodo Integration (RMCP config)" below for the direct `url`-based snippet.
 
 6) Common troubleshooting
