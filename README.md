@@ -1001,6 +1001,33 @@ Notes:
 - In soft mode, the client will require a patched server to accept soft embeddings. The flag ensures no breakage.
 
 
+### Alternative: GLM API Provider
+
+Instead of running llama.cpp locally, you can use the GLM API (ZhipuAI) as your decoder backend:
+
+**Setup:**
+```bash
+# In .env
+REFRAG_DECODER=1
+REFRAG_RUNTIME=glm          # Switch from llamacpp to glm
+GLM_API_KEY=your-api-key    # Required
+GLM_MODEL=glm-4.6           # Optional, defaults to glm-4.6
+```
+
+**How it works:**
+- Uses OpenAI SDK with `base_url="https://api.z.ai/api/paas/v4/"`
+- Supports prompt mode only (soft embeddings ignored)
+- Handles GLM-4.6's reasoning mode (`reasoning_content` field)
+- Drop-in replacement for llama.cpp—same interface, no code changes needed
+
+**Switch back to llama.cpp:**
+```bash
+REFRAG_RUNTIME=llamacpp
+```
+
+The GLM provider is implemented in `scripts/refrag_glm.py` and automatically selected when `REFRAG_RUNTIME=glm`.
+
+
 ## How context_answer works (with decoder)
 
 The `context_answer` MCP tool answers natural-language questions using retrieval + a decoder sidecar.
@@ -1016,7 +1043,7 @@ Pipeline
 1) Hybrid search (gate-first): Uses MINI-vector gating when `REFRAG_GATE_FIRST=1` to prefilter candidates, then runs dense+lexical fusion
 2) Micro-span budgeting: Merges adjacent micro hits and applies a global token budget (`REFRAG_MODE=1`, `MICRO_BUDGET_TOKENS`, `MICRO_OUT_MAX_SPANS`)
 3) Prompt assembly: Builds compact context blocks and a “Sources” footer
-4) Decoder call (llama.cpp): When `REFRAG_DECODER=1`, calls `LLAMACPP_URL` to synthesize the final answer
+4) Decoder call: When `REFRAG_DECODER=1`, calls the configured runtime (`REFRAG_RUNTIME=llamacpp` or `glm`) to synthesize the final answer
 5) Return: Answer + citations + usage flags; errors keep citations for debugging
 
 Environment toggles
