@@ -3312,9 +3312,18 @@ async def expand_query(query: Any = None, max_new: Any = None) -> Dict[str, Any]
                 cap = max(0, min(2, int(max_new)))
             except (ValueError, TypeError):
                 cap = 2
-        from scripts.refrag_llamacpp import LlamaCppRefragClient, is_decoder_enabled  # type: ignore
-        if not is_decoder_enabled():
-            return {"alternates": [], "hint": "decoder disabled: set REFRAG_DECODER=1 and start llamacpp (LLAMACPP_URL)"}
+        runtime = str(os.environ.get("REFRAG_RUNTIME", "llamacpp")).strip().lower()
+        dec_on = str(os.environ.get("REFRAG_DECODER", "0")).strip().lower() in {"1", "true", "yes", "on"}
+        if runtime == "glm":
+            if not (dec_on and os.environ.get("GLM_API_KEY")):
+                return {"alternates": [], "hint": "decoder disabled: set REFRAG_DECODER=1 and GLM_API_KEY; or use llamacpp"}
+            from scripts.refrag_glm import GLMRefragClient  # type: ignore
+            client = GLMRefragClient()
+        else:
+            from scripts.refrag_llamacpp import LlamaCppRefragClient, is_decoder_enabled  # type: ignore
+            if not is_decoder_enabled():
+                return {"alternates": [], "hint": "decoder disabled: set REFRAG_DECODER=1 and start llamacpp (LLAMACPP_URL)"}
+            client = LlamaCppRefragClient()
         if not qlist:
             return {"alternates": []}
         prompt = (
@@ -3322,11 +3331,10 @@ async def expand_query(query: Any = None, max_new: Any = None) -> Dict[str, Any]
             "Return JSON array of strings only. No explanations.\n"
             f"Queries: {qlist}\n"
         )
-        client = LlamaCppRefragClient()
         out = client.generate_with_soft_embeddings(
             prompt=prompt,
             max_tokens=int(os.environ.get("EXPAND_MAX_TOKENS", "64") or 64),
-            temperature=0.0,  # Always 0 for deterministic expansion
+            temperature=0.0,
             top_k=int(os.environ.get("EXPAND_TOP_K", "30") or 30),
             top_p=float(os.environ.get("EXPAND_TOP_P", "0.9") or 0.9),
             stop=["\n\n"],
@@ -4790,8 +4798,13 @@ def _ca_build_prompt(context_blocks: list[str], citations: list[Dict[str, Any]],
 
 
 def _ca_decode(prompt: str, *, mtok: int, temp: float, top_k: int, top_p: float, stops: list[str]) -> str:
-    from scripts.refrag_llamacpp import LlamaCppRefragClient  # type: ignore
-    client = LlamaCppRefragClient()
+    runtime = str(os.environ.get("REFRAG_RUNTIME", "llamacpp")).strip().lower()
+    if runtime == "glm":
+        from scripts.refrag_glm import GLMRefragClient  # type: ignore
+        client = GLMRefragClient()
+    else:
+        from scripts.refrag_llamacpp import LlamaCppRefragClient  # type: ignore
+        client = LlamaCppRefragClient()
     return client.generate_with_soft_embeddings(
         prompt=prompt,
         max_tokens=mtok,
