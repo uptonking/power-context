@@ -5489,12 +5489,116 @@ async def context_answer(
     except Exception:
         pass
 
-    return {
+    # Optional: provide per-query answers/citations for pack mode to enable exact router demux
+    answers_by_query = None
+    try:
+        if len(queries) > 1 and str(_cfg.get("mode") or "").strip().lower() == "pack":
+            answers_by_query = []
+            for q in queries:
+                try:
+                    # Per-query retrieval
+                    _retr_i = _ca_prepare_filters_and_retrieve(
+                        queries=[q],
+                        lim=lim,
+                        ppath=ppath,
+                        filters=_cfg["filters"],
+                        model=model,
+                        did_local_expand=did_local_expand,
+                        kwargs={
+                            "language": _cfg["filters"].get("language"),
+                            "under": _cfg["filters"].get("under"),
+                            "path_glob": _cfg["filters"].get("path_glob"),
+                            "not_glob": _cfg["filters"].get("not_glob"),
+                            "path_regex": _cfg["filters"].get("path_regex"),
+                            "ext": _cfg["filters"].get("ext"),
+                            "kind": _cfg["filters"].get("kind"),
+                            "case": _cfg["filters"].get("case"),
+                            "symbol": _cfg["filters"].get("symbol"),
+                        },
+                    )
+                    items_i = _retr_i["items"]
+                    eff_language_i = _retr_i["eff_language"]
+                    eff_path_glob_i = _retr_i["eff_path_glob"]
+                    eff_not_glob_i = _retr_i["eff_not_glob"]
+                    override_under_i = _retr_i["override_under"]
+                    sym_arg_i = _retr_i["sym_arg"]
+                    cwd_root_i = _retr_i["cwd_root"]
+                    path_regex_i = _retr_i["path_regex"]
+                    ext_i = _retr_i["ext"]
+                    kind_i = _retr_i["kind"]
+                    case_i = _retr_i["case"]
+
+                    fallback_kwargs_i = dict(kwargs or {})
+                    for key in ("path_glob", "language", "under"):
+                        fallback_kwargs_i.pop(key, None)
+
+                    spans_i = _ca_fallback_and_budget(
+                        items=items_i,
+                        queries=[q],
+                        lim=lim,
+                        ppath=ppath,
+                        eff_language=eff_language_i,
+                        eff_path_glob=eff_path_glob_i,
+                        eff_not_glob=eff_not_glob_i,
+                        path_regex=path_regex_i,
+                        sym_arg=sym_arg_i,
+                        ext=ext_i,
+                        kind=kind_i,
+                        override_under=override_under_i,
+                        did_local_expand=did_local_expand,
+                        model=model,
+                        req_language=eff_language_i,
+                        not_=not_,
+                        case=case_i,
+                        cwd_root=cwd_root_i,
+                        include_snippet=bool(include_snippet),
+                        kwargs=fallback_kwargs_i,
+                    )
+
+                    cits_i, ctx_blocks_i, snippets_by_id_i, asked_ident_i, def_line_i, def_id_i, usage_id_i = _ca_build_citations_and_context(
+                        spans=spans_i,
+                        include_snippet=bool(include_snippet),
+                        queries=[q],
+                    )
+
+                    # Decode per-query
+                    prompt_i = _ca_build_prompt(ctx_blocks_i, cits_i, [q])
+                    ans_raw_i = _ca_decode(prompt_i, mtok=mtok, temp=temp, top_k=top_k, top_p=top_p, stops=stops)
+                    ans_i = _ca_postprocess_answer(
+                        ans_raw_i,
+                        cits_i,
+                        asked_ident=asked_ident_i,
+                        def_line_exact=def_line_i,
+                        def_id=def_id_i,
+                        usage_id=usage_id_i,
+                        snippets_by_id=snippets_by_id_i,
+                    )
+
+                    answers_by_query.append({
+                        "query": q,
+                        "answer": ans_i,
+                        "citations": cits_i,
+                    })
+                except Exception as _e:
+                    # Best-effort: if per-query path fails, include empty stub to preserve alignment
+                    answers_by_query.append({
+                        "query": q,
+                        "answer": "",
+                        "citations": [],
+                        "error": str(_e),
+                    })
+    except Exception:
+        answers_by_query = None
+
+    out = {
         "answer": answer.strip(),
         "citations": citations,
         "query": queries,
         "used": {"gate_first": True, "refrag": True},
     }
+    if answers_by_query:
+        out["answers_by_query"] = answers_by_query
+    return out
 
 
 @mcp.tool()

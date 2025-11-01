@@ -117,6 +117,7 @@ Notes:
 - Roo (SSE/RMCP): supports both SSE and RMCP connections; see config examples below
 - Cline (SSE/RMCP): supports both SSE and RMCP connections; see config examples below
 - Windsurf (SSE/RMCP): supports both SSE and RMCP connections; see config examples below
+- Zed (SSE): uses mcp-remote bridge via command/args; see config below
 - Kiro (SSE): uses mcp-remote bridge via command/args; see config below
 - Qodo (RMCP): connects directly to HTTP endpoints; add each tool individually
 - OpenAI Codex (RMCP): TOML config for memory/indexer URLs
@@ -270,8 +271,29 @@ Create `.kiro/settings/mcp.json` in your workspace:
   }
 }
 ````
+
+Zed (SSE):
+Add to your Zed `settings.json` (accessed via Command Palette → "Settings: Open Settings (JSON)"):
+````json
+{
+  "mcp": {
+    "servers": {
+      "qdrant-indexer": {
+        "command": "npx",
+        "args": [
+          "mcp-remote",
+          "http://localhost:8001/sse",
+          "--transport",
+          "sse-only"
+        ],
+        "env": {}
+      }
+    }
+  }
+}
+````
 Notes:
-- Kiro expects command/args (stdio). mcp-remote bridges to remote SSE endpoints.
+- Zed expects command/args (stdio). mcp-remote bridges to remote SSE endpoints.
 - If npx prompts, add -y right after npx.
 - For Qodo (RMCP) clients, see "Qodo Integration (RMCP config)" below for the direct `url`-based snippet.
 
