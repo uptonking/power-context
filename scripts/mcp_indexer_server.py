@@ -250,6 +250,7 @@ MCP_TOOL_TIMEOUT_SECS = safe_float(
 os.environ.setdefault("DEBUG_CONTEXT_ANSWER", "1")
 os.environ.setdefault("REFRAG_DECODER", "1")
 os.environ.setdefault("LLAMACPP_URL", "http://localhost:8080")
+os.environ.setdefault("USE_GPU_DECODER", "0")
 os.environ.setdefault(
     "CTX_REQUIRE_IDENTIFIER", "0"
 )  # Disable strict identifier requirement
@@ -5602,7 +5603,8 @@ def _ca_postprocess_answer(
     # Remove accidental URLs/Markdown links; enforce bracket citations only
     import re as _re
     txt = _re.sub(r"https?://\S+", "", txt)
-    txt = _re.sub(r"\[[^\]]+\]\([^\)]+\)", lambda m: m.group(0).split(']')[0] + ']' , txt)
+    # Convert Markdown links [text](url) or even incomplete [text]( to [text]
+    txt = _re.sub(r"\[([^\]]+)\]\s*\([^\)]*\)?", r"[\1]", txt)
     # Cleanup repetition
     txt = _cleanup_answer(
         txt,

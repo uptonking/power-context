@@ -120,9 +120,21 @@ class LlamaCppRefragClient:
     """
 
     def __init__(self, base_url: Optional[str] = None) -> None:
-        self.base_url = base_url or os.environ.get(
-            "LLAMACPP_URL", "http://localhost:8080"
-        )
+        if base_url:
+            self.base_url = base_url
+        else:
+            # Smart URL resolution: GPU vs Docker based on USE_GPU_DECODER flag
+            use_gpu = str(os.environ.get("USE_GPU_DECODER", "0")).strip().lower()
+            if use_gpu in {"1", "true", "yes", "on"}:
+                # Use native GPU-accelerated server
+                # Use localhost when running on host, host.docker.internal when in container
+                if os.path.exists("/.dockerenv"):
+                    self.base_url = "http://host.docker.internal:8081"
+                else:
+                    self.base_url = "http://localhost:8081"
+            else:
+                # Use configured LLAMACPP_URL (default: Docker CPU-only)
+                self.base_url = os.environ.get("LLAMACPP_URL", "http://localhost:8080")
         _maybe_warm(self.base_url)
         if get_runtime_kind() != "llamacpp":
             raise ValueError(

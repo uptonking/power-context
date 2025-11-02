@@ -57,7 +57,7 @@ INDEX_MICRO_CHUNKS=1 MAX_MICRO_CHUNKS_PER_FILE=200 make reset-dev-dual
 LLAMACPP_MODEL_URL="https://huggingface.co/ORG/MODEL/resolve/main/model.gguf" \
   INDEX_MICRO_CHUNKS=1 MAX_MICRO_CHUNKS_PER_FILE=200 make reset-dev-dual
 ```
-- Want GPU acceleration? Set `LLAMACPP_USE_GPU=1` (optionally `LLAMACPP_GPU_LAYERS=-1`) in your `.env` before `docker compose up`. The llama.cpp entrypoint will pass the right `--n-gpu-layers` flags; leave it at 0 for CPU-only.
+- Want GPU acceleration? Set `LLAMACPP_USE_GPU=1` (optionally `LLAMACPP_GPU_LAYERS=-1`) in your `.env` before `docker compose up`.
 - Embeddings: set EMBEDDING_MODEL in .env and reindex (make reindex)
 
 
@@ -75,8 +75,7 @@ HOST_INDEX_PATH="$(pwd)" FASTMCP_INDEXER_PORT=8001 docker compose up -d qdrant m
 ### Make targets (quick reference)
 - reset-dev: SSE stack on 8000/8001; seeds Qdrant, downloads tokenizer + tiny llama.cpp model, reindexes, brings up memory + indexer + watcher
 - reset-dev-codex: RMCP stack on 8002/8003; same seeding + bring-up for Codex/Qodo
-- reset-dev-dual: SSE + RMCP together (8000/8001 and 8002/8003) – optimized for Apple Silicon/arm64 (uses arm64 compose overlay).
-- reset-dev-dual-amd: Legacy dual stack for linux/amd64 hosts (mirrors the previous default flow).
+- reset-dev-dual: SSE + RMCP together (8000/8001 and 8002/8003)
 - up / down / logs / ps: Docker Compose lifecycle helpers
 - index / reindex / reindex-hard: Index current repo; `reindex` recreates the collection; `reindex-hard` also clears the local cache so unchanged files are re-uploaded
 - index-here / index-path: Index arbitrary host path without cloning into this repo
