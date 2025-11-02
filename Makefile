@@ -4,6 +4,8 @@ SHELL := /bin/bash
 # An empty export forces docker to use its default context/socket.
 export DOCKER_HOST =
 
+DC_ARM := docker compose -f docker-compose.yml -f docker-compose.arm64.yml
+
 .PHONY: help up down logs ps restart rebuild index reindex watch env hybrid bootstrap history rerank-local setup-reranker prune warm health
 .PHONY: venv venv-install
 
@@ -184,7 +186,21 @@ quantize-reranker: ## Quantize reranker ONNX to INT8 (set RERANKER_ONNX_PATH, op
 
 
 
-reset-dev-dual: ## bring up BOTH legacy SSE and Streamable HTTP MCPs (dual-compat mode)
+reset-dev-dual: ## bring up BOTH legacy SSE and Streamable HTTP MCPs (dual-compat mode) [Apple/arm64 default]
+	$(DC_ARM) down || true
+	$(DC_ARM) build --no-cache indexer mcp mcp_indexer mcp_http mcp_indexer_http watcher llamacpp
+	$(DC_ARM) up -d qdrant
+	./scripts/wait-for-qdrant.sh
+	$(DC_ARM) run --rm init_payload || true
+	$(MAKE) tokenizer
+	$(DC_ARM) run --rm -e INDEX_MICRO_CHUNKS -e MAX_MICRO_CHUNKS_PER_FILE -e TOKENIZER_PATH -e TOKENIZER_URL indexer --root /work --recreate
+	$(MAKE) llama-model
+	$(DC_ARM) up -d mcp mcp_indexer mcp_http mcp_indexer_http watcher llamacpp
+	# Ensure watcher is up even if a prior step or manual bring-up omitted it
+	$(DC_ARM) up -d watcher
+	$(DC_ARM) ps
+
+reset-dev-dual-amd: ## legacy dual target for linux/amd64 hosts
 	docker compose down || true
 	docker compose build --no-cache indexer mcp mcp_indexer mcp_http mcp_indexer_http watcher llamacpp
 	docker compose up -d qdrant
@@ -194,7 +210,6 @@ reset-dev-dual: ## bring up BOTH legacy SSE and Streamable HTTP MCPs (dual-compa
 	docker compose run --rm -e INDEX_MICRO_CHUNKS -e MAX_MICRO_CHUNKS_PER_FILE -e TOKENIZER_PATH -e TOKENIZER_URL indexer --root /work --recreate
 	$(MAKE) llama-model
 	docker compose up -d mcp mcp_indexer mcp_http mcp_indexer_http watcher llamacpp
-	# Ensure watcher is up even if a prior step or manual bring-up omitted it
 	docker compose up -d watcher
 	docker compose ps
 
@@ -272,4 +287,3 @@ qdrant-prune:
 
 qdrant-index-root:
 	python3 scripts/mcp_router.py --run "reindex repo"
-

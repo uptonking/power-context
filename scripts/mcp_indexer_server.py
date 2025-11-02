@@ -5298,7 +5298,7 @@ def _ca_build_citations_and_context(
         eline = int(it.get("end_line") or 0)
         _hostp = it.get("host_path")
         _contp = it.get("container_path")
-        # Normalize paths: prefer repo-relative (drop leading /work/)
+        # Provide both container-absolute and repo-relative forms for compatibility
         def _norm(p: str) -> str:
             try:
                 if p.startswith("/work/"):
@@ -5308,7 +5308,8 @@ def _ca_build_citations_and_context(
                 return p
         _cit = {
             "id": idx,
-            "path": _norm(path),
+            "path": path,  # keep original for backward compatibility (tests expect /work/...)
+            "rel_path": _norm(path),
             "start_line": sline,
             "end_line": eline,
         }
