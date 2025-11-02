@@ -252,6 +252,18 @@ Ports
 | FASTMCP_INDEXER_HTTP_PORT | Indexer RMCP host port mapping | 8003 |
 | FASTMCP_HEALTH_PORT | Health port (memory/indexer) | memory: 18000; indexer: 18001 |
 | LLM_EXPAND_MAX | Max alternate queries generated via LLM | 0 |
+| REFRAG_DECODER | Enable decoder for context_answer | 1 (enabled) |
+| REFRAG_RUNTIME | Decoder backend: llamacpp or glm | llamacpp |
+| LLAMACPP_URL | llama.cpp server endpoint | http://llamacpp:8080 or http://host.docker.internal:8081 |
+| LLAMACPP_TIMEOUT_SEC | Decoder request timeout | 300 |
+| DECODER_MAX_TOKENS | Max tokens for decoder responses | 4000 |
+| GLM_API_KEY | API key for GLM provider | unset |
+| GLM_MODEL | GLM model name | glm-4.6 |
+| USE_GPU_DECODER | Native Metal decoder (1) vs Docker (0) | 0 (docker) |
+| REFRAG_MODE | Enable micro-chunking and span budgeting | 1 (enabled) |
+| REFRAG_GATE_FIRST | Enable mini-vector gating | 1 (enabled) |
+| REFRAG_CANDIDATES | Candidates for gate-first filtering | 200 |
+| MICRO_BUDGET_TOKENS | Token budget for context_answer | 512 |
 
 ## Running tests
 
