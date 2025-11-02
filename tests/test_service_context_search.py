@@ -2,6 +2,14 @@ import importlib
 import json
 import pytest
 
+# Import fastmcp BEFORE scripts.mcp_indexer_server to avoid import conflicts
+# (scripts.mcp_indexer_server imports from mcp.server.fastmcp which can cause
+# the mcp module to be in a partially initialized state)
+try:
+    import fastmcp
+except ImportError:
+    fastmcp = None  # Will be handled in tests that need it
+
 srv = importlib.import_module("scripts.mcp_indexer_server")
 
 
@@ -118,7 +126,9 @@ async def test_context_search_weight_scaling(monkeypatch):
         async def call_tool(self, *a, **k):
             return Resp()
 
-    import fastmcp
+    # fastmcp is already imported at module level
+    if fastmcp is None:
+        pytest.skip("fastmcp not available")
 
     monkeypatch.setattr(fastmcp, "Client", lambda *a, **k: FakeClient())
 
@@ -182,7 +192,9 @@ async def test_context_search_per_source_limits(monkeypatch):
         async def call_tool(self, *a, **k):
             return Resp()
 
-    import fastmcp
+    # fastmcp is already imported at module level
+    if fastmcp is None:
+        pytest.skip("fastmcp not available")
 
     monkeypatch.setattr(fastmcp, "Client", lambda *a, **k: FakeClient())
 
