@@ -57,6 +57,7 @@ INDEX_MICRO_CHUNKS=1 MAX_MICRO_CHUNKS_PER_FILE=200 make reset-dev-dual
 LLAMACPP_MODEL_URL="https://huggingface.co/ORG/MODEL/resolve/main/model.gguf" \
   INDEX_MICRO_CHUNKS=1 MAX_MICRO_CHUNKS_PER_FILE=200 make reset-dev-dual
 ```
+- Want GPU acceleration? Set `LLAMACPP_USE_GPU=1` (optionally `LLAMACPP_GPU_LAYERS=-1`) in your `.env` before `docker compose up`. The llama.cpp entrypoint will pass the right `--n-gpu-layers` flags; leave it at 0 for CPU-only.
 - Embeddings: set EMBEDDING_MODEL in .env and reindex (make reindex)
 
 

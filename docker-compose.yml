@@ -135,17 +135,44 @@ services:
     # Optional sidecar providing a text-generation API on :8080
     # No behavior change unless REFRAG_DECODER=1
     environment:
-      - LLAMA_ARG_MODEL=/models/model.gguf
-      - LLAMA_ARG_CTX_SIZE=8192
-      - LLAMA_ARG_HOST=0.0.0.0
-      - LLAMA_ARG_PORT=8080
+      - LLAMACPP_CTX_SIZE=${LLAMACPP_CTX_SIZE:-8192}
+      - LLAMACPP_HOST=0.0.0.0
+      - LLAMACPP_PORT=8080
+      - LLAMACPP_USE_GPU=${LLAMACPP_USE_GPU:-0}
+      - LLAMACPP_GPU_LAYERS=${LLAMACPP_GPU_LAYERS:-0}
+      - LLAMACPP_GPU_SPLIT=${LLAMACPP_GPU_SPLIT:-}
+      - LLAMACPP_THREADS=${LLAMACPP_THREADS:-}
+      - LLAMACPP_EXTRA_ARGS=${LLAMACPP_EXTRA_ARGS:-}
+      - LLAMACPP_NO_WARMUP=${LLAMACPP_NO_WARMUP:-1}
+      - LLAMACPP_TEMPERATURE=${LLAMACPP_TEMPERATURE:-}
     ports:
       - "8080:8080"
     volumes:
       - ./models:/models:ro
-    # The server image's entrypoint is already the server binary; pass args only
-    command: ["--model", "/models/model.gguf", "--host", "0.0.0.0", "--port", "8080", "--no-warmup"]
-
+    entrypoint: ["/bin/sh","-lc"]
+    command:
+      - |
+        set -e
+        ARGS="--model /models/model.gguf --host ${LLAMACPP_HOST:-0.0.0.0} --port ${LLAMACPP_PORT:-8080} --ctx-size ${LLAMACPP_CTX_SIZE:-8192}"
+        if [ "${LLAMACPP_USE_GPU:-0}" = "1" ]; then
+          LAYERS="${LLAMACPP_GPU_LAYERS:--1}"
+        else
+          LAYERS="${LLAMACPP_GPU_LAYERS:-0}"
+        fi
+        ARGS="$$ARGS --n-gpu-layers $${LAYERS}"
+        if [ -n "${LLAMACPP_GPU_SPLIT:-}" ]; then
+          ARGS="$$ARGS --tensor-split ${LLAMACPP_GPU_SPLIT}"
+        fi
+        if [ "${LLAMACPP_NO_WARMUP:-1}" != "0" ]; then
+          ARGS="$$ARGS --no-warmup"
+        fi
+        if [ -n "${LLAMACPP_THREADS:-}" ]; then
+          ARGS="$$ARGS --threads ${LLAMACPP_THREADS}"
+        fi
+        if [ -n "${LLAMACPP_EXTRA_ARGS:-}" ]; then
+          ARGS="$$ARGS ${LLAMACPP_EXTRA_ARGS}"
+        fi
+        exec /app/llama-server $$ARGS
 
   indexer:
     build:

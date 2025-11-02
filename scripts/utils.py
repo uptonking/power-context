@@ -69,6 +69,7 @@ def lex_hash_vector_queries(phrases: list[str], dim: int = 4096) -> list[float]:
 def highlight_snippet(snippet: str, tokens: list[str]) -> str:
     if not snippet or not tokens:
         return snippet
+
     # longest first to avoid partial overlaps
     toks = sorted(set(tokens), key=len, reverse=True)
     import re as _re
