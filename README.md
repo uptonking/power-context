@@ -75,7 +75,8 @@ HOST_INDEX_PATH="$(pwd)" FASTMCP_INDEXER_PORT=8001 docker compose up -d qdrant m
 ### Make targets (quick reference)
 - reset-dev: SSE stack on 8000/8001; seeds Qdrant, downloads tokenizer + tiny llama.cpp model, reindexes, brings up memory + indexer + watcher
 - reset-dev-codex: RMCP stack on 8002/8003; same seeding + bring-up for Codex/Qodo
-- reset-dev-dual: SSE + RMCP together (8000/8001 and 8002/8003)
+- reset-dev-dual: SSE + RMCP together (8000/8001 and 8002/8003) – optimized for Apple Silicon/arm64 (uses arm64 compose overlay).
+- reset-dev-dual-amd: Legacy dual stack for linux/amd64 hosts (mirrors the previous default flow).
 - up / down / logs / ps: Docker Compose lifecycle helpers
 - index / reindex / reindex-hard: Index current repo; `reindex` recreates the collection; `reindex-hard` also clears the local cache so unchanged files are re-uploaded
 - index-here / index-path: Index arbitrary host path without cloning into this repo
