@@ -59,8 +59,17 @@ INDEX_MICRO_CHUNKS=1 MAX_MICRO_CHUNKS_PER_FILE=200 make reset-dev-dual
 LLAMACPP_MODEL_URL="https://huggingface.co/ORG/MODEL/resolve/main/model.gguf" \
   INDEX_MICRO_CHUNKS=1 MAX_MICRO_CHUNKS_PER_FILE=200 make reset-dev-dual
 ```
-- Want GPU acceleration? Set `LLAMACPP_USE_GPU=1` (optionally `LLAMACPP_GPU_LAYERS=-1`) in your `.env` before `docker compose up`.
+- Want GPU acceleration? Set `LLAMACPP_USE_GPU=1` (optionally `LLAMACPP_GPU_LAYERS=-1`) in your `.env` before `docker compose up`, or simply run `scripts/gpu_toggle.sh gpu` (described below) to flip the switch for you.
 - Embeddings: set EMBEDDING_MODEL in .env and reindex (make reindex)
+
+
+Decoder env toggles (set in `.env` and managed automatically by `scripts/gpu_toggle.sh`):
+
+| Variable              | Description                                           | Typical values |
+|-----------------------|-------------------------------------------------------|----------------|
+| `USE_GPU_DECODER`     | Feature-flag for native Metal decoder                | `0` (docker), `1` (native) |
+| `LLAMACPP_URL`        | Decoder endpoint containers should use               | `http://llamacpp:8080` or `http://host.docker.internal:8081` |
+| `LLAMACPP_GPU_LAYERS` | Number of layers to offload to GPU (`-1` = all)      | `0`, `32`, `-1` |
 
 
 Alternative (compose only)
@@ -84,6 +93,7 @@ On Apple Silicon you can run the llama.cpp decoder natively with Metal while kee
    scripts/gpu_toggle.sh gpu
    scripts/gpu_toggle.sh start   # launches llama-server on localhost:8081
    docker compose up -d --force-recreate mcp_indexer mcp_indexer_http
+   docker compose stop llamacpp   # optional once the native server is healthy
    ```
    The toggle updates `.env` to point at `http://host.docker.internal:8081` so containers reach the host process.
 3. Run `scripts/gpu_toggle.sh status` to confirm the native server is healthy. All MCP `context_answer` calls will now use the Metal-backed decoder.
@@ -339,7 +349,7 @@ Notes:
 - SSE “Invalid session ID” when POSTing /messages directly:
   - Expected if you didn’t initiate an SSE session first. Use an MCP client (e.g., mcp-remote) to handle the handshake.
 - llama.cpp platform warning on Apple Silicon:
-  - Safe to ignore for local dev, or set platform: linux/amd64 for the service, or build a native image.
+  - Prefer the native path above (`scripts/gpu_toggle.sh gpu`). If you stick with Docker, add `platform: linux/amd64` to the service or ignore the warning during local dev.
 - Indexing feels stuck on very large files:
   - Use MAX_MICRO_CHUNKS_PER_FILE=200 during dev runs.
 
@@ -422,13 +432,18 @@ Memory MCP (8000 SSE, 8002 RMCP):
 Indexer/Search MCP (8001 SSE, 8003 RMCP):
 - repo_search — hybrid code search (dense + lexical + optional reranker)
 - context_search — search that can also blend memory results (include_memories)
+- context_answer — natural-language Q&A with retrieval + local LLM (llama.cpp or GLM)
 - code_search — alias of repo_search
 - repo_search_compat — permissive wrapper that normalizes q/text/queries/top_k payloads
+- context_answer_compat — permissive wrapper for context_answer with lenient argument handling
+- expand_query(query, max_new?) — LLM-assisted query expansion (generates 1-2 alternates)
 - qdrant_index_root — index /work (mounted repo root) with safe defaults
 - qdrant_index(subdir?, recreate?, collection?) — index a subdir or recreate collection
 - qdrant_prune — remove points for missing files or file_hash mismatch
 - qdrant_list — list Qdrant collections
 - qdrant_status — collection counts and recent ingestion timestamps
+- workspace_info(workspace_path?) — read .codebase/state.json and resolve default collection
+- list_workspaces(search_root?) — scan for multiple workspaces in multi-repo environments
 - memory_store — convenience memory store from the indexer (uses default collection)
 - search_tests_for — intent wrapper for test files
 - search_config_for — intent wrapper for likely config files
@@ -439,6 +454,7 @@ Indexer/Search MCP (8001 SSE, 8003 RMCP):
 Notes:
 - Most search tools accept filters like language, under, path_glob, kind, symbol, ext.
 - Reranker enabled by default; timeouts fall back to hybrid results.
+- context_answer requires decoder enabled (REFRAG_DECODER=1) with llama.cpp or GLM backend.
 
 ### Qodo Integration (RMCP config)
 
