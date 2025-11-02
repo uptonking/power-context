@@ -217,11 +217,9 @@ def get_workspace_state(workspace_path: str) -> WorkspaceState:
 
             # Create new state
             now = datetime.now().isoformat()
-            env_coll = os.environ.get("COLLECTION_NAME")
-            if isinstance(env_coll, str) and env_coll.strip() and env_coll.strip() != "my-collection":
-                collection_name = env_coll.strip()
-            else:
-                collection_name = _generate_collection_name(workspace_path)
+            env_coll = os.environ.get("COLLECTION_NAME", "").strip()
+            # Use env var if set, otherwise default to "codebase"
+            collection_name = env_coll if env_coll else "codebase"
 
             state: WorkspaceState = {
                 "workspace_path": str(Path(workspace_path).resolve()),
@@ -284,33 +282,18 @@ def update_qdrant_stats(workspace_path: str, stats: QdrantStats) -> WorkspaceSta
 
 def get_collection_name(workspace_path: str) -> str:
     """Get the Qdrant collection name for a workspace.
-    If none is present in state, persist either COLLECTION_NAME from env or a generated
-    repoName-<shortHash> based on the workspace path, and return it.
 
-    Fix: treat placeholders as not-real so we don't collide across repos.
-    Placeholders include: empty string, "my-collection", and the env default if it equals "my-collection".
-    Only short-circuit when the stored name is already real.
+    Seamless single-collection mode:
+    - Defaults to "codebase" for unified cross-repo search
+    - All your code goes into one collection
+    - Override via COLLECTION_NAME env var if you need isolation
     """
-    state = get_workspace_state(workspace_path)
-    coll = state.get("qdrant_collection") if isinstance(state, dict) else None
-    env_coll = os.environ.get("COLLECTION_NAME")
-    env_coll = env_coll.strip() if isinstance(env_coll, str) else ""
-    placeholders = {"", "my-collection"}
-    # If env is explicitly the default placeholder, consider it a placeholder too
-    if env_coll == "my-collection":
-        placeholders.add(env_coll)
+    env_coll = os.environ.get("COLLECTION_NAME", "").strip()
 
-    # If state has a real (non-placeholder) collection, keep it
-    if isinstance(coll, str):
-        c = coll.strip()
-        if c and c not in placeholders:
-            return c
+    # Use env var if set, otherwise default to unified "codebase" collection
+    coll = env_coll if env_coll else "codebase"
 
-    # Otherwise, prefer a non-placeholder explicit env override; else generate
-    if env_coll and env_coll not in placeholders:
-        coll = env_coll.strip()
-    else:
-        coll = _generate_collection_name(workspace_path)
+    # Persist to state for consistency
     update_workspace_state(workspace_path, {"qdrant_collection": coll})
     return coll
 

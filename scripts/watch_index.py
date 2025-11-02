@@ -34,7 +34,7 @@ from datetime import datetime
 import scripts.ingest_code as idx
 
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
-COLLECTION = os.environ.get("COLLECTION_NAME", "my-collection")
+COLLECTION = os.environ.get("COLLECTION_NAME", "codebase")
 MODEL = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
 ROOT = Path(os.environ.get("WATCH_ROOT", "/work")).resolve()
 
@@ -473,6 +473,20 @@ def main():
     print(
         f"Watch mode: root={ROOT} qdrant={QDRANT_URL} collection={COLLECTION} model={MODEL}"
     )
+
+    # Health check: detect and auto-heal cache/collection sync issues
+    try:
+        from scripts.collection_health import auto_heal_if_needed
+        print("[health_check] Checking collection health...")
+        heal_result = auto_heal_if_needed(str(ROOT), COLLECTION, QDRANT_URL, dry_run=False)
+        if heal_result["action_taken"] == "cleared_cache":
+            print("[health_check] Cache cleared due to sync issue - files will be reindexed")
+        elif not heal_result["health_check"]["healthy"]:
+            print(f"[health_check] Issue detected: {heal_result['health_check']['issue']}")
+        else:
+            print("[health_check] Collection health OK")
+    except Exception as e:
+        print(f"[health_check] Warning: health check failed: {e}")
 
     client = QdrantClient(
         url=QDRANT_URL, timeout=int(os.environ.get("QDRANT_TIMEOUT", "20") or 20)

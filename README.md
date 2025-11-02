@@ -40,6 +40,13 @@ INDEX_MICRO_CHUNKS=1 MAX_MICRO_CHUNKS_PER_FILE=200 make reset-dev-dual
 ```
 - Default ports: Memory MCP :8000, Indexer MCP :8001, Qdrant :6333, llama.cpp :8080
 
+**🎯 Seamless Setup Note:**
+- The stack uses a **single unified `codebase` collection** by default
+- All your code goes into one collection for seamless cross-repo search
+- No per-workspace fragmentation - search across everything at once
+- Health checks auto-detect and fix cache/collection sync issues
+- Just run `make reset-dev-dual` on any machine and it works™
+
 ### Make targets: SSE, RMCP, and dual-compat
 - Legacy SSE only (default):
   - Ports: 8000 (/sse), 8001 (/sse)
@@ -96,9 +103,10 @@ INDEX_MICRO_CHUNKS=1 MAX_MICRO_CHUNKS_PER_FILE=200 make reset-dev-dual
    GLM_MODEL=glm-4.6             # Optional, defaults to glm-4.6
    ```
 
-5. **Custom collection name**:
+5. **Collection name** (unified by default):
    ```bash
-   COLLECTION_NAME=my-project    # Defaults to auto-detected repo name
+   COLLECTION_NAME=codebase      # Default: single unified collection for all code
+   # Only change this if you need isolated collections per project
    ```
 
 **After changing `.env`:**
@@ -280,7 +288,7 @@ Ports
 
 | Name | Description | Default |
 |------|-------------|---------|
-| COLLECTION_NAME | Qdrant collection name used by both servers | my-collection |
+| COLLECTION_NAME | Qdrant collection name (unified across all repos) | codebase |
 | REPO_NAME | Logical repo tag stored in payload for filtering | auto-detect from git/folder |
 | HOST_INDEX_PATH | Host path mounted at /work in containers | current repo (.) |
 | QDRANT_URL | Qdrant base URL | container: http://qdrant:6333; local: http://localhost:6333 |
@@ -762,6 +770,50 @@ Expected: non-zero results with blended items; memory hits will have memory-like
 Notes:
 - Named vector remains aligned with the MCP server (fast-bge-base-en-v1.5). If you change EMBEDDING_MODEL, run `make reindex` to recreate the collection.
 - For very large repos, consider running `make index` on a schedule (or pre-commit) to keep Qdrant warm without full reingestion.
+
+### Multi-repo indexing (unified search)
+
+The stack uses a **single unified `codebase` collection** by default, making multi-repo search seamless:
+
+**Index another repo into the same collection:**
+```bash
+# From your qdrant directory
+make index-here HOST_INDEX_PATH=/path/to/other/repo REPO_NAME=other-repo
+
+# Or with full control:
+HOST_INDEX_PATH=/path/to/other/repo \
+COLLECTION_NAME=codebase \
+REPO_NAME=other-repo \
+docker compose run --rm indexer --root /work
+```
+
+**What happens:**
+- Files from the other repo get indexed into the unified `codebase` collection
+- Each file is tagged with `metadata.repo = "other-repo"` for filtering
+- Search across all repos by default, or filter by specific repo
+
+**Search examples:**
+```bash
+# Search across all indexed repos
+make hybrid QUERY="authentication logic"
+
+# Filter by specific repo
+python scripts/hybrid_search.py \
+  --query "authentication logic" \
+  --repo other-repo
+
+# Filter by repo + language
+python scripts/hybrid_search.py \
+  --query "authentication logic" \
+  --repo other-repo \
+  --language python
+```
+
+**Benefits:**
+- One collection = unified search across all your code
+- No fragmentation or collection management overhead
+- Filter by repo when you need isolation
+- All repos share the same vector space for better semantic search
 
 ### Multi-query re-ranker (no new deps)
 
@@ -1296,6 +1348,39 @@ Client tips:
 
 ## Troubleshooting
 
+### Collection Health & Cache Sync
+
+The stack includes automatic health checks that detect and fix cache/collection sync issues:
+
+**Check collection health:**
+```bash
+python scripts/collection_health.py --workspace . --collection codebase
+```
+
+**Auto-heal cache issues:**
+```bash
+python scripts/collection_health.py --workspace . --collection codebase --auto-heal
+```
+
+**What it detects:**
+- Empty collection with cached files (cache thinks files are indexed but they're not)
+- Significant mismatch between cached files and actual collection contents
+- Missing metadata in collection points
+
+**When to use:**
+- After manually deleting collections
+- If searches return no results despite indexing
+- After Qdrant crashes or data loss
+- When switching between collection names
+
+**Automatic healing:**
+- Health checks run automatically on watcher and indexer startup
+- Cache is cleared when sync issues are detected
+- Files are reindexed on next run
+
+### General Issues
+
 - If the MCP servers can’t reach Qdrant, confirm both containers are up: `make ps`.
 - If the SSE port collides, change `FASTMCP_PORT` in `.env` and the mapped port in `docker-compose.yml`.
 - If you customize tool descriptions, restart: `make restart`.
+- If searches return no results, check collection health (see above).

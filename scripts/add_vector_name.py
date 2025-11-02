@@ -3,7 +3,7 @@ import os
 from qdrant_client import QdrantClient, models
 
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
-COLLECTION = os.environ.get("COLLECTION_NAME", "my-collection")
+COLLECTION = os.environ.get("COLLECTION_NAME", "codebase")
 
 cli = QdrantClient(url=QDRANT_URL)
 

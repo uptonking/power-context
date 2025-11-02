@@ -6,7 +6,7 @@ from typing import Tuple
 
 from qdrant_client import QdrantClient, models
 
-COLLECTION = os.environ.get("COLLECTION_NAME", "my-collection")
+COLLECTION = os.environ.get("COLLECTION_NAME", "codebase")
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
 API_KEY = os.environ.get("QDRANT_API_KEY")
 ROOT = Path(os.environ.get("PRUNE_ROOT", ".")).resolve()

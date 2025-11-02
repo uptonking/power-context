@@ -1911,14 +1911,12 @@ def index_repo(
         if vector_name is None:
             vector_name = _sanitize_vector_name(model_name)
 
-    # Workspace state: ensure unique per-workspace collection and announce start
+    # Workspace state: use single unified collection for seamless cross-repo search
     try:
         ws_path = str(root)
-        # If collection is unset or default placeholder, generate a per-workspace one
+        # Always use the unified collection (default: "codebase")
         if 'get_collection_name' in globals() and get_collection_name:
-            default_marker = os.environ.get("COLLECTION_NAME", "my-collection")
-            if (not collection) or (collection == "my-collection") or (default_marker == "my-collection"):
-                collection = get_collection_name(ws_path)
+            collection = get_collection_name(ws_path)
         if update_workspace_state:
             update_workspace_state(ws_path, {"qdrant_collection": collection})
         if update_indexing_status:
@@ -1937,6 +1935,22 @@ def index_repo(
     print(
         f"Indexing root={root} -> {qdrant_url} collection={collection} model={model_name} recreate={recreate}"
     )
+
+    # Health check: detect cache/collection sync issues before indexing
+    if not recreate and skip_unchanged:
+        try:
+            from scripts.collection_health import auto_heal_if_needed
+            print("[health_check] Checking collection health...")
+            heal_result = auto_heal_if_needed(str(root), collection, qdrant_url, dry_run=False)
+            if heal_result["action_taken"] == "cleared_cache":
+                print("[health_check] Cache cleared due to sync issue - forcing full reindex")
+            elif not heal_result["health_check"]["healthy"]:
+                print(f"[health_check] Issue detected: {heal_result['health_check']['issue']}")
+            else:
+                print("[health_check] Collection health OK")
+        except Exception as e:
+            print(f"[health_check] Warning: health check failed: {e}")
+
     if recreate:
         recreate_collection(client, collection, dim, vector_name)
     else:
@@ -2387,7 +2401,7 @@ def main():
 
     qdrant_url = os.environ.get("QDRANT_URL", "http://localhost:6333")
     api_key = os.environ.get("QDRANT_API_KEY")
-    collection = os.environ.get("COLLECTION_NAME", "my-collection")
+    collection = os.environ.get("COLLECTION_NAME", "codebase")
     model_name = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
 
     index_repo(

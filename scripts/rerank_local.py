@@ -14,7 +14,7 @@ except Exception:  # pragma: no cover
     ort = None
     Tokenizer = None
 
-COLLECTION = os.environ.get("COLLECTION_NAME", "my-collection")
+COLLECTION = os.environ.get("COLLECTION_NAME", "codebase")
 MODEL_NAME = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
 API_KEY = os.environ.get("QDRANT_API_KEY")
