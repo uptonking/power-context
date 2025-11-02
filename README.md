@@ -51,7 +51,61 @@ INDEX_MICRO_CHUNKS=1 MAX_MICRO_CHUNKS_PER_FILE=200 make reset-dev-dual
   - Ports: 8000/8001 (/sse) and 8002/8003 (/mcp)
   - Command: `INDEX_MICRO_CHUNKS=1 MAX_MICRO_CHUNKS_PER_FILE=200 make reset-dev-dual`
 
-- You can skip the decoder; it’s feature-flagged off by default.
+### Environment Configuration
+
+**Default Setup:**
+- The repository includes `.env.example` with sensible defaults for local development
+- On first run, copy it to `.env`: `cp .env.example .env`
+- The `make reset-dev*` targets will use your `.env` settings automatically
+
+**Key Configuration Files:**
+- `.env` — Your local environment variables (gitignored, safe to customize)
+- `.env.example` — Template with documented defaults (committed to repo)
+- `docker-compose.yml` — Service definitions that read from `.env`
+
+**Recommended Customizations:**
+
+1. **Enable micro-chunking** (better retrieval quality):
+   ```bash
+   INDEX_MICRO_CHUNKS=1
+   MAX_MICRO_CHUNKS_PER_FILE=200
+   ```
+
+2. **Enable decoder for Q&A** (context_answer tool):
+   ```bash
+   REFRAG_DECODER=1              # Enable decoder (default: 1)
+   REFRAG_RUNTIME=llamacpp       # Use llama.cpp (default) or glm
+   ```
+
+3. **GPU acceleration** (Apple Silicon Metal):
+   ```bash
+   # Option A: Use the toggle script (recommended)
+   scripts/gpu_toggle.sh gpu
+   scripts/gpu_toggle.sh start
+
+   # Option B: Manual .env settings
+   USE_GPU_DECODER=1
+   LLAMACPP_URL=http://host.docker.internal:8081
+   LLAMACPP_GPU_LAYERS=32        # or -1 for all layers
+   ```
+
+4. **Alternative: GLM API** (instead of local llama.cpp):
+   ```bash
+   REFRAG_RUNTIME=glm
+   GLM_API_KEY=your-api-key-here
+   GLM_MODEL=glm-4.6             # Optional, defaults to glm-4.6
+   ```
+
+5. **Custom collection name**:
+   ```bash
+   COLLECTION_NAME=my-project    # Defaults to auto-detected repo name
+   ```
+
+**After changing `.env`:**
+- Restart services: `docker compose restart mcp_indexer mcp_indexer_http`
+- For indexing changes: `make reindex` or `make reindex-hard`
+- For decoder changes: `docker compose up -d --force-recreate llamacpp` (or restart native server)
+
 ### Switch decoder model (llama.cpp)
 - Default tiny model: Granite 4.0 Micro (Q4_K_M GGUF)
 - Change the model by overriding Make vars (downloads to ./models/model.gguf):
@@ -59,7 +113,17 @@ INDEX_MICRO_CHUNKS=1 MAX_MICRO_CHUNKS_PER_FILE=200 make reset-dev-dual
 LLAMACPP_MODEL_URL="https://huggingface.co/ORG/MODEL/resolve/main/model.gguf" \
   INDEX_MICRO_CHUNKS=1 MAX_MICRO_CHUNKS_PER_FILE=200 make reset-dev-dual
 ```
+- Want GPU acceleration? Set `LLAMACPP_USE_GPU=1` (optionally `LLAMACPP_GPU_LAYERS=-1`) in your `.env` before `docker compose up`, or simply run `scripts/gpu_toggle.sh gpu` (described below) to flip the switch for you.
 - Embeddings: set EMBEDDING_MODEL in .env and reindex (make reindex)
+
+
+Decoder env toggles (set in `.env` and managed automatically by `scripts/gpu_toggle.sh`):
+
+| Variable              | Description                                           | Typical values |
+|-----------------------|-------------------------------------------------------|----------------|
+| `USE_GPU_DECODER`     | Feature-flag for native Metal decoder                | `0` (docker), `1` (native) |
+| `LLAMACPP_URL`        | Decoder endpoint containers should use               | `http://llamacpp:8080` or `http://host.docker.internal:8081` |
+| `LLAMACPP_GPU_LAYERS` | Number of layers to offload to GPU (`-1` = all)      | `0`, `32`, `-1` |
 
 
 Alternative (compose only)
@@ -72,6 +136,28 @@ HOST_INDEX_PATH="$(pwd)" FASTMCP_INDEXER_PORT=8001 docker compose up -d qdrant m
 2. When you need a clean ingest (after large edits or when the `qdrant_status` tool/`make qdrant-status` reports zero points), run `make reindex-hard`. This clears `.codebase/cache.json` before recreating the collection so unchanged files cannot be skipped.
 3. Confirm collection health with `make qdrant-status` (calls the MCP router to print counts and timestamps).
 4. Iterate using search helpers such as `make hybrid ARGS="--query 'async file watcher'"` or invoke the MCP tools directly from your client.
+
+### Apple Silicon Metal GPU (native) vs Docker decoder
+
+On Apple Silicon you can run the llama.cpp decoder natively with Metal while keeping the rest of the stack in Docker:
+
+1. Install the Metal-enabled llama.cpp binary (e.g. `brew install llama.cpp`).
+2. Flip to GPU mode and start the native server:
+   ```bash
+   scripts/gpu_toggle.sh gpu
+   scripts/gpu_toggle.sh start   # launches llama-server on localhost:8081
+   docker compose up -d --force-recreate mcp_indexer mcp_indexer_http
+   docker compose stop llamacpp   # optional once the native server is healthy
+   ```
+   The toggle updates `.env` to point at `http://host.docker.internal:8081` so containers reach the host process.
+3. Run `scripts/gpu_toggle.sh status` to confirm the native server is healthy. All MCP `context_answer` calls will now use the Metal-backed decoder.
+
+Want the original dockerised decoder (CPU-only or x86 GPU fallback)? Swap back with:
+```bash
+scripts/gpu_toggle.sh docker
+docker compose up -d --force-recreate mcp_indexer mcp_indexer_http llamacpp
+```
+This re-enables the `llamacpp` container and resets `.env` to `http://llamacpp:8080`.
 
 ### Make targets (quick reference)
 - reset-dev: SSE stack on 8000/8001; seeds Qdrant, downloads tokenizer + tiny llama.cpp model, reindexes, brings up memory + indexer + watcher
@@ -166,6 +252,25 @@ Reranker
 - RERANKER_ENABLED: 1/true to enable, 0/false to disable; default is enabled in server
   - Timeouts/failures automatically fall back to hybrid results
 
+Decoder (llama.cpp / GLM)
+- REFRAG_DECODER: 1 to enable decoder for context_answer; 0 to disable (default: 1)
+- REFRAG_RUNTIME: llamacpp or glm (default: llamacpp)
+- LLAMACPP_URL: llama.cpp server endpoint (default: http://llamacpp:8080 or http://host.docker.internal:8081 for GPU)
+- LLAMACPP_TIMEOUT_SEC: Decoder request timeout in seconds (default: 300)
+- DECODER_MAX_TOKENS: Max tokens for decoder responses (default: 4000)
+- REFRAG_DECODER_MODE: prompt or soft (default: prompt; soft requires patched llama.cpp)
+- GLM_API_KEY: API key for GLM provider (required when REFRAG_RUNTIME=glm)
+- GLM_MODEL: GLM model name (default: glm-4.6)
+- USE_GPU_DECODER: 1 for native Metal decoder on host, 0 for Docker (managed by gpu_toggle.sh)
+- LLAMACPP_GPU_LAYERS: Number of layers to offload to GPU, -1 for all (default: 32)
+
+ReFRAG (micro-chunking and retrieval)
+- REFRAG_MODE: 1 to enable micro-chunking and span budgeting (default: 1)
+- REFRAG_GATE_FIRST: 1 to enable mini-vector gating before dense search (default: 1)
+- REFRAG_CANDIDATES: Number of candidates for gate-first filtering (default: 200)
+- MICRO_BUDGET_TOKENS: Global token budget for context_answer spans (default: 512)
+- MICRO_OUT_MAX_SPANS: Max number of spans to return per query (default: 3)
+
 Ports
 - FASTMCP_PORT (SSE/RMCP): Override Memory MCP ports (defaults: 8000/8002)
 - FASTMCP_INDEXER_PORT (SSE/RMCP): Override Indexer MCP ports (defaults: 8001/8003)
@@ -201,6 +306,18 @@ Ports
 | FASTMCP_INDEXER_HTTP_PORT | Indexer RMCP host port mapping | 8003 |
 | FASTMCP_HEALTH_PORT | Health port (memory/indexer) | memory: 18000; indexer: 18001 |
 | LLM_EXPAND_MAX | Max alternate queries generated via LLM | 0 |
+| REFRAG_DECODER | Enable decoder for context_answer | 1 (enabled) |
+| REFRAG_RUNTIME | Decoder backend: llamacpp or glm | llamacpp |
+| LLAMACPP_URL | llama.cpp server endpoint | http://llamacpp:8080 or http://host.docker.internal:8081 |
+| LLAMACPP_TIMEOUT_SEC | Decoder request timeout | 300 |
+| DECODER_MAX_TOKENS | Max tokens for decoder responses | 4000 |
+| GLM_API_KEY | API key for GLM provider | unset |
+| GLM_MODEL | GLM model name | glm-4.6 |
+| USE_GPU_DECODER | Native Metal decoder (1) vs Docker (0) | 0 (docker) |
+| REFRAG_MODE | Enable micro-chunking and span budgeting | 1 (enabled) |
+| REFRAG_GATE_FIRST | Enable mini-vector gating | 1 (enabled) |
+| REFRAG_CANDIDATES | Candidates for gate-first filtering | 200 |
+| MICRO_BUDGET_TOKENS | Token budget for context_answer | 512 |
 
 ## Running tests
 
@@ -317,7 +434,7 @@ Notes:
 - SSE “Invalid session ID” when POSTing /messages directly:
   - Expected if you didn’t initiate an SSE session first. Use an MCP client (e.g., mcp-remote) to handle the handshake.
 - llama.cpp platform warning on Apple Silicon:
-  - Safe to ignore for local dev, or set platform: linux/amd64 for the service, or build a native image.
+  - Prefer the native path above (`scripts/gpu_toggle.sh gpu`). If you stick with Docker, add `platform: linux/amd64` to the service or ignore the warning during local dev.
 - Indexing feels stuck on very large files:
   - Use MAX_MICRO_CHUNKS_PER_FILE=200 during dev runs.
 
@@ -400,13 +517,18 @@ Memory MCP (8000 SSE, 8002 RMCP):
 Indexer/Search MCP (8001 SSE, 8003 RMCP):
 - repo_search — hybrid code search (dense + lexical + optional reranker)
 - context_search — search that can also blend memory results (include_memories)
+- context_answer — natural-language Q&A with retrieval + local LLM (llama.cpp or GLM)
 - code_search — alias of repo_search
 - repo_search_compat — permissive wrapper that normalizes q/text/queries/top_k payloads
+- context_answer_compat — permissive wrapper for context_answer with lenient argument handling
+- expand_query(query, max_new?) — LLM-assisted query expansion (generates 1-2 alternates)
 - qdrant_index_root — index /work (mounted repo root) with safe defaults
 - qdrant_index(subdir?, recreate?, collection?) — index a subdir or recreate collection
 - qdrant_prune — remove points for missing files or file_hash mismatch
 - qdrant_list — list Qdrant collections
 - qdrant_status — collection counts and recent ingestion timestamps
+- workspace_info(workspace_path?) — read .codebase/state.json and resolve default collection
+- list_workspaces(search_root?) — scan for multiple workspaces in multi-repo environments
 - memory_store — convenience memory store from the indexer (uses default collection)
 - search_tests_for — intent wrapper for test files
 - search_config_for — intent wrapper for likely config files
@@ -417,6 +539,7 @@ Indexer/Search MCP (8001 SSE, 8003 RMCP):
 Notes:
 - Most search tools accept filters like language, under, path_glob, kind, symbol, ext.
 - Reranker enabled by default; timeouts fall back to hybrid results.
+- context_answer requires decoder enabled (REFRAG_DECODER=1) with llama.cpp or GLM backend.
 
 ### Qodo Integration (RMCP config)
 

@@ -19,4 +19,3 @@ RUN mkdir -p /models \
     && if [ -n "$MODEL_URL" ]; then echo "Fetching model: $MODEL_URL" && curl -L --fail --retry 3 -C - "$MODEL_URL" -o /models/model.gguf; else echo "No MODEL_URL provided; expecting host volume /models"; fi
 EXPOSE 8080
 ENTRYPOINT ["/app/server", "--model", "/models/model.gguf", "--host", "0.0.0.0", "--port", "8080", "--no-warmup"]
-

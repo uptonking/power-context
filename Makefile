@@ -194,7 +194,6 @@ reset-dev-dual: ## bring up BOTH legacy SSE and Streamable HTTP MCPs (dual-compa
 	docker compose run --rm -e INDEX_MICRO_CHUNKS -e MAX_MICRO_CHUNKS_PER_FILE -e TOKENIZER_PATH -e TOKENIZER_URL indexer --root /work --recreate
 	$(MAKE) llama-model
 	docker compose up -d mcp mcp_indexer mcp_http mcp_indexer_http watcher llamacpp
-	# Ensure watcher is up even if a prior step or manual bring-up omitted it
 	docker compose up -d watcher
 	docker compose ps
 
@@ -272,4 +271,3 @@ qdrant-prune:
 
 qdrant-index-root:
 	python3 scripts/mcp_router.py --run "reindex repo"
-

@@ -58,8 +58,8 @@ class ChangeQueue:
             if self._timer is not None:
                 try:
                     self._timer.cancel()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.error(f"Failed to cancel timer in ChangeQueue.add: {e}")
             self._timer = threading.Timer(DELAY_SECS, self._flush)
             self._timer.daemon = True
             self._timer.start()
@@ -88,8 +88,10 @@ class ChangeQueue:
                 except Exception as e:
                     try:
                         print(f"[watcher_error] processing batch failed: {e}")
-                    except Exception:
-                        pass
+                    except Exception as inner_e:
+                        logger.error(
+                            f"Exception in ChangeQueue._flush during batch processing: {inner_e}"
+                        )
                 # drain any pending accumulated during processing
                 with self._lock:
                     if not self._pending:
@@ -101,7 +103,9 @@ class ChangeQueue:
 
 
 class IndexHandler(FileSystemEventHandler):
-    def __init__(self, root: Path, queue: ChangeQueue, client: QdrantClient, collection: str):
+    def __init__(
+        self, root: Path, queue: ChangeQueue, client: QdrantClient, collection: str
+    ):
         super().__init__()
         self.root = root
         self.queue = queue
@@ -115,14 +119,18 @@ class IndexHandler(FileSystemEventHandler):
         except Exception:
             self._ignore_path = None
         self._ignore_mtime = (
-            (self._ignore_path.stat().st_mtime if self._ignore_path and self._ignore_path.exists() else 0.0)
+            self._ignore_path.stat().st_mtime
+            if self._ignore_path and self._ignore_path.exists()
+            else 0.0
         )
 
     def _maybe_reload_excluder(self):
         try:
             if not self._ignore_path:
                 return
-            cur = self._ignore_path.stat().st_mtime if self._ignore_path.exists() else 0.0
+            cur = (
+                self._ignore_path.stat().st_mtime if self._ignore_path.exists() else 0.0
+            )
             if cur != self._ignore_mtime:
                 self.excl = idx._Excluder(self.root)
                 self._ignore_mtime = cur
@@ -212,17 +220,24 @@ class IndexHandler(FileSystemEventHandler):
         except Exception:
             return
         # Only react to code files
-        if dest.suffix.lower() not in idx.CODE_EXTS and src.suffix.lower() not in idx.CODE_EXTS:
+        if (
+            dest.suffix.lower() not in idx.CODE_EXTS
+            and src.suffix.lower() not in idx.CODE_EXTS
+        ):
             return
         # If destination directory is ignored, treat as simple deletion
         try:
-            rel_dir = "/" + str(dest.parent.resolve().relative_to(self.root.resolve())).replace(os.sep, "/")
+            rel_dir = "/" + str(
+                dest.parent.resolve().relative_to(self.root.resolve())
+            ).replace(os.sep, "/")
             if rel_dir == "/.":
                 rel_dir = "/"
             if self.excl.exclude_dir(rel_dir):
                 if src.suffix.lower() in idx.CODE_EXTS:
                     try:
-                        idx.delete_points_by_path(self.client, self.collection, str(src))
+                        idx.delete_points_by_path(
+                            self.client, self.collection, str(src)
+                        )
                         print(f"[moved:ignored_dest_deleted_src] {src} -> {dest}")
                         try:
                             remove_cached_file(str(self.root), str(src))
@@ -261,7 +276,12 @@ class IndexHandler(FileSystemEventHandler):
             except Exception:
                 pass
             try:
-                _log_activity(str(self.root), "moved", dest, {"from": str(src), "chunks": int(moved_count)})
+                _log_activity(
+                    str(self.root),
+                    "moved",
+                    dest,
+                    {"from": str(src), "chunks": int(moved_count)},
+                )
             except Exception:
                 pass
             return
@@ -276,6 +296,7 @@ class IndexHandler(FileSystemEventHandler):
             self._maybe_enqueue(str(dest))
         except Exception:
             pass
+
 
 # --- Workspace state helpers ---
 def _set_status_indexing(workspace_path: str, total_files: int) -> None:
@@ -293,7 +314,11 @@ def _set_status_indexing(workspace_path: str, total_files: int) -> None:
 
 
 def _update_progress(
-    workspace_path: str, started_at: str, processed: int, total: int, current_file: Path | None
+    workspace_path: str,
+    started_at: str,
+    processed: int,
+    total: int,
+    current_file: Path | None,
 ) -> None:
     try:
         update_indexing_status(
@@ -312,7 +337,9 @@ def _update_progress(
         pass
 
 
-def _log_activity(workspace_path: str, action: str, file_path: Path, details: dict | None = None) -> None:
+def _log_activity(
+    workspace_path: str, action: str, file_path: Path, details: dict | None = None
+) -> None:
     try:
         update_last_activity(
             workspace_path,
@@ -328,7 +355,9 @@ def _log_activity(workspace_path: str, action: str, file_path: Path, details: di
 
 
 # --- Move/Rename optimization: reuse vectors when file content unchanged ---
-def _rename_in_store(client: QdrantClient, collection: str, src: Path, dest: Path) -> int:
+def _rename_in_store(
+    client: QdrantClient, collection: str, src: Path, dest: Path
+) -> int:
     """Best-effort: if dest content hash matches previously indexed src hash,
     update points in-place to the new path without re-embedding.
 
@@ -369,7 +398,7 @@ def _rename_in_store(client: QdrantClient, collection: str, src: Path, dest: Pat
             new_points = []
             for rec in points:
                 payload = rec.payload or {}
-                md = (payload.get("metadata") or {})
+                md = payload.get("metadata") or {}
                 code = md.get("code") or ""
                 try:
                     start_line = int(md.get("start_line") or 1)
@@ -384,7 +413,9 @@ def _rename_in_store(client: QdrantClient, collection: str, src: Path, dest: Pat
                 new_md["path_prefix"] = str(dest.parent)
                 # Recompute dual-path hints
                 cur_path = str(dest)
-                host_root = str(os.environ.get("HOST_INDEX_PATH") or "").strip().rstrip("/")
+                host_root = (
+                    str(os.environ.get("HOST_INDEX_PATH") or "").strip().rstrip("/")
+                )
                 host_path = None
                 container_path = None
                 try:
@@ -490,7 +521,9 @@ def main():
     except Exception:
         pass
 
-    q = ChangeQueue(lambda paths: _process_paths(paths, client, model, vector_name, str(ROOT)))
+    q = ChangeQueue(
+        lambda paths: _process_paths(paths, client, model, vector_name, str(ROOT))
+    )
     handler = IndexHandler(ROOT, q, client, COLLECTION)
 
     obs = Observer()
@@ -546,12 +579,19 @@ def _process_paths(paths, client, model, vector_name: str, workspace_path: str):
             # Lazily instantiate model if needed
             if model is None:
                 from fastembed import TextEmbedding
+
                 mname = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
                 model = TextEmbedding(model_name=mname)
             ok = False
             try:
                 ok = idx.index_single_file(
-                    client, model, COLLECTION, vector_name, p, dedupe=True, skip_unchanged=True
+                    client,
+                    model,
+                    COLLECTION,
+                    vector_name,
+                    p,
+                    dedupe=True,
+                    skip_unchanged=True,
                 )
             except Exception as e:
                 try:
@@ -568,7 +608,9 @@ def _process_paths(paths, client, model, vector_name: str, workspace_path: str):
                     size = None
                 _log_activity(workspace_path, "indexed", p, {"file_size": size})
             else:
-                _log_activity(workspace_path, "skipped", p, {"reason": "no-change-or-error"})
+                _log_activity(
+                    workspace_path, "skipped", p, {"reason": "no-change-or-error"}
+                )
             processed += 1
             _update_progress(workspace_path, started_at, processed, total, current)
     finally:
