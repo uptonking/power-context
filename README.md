@@ -198,6 +198,25 @@ Reranker
 - RERANKER_ENABLED: 1/true to enable, 0/false to disable; default is enabled in server
   - Timeouts/failures automatically fall back to hybrid results
 
+Decoder (llama.cpp / GLM)
+- REFRAG_DECODER: 1 to enable decoder for context_answer; 0 to disable (default: 1)
+- REFRAG_RUNTIME: llamacpp or glm (default: llamacpp)
+- LLAMACPP_URL: llama.cpp server endpoint (default: http://llamacpp:8080 or http://host.docker.internal:8081 for GPU)
+- LLAMACPP_TIMEOUT_SEC: Decoder request timeout in seconds (default: 300)
+- DECODER_MAX_TOKENS: Max tokens for decoder responses (default: 4000)
+- REFRAG_DECODER_MODE: prompt or soft (default: prompt; soft requires patched llama.cpp)
+- GLM_API_KEY: API key for GLM provider (required when REFRAG_RUNTIME=glm)
+- GLM_MODEL: GLM model name (default: glm-4.6)
+- USE_GPU_DECODER: 1 for native Metal decoder on host, 0 for Docker (managed by gpu_toggle.sh)
+- LLAMACPP_GPU_LAYERS: Number of layers to offload to GPU, -1 for all (default: 32)
+
+ReFRAG (micro-chunking and retrieval)
+- REFRAG_MODE: 1 to enable micro-chunking and span budgeting (default: 1)
+- REFRAG_GATE_FIRST: 1 to enable mini-vector gating before dense search (default: 1)
+- REFRAG_CANDIDATES: Number of candidates for gate-first filtering (default: 200)
+- MICRO_BUDGET_TOKENS: Global token budget for context_answer spans (default: 512)
+- MICRO_OUT_MAX_SPANS: Max number of spans to return per query (default: 3)
+
 Ports
 - FASTMCP_PORT (SSE/RMCP): Override Memory MCP ports (defaults: 8000/8002)
 - FASTMCP_INDEXER_PORT (SSE/RMCP): Override Indexer MCP ports (defaults: 8001/8003)
