@@ -51,6 +51,61 @@ INDEX_MICRO_CHUNKS=1 MAX_MICRO_CHUNKS_PER_FILE=200 make reset-dev-dual
   - Ports: 8000/8001 (/sse) and 8002/8003 (/mcp)
   - Command: `INDEX_MICRO_CHUNKS=1 MAX_MICRO_CHUNKS_PER_FILE=200 make reset-dev-dual`
 
+### Environment Configuration
+
+**Default Setup:**
+- The repository includes `.env.example` with sensible defaults for local development
+- On first run, copy it to `.env`: `cp .env.example .env`
+- The `make reset-dev*` targets will use your `.env` settings automatically
+
+**Key Configuration Files:**
+- `.env` — Your local environment variables (gitignored, safe to customize)
+- `.env.example` — Template with documented defaults (committed to repo)
+- `docker-compose.yml` — Service definitions that read from `.env`
+
+**Recommended Customizations:**
+
+1. **Enable micro-chunking** (better retrieval quality):
+   ```bash
+   INDEX_MICRO_CHUNKS=1
+   MAX_MICRO_CHUNKS_PER_FILE=200
+   ```
+
+2. **Enable decoder for Q&A** (context_answer tool):
+   ```bash
+   REFRAG_DECODER=1              # Enable decoder (default: 1)
+   REFRAG_RUNTIME=llamacpp       # Use llama.cpp (default) or glm
+   ```
+
+3. **GPU acceleration** (Apple Silicon Metal):
+   ```bash
+   # Option A: Use the toggle script (recommended)
+   scripts/gpu_toggle.sh gpu
+   scripts/gpu_toggle.sh start
+
+   # Option B: Manual .env settings
+   USE_GPU_DECODER=1
+   LLAMACPP_URL=http://host.docker.internal:8081
+   LLAMACPP_GPU_LAYERS=32        # or -1 for all layers
+   ```
+
+4. **Alternative: GLM API** (instead of local llama.cpp):
+   ```bash
+   REFRAG_RUNTIME=glm
+   GLM_API_KEY=your-api-key-here
+   GLM_MODEL=glm-4.6             # Optional, defaults to glm-4.6
+   ```
+
+5. **Custom collection name**:
+   ```bash
+   COLLECTION_NAME=my-project    # Defaults to auto-detected repo name
+   ```
+
+**After changing `.env`:**
+- Restart services: `docker compose restart mcp_indexer mcp_indexer_http`
+- For indexing changes: `make reindex` or `make reindex-hard`
+- For decoder changes: `docker compose up -d --force-recreate llamacpp` (or restart native server)
+
 - You can skip the decoder; it’s feature-flagged off by default.
 ### Switch decoder model (llama.cpp)
 - Default tiny model: Granite 4.0 Micro (Q4_K_M GGUF)
