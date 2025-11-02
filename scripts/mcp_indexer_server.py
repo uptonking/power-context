@@ -1307,6 +1307,7 @@ async def qdrant_prune(kwargs: Any = None) -> Dict[str, Any]:
 @mcp.tool()
 async def repo_search(
     query: Any = None,
+    queries: Any = None,  # Alias for query (many clients use this)
     limit: Any = None,
     per_path: Any = None,
     include_snippet: Any = None,
@@ -1359,6 +1360,10 @@ async def repo_search(
     - path_glob=["scripts/**","**/*.py"], language="python"
     - symbol="context_answer", under="scripts"
     """
+    # Handle queries alias (explicit parameter)
+    if queries is not None and (query is None or (isinstance(query, str) and str(query).strip() == "")):
+        query = queries
+
     # Accept common alias keys from clients (top-level)
     try:
         if kwargs and (
