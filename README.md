@@ -106,7 +106,6 @@ INDEX_MICRO_CHUNKS=1 MAX_MICRO_CHUNKS_PER_FILE=200 make reset-dev-dual
 - For indexing changes: `make reindex` or `make reindex-hard`
 - For decoder changes: `docker compose up -d --force-recreate llamacpp` (or restart native server)
 
-- You can skip the decoder; it’s feature-flagged off by default.
 ### Switch decoder model (llama.cpp)
 - Default tiny model: Granite 4.0 Micro (Q4_K_M GGUF)
 - Change the model by overriding Make vars (downloads to ./models/model.gguf):
