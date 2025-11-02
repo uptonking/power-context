@@ -3769,6 +3769,7 @@ def _answer_style_guidance() -> str:
         "Write a direct answer in 2-4 sentences. No headings or labels. "
         "Ground non-trivial claims with bracketed citations like [n] using the numbered Sources. "
         "Never invent functions or parameters that do not appear in the snippets. "
+        "Do not include URLs or Markdown links of any kind; cite only with [n]. "
         "If the Sources list is empty or the snippets are insufficient, respond exactly: insufficient context."
     )
 
@@ -5597,6 +5598,10 @@ def _ca_postprocess_answer(
     # Strip leaked stop tokens
     for stop_tok in ["<|end_of_text|>", "<|start_of_role|>", "<|end_of_response|>"]:
         txt = txt.replace(stop_tok, "")
+    # Remove accidental URLs/Markdown links; enforce bracket citations only
+    import re as _re
+    txt = _re.sub(r"https?://\S+", "", txt)
+    txt = _re.sub(r"\[[^\]]+\]\([^\)]+\)", lambda m: m.group(0).split(']')[0] + ']' , txt)
     # Cleanup repetition
     txt = _cleanup_answer(
         txt,
