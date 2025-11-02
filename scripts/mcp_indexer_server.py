@@ -857,7 +857,7 @@ async def qdrant_index_root(
 
 
 @mcp.tool()
-async def qdrant_list(**kwargs) -> Dict[str, Any]:
+async def qdrant_list(kwargs: Any = None) -> Dict[str, Any]:
     """List available Qdrant collections.
 
     When to use:
@@ -888,7 +888,7 @@ async def qdrant_list(**kwargs) -> Dict[str, Any]:
 
 @mcp.tool()
 async def workspace_info(
-    workspace_path: Optional[str] = None, **kwargs
+    workspace_path: Optional[str] = None, kwargs: Any = None
 ) -> Dict[str, Any]:
     """Read .codebase/state.json for the current workspace and resolve defaults.
 
@@ -1071,7 +1071,7 @@ async def qdrant_status(
     collection: Optional[str] = None,
     max_points: Optional[int] = None,
     batch: Optional[int] = None,
-    **kwargs,
+    kwargs: Any = None,
 ) -> Dict[str, Any]:
     """Summarize collection size and recent index timestamps.
 
@@ -1276,7 +1276,7 @@ async def qdrant_index(
 
 
 @mcp.tool()
-async def qdrant_prune(**kwargs) -> Dict[str, Any]:
+async def qdrant_prune(kwargs: Any = None) -> Dict[str, Any]:
     """Remove stale points for /work (files deleted/moved but still in the index).
 
     When to use:
@@ -1324,7 +1324,7 @@ async def repo_search(
     case: Any = None,
     # Response shaping
     compact: Any = None,
-    **kwargs,
+    kwargs: Any = None,
 ) -> Dict[str, Any]:
     """Zero-config code search over repositories (hybrid: vector + lexical RRF, optional rerank).
 
@@ -2159,7 +2159,7 @@ async def search_tests_for(
     under: Any = None,
     language: Any = None,
     compact: Any = None,
-    **kwargs,
+    kwargs: Any = None,
 ) -> Dict[str, Any]:
     """Find test files related to a query.
 
@@ -2180,7 +2180,9 @@ async def search_tests_for(
         "**/Test*/**",
     ]
     # Allow caller to add more with path_glob kwarg
-    extra_glob = kwargs.get("path_glob")
+    # Handle kwargs being passed as a string by some MCP clients
+    _kwargs = _extract_kwargs_payload(kwargs) if kwargs else {}
+    extra_glob = _kwargs.get("path_glob")
     if extra_glob:
         if isinstance(extra_glob, (list, tuple)):
             globs.extend([str(x) for x in extra_glob])
@@ -2195,7 +2197,7 @@ async def search_tests_for(
         language=language,
         path_glob=globs,
         compact=compact,
-        **{k: v for k, v in kwargs.items() if k not in {"path_glob"}},
+        kwargs={k: v for k, v in _kwargs.items() if k not in {"path_glob"}},
     )
 
 
@@ -2207,7 +2209,7 @@ async def search_config_for(
     context_lines: Any = None,
     under: Any = None,
     compact: Any = None,
-    **kwargs,
+    kwargs: Any = None,
 ) -> Dict[str, Any]:
     """Find likely configuration files for a service/query.
 
@@ -2233,7 +2235,9 @@ async def search_config_for(
         "**/*.xml",
         "**/appsettings*.json",
     ]
-    extra_glob = kwargs.get("path_glob")
+    # Handle kwargs being passed as a string by some MCP clients
+    _kwargs = _extract_kwargs_payload(kwargs) if kwargs else {}
+    extra_glob = _kwargs.get("path_glob")
     if extra_glob:
         if isinstance(extra_glob, (list, tuple)):
             globs.extend([str(x) for x in extra_glob])
@@ -2247,7 +2251,7 @@ async def search_config_for(
         under=under,
         path_glob=globs,
         compact=compact,
-        **{k: v for k, v in kwargs.items() if k not in {"path_glob"}},
+        kwargs={k: v for k, v in _kwargs.items() if k not in {"path_glob"}},
     )
 
 
@@ -2256,7 +2260,7 @@ async def search_callers_for(
     query: Any = None,
     limit: Any = None,
     language: Any = None,
-    **kwargs,
+    kwargs: Any = None,
 ) -> Dict[str, Any]:
     """Heuristic search for callers/usages of a symbol.
 
@@ -2271,7 +2275,7 @@ async def search_callers_for(
         query=query,
         limit=limit,
         language=language,
-        **kwargs,
+        kwargs=kwargs,
     )
 
 
@@ -2280,7 +2284,7 @@ async def search_importers_for(
     query: Any = None,
     limit: Any = None,
     language: Any = None,
-    **kwargs,
+    kwargs: Any = None,
 ) -> Dict[str, Any]:
     """Find files likely importing or referencing a module/symbol.
 
@@ -2309,7 +2313,9 @@ async def search_importers_for(
         "**/*.cpp",
         "**/*.hpp",
     ]
-    extra_glob = kwargs.get("path_glob")
+    # Handle kwargs being passed as a string by some MCP clients
+    _kwargs = _extract_kwargs_payload(kwargs) if kwargs else {}
+    extra_glob = _kwargs.get("path_glob")
     if extra_glob:
         if isinstance(extra_glob, (list, tuple)):
             globs.extend([str(x) for x in extra_glob])
@@ -2321,7 +2327,7 @@ async def search_importers_for(
         limit=limit,
         language=language,
         path_glob=globs,
-        **{k: v for k, v in kwargs.items() if k not in {"path_glob"}},
+        kwargs={k: v for k, v in _kwargs.items() if k not in {"path_glob"}},
     )
 
 
@@ -2447,7 +2453,7 @@ async def context_search(
     not_: Any = None,
     case: Any = None,
     compact: Any = None,
-    **kwargs,
+    kwargs: Any = None,
 ) -> Dict[str, Any]:
     """Blend code search results with memory-store entries (notes, docs) for richer context.
 
@@ -5865,7 +5871,7 @@ async def context_answer(
     not_glob: Any = None,
     case: Any = None,
     not_: Any = None,
-    **kwargs,
+    kwargs: Any = None,
 ) -> Dict[str, Any]:
     """Natural-language Q&A over the repo using retrieval + local LLM (llama.cpp).
 
@@ -6662,7 +6668,7 @@ async def code_search(
     not_: Any = None,
     case: Any = None,
     compact: Any = None,
-    **kwargs,
+    kwargs: Any = None,
 ) -> Dict[str, Any]:
     """Exact alias of repo_search (hybrid code search).
 
@@ -6692,7 +6698,7 @@ async def code_search(
         not_=not_,
         case=case,
         compact=compact,
-        **kwargs,
+        kwargs=kwargs,
     )
 
 
