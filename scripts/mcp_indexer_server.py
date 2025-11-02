@@ -680,6 +680,14 @@ def _to_str_list_relaxed(x: _Any) -> list[str]:
 
 def _extract_kwargs_payload(kwargs: _Any) -> _Dict[str, _Any]:
     try:
+        # Handle kwargs being passed as a string "{}" by some MCP clients
+        if isinstance(kwargs, str):
+            parsed = _maybe_parse_jsonish(kwargs)
+            if isinstance(parsed, dict):
+                kwargs = parsed
+            else:
+                return {}
+
         if isinstance(kwargs, dict) and "kwargs" in kwargs:
             inner = kwargs.get("kwargs")
             if isinstance(inner, dict):
