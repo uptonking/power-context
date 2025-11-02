@@ -74,6 +74,27 @@ HOST_INDEX_PATH="$(pwd)" FASTMCP_INDEXER_PORT=8001 docker compose up -d qdrant m
 3. Confirm collection health with `make qdrant-status` (calls the MCP router to print counts and timestamps).
 4. Iterate using search helpers such as `make hybrid ARGS="--query 'async file watcher'"` or invoke the MCP tools directly from your client.
 
+### Apple Silicon Metal GPU (native) vs Docker decoder
+
+On Apple Silicon you can run the llama.cpp decoder natively with Metal while keeping the rest of the stack in Docker:
+
+1. Install the Metal-enabled llama.cpp binary (e.g. `brew install llama.cpp`).
+2. Flip to GPU mode and start the native server:
+   ```bash
+   scripts/gpu_toggle.sh gpu
+   scripts/gpu_toggle.sh start   # launches llama-server on localhost:8081
+   docker compose up -d --force-recreate mcp_indexer mcp_indexer_http
+   ```
+   The toggle updates `.env` to point at `http://host.docker.internal:8081` so containers reach the host process.
+3. Run `scripts/gpu_toggle.sh status` to confirm the native server is healthy. All MCP `context_answer` calls will now use the Metal-backed decoder.
+
+Want the original dockerised decoder (CPU-only or x86 GPU fallback)? Swap back with:
+```bash
+scripts/gpu_toggle.sh docker
+docker compose up -d --force-recreate mcp_indexer mcp_indexer_http llamacpp
+```
+This re-enables the `llamacpp` container and resets `.env` to `http://llamacpp:8080`.
+
 ### Make targets (quick reference)
 - reset-dev: SSE stack on 8000/8001; seeds Qdrant, downloads tokenizer + tiny llama.cpp model, reindexes, brings up memory + indexer + watcher
 - reset-dev-codex: RMCP stack on 8002/8003; same seeding + bring-up for Codex/Qodo
