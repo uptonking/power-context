@@ -1361,11 +1361,11 @@ async def repo_search(
     """
     # Accept common alias keys from clients (top-level)
     try:
-        if (
+        if kwargs and (
             limit is None or (isinstance(limit, str) and str(limit).strip() == "")
         ) and ("top_k" in kwargs):
             limit = kwargs.get("top_k")
-        if query is None or (isinstance(query, str) and str(query).strip() == ""):
+        if kwargs and (query is None or (isinstance(query, str) and str(query).strip() == "")):
             q_alt = kwargs.get("q") or kwargs.get("text")
             if q_alt is not None:
                 query = q_alt
@@ -1563,7 +1563,7 @@ async def repo_search(
 
     # Accept top-level alias `queries` as a drop-in for `query`
     # Many clients send queries=[...] instead of query=[...]
-    if "queries" in kwargs and kwargs.get("queries") is not None:
+    if kwargs and "queries" in kwargs and kwargs.get("queries") is not None:
         query = kwargs.get("queries")
 
     # Normalize queries to a list[str] (robust for JSON strings and arrays)
@@ -2914,15 +2914,15 @@ async def context_search(
         queries = [str(query).strip()]
 
     # Accept common alias keys and camelCase from clients
-    if (limit is None or (isinstance(limit, str) and limit.strip() == "")) and (
+    if kwargs and (limit is None or (isinstance(limit, str) and limit.strip() == "")) and (
         "top_k" in kwargs
     ):
         limit = kwargs.get("top_k")
-    if include_memories is None and ("includeMemories" in kwargs):
+    if kwargs and include_memories is None and ("includeMemories" in kwargs):
         include_memories = kwargs.get("includeMemories")
-    if memory_weight is None and ("memoryWeight" in kwargs):
+    if kwargs and memory_weight is None and ("memoryWeight" in kwargs):
         memory_weight = kwargs.get("memoryWeight")
-    if per_source_limits is None and ("perSourceLimits" in kwargs):
+    if kwargs and per_source_limits is None and ("perSourceLimits" in kwargs):
         per_source_limits = kwargs.get("perSourceLimits")
 
     # Smart defaults inspired by stored preferences, but without external calls
