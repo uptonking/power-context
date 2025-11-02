@@ -11,6 +11,20 @@ if str(ROOT) not in sys.path:
 
 
 @pytest.fixture(scope="session", autouse=True)
+def _ensure_mcp_imported():
+    """Ensure mcp package is properly imported before any tests run.
+
+    This prevents import conflicts when scripts.mcp_indexer_server imports
+    from mcp.server.fastmcp and later tests try to import fastmcp.
+    """
+    try:
+        import mcp.types  # noqa: F401
+    except ImportError:
+        pass  # mcp package not available, tests will skip if needed
+    yield
+
+
+@pytest.fixture(scope="session", autouse=True)
 def _disable_tokenizers_parallelism():
     """Force tokenizers to stay single-threaded to avoid fork warnings during tests."""
     prev = os.environ.get("TOKENIZERS_PARALLELISM")
