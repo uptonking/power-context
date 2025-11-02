@@ -3660,11 +3660,10 @@ async def expand_query(query: Any = None, max_new: Any = None) -> Dict[str, Any]
             "Return JSON array of strings only. No explanations.\n"
             f"Queries: {qlist}\n"
         )
-        client = LlamaCppRefragClient()
         out = client.generate_with_soft_embeddings(
             prompt=prompt,
             max_tokens=int(os.environ.get("EXPAND_MAX_TOKENS", "64") or 64),
-            temperature=0.0,  # Always 0 for deterministic expansion
+            temperature=0.0,
             top_k=int(os.environ.get("EXPAND_TOP_K", "30") or 30),
             top_p=float(os.environ.get("EXPAND_TOP_P", "0.9") or 0.9),
             stop=["\n\n"],
