@@ -11,35 +11,59 @@ This directory contains Kubernetes manifests for deploying Context Engine on a r
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     Kubernetes Cluster                       │
-│                                                              │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐     │
-│  │   Qdrant     │  │  Memory MCP  │  │ Indexer MCP  │     │
-│  │ StatefulSet  │  │  Deployment  │  │  Deployment  │     │
-│  │  Port: 6333  │  │  Port: 8000  │  │  Port: 8001  │     │
-│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘     │
-│         │                  │                  │             │
-│         │    ┌─────────────┴──────────────────┘             │
-│         │    │                                              │
-│  ┌──────▼────▼──────────────────────────────────────────┐  │
-│  │           PersistentVolume (qdrant-storage)          │  │
-│  └───────────────────────────────────────────────────────┘  │
-│                                                              │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐     │
-│  │   Watcher    │  │   Watcher    │  │   Watcher    │     │
-│  │  (repo-1)    │  │  (repo-2)    │  │  (repo-3)    │     │
-│  │  Deployment  │  │  Deployment  │  │  Deployment  │     │
-│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘     │
-│         │                  │                  │             │
-│  ┌──────▼──────────────────▼──────────────────▼─────────┐  │
-│  │           HostPath Volume (repos)                     │  │
-│  │  /tmp/context-engine-repos/repo-1/                    │  │
-│  │  /tmp/context-engine-repos/repo-2/                    │  │
-│  │  /tmp/context-engine-repos/repo-3/                    │  │
-│  └───────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────┘
+```mermaid
+graph TB
+    subgraph cluster["Kubernetes Cluster (namespace: context-engine)"]
+        subgraph ingress["Ingress Layer"]
+            nginx["NGINX Ingress<br/>Routes: /qdrant, /mcp/*, /mcp-http/*, /llamacpp"]
+        end
+
+        subgraph services["Core Services"]
+            qdrant["Qdrant StatefulSet<br/>Port: 6333<br/>Vector Database"]
+
+            subgraph mcp["MCP Services (4 Deployments)"]
+                mcp_mem_sse["Memory SSE<br/>Port: 8000"]
+                mcp_mem_http["Memory HTTP<br/>Port: 8002"]
+                mcp_idx_sse["Indexer SSE<br/>Port: 8001<br/>(HPA: 1-5 replicas)"]
+                mcp_idx_http["Indexer HTTP<br/>Port: 8003"]
+            end
+
+            llama["Llama.cpp Deployment<br/>Port: 8080<br/>Init: Model Download"]
+            watcher["Watcher Deployment<br/>Watches: /work"]
+        end
+
+        subgraph security["Security & Scaling"]
+            rbac["RBAC: ServiceAccount<br/>(context-engine)"]
+            netpol["NetworkPolicy<br/>Intra-namespace ingress<br/>for watcher/indexer/init"]
+            hpa["HPA: mcp-indexer<br/>1-5 replicas @ 70% CPU"]
+        end
+
+        subgraph storage["Persistent Storage (HostPath)"]
+            qdrant_vol["Qdrant Data<br/>/tmp/context-engine-qdrant"]
+            models_vol["LLM Models<br/>/tmp/context-engine-models"]
+            repos_vol["Repositories<br/>/tmp/context-engine-repos"]
+        end
+    end
+
+    nginx --> qdrant
+    nginx --> mcp
+    nginx --> llama
+
+    mcp --> qdrant
+    llama -.-> mcp
+    watcher --> qdrant
+
+    qdrant --> qdrant_vol
+    llama --> models_vol
+    watcher --> repos_vol
+
+    style nginx fill:#e1f5ff
+    style qdrant fill:#fff4e1
+    style mcp fill:#e8f5e9
+    style llama fill:#f3e5f5
+    style watcher fill:#fce4ec
+    style security fill:#fff9c4
+    style storage fill:#e0e0e0
 ```
 
 ## Quick Start
@@ -75,15 +99,25 @@ images:
 ### 3. Deploy Using Kustomize
 
 ```bash
-# Option 1: Using kubectl with kustomize
+# Option 1: Using the deploy script with Kustomize (recommended)
+./deploy.sh --use-kustomize --registry your-registry/context-engine --tag latest --deploy-ingress
+
+# Option 2: Using kubectl with kustomize directly
 kubectl apply -k .
 
-# Option 2: Using kustomize CLI
+# Option 3: Using kustomize CLI
 kustomize build . | kubectl apply -f -
 
-# Option 3: Using the deploy script
-./deploy.sh --registry your-registry --tag latest
+# Option 4: Using the deploy script without Kustomize (legacy)
+./deploy.sh --registry your-registry/context-engine --tag latest --deploy-ingress
 ```
+
+**Deploy Script Flags:**
+- `--use-kustomize`: Use Kustomize for declarative image management (recommended)
+- `--registry <registry/name>`: Docker registry and image name (default: context-engine)
+- `--tag <tag>`: Image tag (default: latest)
+- `--deploy-ingress`: Deploy NGINX ingress routes
+- `--skip-llamacpp`: Skip llama.cpp decoder deployment
 
 ### 4. Deploy Using Makefile
 
@@ -458,11 +492,35 @@ kubectl patch deployment -n context-engine mcp-indexer -p \
 
 ## Security Considerations
 
-1. **Network Policies**: Restrict pod-to-pod communication
-2. **RBAC**: Limit service account permissions
-3. **Secrets Management**: Use Kubernetes secrets or external secret managers
-4. **TLS**: Enable TLS for external access via Ingress
-5. **Resource Quotas**: Set namespace resource quotas
+### Implemented Security Features
+
+1. **RBAC (Role-Based Access Control)**
+   - ServiceAccount: `context-engine` created in `rbac.yaml`
+   - Applied to all Deployments and Jobs
+   - Provides pod identity for Kubernetes API authentication
+   - Future: Add Role/RoleBinding for fine-grained permissions
+
+2. **NetworkPolicy (Soft Hardening - Option B)**
+   - Policy: `allow-intra-namespace-ingress-internal` in `networkpolicy.yaml`
+   - Scope: Applies to watcher, indexer, and init pods
+   - Rules: Allows ingress only from pods in the same namespace
+   - No egress restrictions (external downloads and Qdrant access work)
+   - MCP services and Qdrant remain accessible via Ingress/NodePort
+   - Future: Implement Option A (default-deny with explicit allow rules)
+
+3. **HorizontalPodAutoscaler (HPA)**
+   - Target: mcp-indexer deployment
+   - Min replicas: 1, Max replicas: 5
+   - Trigger: 70% CPU utilization
+   - Prevents resource exhaustion under load
+
+### Additional Security Recommendations
+
+4. **Secrets Management**: Use Kubernetes secrets or external secret managers for sensitive data
+5. **TLS**: Enable TLS for external access via Ingress with cert-manager
+6. **Resource Quotas**: Set namespace resource quotas to prevent resource exhaustion
+7. **Pod Security Standards**: Apply restricted pod security standards
+8. **Image Security**: Use signed images and vulnerability scanning
 
 ## See Also
 
