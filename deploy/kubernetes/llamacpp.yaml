@@ -1,0 +1,171 @@
+---
+# Llama.cpp Deployment (Optional - for text generation)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llamacpp
+  namespace: context-engine
+  labels:
+    app: context-engine
+    component: llamacpp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: context-engine
+      component: llamacpp
+  template:
+    metadata:
+      labels:
+        app: context-engine
+        component: llamacpp
+    spec:
+      # Init container to download model if not present
+      initContainers:
+      - name: model-downloader
+        image: curlimages/curl:latest
+        env:
+        - name: LLAMACPP_MODEL_URL
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: LLAMACPP_MODEL_URL
+        - name: LLAMACPP_MODEL_NAME
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: LLAMACPP_MODEL_NAME
+        command:
+          - sh
+          - -c
+          - |
+            MODEL_PATH="/models/${LLAMACPP_MODEL_NAME}"
+
+            if [ -f "$MODEL_PATH" ]; then
+              echo "Model already exists at $MODEL_PATH"
+              ls -lh "$MODEL_PATH"
+              exit 0
+            fi
+
+            echo "Downloading model from ${LLAMACPP_MODEL_URL}..."
+            echo "Target: $MODEL_PATH"
+
+            curl -L --progress-bar -o "$MODEL_PATH.tmp" "${LLAMACPP_MODEL_URL}"
+
+            if [ $? -eq 0 ]; then
+              mv "$MODEL_PATH.tmp" "$MODEL_PATH"
+              echo "Model downloaded successfully"
+              ls -lh "$MODEL_PATH"
+            else
+              echo "Failed to download model"
+              rm -f "$MODEL_PATH.tmp"
+              exit 1
+            fi
+        volumeMounts:
+        - name: models
+          mountPath: /models
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+
+      containers:
+      - name: llamacpp
+        image: ghcr.io/ggerganov/llama.cpp:server
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: LLAMACPP_MODEL_NAME
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: LLAMACPP_MODEL_NAME
+        ports:
+        - name: http
+          containerPort: 8080
+          protocol: TCP
+        command:
+          - sh
+          - -c
+        args:
+          - |
+            exec /llama-server \
+              --host 0.0.0.0 \
+              --port 8080 \
+              --model "/models/${LLAMACPP_MODEL_NAME}" \
+              --ctx-size 4096 \
+              --n-gpu-layers 0
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1"
+          limits:
+            memory: "8Gi"
+            cpu: "4"
+        volumeMounts:
+        - name: models
+          mountPath: /models
+          readOnly: false
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 60
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 5
+      volumes:
+      - name: models
+        hostPath:
+          path: /tmp/context-engine-models
+          type: DirectoryOrCreate
+
+---
+# Llama.cpp Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: llamacpp
+  namespace: context-engine
+  labels:
+    app: context-engine
+    component: llamacpp
+spec:
+  type: ClusterIP
+  ports:
+  - name: http
+    port: 8080
+    targetPort: http
+    protocol: TCP
+  selector:
+    app: context-engine
+    component: llamacpp
+
+---
+# Optional: Llama.cpp External Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: llamacpp-external
+  namespace: context-engine
+  labels:
+    app: context-engine
+    component: llamacpp
+spec:
+  type: NodePort
+  ports:
+  - name: http
+    port: 8080
+    targetPort: http
+    nodePort: 30808
+    protocol: TCP
+  selector:
+    app: context-engine
+    component: llamacpp
+

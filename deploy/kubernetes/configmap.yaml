@@ -1,0 +1,75 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: context-engine-config
+  namespace: context-engine
+  labels:
+    app: context-engine
+data:
+  # Core Configuration
+  COLLECTION_NAME: "codebase"
+  EMBEDDING_MODEL: "BAAI/bge-base-en-v1.5"
+  EMBEDDING_PROVIDER: "fastembed"
+  
+  # Qdrant Configuration
+  QDRANT_URL: "http://qdrant:6333"
+  QDRANT_TIMEOUT: "60"
+  
+  # Indexing Configuration
+  INDEX_MICRO_CHUNKS: "1"
+  MAX_MICRO_CHUNKS_PER_FILE: "200"
+  INDEX_CHUNK_LINES: "120"
+  INDEX_CHUNK_OVERLAP: "20"
+  INDEX_BATCH_SIZE: "64"
+  INDEX_UPSERT_BATCH: "128"
+  INDEX_UPSERT_RETRIES: "5"
+  INDEX_UPSERT_BACKOFF: "0.5"
+  
+  # Watcher Configuration
+  WATCH_DEBOUNCE_SECS: "1.5"
+  
+  # ReFRAG Configuration
+  REFRAG_MODE: "1"
+  REFRAG_GATE_FIRST: "1"
+  REFRAG_CANDIDATES: "200"
+  MICRO_CHUNK_TOKENS: "16"
+  MICRO_CHUNK_STRIDE: "8"
+  MICRO_OUT_MAX_SPANS: "3"
+  MICRO_MERGE_LINES: "4"
+  MICRO_BUDGET_TOKENS: "512"
+  MICRO_TOKENS_PER_LINE: "32"
+  
+  # Decoder Configuration (optional)
+  REFRAG_DECODER: "1"
+  REFRAG_RUNTIME: "llamacpp"
+  LLAMACPP_URL: "http://llamacpp:8080"
+  LLAMACPP_TIMEOUT_SEC: "180"
+  DECODER_MAX_TOKENS: "4000"
+
+  # Model download configuration (for init container)
+  LLAMACPP_MODEL_URL: "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q8_0.gguf"
+  LLAMACPP_MODEL_NAME: "qwen2.5-1.5b-instruct-q8_0.gguf"
+  
+  # Reranker Configuration
+  RERANKER_ENABLED: "1"
+  
+  # MCP Configuration
+  FASTMCP_HOST: "0.0.0.0"
+  FASTMCP_PORT: "8000"
+  FASTMCP_INDEXER_PORT: "8001"
+  FASTMCP_HEALTH_PORT: "18000"
+  
+  # Memory Configuration
+  MEMORY_SSE_ENABLED: "true"
+  MEMORY_MCP_URL: "http://mcp-memory:8000/sse"
+  MEMORY_MCP_TIMEOUT: "6"
+  
+  # Multi-collection Configuration
+  CTX_MULTI_COLLECTION: "1"
+  CTX_DOC_PASS: "1"
+  
+  # Logging
+  DEBUG_CONTEXT_ANSWER: "0"
+  
+  # Tokenizer
+  TOKENIZER_JSON: "/app/models/tokenizer.json"
