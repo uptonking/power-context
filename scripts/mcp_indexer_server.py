@@ -290,17 +290,12 @@ def _default_collection() -> str:
 
 
 def _work_script(name: str) -> str:
-    """Return path to a script under /work if present, else local ./scripts.
-    Keeps Docker/default behavior but works in local dev without /work mount.
+    """Return path to a script under /app/scripts (container installation).
+
+    Scripts are always installed at /app/scripts in the container.
+    This is independent of where user repositories are mounted.
     """
-    try:
-        p = os.path.join("/work", "scripts", name)
-        if os.path.exists(p):
-            return p
-    except Exception as e:
-        logger.debug(f"Failed to locate script {name}: {e}")
-        pass
-    return os.path.join(os.getcwd(), "scripts", name)
+    return os.path.join("/app", "scripts", name)
 
 
 # Invalidate router scratchpad after reindex to avoid stale state reuse

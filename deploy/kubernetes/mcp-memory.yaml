@@ -73,8 +73,8 @@ spec:
             memory: "4Gi"
             cpu: "2"
         volumeMounts:
-        - name: repos
-          mountPath: /repos
+        - name: work
+          mountPath: /work
           readOnly: true
         livenessProbe:
           httpGet:
@@ -89,9 +89,9 @@ spec:
           initialDelaySeconds: 10
           periodSeconds: 5
       volumes:
-      - name: repos
+      - name: work
         hostPath:
-          path: /tmp/context-engine-repos
+          path: /tmp/context-engine-work
           type: DirectoryOrCreate
 
 ---
