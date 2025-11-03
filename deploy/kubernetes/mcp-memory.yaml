@@ -20,6 +20,8 @@ spec:
         app: context-engine
         component: mcp-memory
     spec:
+      serviceAccountName: context-engine
+
       containers:
       - name: mcp-memory
         image: context-engine:latest

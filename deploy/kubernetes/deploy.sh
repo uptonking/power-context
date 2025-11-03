@@ -186,24 +186,39 @@ apply_with_kustomize() {
   tmp_dir="$(mktemp -d)"
   log_info "Building temporary kustomize overlay at ${tmp_dir}"
 
+  # Copy manifests to temp dir to avoid absolute path issues
+  cp namespace.yaml configmap.yaml qdrant.yaml mcp-memory.yaml mcp-indexer.yaml \
+     mcp-http.yaml indexer-services.yaml rbac.yaml hpa.yaml networkpolicy.yaml "${tmp_dir}/"
+
+  if [[ "${SKIP_LLAMACPP}" != "true" ]]; then
+    cp llamacpp.yaml "${tmp_dir}/"
+  fi
+
+  if [[ "${DEPLOY_INGRESS}" == "true" ]]; then
+    cp ingress.yaml "${tmp_dir}/"
+  fi
+
   # Compose resources list based on flags
   {
     echo "apiVersion: kustomize.config.k8s.io/v1beta1"
     echo "kind: Kustomization"
     echo "namespace: ${NAMESPACE}"
     echo "resources:"
-    echo "  - ${base_dir}/namespace.yaml"
-    echo "  - ${base_dir}/configmap.yaml"
-    echo "  - ${base_dir}/qdrant.yaml"
-    echo "  - ${base_dir}/mcp-memory.yaml"
-    echo "  - ${base_dir}/mcp-indexer.yaml"
-    echo "  - ${base_dir}/mcp-http.yaml"
-    echo "  - ${base_dir}/indexer-services.yaml"
+    echo "  - namespace.yaml"
+    echo "  - configmap.yaml"
+    echo "  - qdrant.yaml"
+    echo "  - mcp-memory.yaml"
+    echo "  - mcp-indexer.yaml"
+    echo "  - mcp-http.yaml"
+    echo "  - indexer-services.yaml"
+    echo "  - rbac.yaml"
+    echo "  - hpa.yaml"
+    echo "  - networkpolicy.yaml"
     if [[ "${SKIP_LLAMACPP}" != "true" ]]; then
-      echo "  - ${base_dir}/llamacpp.yaml"
+      echo "  - llamacpp.yaml"
     fi
     if [[ "${DEPLOY_INGRESS}" == "true" ]]; then
-      echo "  - ${base_dir}/ingress.yaml"
+      echo "  - ingress.yaml"
     fi
     echo "images:"
     echo "  - name: context-engine"
@@ -214,6 +229,9 @@ apply_with_kustomize() {
   log_info "Applying kustomize overlay"
   kubectl apply -k "${tmp_dir}"
   log_success "Applied manifests via kustomize"
+
+  # Clean up temp dir
+  rm -rf "${tmp_dir}"
 }
 
 

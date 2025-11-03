@@ -20,6 +20,8 @@ spec:
         app: context-engine
         component: mcp-indexer
     spec:
+      serviceAccountName: context-engine
+
       containers:
       - name: mcp-indexer
         image: context-engine:latest

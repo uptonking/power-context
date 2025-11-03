@@ -20,6 +20,8 @@ spec:
         app: context-engine
         component: mcp-memory-http
     spec:
+      serviceAccountName: context-engine
+
       containers:
       - name: mcp-memory-http
         image: context-engine:latest
@@ -162,6 +164,7 @@ spec:
         app: context-engine
         component: mcp-indexer-http
     spec:
+      serviceAccountName: context-engine
       containers:
       - name: mcp-indexer-http
         image: context-engine:latest

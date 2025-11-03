@@ -21,6 +21,8 @@ spec:
         app: context-engine
         component: watcher
     spec:
+      serviceAccountName: context-engine
+
       containers:
       - name: watcher
         image: context-engine:latest
@@ -103,6 +105,7 @@ spec:
         app: context-engine
         component: indexer
     spec:
+      serviceAccountName: context-engine
       restartPolicy: OnFailure
       containers:
       - name: indexer
@@ -160,6 +163,7 @@ spec:
         app: context-engine
         component: init
     spec:
+      serviceAccountName: context-engine
       restartPolicy: OnFailure
       containers:
       - name: init-payload
