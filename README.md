@@ -44,7 +44,7 @@ INDEX_MICRO_CHUNKS=1 MAX_MICRO_CHUNKS_PER_FILE=200 make reset-dev-dual
 ```
 - Default ports: Memory MCP :8000, Indexer MCP :8001, Qdrant :6333, llama.cpp :8080
 
-**🎯 Seamless Setup Note:**
+**Seamless Setup Note:**
 - The stack uses a **single unified `codebase` collection** by default
 - All your code goes into one collection for seamless cross-repo search
 - No per-workspace fragmentation - search across everything at once
