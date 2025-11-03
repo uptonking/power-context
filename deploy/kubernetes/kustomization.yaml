@@ -26,10 +26,11 @@ resources:
   - ingress.yaml
 
 # Common labels
-commonLabels:
-  app.kubernetes.io/name: context-engine
-  app.kubernetes.io/component: kubernetes-deployment
-  app.kubernetes.io/managed-by: kustomize
+labels:
+  - pairs:
+      app.kubernetes.io/name: context-engine
+      app.kubernetes.io/component: kubernetes-deployment
+      app.kubernetes.io/managed-by: kustomize
 
 # Patches for production customization
 patchesStrategicMerge:
