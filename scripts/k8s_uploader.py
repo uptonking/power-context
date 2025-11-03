@@ -170,20 +170,25 @@ def trigger_indexing(
     """Trigger indexing via the MCP indexer server."""
     print(f"Triggering indexing for {repo_path}")
 
-    # Build Python command to call qdrant_index_root via MCP server
+    # Build Python command to call qdrant_index via MCP server
+    # Use qdrant_index with subdir parameter to index specific repo
     python_cmd = f"""
 import sys
 sys.path.insert(0, '/app')
-from scripts.mcp_indexer_server import qdrant_index_root
+from scripts.mcp_indexer_server import qdrant_index
 import asyncio
 import json
-import os
 
-# Set working directory to the uploaded repo
-os.chdir('{repo_path}')
+# Extract subdir from repo_path (e.g., /work/test-repo -> test-repo)
+repo_path = '{repo_path}'
+if repo_path.startswith('/work/'):
+    subdir = repo_path[6:]  # Remove '/work/' prefix
+else:
+    subdir = repo_path
 
 # Call indexing
-result = asyncio.run(qdrant_index_root(
+result = asyncio.run(qdrant_index(
+    subdir=subdir,
     recreate={str(recreate)},
     collection={repr(collection) if collection else 'None'}
 ))
