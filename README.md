@@ -4,7 +4,9 @@
 
 Context-Engine is a plug-and-play MCP retrieval stack that unifies code indexing, hybrid search, and optional llama.cpp decoding so product teams can ship context-aware agents in minutes, not weeks.
 
-<img src="useage.png" alt="Context-Engine Usage" width="600"/>
+<p align="center">
+  <img src="useage.png" alt="Context-Engine Usage" width="50%"/>
+</p>
 
 **Key differentiators**
 - One-command bring-up delivers dual SSE/RMCP endpoints, seeded Qdrant, and live watch/reindex loops for fast local validation.
