@@ -41,7 +41,7 @@ graph TB
         subgraph storage["Persistent Storage (HostPath)"]
             qdrant_vol["Qdrant Data<br/>/tmp/context-engine-qdrant"]
             models_vol["LLM Models<br/>/tmp/context-engine-models"]
-            repos_vol["Repositories<br/>/tmp/context-engine-repos"]
+            work_vol["Workspace<br/>/tmp/context-engine-work"]
         end
     end
 
@@ -55,7 +55,7 @@ graph TB
 
     qdrant --> qdrant_vol
     llama --> models_vol
-    watcher --> repos_vol
+    watcher --> work_vol
 
     style nginx fill:#e1f5ff
     style qdrant fill:#fff4e1
@@ -197,15 +197,22 @@ WATCH_DEBOUNCE_SECS: "1.5"
 
 ### Persistent Volumes
 
-Two persistent volumes are required:
+The deployment uses HostPath volumes for simplicity (suitable for single-node clusters like minikube):
 
 1. **qdrant-storage**: Stores Qdrant vector database
-   - Size: 50Gi (adjust based on codebase size)
-   - Access: ReadWriteOnce
+   - Path: `/tmp/context-engine-qdrant`
+   - Type: DirectoryOrCreate
 
-2. **repos-storage**: Stores repository code
-   - Size: 100Gi (adjust based on number/size of repos)
-   - Access: ReadWriteMany (required for multiple watchers)
+2. **models-storage**: Stores LLM models for llama.cpp
+   - Path: `/tmp/context-engine-models`
+   - Type: DirectoryOrCreate
+
+3. **work-storage**: Stores workspace/repository code
+   - Path: `/tmp/context-engine-work`
+   - Type: DirectoryOrCreate
+   - Mounted at: `/work` in containers
+
+For multi-node production clusters, replace HostPath with PersistentVolumeClaims (PVCs) backed by network storage (NFS, Ceph, cloud provider volumes).
 
 ### Resource Requests/Limits
 
@@ -240,59 +247,57 @@ resources:
     cpu: "1"
 ```
 
-## Multi-Repository Setup
+## Workspace Setup
 
-### Adding a New Repository
+### Indexing Your Codebase
 
-1. **Upload repository code** to the repos volume:
+The deployment indexes the codebase mounted at `/work` inside containers, which maps to `/tmp/context-engine-work` on the host.
+
+1. **Copy your codebase to the workspace volume**:
    ```bash
-   # Using uploader service
-   python scripts/upload_repo.py --repo-name my-service --path /local/path/to/repo
-   
-   # Or using kubectl cp
-   kubectl cp /local/path/to/repo context-engine/uploader-pod:/repos/my-service
+   # For minikube (single-node)
+   minikube ssh
+   sudo mkdir -p /tmp/context-engine-work
+   exit
+
+   # Copy your code
+   kubectl cp /local/path/to/your/repo context-engine/watcher-<pod-id>:/work
+
+   # Or mount directly on the host
+   cp -r /local/path/to/your/repo /tmp/context-engine-work/
    ```
 
-2. **Create watcher deployment** for the new repo:
-   ```bash
-   # Copy and modify watcher template
-   cp watcher-backend-deployment.yaml watcher-my-service-deployment.yaml
-   
-   # Edit: change WATCH_ROOT, REPO_NAME, and volume subPath
-   # Then apply
-   kubectl apply -f watcher-my-service-deployment.yaml -n context-engine
-   ```
-
-3. **Verify indexing**:
+2. **Verify indexing**:
    ```bash
    # Check watcher logs
-   kubectl logs -f deployment/watcher-my-service -n context-engine
-   
+   kubectl logs -f deployment/watcher -n context-engine
+
+   # Check indexer job completion
+   kubectl get jobs -n context-engine
+
    # Check collection status via MCP
-   curl http://indexer-mcp-service:8001/sse
+   kubectl port-forward -n context-engine svc/mcp-indexer 8001:8001
+   curl -X POST http://localhost:8001/mcp \
+     -H "Content-Type: application/json" \
+     -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"qdrant_status","arguments":{}}}'
    ```
 
-### Repository Volume Structure
+### Workspace Volume Structure
 
 ```
-/repos/
-├── backend/
-│   ├── .codebase/
-│   │   └── state.json
-│   ├── src/
-│   ├── tests/
-│   └── ...
-├── frontend/
-│   ├── .codebase/
-│   │   └── state.json
-│   ├── src/
-│   └── ...
-└── ml-service/
-    ├── .codebase/
-    │   └── state.json
-    ├── models/
-    └── ...
+/work/                          # Container mount point
+├── .codebase/                  # Indexing metadata
+│   └── state.json
+├── src/                        # Your source code
+├── tests/
+├── docs/
+└── ...
 ```
+
+**Note**: The current deployment uses a single workspace at `/work`. For multi-repository setups, you can:
+- Use subdirectories under `/work` (e.g., `/work/backend`, `/work/frontend`)
+- Deploy multiple watcher instances with different `WATCH_ROOT` environment variables
+- Use a unified collection or separate collections per repository
 
 ## Accessing Services
 
@@ -377,10 +382,10 @@ kubectl exec -n context-engine deployment/mcp-indexer -- curl -f http://localhos
 # View logs for specific service
 kubectl logs -f -n context-engine deployment/mcp-memory
 kubectl logs -f -n context-engine deployment/mcp-indexer
-kubectl logs -f -n context-engine deployment/watcher-backend
+kubectl logs -f -n context-engine deployment/watcher
 
-# View logs for all watchers
-kubectl logs -f -n context-engine -l app=watcher
+# View logs for all watchers (if multiple)
+kubectl logs -f -n context-engine -l component=watcher
 ```
 
 ### Collection Status
@@ -448,13 +453,13 @@ kubectl describe pvc -n context-engine <pvc-name>
 
 ```bash
 # Check watcher logs
-kubectl logs -f -n context-engine deployment/watcher-backend
+kubectl logs -f -n context-engine deployment/watcher
 
 # Verify volume mount
-kubectl exec -n context-engine deployment/watcher-backend -- ls -la /repos/backend
+kubectl exec -n context-engine deployment/watcher -- ls -la /work
 
 # Check Qdrant connectivity
-kubectl exec -n context-engine deployment/watcher-backend -- \
+kubectl exec -n context-engine deployment/watcher -- \
   curl -f http://qdrant:6333/readyz
 ```
 
