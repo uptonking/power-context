@@ -13,7 +13,7 @@ Environment:
 - FASTMCP_HOST (default: 0.0.0.0)
 - FASTMCP_INDEXER_PORT (default: 8001)
 - QDRANT_URL (e.g., http://qdrant:6333) — server expects Qdrant reachable via this env
-- COLLECTION_NAME (default: my-collection)
+- COLLECTION_NAME (default: codebase) — unified collection for seamless cross-repo search
 
 Conventions:
 - Repo content must be mounted at /work inside containers
@@ -225,7 +225,7 @@ def _primary_identifier_from_queries(qs: list[str]) -> str:
 
 
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
-DEFAULT_COLLECTION = os.environ.get("COLLECTION_NAME", "my-collection")
+DEFAULT_COLLECTION = os.environ.get("COLLECTION_NAME", "codebase")
 MAX_LOG_TAIL = safe_int(
     os.environ.get("MCP_MAX_LOG_TAIL", "4000"),
     default=4000,
@@ -290,17 +290,12 @@ def _default_collection() -> str:
 
 
 def _work_script(name: str) -> str:
-    """Return path to a script under /work if present, else local ./scripts.
-    Keeps Docker/default behavior but works in local dev without /work mount.
+    """Return path to a script under /app/scripts (container installation).
+
+    Scripts are always installed at /app/scripts in the container.
+    This is independent of where user repositories are mounted.
     """
-    try:
-        p = os.path.join("/work", "scripts", name)
-        if os.path.exists(p):
-            return p
-    except Exception as e:
-        logger.debug(f"Failed to locate script {name}: {e}")
-        pass
-    return os.path.join(os.getcwd(), "scripts", name)
+    return os.path.join("/app", "scripts", name)
 
 
 # Invalidate router scratchpad after reindex to avoid stale state reuse
@@ -827,13 +822,13 @@ async def qdrant_index_root(
     except Exception:
         pass
 
-    # Resolve collection: prefer explicit non-placeholder; otherwise workspace state
+    # Resolve collection: prefer explicit value; otherwise use workspace state
     try:
         _c = (collection or "").strip()
     except Exception:
         _c = ""
-    _placeholders = {"", "my-collection"}
-    if _c and _c not in _placeholders:
+    # Empty string means use workspace state default (codebase)
+    if _c:
         coll = _c
     else:
         try:
@@ -1241,13 +1236,13 @@ async def qdrant_index(
     if not (real_root == "/work" or real_root.startswith("/work/")):
         return {"ok": False, "error": "subdir escapes /work sandbox"}
     root = real_root
-    # Resolve collection: prefer explicit non-placeholder; otherwise workspace state (use workspace root)
+    # Resolve collection: prefer explicit value; otherwise use workspace state (use workspace root)
     try:
         _c2 = (collection or "").strip()
     except Exception:
         _c2 = ""
-    _placeholders2 = {"", "my-collection"}
-    if _c2 and _c2 not in _placeholders2:
+    # Empty string means use workspace state default (codebase)
+    if _c2:
         coll = _c2
     else:
         try:

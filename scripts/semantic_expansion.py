@@ -229,7 +229,7 @@ def expand_queries_semantically(
             model = TextEmbedding(model_name=model_name)
         
         if collection is None:
-            collection = os.environ.get("COLLECTION_NAME", "my-collection")
+            collection = os.environ.get("COLLECTION_NAME", "codebase")
         
         # If we don't have the required components, fall back to lexical expansion
         if not (client and model):

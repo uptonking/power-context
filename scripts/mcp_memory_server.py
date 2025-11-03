@@ -9,7 +9,7 @@ from qdrant_client import QdrantClient, models
 
 # Env
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
-DEFAULT_COLLECTION = os.environ.get("COLLECTION_NAME", "my-collection")
+DEFAULT_COLLECTION = os.environ.get("COLLECTION_NAME", "codebase")
 LEX_VECTOR_NAME = os.environ.get("LEX_VECTOR_NAME", "lex")
 LEX_VECTOR_DIM = int(os.environ.get("LEX_VECTOR_DIM", "4096") or 4096)
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")

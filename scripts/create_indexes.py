@@ -11,12 +11,12 @@ except Exception:
     update_last_activity = None  # type: ignore
     get_collection_name = None  # type: ignore
 
-COLLECTION = os.environ.get("COLLECTION_NAME", "my-collection")
+COLLECTION = os.environ.get("COLLECTION_NAME", "codebase")
 # Discover workspace path for state updates (allows subdir indexing)
 WS_PATH = os.environ.get("INDEX_ROOT") or os.environ.get("WORKSPACE_PATH") or "/work"
 
-# Prefer per-workspace unique collection if none provided
-if (COLLECTION == "my-collection") and ('get_collection_name' in globals()) and get_collection_name:
+# Use workspace state to get collection name (defaults to "codebase")
+if 'get_collection_name' in globals() and get_collection_name:
     try:
         COLLECTION = get_collection_name(WS_PATH)
     except Exception:

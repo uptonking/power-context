@@ -42,7 +42,7 @@ logger = logging.getLogger("hybrid_search")
 
 
 def _collection() -> str:
-    return os.environ.get("COLLECTION_NAME", "my-collection")
+    return os.environ.get("COLLECTION_NAME", "codebase")
 
 
 MODEL_NAME = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")

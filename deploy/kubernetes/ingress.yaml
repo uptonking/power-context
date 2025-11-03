@@ -1,0 +1,86 @@
+---
+# Ingress for Context-Engine services
+# Requires an Ingress controller (e.g., nginx-ingress, traefik)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: context-engine-ingress
+  namespace: context-engine
+  labels:
+    app: context-engine
+  annotations:
+    # Nginx Ingress annotations
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    # Increase timeouts for SSE connections
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    # Enable CORS if needed
+    # nginx.ingress.kubernetes.io/enable-cors: "true"
+    # nginx.ingress.kubernetes.io/cors-allow-origin: "*"
+spec:
+  ingressClassName: nginx  # Adjust based on your ingress controller
+  rules:
+  - host: context-engine.example.com  # Change to your domain
+    http:
+      paths:
+      # Qdrant
+      - path: /qdrant(/|$)(.*)
+        pathType: Prefix
+        backend:
+          service:
+            name: qdrant
+            port:
+              number: 6333
+      
+      # MCP Memory (SSE)
+      - path: /mcp/memory(/|$)(.*)
+        pathType: Prefix
+        backend:
+          service:
+            name: mcp-memory
+            port:
+              number: 8000
+      
+      # MCP Indexer (SSE)
+      - path: /mcp/indexer(/|$)(.*)
+        pathType: Prefix
+        backend:
+          service:
+            name: mcp-indexer
+            port:
+              number: 8001
+      
+      # MCP Memory HTTP
+      - path: /mcp-http/memory(/|$)(.*)
+        pathType: Prefix
+        backend:
+          service:
+            name: mcp-memory-http
+            port:
+              number: 8002
+      
+      # MCP Indexer HTTP
+      - path: /mcp-http/indexer(/|$)(.*)
+        pathType: Prefix
+        backend:
+          service:
+            name: mcp-indexer-http
+            port:
+              number: 8003
+      
+      # Llama.cpp (optional)
+      - path: /llamacpp(/|$)(.*)
+        pathType: Prefix
+        backend:
+          service:
+            name: llamacpp
+            port:
+              number: 8080
+  
+  # TLS configuration (optional)
+  # tls:
+  # - hosts:
+  #   - context-engine.example.com
+  #   secretName: context-engine-tls
+

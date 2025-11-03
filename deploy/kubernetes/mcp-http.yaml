@@ -1,0 +1,323 @@
+---
+# MCP Memory HTTP Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-memory-http
+  namespace: context-engine
+  labels:
+    app: context-engine
+    component: mcp-memory-http
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: context-engine
+      component: mcp-memory-http
+  template:
+    metadata:
+      labels:
+        app: context-engine
+        component: mcp-memory-http
+    spec:
+      containers:
+      - name: mcp-memory-http
+        image: context-engine:latest
+        imagePullPolicy: IfNotPresent
+        command: ["python", "/app/scripts/mcp_memory_server.py"]
+        ports:
+        - name: http
+          containerPort: 8002
+          protocol: TCP
+        - name: health
+          containerPort: 18002
+          protocol: TCP
+        env:
+        - name: FASTMCP_TRANSPORT
+          value: "streamable-http"
+        - name: FASTMCP_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: FASTMCP_HOST
+        - name: FASTMCP_PORT
+          value: "8002"
+        - name: FASTMCP_HEALTH_PORT
+          value: "18002"
+        - name: QDRANT_URL
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: QDRANT_URL
+        - name: COLLECTION_NAME
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: COLLECTION_NAME
+        - name: EMBEDDING_MODEL
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: EMBEDDING_MODEL
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "4Gi"
+            cpu: "2"
+        volumeMounts:
+        - name: work
+          mountPath: /work
+          readOnly: true
+        livenessProbe:
+          httpGet:
+            path: /readyz
+            port: health
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: health
+          initialDelaySeconds: 10
+          periodSeconds: 5
+      volumes:
+      - name: work
+        hostPath:
+          path: /tmp/context-engine-work
+          type: DirectoryOrCreate
+
+---
+# MCP Memory HTTP Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-memory-http
+  namespace: context-engine
+  labels:
+    app: context-engine
+    component: mcp-memory-http
+spec:
+  type: ClusterIP
+  ports:
+  - name: http
+    port: 8002
+    targetPort: http
+    protocol: TCP
+  - name: health
+    port: 18002
+    targetPort: health
+    protocol: TCP
+  selector:
+    app: context-engine
+    component: mcp-memory-http
+
+---
+# Optional: MCP Memory HTTP External Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-memory-http-external
+  namespace: context-engine
+  labels:
+    app: context-engine
+    component: mcp-memory-http
+spec:
+  type: NodePort
+  ports:
+  - name: http
+    port: 8002
+    targetPort: http
+    nodePort: 30804
+    protocol: TCP
+  - name: health
+    port: 18002
+    targetPort: health
+    nodePort: 30805
+    protocol: TCP
+  selector:
+    app: context-engine
+    component: mcp-memory-http
+
+---
+# MCP Indexer HTTP Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-indexer-http
+  namespace: context-engine
+  labels:
+    app: context-engine
+    component: mcp-indexer-http
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: context-engine
+      component: mcp-indexer-http
+  template:
+    metadata:
+      labels:
+        app: context-engine
+        component: mcp-indexer-http
+    spec:
+      containers:
+      - name: mcp-indexer-http
+        image: context-engine:latest
+        imagePullPolicy: IfNotPresent
+        command: ["python", "/app/scripts/mcp_indexer_server.py"]
+        ports:
+        - name: http
+          containerPort: 8003
+          protocol: TCP
+        - name: health
+          containerPort: 18003
+          protocol: TCP
+        env:
+        - name: FASTMCP_TRANSPORT
+          value: "streamable-http"
+        - name: FASTMCP_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: FASTMCP_HOST
+        - name: FASTMCP_INDEXER_PORT
+          value: "8003"
+        - name: FASTMCP_HEALTH_PORT
+          value: "18003"
+        - name: QDRANT_URL
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: QDRANT_URL
+        - name: COLLECTION_NAME
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: COLLECTION_NAME
+        - name: EMBEDDING_MODEL
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: EMBEDDING_MODEL
+        - name: INDEX_MICRO_CHUNKS
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: INDEX_MICRO_CHUNKS
+        - name: MAX_MICRO_CHUNKS_PER_FILE
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: MAX_MICRO_CHUNKS_PER_FILE
+        - name: REFRAG_MODE
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: REFRAG_MODE
+        - name: REFRAG_DECODER
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: REFRAG_DECODER
+        - name: LLAMACPP_URL
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: LLAMACPP_URL
+        - name: MEMORY_SSE_ENABLED
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: MEMORY_SSE_ENABLED
+        - name: MEMORY_MCP_URL
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: MEMORY_MCP_URL
+        - name: CTX_MULTI_COLLECTION
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: CTX_MULTI_COLLECTION
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "4Gi"
+            cpu: "2"
+        volumeMounts:
+        - name: work
+          mountPath: /work
+        livenessProbe:
+          httpGet:
+            path: /readyz
+            port: health
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: health
+          initialDelaySeconds: 10
+          periodSeconds: 5
+      volumes:
+      - name: work
+        hostPath:
+          path: /tmp/context-engine-work
+          type: DirectoryOrCreate
+
+---
+# MCP Indexer HTTP Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-indexer-http
+  namespace: context-engine
+  labels:
+    app: context-engine
+    component: mcp-indexer-http
+spec:
+  type: ClusterIP
+  ports:
+  - name: http
+    port: 8003
+    targetPort: http
+    protocol: TCP
+  - name: health
+    port: 18003
+    targetPort: health
+    protocol: TCP
+  selector:
+    app: context-engine
+    component: mcp-indexer-http
+
+---
+# Optional: MCP Indexer HTTP External Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-indexer-http-external
+  namespace: context-engine
+  labels:
+    app: context-engine
+    component: mcp-indexer-http
+spec:
+  type: NodePort
+  ports:
+  - name: http
+    port: 8003
+    targetPort: http
+    nodePort: 30806
+    protocol: TCP
+  - name: health
+    port: 18003
+    targetPort: health
+    nodePort: 30807
+    protocol: TCP
+  selector:
+    app: context-engine
+    component: mcp-indexer-http
+
