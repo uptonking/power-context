@@ -178,6 +178,45 @@ set_images() {
   log_success "Images set to ${full} and jobs refreshed"
 }
 
+# Build a temporary Kustomize overlay and apply it with images/flags respected
+apply_with_kustomize() {
+  local base_dir
+  base_dir="$(pwd)"
+  local tmp_dir
+  tmp_dir="$(mktemp -d)"
+  log_info "Building temporary kustomize overlay at ${tmp_dir}"
+
+  # Compose resources list based on flags
+  {
+    echo "apiVersion: kustomize.config.k8s.io/v1beta1"
+    echo "kind: Kustomization"
+    echo "namespace: ${NAMESPACE}"
+    echo "resources:"
+    echo "  - ${base_dir}/namespace.yaml"
+    echo "  - ${base_dir}/configmap.yaml"
+    echo "  - ${base_dir}/qdrant.yaml"
+    echo "  - ${base_dir}/mcp-memory.yaml"
+    echo "  - ${base_dir}/mcp-indexer.yaml"
+    echo "  - ${base_dir}/mcp-http.yaml"
+    echo "  - ${base_dir}/indexer-services.yaml"
+    if [[ "${SKIP_LLAMACPP}" != "true" ]]; then
+      echo "  - ${base_dir}/llamacpp.yaml"
+    fi
+    if [[ "${DEPLOY_INGRESS}" == "true" ]]; then
+      echo "  - ${base_dir}/ingress.yaml"
+    fi
+    echo "images:"
+    echo "  - name: context-engine"
+    echo "    newName: ${IMAGE_REGISTRY}"
+    echo "    newTag: ${IMAGE_TAG}"
+  } > "${tmp_dir}/kustomization.yaml"
+
+  log_info "Applying kustomize overlay"
+  kubectl apply -k "${tmp_dir}"
+  log_success "Applied manifests via kustomize"
+}
+
+
 # Main deployment function
 main() {
     log_info "Starting Context-Engine Kubernetes deployment"
@@ -185,16 +224,21 @@ main() {
     # Check prerequisites
     check_kubectl
 
-    # Deploy in order
-    create_namespace
-    deploy_config
-    deploy_core
-    deploy_mcp_servers
-    deploy_http_servers
-    deploy_indexer_services
-    deploy_llamacpp
-    deploy_ingress
-    set_images
+    if [[ "$USE_KUSTOMIZE" == "true" ]]; then
+        # Single-shot apply via kustomize overlay (respects flags and images)
+        apply_with_kustomize
+    else
+        # Deploy in order via raw manifests
+        create_namespace
+        deploy_config
+        deploy_core
+        deploy_mcp_servers
+        deploy_http_servers
+        deploy_indexer_services
+        deploy_llamacpp
+        deploy_ingress
+        set_images
+    fi
 
     # Show status
     show_status
@@ -212,6 +256,7 @@ show_help() {
     echo "  -t, --tag TAG                 Docker image tag (default: latest)"
     echo "  --skip-llamacpp               Skip Llama.cpp deployment"
     echo "  --deploy-ingress              Deploy Ingress configuration"
+    echo "  --use-kustomize               Apply via kustomize overlay (respects --registry/--tag and flags)"
     echo "  --namespace NAMESPACE         Kubernetes namespace (default: context-engine)"
     echo
     echo "Examples:"
@@ -242,6 +287,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --deploy-ingress)
             DEPLOY_INGRESS=true
+            shift
+            ;;
+        --use-kustomize)
+            USE_KUSTOMIZE=true
             shift
             ;;
         --namespace)
