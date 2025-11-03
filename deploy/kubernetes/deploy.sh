@@ -162,6 +162,22 @@ show_status() {
     fi
 }
 
+
+# Patch images to the chosen registry:tag and refresh jobs
+set_images() {
+  local full="${IMAGE_REGISTRY}:${IMAGE_TAG}"
+  log_info "Setting images to ${full}"
+  kubectl set image deployment/mcp-memory mcp-memory="${full}" -n "$NAMESPACE" || true
+  kubectl set image deployment/mcp-indexer mcp-indexer="${full}" -n "$NAMESPACE" || true
+  kubectl set image deployment/mcp-memory-http mcp-memory-http="${full}" -n "$NAMESPACE" || true
+  kubectl set image deployment/mcp-indexer-http mcp-indexer-http="${full}" -n "$NAMESPACE" || true
+  kubectl set image deployment/watcher watcher="${full}" -n "$NAMESPACE" || true
+  # Refresh Jobs so they pick up the new image
+  kubectl delete job indexer-job init-payload -n "$NAMESPACE" --ignore-not-found=true
+  kubectl apply -f indexer-services.yaml
+  log_success "Images set to ${full} and jobs refreshed"
+}
+
 # Main deployment function
 main() {
     log_info "Starting Context-Engine Kubernetes deployment"
@@ -178,6 +194,7 @@ main() {
     deploy_indexer_services
     deploy_llamacpp
     deploy_ingress
+    set_images
 
     # Show status
     show_status

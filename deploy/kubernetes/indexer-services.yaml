@@ -26,7 +26,7 @@ spec:
         image: context-engine:latest
         imagePullPolicy: IfNotPresent
         command: ["python", "/app/scripts/watch_index.py"]
-        workingDir: /repos
+        workingDir: /work
         env:
         - name: QDRANT_URL
           valueFrom:
@@ -109,7 +109,7 @@ spec:
         image: context-engine:latest
         imagePullPolicy: IfNotPresent
         command: ["python", "/app/scripts/ingest_code.py"]
-        workingDir: /repos
+        workingDir: /work
         env:
         - name: QDRANT_URL
           valueFrom:
@@ -166,7 +166,7 @@ spec:
         image: context-engine:latest
         imagePullPolicy: IfNotPresent
         command: ["python", "/app/scripts/create_indexes.py"]
-        workingDir: /repos
+        workingDir: /work
         env:
         - name: QDRANT_URL
           valueFrom:

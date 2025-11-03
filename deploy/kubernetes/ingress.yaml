@@ -10,6 +10,7 @@ metadata:
     app: context-engine
   annotations:
     # Nginx Ingress annotations
+    nginx.ingress.kubernetes.io/use-regex: "true"
     nginx.ingress.kubernetes.io/rewrite-target: /$2
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
     # Increase timeouts for SSE connections
@@ -26,7 +27,7 @@ spec:
       paths:
       # Qdrant
       - path: /qdrant(/|$)(.*)
-        pathType: Prefix
+        pathType: ImplementationSpecific
         backend:
           service:
             name: qdrant
@@ -35,7 +36,7 @@ spec:
       
       # MCP Memory (SSE)
       - path: /mcp/memory(/|$)(.*)
-        pathType: Prefix
+        pathType: ImplementationSpecific
         backend:
           service:
             name: mcp-memory
@@ -44,7 +45,7 @@ spec:
       
       # MCP Indexer (SSE)
       - path: /mcp/indexer(/|$)(.*)
-        pathType: Prefix
+        pathType: ImplementationSpecific
         backend:
           service:
             name: mcp-indexer
@@ -53,7 +54,7 @@ spec:
       
       # MCP Memory HTTP
       - path: /mcp-http/memory(/|$)(.*)
-        pathType: Prefix
+        pathType: ImplementationSpecific
         backend:
           service:
             name: mcp-memory-http
@@ -62,7 +63,7 @@ spec:
       
       # MCP Indexer HTTP
       - path: /mcp-http/indexer(/|$)(.*)
-        pathType: Prefix
+        pathType: ImplementationSpecific
         backend:
           service:
             name: mcp-indexer-http
@@ -71,7 +72,7 @@ spec:
       
       # Llama.cpp (optional)
       - path: /llamacpp(/|$)(.*)
-        pathType: Prefix
+        pathType: ImplementationSpecific
         backend:
           service:
             name: llamacpp
