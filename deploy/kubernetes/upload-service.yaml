@@ -20,6 +20,10 @@ spec:
         app: context-engine
         component: upload-service
     spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
       containers:
       - name: upload-service
         image: context-engine-upload-service  # Use service-specific image name

@@ -44,23 +44,11 @@ For local development or direct access, services are exposed via NodePort:
    docker build -f Dockerfile.indexer -t context-engine-indexer-service:latest .
    ```
 
-4. **Source Code Access** (choose one):
-   - **Local Mode**: Source code pre-distributed to all cluster nodes at `/tmp/context-engine-work`
-   - **Git Mode**: Git repository accessible from cluster with proper authentication configured
+4. **Source Code Access**: Source code should be pre-distributed to all cluster nodes at `/tmp/context-engine-work`
 
 ## Quick Start
 
-### Option 1: Automated Deployment with Source Code Management
-
-```bash
-# Deploy with Git-based source code synchronization (recommended)
-./deploy-with-source.sh git https://github.com/your-org/your-repo.git main
-
-# Or deploy with local source code (requires pre-distribution)
-./deploy-with-source.sh local
-```
-
-### Option 2: Manual Deployment
+### Manual Deployment
 
 ### 1. Deploy Core Services
 
@@ -139,38 +127,7 @@ All configuration is managed through the `context-engine-config` ConfigMap in `c
 
 ## Source Code Management
 
-### Local Mode vs Git Mode
-
-The deployment supports two source code access strategies:
-
-#### **Local Mode** (Default)
-- Uses hostPath volumes to access source code on cluster nodes
-- **Pros**: Simple, no external dependencies
-- **Cons**: Requires manual source code distribution to all nodes
-- **Use Case**: Single-node clusters, development environments
-
-#### **Git Mode** (Recommended for Production)
-- Uses Git sync sidecars to automatically pull source code from repositories
-- **Pros**: Automatic source code synchronization, CI/CD integration
-- **Cons**: Requires Git repository access from cluster
-- **Use Case**: Multi-node clusters, production deployments
-
-### Git Sync Setup
-
-For Git mode setup, see [GIT_SYNC_SETUP.md](./GIT_SYNC_SETUP.md) for detailed instructions.
-
-**Quick Git Mode Setup:**
-
-```bash
-# Public repository
-./deploy-with-source.sh git https://github.com/your-org/your-repo.git main
-
-# Private repository (requires SSH key setup)
-kubectl create secret generic git-ssh-key \
-  --from-file=ssh-private-key=~/.ssh/id_rsa \
-  -n context-engine
-./deploy-with-source.sh git git@github.com:your-org/your-repo.git main
-```
+The deployment uses hostPath volumes to access source code on cluster nodes. Source code must be pre-distributed to all cluster nodes at the configured paths.
 
 ## Development Workflow
 

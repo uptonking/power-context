@@ -127,14 +127,4 @@ data:
   FASTMCP_SERVER_NAME: "qdrant-mcp"     # MCP server identifier
   HOST_INDEX_PATH: "/work"              # Work directory mounting path
 
-  # Source Code Configuration
-  # Set to "git" to use Git sync sidecar, or "local" to use hostPath (default)
-  SOURCE_CODE_MODE: "local"
-
-  # Git repository configuration (only used when SOURCE_CODE_MODE=git)
-  GIT_REPO_URL: ""  # e.g., "https://github.com/your-org/your-repo.git"
-  GIT_BRANCH: "main"
-  GIT_SYNC_PERIOD: "60"  # Sync every 60 seconds
-  GIT_SSH_KEY: ""  # SSH private key for private repos (optional)
-  GIT_USERNAME: ""  # Username for private repos (optional)
-  GIT_PASSWORD: ""  # Password/token for private repos (optional)
+  

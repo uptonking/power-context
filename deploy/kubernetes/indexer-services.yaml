@@ -38,6 +38,7 @@ spec:
             configMapKeyRef:
               name: context-engine-config
               key: EMBEDDING_MODEL
+        # CODEBASE_ROOT not needed when mounting at /work/.codebase
         resources:
           requests:
             memory: "1Gi"
@@ -49,17 +50,15 @@ spec:
         - name: work-volume
           mountPath: /work
           readOnly: true
-        - name: codebase-volume
+        - name: metadata-volume
           mountPath: /work/.codebase
       volumes:
       - name: work-volume
-        hostPath:
-          path: /tmp/context-engine-work  # Adjust for your environment
-          type: DirectoryOrCreate
-      - name: codebase-volume
-        hostPath:
-          path: /tmp/context-engine-work/.codebase  # Adjust for your environment
-          type: DirectoryOrCreate
+        persistentVolumeClaim:
+          claimName: code-repos-pvc
+      - name: metadata-volume
+        persistentVolumeClaim:
+          claimName: code-metadata-pvc
 
 ---
 # Watcher Service (File change monitoring and reindexing)
@@ -130,6 +129,7 @@ spec:
             configMapKeyRef:
               name: context-engine-config
               key: WATCH_DEBOUNCE_SECS
+        # CODEBASE_ROOT not needed when mounting at /work/.codebase
         resources:
           requests:
             memory: "512Mi"
@@ -141,17 +141,15 @@ spec:
         - name: work-volume
           mountPath: /work
           readOnly: true
-        - name: codebase-volume
+        - name: metadata-volume
           mountPath: /work/.codebase
       volumes:
       - name: work-volume
-        hostPath:
-          path: /tmp/context-engine-work  # Adjust for your environment
-          type: DirectoryOrCreate
-      - name: codebase-volume
-        hostPath:
-          path: /tmp/context-engine-work/.codebase  # Adjust for your environment
-          type: DirectoryOrCreate
+        persistentVolumeClaim:
+          claimName: code-repos-pvc
+      - name: metadata-volume
+        persistentVolumeClaim:
+          claimName: code-metadata-pvc
 
 ---
 # Index Initialization Job
@@ -188,6 +186,7 @@ spec:
             configMapKeyRef:
               name: context-engine-config
               key: COLLECTION_NAME
+        # CODEBASE_ROOT not needed when mounting at /work/.codebase
         resources:
           requests:
             memory: "512Mi"
@@ -199,14 +198,12 @@ spec:
         - name: work-volume
           mountPath: /work
           readOnly: true
-        - name: codebase-volume
+        - name: metadata-volume
           mountPath: /work/.codebase
       volumes:
       - name: work-volume
-        hostPath:
-          path: /tmp/context-engine-work  # Adjust for your environment
-          type: DirectoryOrCreate
-      - name: codebase-volume
-        hostPath:
-          path: /tmp/context-engine-work/.codebase  # Adjust for your environment
-          type: DirectoryOrCreate
+        persistentVolumeClaim:
+          claimName: code-repos-pvc
+      - name: metadata-volume
+        persistentVolumeClaim:
+          claimName: code-metadata-pvc

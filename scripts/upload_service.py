@@ -26,30 +26,20 @@ from pydantic import BaseModel, Field
 # Import existing workspace state and indexing functions
 try:
     from scripts.workspace_state import (
-        get_workspace_state,
-        update_workspace_state,
-        update_last_activity,
+        log_activity,
         get_collection_name,
         get_cached_file_hash,
         set_cached_file_hash,
-        remove_cached_file,
+        _extract_repo_name_from_path,
     )
 except ImportError:
     # Fallback for testing without full environment
-    get_workspace_state = None
-    update_workspace_state = None
-    update_last_activity = None
+    log_activity = None
     get_collection_name = None
     get_cached_file_hash = None
     set_cached_file_hash = None
-    remove_cached_file = None
+    _extract_repo_name_from_path = None
 
-try:
-    from scripts.ingest_code import index_repo, delete_points_by_path
-except ImportError:
-    # Fallback for testing
-    index_repo = None
-    delete_points_by_path = None
 
 # Configure logging
 logging.basicConfig(
@@ -90,8 +80,6 @@ class UploadResponse(BaseModel):
     sequence_number: Optional[int] = None
     processed_operations: Optional[Dict[str, int]] = None
     processing_time_ms: Optional[int] = None
-    indexed_points: Optional[int] = None
-    collection_name: Optional[str] = None
     next_sequence: Optional[int] = None
     error: Optional[Dict[str, Any]] = None
 
@@ -112,8 +100,12 @@ class HealthResponse(BaseModel):
     work_dir: str
 
 def get_workspace_key(workspace_path: str) -> str:
-    """Generate a unique key for workspace tracking."""
-    return hashlib.sha256(workspace_path.encode('utf-8')).hexdigest()[:16]
+    """Generate a unique key for workspace tracking using repository name."""
+    # Extract repository name from path for consistent identification
+    # Both host paths (/home/user/project/repo) and container paths (/work/repo)
+    # should generate the same key for the same repository
+    repo_name = Path(workspace_path).name
+    return hashlib.sha256(repo_name.encode('utf-8')).hexdigest()[:16]
 
 def get_next_sequence(workspace_path: str) -> int:
     """Get next sequence number for workspace."""
@@ -135,35 +127,35 @@ def validate_bundle_format(bundle_path: Path) -> Dict[str, Any]:
             # Check for required files
             required_files = ["manifest.json", "metadata/operations.json", "metadata/hashes.json"]
             members = tar.getnames()
-            
+
             for req_file in required_files:
                 if not any(req_file in member for member in members):
                     raise ValueError(f"Missing required file: {req_file}")
-            
+
             # Extract and validate manifest
             manifest_member = None
             for member in members:
                 if member.endswith("manifest.json"):
                     manifest_member = member
                     break
-            
+
             if not manifest_member:
                 raise ValueError("manifest.json not found in bundle")
-            
+
             manifest_file = tar.extractfile(manifest_member)
             if not manifest_file:
                 raise ValueError("Cannot extract manifest.json")
-            
+
             manifest = json.loads(manifest_file.read().decode('utf-8'))
-            
+
             # Validate manifest structure
             required_fields = ["version", "bundle_id", "workspace_path", "created_at", "sequence_number"]
             for field in required_fields:
                 if field not in manifest:
                     raise ValueError(f"Missing required field in manifest: {field}")
-            
+
             return manifest
-            
+
     except Exception as e:
         raise ValueError(f"Invalid bundle format: {str(e)}")
 
@@ -177,12 +169,22 @@ async def process_delta_bundle(workspace_path: str, bundle_path: Path, manifest:
         "skipped": 0,
         "failed": 0
     }
-    
+
     try:
-        # Ensure workspace directory exists
-        workspace = Path(workspace_path)
+        # CRITICAL FIX: Extract repo name and create workspace under WORK_DIR
+        # Previous bug: used source workspace_path directly, extracting files outside /work
+        # This caused watcher service to never see uploaded files
+        if _extract_repo_name_from_path:
+            repo_name = _extract_repo_name_from_path(workspace_path)
+        else:
+            # Fallback: use directory name
+            repo_name = Path(workspace_path).name
+
+        # Generate workspace under WORK_DIR using repo name hash
+        workspace_key = get_workspace_key(workspace_path)
+        workspace = Path(WORK_DIR) / f"{repo_name}-{workspace_key}"
         workspace.mkdir(parents=True, exist_ok=True)
-        
+
         with tarfile.open(bundle_path, "r:gz") as tar:
             # Extract operations metadata
             ops_member = None
@@ -190,28 +192,28 @@ async def process_delta_bundle(workspace_path: str, bundle_path: Path, manifest:
                 if member.endswith("metadata/operations.json"):
                     ops_member = member
                     break
-            
+
             if not ops_member:
                 raise ValueError("operations.json not found in bundle")
-            
+
             ops_file = tar.extractfile(ops_member)
             if not ops_file:
                 raise ValueError("Cannot extract operations.json")
-            
+
             operations_data = json.loads(ops_file.read().decode('utf-8'))
             operations = operations_data.get("operations", [])
-            
+
             # Process each operation
             for operation in operations:
                 op_type = operation.get("operation")
                 rel_path = operation.get("path")
-                
+
                 if not rel_path:
                     operations_count["skipped"] += 1
                     continue
-                
+
                 target_path = workspace / rel_path
-                
+
                 try:
                     if op_type == "created":
                         # Extract file from bundle
@@ -220,7 +222,7 @@ async def process_delta_bundle(workspace_path: str, bundle_path: Path, manifest:
                             if member.endswith(f"files/created/{rel_path}"):
                                 file_member = member
                                 break
-                        
+
                         if file_member:
                             file_content = tar.extractfile(file_member)
                             if file_content:
@@ -231,7 +233,7 @@ async def process_delta_bundle(workspace_path: str, bundle_path: Path, manifest:
                                 operations_count["failed"] += 1
                         else:
                             operations_count["failed"] += 1
-                    
+
                     elif op_type == "updated":
                         # Extract updated file
                         file_member = None
@@ -239,7 +241,7 @@ async def process_delta_bundle(workspace_path: str, bundle_path: Path, manifest:
                             if member.endswith(f"files/updated/{rel_path}"):
                                 file_member = member
                                 break
-                        
+
                         if file_member:
                             file_content = tar.extractfile(file_member)
                             if file_content:
@@ -250,7 +252,7 @@ async def process_delta_bundle(workspace_path: str, bundle_path: Path, manifest:
                                 operations_count["failed"] += 1
                         else:
                             operations_count["failed"] += 1
-                    
+
                     elif op_type == "moved":
                         # Extract moved file to destination
                         file_member = None
@@ -258,7 +260,7 @@ async def process_delta_bundle(workspace_path: str, bundle_path: Path, manifest:
                             if member.endswith(f"files/moved/{rel_path}"):
                                 file_member = member
                                 break
-                        
+
                         if file_member:
                             file_content = tar.extractfile(file_member)
                             if file_content:
@@ -269,7 +271,7 @@ async def process_delta_bundle(workspace_path: str, bundle_path: Path, manifest:
                                 operations_count["failed"] += 1
                         else:
                             operations_count["failed"] += 1
-                    
+
                     elif op_type == "deleted":
                         # Delete file
                         if target_path.exists():
@@ -277,57 +279,20 @@ async def process_delta_bundle(workspace_path: str, bundle_path: Path, manifest:
                             operations_count["deleted"] += 1
                         else:
                             operations_count["skipped"] += 1
-                    
+
                     else:
                         operations_count["skipped"] += 1
-                
+
                 except Exception as e:
                     logger.error(f"Error processing operation {op_type} for {rel_path}: {e}")
                     operations_count["failed"] += 1
-        
+
         return operations_count
-    
+
     except Exception as e:
         logger.error(f"Error processing delta bundle: {e}")
         raise
 
-async def index_changed_files(workspace_path: str, collection_name: str) -> int:
-    """Index changed files using existing ingest_code pipeline."""
-    if not index_repo:
-        logger.warning("index_repo function not available, skipping indexing")
-        return 0
-    
-    try:
-        # Get workspace state to determine what needs indexing
-        if get_workspace_state:
-            state = get_workspace_state(workspace_path)
-            # Update last activity
-            if update_last_activity:
-                activity = {
-                    "timestamp": datetime.now().isoformat(),
-                    "action": "indexed",
-                    "details": {
-                        "files_processed": "unknown",
-                        "source": "delta_upload"
-                    }
-                }
-                update_last_activity(workspace_path, activity)
-        
-        # Call existing indexing function
-        logger.info(f"Indexing workspace: {workspace_path}")
-        result = index_repo(
-            workspace_path,
-            qdrant_url=QDRANT_URL,
-            collection_name=collection_name,
-            recreate=False
-        )
-        
-        # Return estimated number of points (this is approximate)
-        return result.get("points_created", 0) if isinstance(result, dict) else 0
-    
-    except Exception as e:
-        logger.error(f"Error indexing files: {e}")
-        return 0
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
@@ -346,24 +311,16 @@ async def get_status(workspace_path: str):
     try:
         # Get collection name
         if get_collection_name:
-            collection_name = get_collection_name(workspace_path)
+            repo_name = _extract_repo_name_from_path(workspace_path) if _extract_repo_name_from_path else None
+            collection_name = get_collection_name(repo_name)
         else:
             collection_name = DEFAULT_COLLECTION
-        
+
         # Get last sequence
         last_sequence = get_last_sequence(workspace_path)
-        
-        # Get workspace state if available
+
         last_upload = None
-        if get_workspace_state:
-            try:
-                state = get_workspace_state(workspace_path)
-                last_activity = state.get("last_activity")
-                if last_activity:
-                    last_upload = last_activity.get("timestamp")
-            except Exception:
-                pass
-        
+
         return StatusResponse(
             workspace_path=workspace_path,
             collection_name=collection_name,
@@ -377,7 +334,7 @@ async def get_status(workspace_path: str):
                 "supported_formats": ["tar.gz"]
             }
         )
-    
+
     except Exception as e:
         logger.error(f"Error getting status: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -393,47 +350,48 @@ async def upload_delta_bundle(
 ):
     """Upload and process delta bundle."""
     start_time = datetime.now()
-    
+
     try:
         # Validate workspace path
         workspace = Path(workspace_path)
         if not workspace.is_absolute():
             workspace = Path(WORK_DIR) / workspace
-        
+
         workspace_path = str(workspace.resolve())
-        
+
         # Get collection name
         if not collection_name:
             if get_collection_name:
-                collection_name = get_collection_name(workspace_path)
+                repo_name = _extract_repo_name_from_path(workspace_path) if _extract_repo_name_from_path else None
+                collection_name = get_collection_name(repo_name)
             else:
                 collection_name = DEFAULT_COLLECTION
-        
+
         # Validate bundle size
         if bundle.size and bundle.size > MAX_BUNDLE_SIZE_MB * 1024 * 1024:
             raise HTTPException(
                 status_code=413,
                 detail=f"Bundle too large. Max size: {MAX_BUNDLE_SIZE_MB}MB"
             )
-        
+
         # Save bundle to temporary file
         with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as temp_file:
             bundle_path = Path(temp_file.name)
-            
+
             # Stream upload to file
             content = await bundle.read()
             bundle_path.write_bytes(content)
-        
+
         try:
             # Validate bundle format
             manifest = validate_bundle_format(bundle_path)
             bundle_id = manifest.get("bundle_id")
             manifest_sequence = manifest.get("sequence_number")
-            
+
             # Check sequence number
             if sequence_number is None:
                 sequence_number = manifest_sequence
-            
+
             if not force and sequence_number is not None:
                 last_sequence = get_last_sequence(workspace_path)
                 if sequence_number != last_sequence + 1:
@@ -447,54 +405,48 @@ async def upload_delta_bundle(
                             "retry_after": 5000
                         }
                     )
-            
+
             # Process delta bundle
             operations_count = await process_delta_bundle(workspace_path, bundle_path, manifest)
-            
-            # Index changed files
-            indexed_points = await index_changed_files(workspace_path, collection_name)
-            
+
+
             # Update sequence tracking
             if sequence_number is not None:
                 key = get_workspace_key(workspace_path)
                 _sequence_tracker[key] = sequence_number
-            
-            # Update workspace state
-            if update_last_activity:
-                activity = {
-                    "timestamp": datetime.now().isoformat(),
-                    "action": "indexed",
-                    "file_path": bundle_id,
-                    "details": {
+
+            # Log activity using cleaned workspace_state function
+            if log_activity:
+                log_activity(
+                    repo_name=_extract_repo_name_from_path(workspace_path) if _extract_repo_name_from_path else None,
+                    action="uploaded",
+                    file_path=bundle_id,
+                    details={
                         "bundle_id": bundle_id,
                         "operations": operations_count,
-                        "indexed_points": indexed_points,
                         "source": "delta_upload"
                     }
-                }
-                update_last_activity(workspace_path, activity)
-            
+                )
+
             # Calculate processing time
             processing_time = (datetime.now() - start_time).total_seconds() * 1000
-            
+
             return UploadResponse(
                 success=True,
                 bundle_id=bundle_id,
                 sequence_number=sequence_number,
                 processed_operations=operations_count,
                 processing_time_ms=int(processing_time),
-                indexed_points=indexed_points,
-                collection_name=collection_name,
                 next_sequence=sequence_number + 1 if sequence_number else None
             )
-        
+
         finally:
             # Clean up temporary file
             try:
                 bundle_path.unlink()
             except Exception:
                 pass
-    
+
     except HTTPException:
         raise
     except Exception as e:
@@ -526,12 +478,12 @@ def main():
     """Main entry point for the upload service."""
     host = os.environ.get("UPLOAD_SERVICE_HOST", "0.0.0.0")
     port = int(os.environ.get("UPLOAD_SERVICE_PORT", "8002"))
-    
+
     logger.info(f"Starting upload service on {host}:{port}")
     logger.info(f"Qdrant URL: {QDRANT_URL}")
     logger.info(f"Work directory: {WORK_DIR}")
     logger.info(f"Max bundle size: {MAX_BUNDLE_SIZE_MB}MB")
-    
+
     uvicorn.run(
         app,
         host=host,

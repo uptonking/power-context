@@ -42,6 +42,14 @@ _roots_env = os.environ.get("WORK_ROOTS", "")
 
 # Cache for memory collection autodetection (name + timestamp)
 _MEM_COLL_CACHE = {"name": None, "ts": 0.0}
+# Session defaults map (token -> defaults). Guarded for concurrency.
+_SESSION_LOCK = threading.Lock()
+SESSION_DEFAULTS: Dict[str, Dict[str, Any]] = {}
+# Per-connection defaults keyed by ctx.session (no token required)
+from weakref import WeakKeyDictionary
+_SESSION_CTX_LOCK = threading.Lock()
+SESSION_DEFAULTS_BY_SESSION: "WeakKeyDictionary[Any, Dict[str, Any]]" = WeakKeyDictionary()
+
 
 _roots = [p.strip() for p in _roots_env.split(",") if p.strip()] or ["/work", "/app"]
 try:
@@ -70,8 +78,9 @@ except Exception:
 
 try:
     # Official MCP Python SDK (FastMCP convenience server)
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.fastmcp import FastMCP, Context  # type: ignore
 except Exception as e:  # pragma: no cover
+    # Keep FastMCP import error loud; Context is for type hints only
     raise SystemExit("mcp package is required inside the container: pip install mcp")
 
 APP_NAME = os.environ.get("FASTMCP_SERVER_NAME", "qdrant-indexer-mcp")
@@ -79,7 +88,21 @@ HOST = os.environ.get("FASTMCP_HOST", "0.0.0.0")
 PORT = int(os.environ.get("FASTMCP_INDEXER_PORT", "8001"))
 
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
-DEFAULT_COLLECTION = os.environ.get("COLLECTION_NAME", "my-collection")
+DEFAULT_COLLECTION = (
+    os.environ.get("DEFAULT_COLLECTION")
+    or os.environ.get("COLLECTION_NAME")
+    or "my-collection"
+)
+
+# Use auto-generated collection name for workspace only if no env default is set
+try:
+    from scripts.workspace_state import get_collection_name as _ws_get_collection_name  # type: ignore
+    workspace_path = os.environ.get("WATCH_ROOT", "/work")
+    if not (os.environ.get("DEFAULT_COLLECTION") or os.environ.get("COLLECTION_NAME")):
+        DEFAULT_COLLECTION = _ws_get_collection_name(workspace_path)
+except Exception:
+    # Fallback to environment variable if workspace_state import fails
+    pass
 MAX_LOG_TAIL = int(os.environ.get("MCP_MAX_LOG_TAIL", "4000"))
 SNIPPET_MAX_BYTES = int(os.environ.get("MCP_SNIPPET_MAX_BYTES", "8192") or 8192)
 
@@ -87,10 +110,33 @@ MCP_TOOL_TIMEOUT_SECS = float(os.environ.get("MCP_TOOL_TIMEOUT_SECS", "3600") or
 
 # --- Workspace state integration helpers ---
 def _state_file_path(ws_path: str = "/work") -> str:
+    """
+    Get the appropriate state file path using the centralized metadata system.
+
+    This function now uses the centralized metadata system from workspace_state.py
+    instead of creating workspace-specific .codebase directories.
+    """
     try:
-        return os.path.join(ws_path, ".codebase", "state.json")
+        from scripts.workspace_state import _extract_repo_name_from_path, _state_file_path as _ws_state_file_path
+
+        # Extract repository name from workspace path for the centralized system
+        repo_name = _extract_repo_name_from_path(ws_path)
+
+        # Use the centralized metadata system with repo_name to create files at:
+        # /work/.codebase/repos/{repo_name}/state.json
+        # This avoids creating internal .codebase directories in workspaces
+        state_path = _ws_state_file_path(workspace_path=None, repo_name=repo_name)
+
+        return str(state_path)
     except Exception:
-        return "/work/.codebase/state.json"
+        # Fallback to centralized system using workspace path for backward compatibility
+        try:
+            from scripts.workspace_state import _state_file_path as _ws_state_file_path
+            state_path = _ws_state_file_path(workspace_path=ws_path, repo_name=None)
+            return str(state_path)
+        except Exception:
+            # Ultimate fallback
+            return "/work/.codebase/state.json"
 
 
 def _read_ws_state(ws_path: str = "/work") -> Optional[Dict[str, Any]]:
@@ -106,25 +152,41 @@ def _read_ws_state(ws_path: str = "/work") -> Optional[Dict[str, Any]]:
 
 
 def _default_collection() -> str:
+    # Prefer explicit environment default if provided
+    env_coll = (os.environ.get("DEFAULT_COLLECTION") or os.environ.get("COLLECTION_NAME") or "").strip()
+    if env_coll:
+        return env_coll
+    # Else, fall back to workspace state if present
     st = _read_ws_state("/work")
     if st:
         coll = st.get("qdrant_collection")
         if isinstance(coll, str) and coll.strip():
             return coll.strip()
+    # Finally, fall back to module default (which may have been initialized from env or workspace)
     return DEFAULT_COLLECTION
 
 
-
 def _work_script(name: str) -> str:
-    """Return path to a script under /work if present, else local ./scripts.
+    """Return path to a script under /work if present, else /app, else local ./scripts.
     Keeps Docker/default behavior but works in local dev without /work mount.
     """
+    # Try bind mount location first (local dev with bind mounts)
     try:
         w = os.path.join("/work", "scripts", name)
         if os.path.exists(w):
             return w
     except Exception:
         pass
+
+    # Try baked-in scripts (production/K8s with scripts copied to /app)
+    try:
+        app_path = os.path.join("/app", "scripts", name)
+        if os.path.exists(app_path):
+            return app_path
+    except Exception:
+        pass
+
+    # Original fallback for local development
     return os.path.join(os.getcwd(), "scripts", name)
 
 
@@ -160,7 +222,6 @@ def _start_readyz_server():
                         self.end_headers()
                     except Exception:
                         pass
-
 
 
             def log_message(self, *args, **kwargs):
@@ -492,7 +553,13 @@ async def qdrant_index_root(
     else:
         try:
             from scripts.workspace_state import get_collection_name as _ws_get_collection_name  # type: ignore
-            coll = _ws_get_collection_name("/work")
+            from scripts.workspace_state import is_multi_repo_mode as _ws_is_multi_repo_mode  # type: ignore
+            # In single-repo mode, use None to get env var "my-collection"
+            # In multi-repo mode, "/work" should be skipped anyway, but handle it consistently
+            if _ws_is_multi_repo_mode():
+                coll = _ws_get_collection_name("/work")  # Multi-repo: generates from "/work" (should be skipped)
+            else:
+                coll = _ws_get_collection_name(None)    # Single-repo: uses env var "my-collection"
         except Exception:
             coll = _default_collection()
 
@@ -527,7 +594,6 @@ async def qdrant_list(**kwargs) -> Dict[str, Any]:
         return {"error": str(e)}
 
 
-
 @mcp.tool()
 async def workspace_info(workspace_path: Optional[str] = None, **kwargs) -> Dict[str, Any]:
     """Return the current workspace state from .codebase/state.json, if present.
@@ -538,8 +604,10 @@ async def workspace_info(workspace_path: Optional[str] = None, **kwargs) -> Dict
       - state: raw state.json contents (or {})
     """
     ws_path = (workspace_path or "/work").strip() or "/work"
+
+
     st = _read_ws_state(ws_path) or {}
-    coll = (st.get("qdrant_collection") if isinstance(st, dict) else None) or os.environ.get("COLLECTION_NAME") or DEFAULT_COLLECTION
+    coll = (st.get("qdrant_collection") if isinstance(st, dict) else None) or os.environ.get("DEFAULT_COLLECTION") or os.environ.get("COLLECTION_NAME") or DEFAULT_COLLECTION
     return {
         "workspace_path": ws_path,
         "default_collection": coll,
@@ -569,7 +637,7 @@ async def memory_store(
     """Store a memory-like entry directly into Qdrant using the default collection.
     - information: free-form text to remember
     - metadata: optional tags (e.g., {"kind":"preference","source":"memory"})
-    - collection: override target collection (defaults to env COLLECTION_NAME)
+    - collection: override target collection (env DEFAULT_COLLECTION or COLLECTION_NAME if not provided)
     """
     try:
         from qdrant_client import QdrantClient, models  # type: ignore
@@ -577,6 +645,8 @@ async def memory_store(
         import time, hashlib, re, math
         from scripts.utils import sanitize_vector_name
         from scripts.ingest_code import ensure_collection as _ensure_collection  # type: ignore
+
+
         from scripts.ingest_code import project_mini as _project_mini  # type: ignore
 
     except Exception as e:  # pragma: no cover
@@ -838,7 +908,13 @@ async def qdrant_index(
     else:
         try:
             from scripts.workspace_state import get_collection_name as _ws_get_collection_name  # type: ignore
-            coll = _ws_get_collection_name("/work")
+            from scripts.workspace_state import is_multi_repo_mode as _ws_is_multi_repo_mode  # type: ignore
+            # In single-repo mode, use None to get env var "my-collection"
+            # In multi-repo mode, "/work" should be skipped anyway, but handle it consistently
+            if _ws_is_multi_repo_mode():
+                coll = _ws_get_collection_name("/work")  # Multi-repo: generates from "/work" (should be skipped)
+            else:
+                coll = _ws_get_collection_name(None)    # Single-repo: uses env var "my-collection"
         except Exception:
             coll = _default_collection()
 
@@ -858,6 +934,59 @@ async def qdrant_index(
     res = await _run_async(cmd, env=env)
     return {"args": {"root": root, "collection": coll, "recreate": recreate}, **res}
 
+
+@mcp.tool()
+async def set_session_defaults(collection: Any = None, session: Any = None, ctx: Context = None, **kwargs) -> Dict[str, Any]:
+    """Set defaults (e.g., collection) for subsequent calls.
+
+    Behavior:
+    - If request Context is available, persist defaults per-connection so later calls on
+      the same MCP session automatically use them (no token required).
+    - Optionally also stores token-scoped defaults for cross-connection reuse.
+    """
+    try:
+        _extra = _extract_kwargs_payload(kwargs)
+        if _extra:
+            if (collection is None or (isinstance(collection, str) and collection.strip() == "")) and _extra.get("collection") is not None:
+                collection = _extra.get("collection")
+            if (session is None or (isinstance(session, str) and str(session).strip() == "")) and _extra.get("session") is not None:
+                session = _extra.get("session")
+    except Exception:
+        pass
+
+    defaults: Dict[str, Any] = {}
+    if isinstance(collection, str) and collection.strip():
+        defaults["collection"] = str(collection).strip()
+
+    # Per-connection storage (preferred)
+    try:
+        if ctx is not None and getattr(ctx, "session", None) is not None and defaults:
+            with _SESSION_CTX_LOCK:
+                existing2 = SESSION_DEFAULTS_BY_SESSION.get(ctx.session) or {}
+                existing2.update(defaults)
+                SESSION_DEFAULTS_BY_SESSION[ctx.session] = existing2
+    except Exception:
+        pass
+
+    # Optional token storage
+    sid = str(session).strip() if session is not None else ""
+    if not sid:
+        sid = uuid.uuid4().hex[:12]
+    try:
+        if defaults:
+            with _SESSION_LOCK:
+                existing = SESSION_DEFAULTS.get(sid) or {}
+                existing.update(defaults)
+                SESSION_DEFAULTS[sid] = existing
+    except Exception:
+        pass
+
+    return {
+        "ok": True,
+        "session": sid,
+        "defaults": SESSION_DEFAULTS.get(sid, {}),
+        "applied": ("connection" if (ctx is not None and getattr(ctx, "session", None) is not None) else "token"),
+    }
 
 @mcp.tool()
 async def qdrant_prune(**kwargs) -> Dict[str, Any]:
@@ -885,6 +1014,11 @@ async def repo_search(
     highlight_snippet: Any = None,
     collection: Any = None,
     workspace_path: Any = None,
+
+
+    session: Any = None,
+    ctx: Context = None,
+
     # Structured filters (optional; mirrors hybrid_search flags)
     language: Any = None,
     under: Any = None,
@@ -909,7 +1043,7 @@ async def repo_search(
       - per_path: max results per file (default 2)
       - include_snippet/context_lines: include snippet near hit lines
       - rerank_*: optional ONNX reranker; timeouts fall back to hybrid
-      - collection: override target collection (default env COLLECTION_NAME)
+      - collection: override target collection (env DEFAULT_COLLECTION or COLLECTION_NAME if not provided)
       - language/under/kind/symbol/path_regex/path_glob/not_glob/ext/not_/case: optional filters
       - compact: if true, return only path and line range
 
@@ -973,11 +1107,18 @@ async def repo_search(
                 or (isinstance(collection, str) and collection.strip() == "")
             ) and _extra.get("collection"):
                 collection = _extra.get("collection")
+            # Optional session token for session-scoped defaults
+            if (
+                (session is None) or (isinstance(session, str) and str(session).strip() == "")
+            ) and _extra.get("session") is not None:
+                session = _extra.get("session")
+
             # Optional workspace_path routing
             if (
                 (workspace_path is None) or (isinstance(workspace_path, str) and str(workspace_path).strip() == "")
             ) and _extra.get("workspace_path") is not None:
                 workspace_path = _extra.get("workspace_path")
+
             if (
                 language is None
                 or (isinstance(language, str) and language.strip() == "")
@@ -1042,6 +1183,10 @@ async def repo_search(
             return False
         return default
 
+    # Session token (top-level or parsed from nested kwargs above)
+    sid = (str(session).strip() if session is not None else "")
+
+
     def _to_str(x, default=""):
         if x is None:
             return default
@@ -1068,17 +1213,39 @@ async def repo_search(
     )
     highlight_snippet = _to_bool(highlight_snippet, True)
 
-    # Resolve collection: explicit > workspace_path state > default
-    ws_hint = _to_str(workspace_path, "").strip()
+    # Resolve collection precedence: explicit > per-connection defaults > token defaults > env default
     coll_hint = _to_str(collection, "").strip()
-    if not coll_hint and ws_hint:
+
+    # 1) Per-connection defaults via ctx (no token required)
+    if (not coll_hint) and ctx is not None and getattr(ctx, "session", None) is not None:
         try:
-            st = _read_ws_state(ws_hint)
-            if st and isinstance(st.get("qdrant_collection"), str):
-                coll_hint = st.get("qdrant_collection").strip()
+            with _SESSION_CTX_LOCK:
+                _d2 = SESSION_DEFAULTS_BY_SESSION.get(ctx.session) or {}
+                _sc2 = str((_d2.get("collection") or "")).strip()
+                if _sc2:
+                    coll_hint = _sc2
         except Exception:
             pass
-    collection = coll_hint or _default_collection()
+
+    # 2) Legacy token-based defaults
+    if (not coll_hint) and sid:
+        try:
+            with _SESSION_LOCK:
+                _d = SESSION_DEFAULTS.get(sid) or {}
+                _sc = str((_d.get("collection") or "")).strip()
+                if _sc:
+                    coll_hint = _sc
+        except Exception:
+            pass
+
+    # 3) Environment default
+    env_coll = (os.environ.get("DEFAULT_COLLECTION") or os.environ.get("COLLECTION_NAME") or "").strip()
+    if (not coll_hint) and env_coll:
+        coll_hint = env_coll
+
+    # Final fallback
+    env_fallback = (os.environ.get("DEFAULT_COLLECTION") or os.environ.get("COLLECTION_NAME") or "my-collection").strip()
+    collection = coll_hint or env_fallback
 
     language = _to_str(language, "").strip()
     under = _to_str(under, "").strip()
@@ -1172,6 +1339,7 @@ async def repo_search(
                 expand=str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower()
                 in {"1", "true", "yes", "on"},
                 model=model,
+                collection=collection,
             )
             # items are already in structured dict form
             json_lines = items  # reuse downstream shaping
@@ -1212,6 +1380,8 @@ async def repo_search(
             cmd += ["--not-glob", g]
         for q in queries:
             cmd += ["--query", q]
+        if collection:
+            cmd += ["--collection", str(collection)]
 
         res = await _run_async(cmd, env=env)
         for line in (res.get("stdout") or "").splitlines():
@@ -1611,6 +1781,8 @@ async def repo_search_compat(**arguments) -> Dict[str, Any]:
             "rerank_timeout_ms": args.get("rerank_timeout_ms"),
             "highlight_snippet": args.get("highlight_snippet"),
             "collection": args.get("collection"),
+            "session": args.get("session"),
+            "workspace_path": args.get("workspace_path"),
             "language": args.get("language"),
             "under": args.get("under"),
             "kind": args.get("kind"),
@@ -1635,7 +1807,6 @@ async def repo_search_compat(**arguments) -> Dict[str, Any]:
         return {"error": f"repo_search_compat failed: {e}"}
 
 
-
 @mcp.tool()
 async def search_tests_for(
     query: Any = None,
@@ -1645,6 +1816,8 @@ async def search_tests_for(
     under: Any = None,
     language: Any = None,
     compact: Any = None,
+    session: Any = None,
+    ctx: Context = None,
     **kwargs,
 ) -> Dict[str, Any]:
     """Intent-specific wrapper to search for tests related to a query.
@@ -1673,6 +1846,8 @@ async def search_tests_for(
         language=language,
         path_glob=globs,
         compact=compact,
+        session=session,
+        ctx=ctx,
         **{k: v for k, v in kwargs.items() if k not in {"path_glob"}}
     )
 
@@ -1685,6 +1860,8 @@ async def search_config_for(
     context_lines: Any = None,
     under: Any = None,
     compact: Any = None,
+    session: Any = None,
+    ctx: Context = None,
     **kwargs,
 ) -> Dict[str, Any]:
     """Intent-specific wrapper to search likely configuration files for a service/query."""
@@ -1718,6 +1895,8 @@ async def search_config_for(
         under=under,
         path_glob=globs,
         compact=compact,
+        session=session,
+        ctx=ctx,
         **{k: v for k, v in kwargs.items() if k not in {"path_glob"}}
     )
 
@@ -1727,6 +1906,8 @@ async def search_callers_for(
     query: Any = None,
     limit: Any = None,
     language: Any = None,
+    session: Any = None,
+    ctx: Context = None,
     **kwargs,
 ) -> Dict[str, Any]:
     """Heuristic: find likely callers/usages of a symbol.
@@ -1737,6 +1918,8 @@ async def search_callers_for(
         query=query,
         limit=limit,
         language=language,
+        session=session,
+        ctx=ctx,
         **kwargs,
     )
 
@@ -1746,6 +1929,8 @@ async def search_importers_for(
     query: Any = None,
     limit: Any = None,
     language: Any = None,
+    session: Any = None,
+    ctx: Context = None,
     **kwargs,
 ) -> Dict[str, Any]:
     """Intent: find files likely importing/referencing a given module/symbol.
@@ -1768,9 +1953,10 @@ async def search_importers_for(
         limit=limit,
         language=language,
         path_glob=globs,
+        session=session,
+        ctx=ctx,
         **{k: v for k, v in kwargs.items() if k not in {"path_glob"}}
     )
-
 
 
 @mcp.tool()
@@ -2214,9 +2400,9 @@ async def context_search(
                 if tool_name:
                     qtext = " ".join([q for q in queries if q]).strip() or queries[0]
                     arg_variants: List[Dict[str, Any]] = [
-                        {"query": qtext, "limit": mem_limit},
-                        {"q": qtext, "limit": mem_limit},
-                        {"text": qtext, "limit": mem_limit},
+                        {"query": qtext, "limit": mem_limit, "collection": mcoll},
+                        {"q": qtext, "limit": mem_limit, "collection": mcoll},
+                        {"text": qtext, "limit": mem_limit, "collection": mcoll},
                     ]
                     res_obj = None
                     for args in arg_variants:
@@ -2591,7 +2777,6 @@ async def expand_query(query: Any = None, max_new: Any = None) -> Dict[str, Any]
         return {"alternates": [], "error": str(e)}
 
 
-
 # Lightweight cleanup to reduce repetition from small models
 def _cleanup_answer(text: str, max_chars: int | None = None) -> str:
     try:
@@ -2647,7 +2832,6 @@ def _cleanup_answer(text: str, max_chars: int | None = None) -> str:
         return t2
     except Exception:
         return text
-
 
 
 @mcp.tool()
@@ -2987,7 +3171,6 @@ async def context_answer(
         context_blocks.append(block)
 
 
-
     # Debug: log span details
     if os.environ.get("DEBUG_CONTEXT_ANSWER"):
         print(f"DEBUG: spans={len(spans)}, context_blocks={len(context_blocks)}")
@@ -2995,7 +3178,6 @@ async def context_answer(
             print(f"DEBUG: first context block: {context_blocks[0][:200]}...")
         else:
             print("DEBUG: no context blocks!")
-
 
 
     # Optional stop sequences via env (comma-separated)

@@ -6,24 +6,27 @@ This module provides functionality to track workspace-specific state including:
 - Collection information and indexing status
 - Progress tracking during indexing operations
 - Activity logging with structured metadata
-- Multi-project support with per-workspace state files
-
-Based on the codebase-index-cli workspace state pattern but adapted for our Python ecosystem.
+- Multi-repo support with per-repo state files
 """
 import json
 import os
 import uuid
-import re
-import hashlib
 import subprocess
+import hashlib
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Literal, TypedDict
 import threading
 
-# Type definitions matching codebase-index-cli patterns
+# Type definitions
 IndexingState = Literal['idle', 'initializing', 'scanning', 'indexing', 'watching', 'error']
 ActivityAction = Literal['indexed', 'deleted', 'skipped', 'scan-completed', 'initialized', 'moved']
+
+# Constants
+STATE_DIRNAME = ".codebase"
+STATE_FILENAME = "state.json"
+CACHE_FILENAME = "cache.json"
+PLACEHOLDER_COLLECTION_NAMES = {"", "default-collection", "my-collection"}
 
 class IndexingProgress(TypedDict, total=False):
     files_processed: int
@@ -52,37 +55,67 @@ class LastActivity(TypedDict, total=False):
     file_path: Optional[str]
     details: Optional[ActivityDetails]
 
-class QdrantStats(TypedDict, total=False):
-    total_vectors: int
-    unique_files: int
-    vector_dimension: int
-    last_updated: str
-    collection_name: str
-
 class WorkspaceState(TypedDict, total=False):
-    workspace_path: str
     created_at: str
     updated_at: str
     qdrant_collection: str
     indexing_status: Optional[IndexingStatus]
     last_activity: Optional[LastActivity]
-    qdrant_stats: Optional[QdrantStats]
+    qdrant_stats: Optional[Dict[str, Any]]
 
-# Constants
-STATE_DIRNAME = ".codebase"
-STATE_FILENAME = "state.json"
+def is_multi_repo_mode() -> bool:
+    """Check if multi-repo mode is enabled."""
+    return os.environ.get("MULTI_REPO_MODE", "0").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
 
-# Thread-safe state management
-# Use re-entrant locks to avoid deadlocks when helper functions call each other
+# Simple locking for concurrent access
 _state_locks: Dict[str, threading.RLock] = {}
-_state_lock = threading.Lock()
 
-def _get_state_lock(workspace_path: str) -> threading.RLock:
-    """Get or create a thread-safe lock for a specific workspace."""
-    with _state_lock:
-        if workspace_path not in _state_locks:
-            _state_locks[workspace_path] = threading.RLock()
-        return _state_locks[workspace_path]
+def _resolve_workspace_root() -> str:
+    """Determine the default workspace root path."""
+    return os.environ.get("WORKSPACE_PATH") or os.environ.get("WATCH_ROOT") or "/work"
+
+def _resolve_repo_context(
+    workspace_path: Optional[str] = None,
+    repo_name: Optional[str] = None,
+) -> tuple[str, Optional[str]]:
+    """Normalize workspace/repo context, ensuring multi-repo callers map to repo state."""
+    resolved_workspace = workspace_path or _resolve_workspace_root()
+
+    if is_multi_repo_mode():
+        if repo_name:
+            return resolved_workspace, repo_name
+
+        if workspace_path:
+            detected = _detect_repo_name_from_path(Path(workspace_path))
+            if detected:
+                return resolved_workspace, detected
+
+        return resolved_workspace, None
+
+    return resolved_workspace, repo_name
+
+def _get_state_lock(workspace_path: Optional[str] = None, repo_name: Optional[str] = None) -> threading.RLock:
+    """Get or create a lock for the workspace or repo state."""
+    if workspace_path:
+        key = str(Path(workspace_path).resolve())
+    elif repo_name:
+        key = f"repo::{repo_name}"
+    else:
+        key = str(Path(_resolve_workspace_root()).resolve())
+
+    if key not in _state_locks:
+        _state_locks[key] = threading.RLock()
+    return _state_locks[key]
+
+def _get_repo_state_dir(repo_name: str) -> Path:
+    """Get the state directory for a repository."""
+    # Use workspace root (typically /work in containers) not script directory
+    base_dir = Path(os.environ.get("WORKSPACE_PATH") or os.environ.get("WATCH_ROOT") or "/work")
+    if is_multi_repo_mode():
+        return base_dir / STATE_DIRNAME / "repos" / repo_name
+    return base_dir / STATE_DIRNAME
 
 def _get_state_path(workspace_path: str) -> Path:
     """Get the path to the state.json file for a workspace."""
@@ -90,74 +123,23 @@ def _get_state_path(workspace_path: str) -> Path:
     state_dir = workspace / STATE_DIRNAME
     return state_dir / STATE_FILENAME
 
-def _ensure_state_dir(workspace_path: str) -> Path:
-    """Ensure the .codebase directory exists and return the state file path."""
-    workspace = Path(workspace_path).resolve()
-    state_dir = workspace / STATE_DIRNAME
-    state_dir.mkdir(exist_ok=True)
-    return state_dir / STATE_FILENAME
-
-def _sanitize_name(s: str, max_len: int = 64) -> str:
-    s = s.lower().strip()
-    s = re.sub(r"[^a-z0-9_.-]+", "-", s)
-    s = re.sub(r"-+", "-", s).strip("-")
-    if not s:
-        s = "workspace"
-    return s[:max_len]
-
-
-def _detect_repo_name_from_path(path: Path) -> str:
-    try:
-        base = path if path.is_dir() else path.parent
-        r = subprocess.run(["git", "-C", str(base), "rev-parse", "--show-toplevel"],
-                           capture_output=True, text=True)
-        top = (r.stdout or "").strip()
-        if r.returncode == 0 and top:
-            return Path(top).name
-    except Exception:
-        pass
-    try:
-        # Walk up to find .git
-        cur = path if path.is_dir() else path.parent
-        for p in [cur] + list(cur.parents):
-            try:
-                if (p / ".git").exists():
-                    return p.name
-            except Exception:
-                continue
-    except Exception:
-        pass
-    return (path if path.is_dir() else path.parent).name or "workspace"
-
-
-def _generate_collection_name(workspace_path: str) -> str:
-    ws = Path(workspace_path).resolve()
-    repo = _sanitize_name(_detect_repo_name_from_path(ws))
-    # stable suffix from absolute path
-    h = hashlib.sha1(str(ws).encode("utf-8", errors="ignore")).hexdigest()[:6]
-    return _sanitize_name(f"{repo}-{h}")
-
-def _atomic_write_state(state_path: Path, state: WorkspaceState) -> None:
-    """Atomically write state to prevent corruption during concurrent access."""
-    # Write to temp file first, then rename (atomic on most filesystems)
-    temp_path = state_path.with_suffix(f".tmp.{uuid.uuid4().hex[:8]}")
-    try:
-        with open(temp_path, 'w', encoding='utf-8') as f:
-            json.dump(state, f, indent=2, ensure_ascii=False)
-        temp_path.replace(state_path)
-    except Exception:
-        # Clean up temp file if something went wrong
-        try:
-            temp_path.unlink(missing_ok=True)
-        except Exception:
-            pass
-        raise
-
-def get_workspace_state(workspace_path: str) -> WorkspaceState:
+def get_workspace_state(workspace_path: Optional[str] = None, repo_name: Optional[str] = None) -> WorkspaceState:
     """Get the current workspace state, creating it if it doesn't exist."""
-    lock = _get_state_lock(workspace_path)
+    workspace_path, repo_name = _resolve_repo_context(workspace_path, repo_name)
+
+    if is_multi_repo_mode() and repo_name is None:
+        print(
+            f"[workspace_state] Multi-repo: Skipping state read for workspace={workspace_path} without repo_name"
+        )
+        return {}
+
+    lock = _get_state_lock(workspace_path, repo_name)
     with lock:
-        state_path = _get_state_path(workspace_path)
+        # In multi-repo mode, use repo-based state path
+        if is_multi_repo_mode() and repo_name:
+            state_path = _get_repo_state_dir(repo_name) / STATE_FILENAME
+        else:
+            state_path = _get_state_path(workspace_path)
 
         if state_path.exists():
             try:
@@ -172,108 +154,189 @@ def get_workspace_state(workspace_path: str) -> WorkspaceState:
                 pass
 
         # Create new state
-        now = datetime.now().isoformat()
-        env_coll = os.environ.get("COLLECTION_NAME")
-        if isinstance(env_coll, str) and env_coll.strip() and env_coll.strip() != "my-collection":
-            collection_name = env_coll.strip()
-        else:
-            collection_name = _generate_collection_name(workspace_path)
-
-        state: WorkspaceState = {
-            "workspace_path": str(Path(workspace_path).resolve()),
-            "created_at": now,
-            "updated_at": now,
-            "qdrant_collection": collection_name,
-            "indexing_status": {
-                "state": "idle"
-            }
+        state = {
+            "created_at": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat(),
+            "qdrant_collection": get_collection_name(repo_name),
+            "indexing_status": {"state": "idle"},
         }
 
-        # Ensure directory exists and write state
-        state_path = _ensure_state_dir(workspace_path)
-        _atomic_write_state(state_path, state)
+        # Write state
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(state_path, 'w', encoding='utf-8') as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+
         return state
 
-def update_workspace_state(workspace_path: str, updates: Dict[str, Any]) -> WorkspaceState:
-    """Update workspace state with the given changes."""
-    lock = _get_state_lock(workspace_path)
+def update_workspace_state(
+    workspace_path: Optional[str] = None,
+    updates: Optional[Dict[str, Any]] = None,
+    repo_name: Optional[str] = None,
+) -> WorkspaceState:
+    """Update workspace state with new values."""
+    workspace_path, repo_name = _resolve_repo_context(workspace_path, repo_name)
+    updates = updates or {}
+
+    if is_multi_repo_mode() and repo_name is None:
+        print(
+            f"[workspace_state] Multi-repo: Skipping state update for workspace={workspace_path} without repo_name"
+        )
+        return {}
+
+    lock = _get_state_lock(workspace_path, repo_name)
     with lock:
-        state = get_workspace_state(workspace_path)
-
-        # Apply updates
-        for key, value in updates.items():
-            if key in state or key in WorkspaceState.__annotations__:
-                state[key] = value
-
-        # Always update timestamp
+        state = get_workspace_state(workspace_path, repo_name)
+        state.update(updates)
         state["updated_at"] = datetime.now().isoformat()
 
-        # Write back to file
-        state_path = _ensure_state_dir(workspace_path)
-        _atomic_write_state(state_path, state)
+        # Write updated state using same path logic as get_workspace_state
+        if is_multi_repo_mode() and repo_name:
+            state_path = _get_repo_state_dir(repo_name) / STATE_FILENAME
+        else:
+            state_path = _get_state_path(workspace_path)
+
+        with open(state_path, 'w', encoding='utf-8') as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+
         return state
 
-def update_indexing_status(workspace_path: str, status: IndexingStatus) -> WorkspaceState:
-    """Update the indexing status in workspace state."""
-    return update_workspace_state(workspace_path, {"indexing_status": status})
+def update_indexing_status(
+    workspace_path: Optional[str] = None,
+    status: Optional[IndexingStatus] = None,
+    repo_name: Optional[str] = None,
+) -> WorkspaceState:
+    """Update indexing status in workspace state."""
+    workspace_path, repo_name = _resolve_repo_context(workspace_path, repo_name)
 
-def update_last_activity(workspace_path: str, activity: LastActivity) -> WorkspaceState:
-    """Update the last activity in workspace state."""
-    return update_workspace_state(workspace_path, {"last_activity": activity})
+    if is_multi_repo_mode() and repo_name is None:
+        print(
+            f"[workspace_state] Multi-repo: Skipping indexing status update for workspace={workspace_path} without repo_name"
+        )
+        return {}
 
-def update_qdrant_stats(workspace_path: str, stats: QdrantStats) -> WorkspaceState:
-    """Update Qdrant statistics in workspace state."""
-    stats["last_updated"] = datetime.now().isoformat()
-    return update_workspace_state(workspace_path, {"qdrant_stats": stats})
+    if status is None:
+        status = {"state": "idle"}
 
-def get_collection_name(workspace_path: str) -> str:
-    """Get the Qdrant collection name for a workspace.
-    If none is present in state, persist either COLLECTION_NAME from env or a generated
-    repoName-<shortHash> based on the workspace path, and return it.
+    return update_workspace_state(
+        workspace_path=workspace_path,
+        updates={"indexing_status": status},
+        repo_name=repo_name,
+    )
 
-    Fix: treat placeholders as not-real so we don't collide across repos.
-    Placeholders include: empty string, "my-collection", and the env default if it equals "my-collection".
-    Only short-circuit when the stored name is already real.
-    """
-    state = get_workspace_state(workspace_path)
-    coll = state.get("qdrant_collection") if isinstance(state, dict) else None
-    env_coll = os.environ.get("COLLECTION_NAME")
-    env_coll = env_coll.strip() if isinstance(env_coll, str) else ""
-    placeholders = {"", "my-collection"}
-    # If env is explicitly the default placeholder, consider it a placeholder too
-    if env_coll == "my-collection":
-        placeholders.add(env_coll)
+def log_activity(repo_name: Optional[str] = None, action: Optional[ActivityAction] = None,
+               file_path: Optional[str] = None, details: Optional[ActivityDetails] = None) -> None:
+    """Log activity to workspace state."""
+    if not action:
+        return
 
-    # If state has a real (non-placeholder) collection, keep it
-    if isinstance(coll, str):
-        c = coll.strip()
-        if c and c not in placeholders:
-            return c
+    activity = {
+        "timestamp": datetime.now().isoformat(),
+        "action": action,
+        "file_path": file_path,
+        "details": details or {}
+    }
 
-    # Otherwise, prefer a non-placeholder explicit env override; else generate
-    if env_coll and env_coll not in placeholders:
-        coll = env_coll.strip()
+    if is_multi_repo_mode() and repo_name:
+        # Multi-repo mode: use repo-based state
+        state_dir = _get_repo_state_dir(repo_name)
+        state_path = state_dir / STATE_FILENAME
+
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if state_path.exists():
+            try:
+                with open(state_path, 'r', encoding='utf-8') as f:
+                    state = json.load(f)
+            except (json.JSONDecodeError, OSError):
+                state = {"created_at": datetime.now().isoformat()}
+        else:
+            state = {"created_at": datetime.now().isoformat()}
+
+        state["last_activity"] = activity
+        state["updated_at"] = datetime.now().isoformat()
+
+        with open(state_path, 'w', encoding='utf-8') as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
     else:
-        coll = _generate_collection_name(workspace_path)
-    update_workspace_state(workspace_path, {"qdrant_collection": coll})
-    return coll
+        # Single-repo mode: use workspace-based state (not implemented here)
+        pass
 
-# --- Persistent file-hash cache (.codebase/cache.json) ---
-CACHE_FILENAME = "cache.json"
+def _generate_collection_name_from_repo(repo_name: str) -> str:
+    """Generate a collection name from repository name with hash suffix."""
+    # Create a short hash from repo name to ensure uniqueness
+    hash_obj = hashlib.sha256(repo_name.encode())
+    short_hash = hash_obj.hexdigest()[:8]
+    return f"{repo_name}-{short_hash}"
 
+def get_collection_name(repo_name: Optional[str] = None) -> str:
+    """Get collection name for repository or workspace."""
+    # In multi-repo mode, prioritize repo-specific collection names
+    if is_multi_repo_mode() and repo_name:
+        return _generate_collection_name_from_repo(repo_name)
 
+    # Check environment for single-repo mode or fallback
+    env_coll = os.environ.get("COLLECTION_NAME", "").strip()
+    if env_coll and env_coll not in PLACEHOLDER_COLLECTION_NAMES:
+        return env_coll
+
+    # Use repo name if provided (for single-repo mode with repo name)
+    if repo_name:
+        return _generate_collection_name_from_repo(repo_name)
+
+    # Default fallback
+    return "global-collection"
+
+def _detect_repo_name_from_path(path: Path) -> str:
+    """Detect repository name from path. Clean, robust implementation."""
+    try:
+        # Normalize path
+        resolved_path = path.resolve()
+
+        # Get workspace root
+        workspace_root = Path(os.environ.get("WATCH_ROOT") or os.environ.get("WORKSPACE_PATH") or "/work")
+
+        # Path must be under workspace root
+        try:
+            rel_path = resolved_path.relative_to(workspace_root)
+        except ValueError:
+            return None  # Path is outside workspace root
+
+        # Get first path component as repo name
+        if rel_path.parts:
+            repo_name = rel_path.parts[0]
+
+            # Exclude system directories
+            if repo_name in (".codebase", ".git", "__pycache__"):
+                return None
+
+            # Verify the path exists (handles bindmounts)
+            repo_path = workspace_root / repo_name
+            if repo_path.exists() or str(resolved_path).startswith(str(repo_path) + "/"):
+                return repo_name
+
+        return None  # Not a valid repo path
+
+    except Exception:
+        return None
+
+def _extract_repo_name_from_path(workspace_path: str) -> str:
+    """Extract repository name from workspace path."""
+    return _detect_repo_name_from_path(Path(workspace_path))
+
+# Cache functions for file hash tracking
 def _get_cache_path(workspace_path: str) -> Path:
-    ws = Path(workspace_path).resolve()
-    return ws / STATE_DIRNAME / CACHE_FILENAME
-
+    """Get the path to the cache.json file."""
+    workspace = Path(workspace_path).resolve()
+    return workspace / STATE_DIRNAME / CACHE_FILENAME
 
 def _read_cache(workspace_path: str) -> Dict[str, Any]:
-    """Best-effort load of the workspace cache (file hashes keyed by absolute path)."""
+    """Read cache file, return empty dict if doesn't exist."""
+    cache_path = _get_cache_path(workspace_path)
+    if not cache_path.exists():
+        return {"file_hashes": {}, "updated_at": datetime.now().isoformat()}
+
     try:
-        p = _get_cache_path(workspace_path)
-        if not p.exists():
-            return {"file_hashes": {}, "updated_at": datetime.now().isoformat()}
-        with open(p, "r", encoding="utf-8") as f:
+        with open(cache_path, 'r', encoding='utf-8') as f:
             obj = json.load(f)
             if isinstance(obj, dict) and isinstance(obj.get("file_hashes"), dict):
                 return obj
@@ -281,103 +344,129 @@ def _read_cache(workspace_path: str) -> Dict[str, Any]:
     except Exception:
         return {"file_hashes": {}, "updated_at": datetime.now().isoformat()}
 
-
 def _write_cache(workspace_path: str, cache: Dict[str, Any]) -> None:
-    """Atomic write of cache file to avoid corruption under concurrency."""
-    lock = _get_state_lock(workspace_path)
-    with lock:
-        state_dir = Path(workspace_path).resolve() / STATE_DIRNAME
-        state_dir.mkdir(exist_ok=True)
-        cache_path = _get_cache_path(workspace_path)
-        tmp = cache_path.with_suffix(f".tmp.{uuid.uuid4().hex[:8]}")
+    """Write cache file atomically."""
+    cache_path = _get_cache_path(workspace_path)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+
+    tmp = cache_path.with_suffix(f".tmp.{uuid.uuid4().hex[:8]}")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+        tmp.replace(cache_path)
+    finally:
         try:
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(cache, f, ensure_ascii=False, indent=2)
-            tmp.replace(cache_path)
-        finally:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+def get_cached_file_hash(file_path: str, repo_name: Optional[str] = None) -> str:
+    """Get cached file hash for tracking changes."""
+    if is_multi_repo_mode() and repo_name:
+        state_dir = _get_repo_state_dir(repo_name)
+        cache_path = state_dir / CACHE_FILENAME
+
+        if cache_path.exists():
             try:
-                tmp.unlink(missing_ok=True)
+                with open(cache_path, 'r', encoding='utf-8') as f:
+                    cache = json.load(f)
+                    file_hashes = cache.get("file_hashes", {})
+                    return file_hashes.get(str(Path(file_path).resolve()), "")
             except Exception:
                 pass
 
+    return ""
 
-def get_cached_file_hash(workspace_path: str, file_path: str) -> str:
-    """Return cached content hash for an absolute file path, or empty string."""
-    cache = _read_cache(workspace_path)
-    try:
-        return str((cache.get("file_hashes") or {}).get(str(Path(file_path).resolve()), ""))
-    except Exception:
-        return ""
+def set_cached_file_hash(file_path: str, file_hash: str, repo_name: Optional[str] = None) -> None:
+    """Set cached file hash for tracking changes."""
+    if is_multi_repo_mode() and repo_name:
+        state_dir = _get_repo_state_dir(repo_name)
+        cache_path = state_dir / CACHE_FILENAME
 
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
 
-def set_cached_file_hash(workspace_path: str, file_path: str, file_hash: str) -> None:
-    """Set cached content hash for an absolute file path and persist immediately."""
-    lock = _get_state_lock(workspace_path)
-    with lock:
-        cache = _read_cache(workspace_path)
-        fh = cache.setdefault("file_hashes", {})
-        fh[str(Path(file_path).resolve())] = str(file_hash)
-        cache["updated_at"] = datetime.now().isoformat()
-        _write_cache(workspace_path, cache)
-
-
-def remove_cached_file(workspace_path: str, file_path: str) -> None:
-    """Remove a file entry from the cache and persist."""
-    lock = _get_state_lock(workspace_path)
-    with lock:
-        cache = _read_cache(workspace_path)
-        fh = cache.setdefault("file_hashes", {})
         try:
-            fp = str(Path(file_path).resolve())
-        except Exception:
-            fp = str(file_path)
-        if fp in fh:
-            fh.pop(fp, None)
+            if cache_path.exists():
+                with open(cache_path, 'r', encoding='utf-8') as f:
+                    cache = json.load(f)
+            else:
+                cache = {"file_hashes": {}, "created_at": datetime.now().isoformat()}
+
+            cache.setdefault("file_hashes", {})[str(Path(file_path).resolve())] = file_hash
             cache["updated_at"] = datetime.now().isoformat()
-            _write_cache(workspace_path, cache)
+
+            # Atomic write
+            tmp = cache_path.with_suffix(f".tmp.{uuid.uuid4().hex[:8]}")
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(cache, f, ensure_ascii=False, indent=2)
+            tmp.replace(cache_path)
+        except Exception:
+            pass
+
+def remove_cached_file(file_path: str, repo_name: Optional[str] = None) -> None:
+    """Remove file entry from cache."""
+    if is_multi_repo_mode() and repo_name:
+        state_dir = _get_repo_state_dir(repo_name)
+        cache_path = state_dir / CACHE_FILENAME
+
+        if cache_path.exists():
+            try:
+                with open(cache_path, 'r', encoding='utf-8') as f:
+                    cache = json.load(f)
+                    file_hashes = cache.get("file_hashes", {})
+
+                fp = str(Path(file_path).resolve())
+                if fp in file_hashes:
+                    file_hashes.pop(fp, None)
+                    cache["updated_at"] = datetime.now().isoformat()
+
+                    tmp = cache_path.with_suffix(f".tmp.{uuid.uuid4().hex[:8]}")
+                    with open(tmp, "w", encoding="utf-8") as f:
+                        json.dump(cache, f, ensure_ascii=False, indent=2)
+                    tmp.replace(cache_path)
+            except Exception:
+                pass
+
+# Additional functions needed by callers
+def _state_file_path(workspace_path: Optional[str] = None, repo_name: Optional[str] = None) -> Path:
+    """Get state file path for workspace or repo."""
+    if repo_name and is_multi_repo_mode():
+        state_dir = _get_repo_state_dir(repo_name)
+        return state_dir / STATE_FILENAME
+
+    if workspace_path:
+        return _get_state_path(workspace_path)
+
+    # Default to current directory
+    return Path.cwd() / STATE_DIRNAME / STATE_FILENAME
+
+def _get_global_state_dir() -> Path:
+    """Get the global .codebase directory."""
+    base_dir = Path.cwd()
+    return base_dir / ".codebase"
 
 def list_workspaces(search_root: Optional[str] = None) -> List[Dict[str, Any]]:
     """Find all workspaces with .codebase/state.json files."""
     if search_root is None:
-        search_root = os.getcwd()
+        # Use workspace root instead of current directory
+        search_root = os.environ.get("WORKSPACE_PATH") or "/work"
 
     workspaces = []
-    search_path = Path(search_root).resolve()
+    root_path = Path(search_root)
 
-    # Search for .codebase directories
-    for state_dir in search_path.rglob(STATE_DIRNAME):
-        state_file = state_dir / STATE_FILENAME
-        if state_file.exists():
-            try:
-                workspace_path = str(state_dir.parent)
-                state = get_workspace_state(workspace_path)
-                workspaces.append({
-                    "workspace_path": workspace_path,
-                    "collection_name": state.get("qdrant_collection"),
-                    "last_updated": state.get("updated_at"),
-                    "indexing_state": state.get("indexing_status", {}).get("state", "unknown")
-                })
-            except Exception:
-                # Skip corrupted state files
-                continue
+    # Look for state files
+    for state_file in root_path.rglob(STATE_FILENAME):
+        try:
+            rel_path = state_file.relative_to(root_path)
+            workspace_info = {
+                "path": str(rel_path.parent),
+                "state_file": str(state_file),
+                "relative_path": str(rel_path.parent)
+            }
+            workspaces.append(workspace_info)
+        except (ValueError, OSError):
+            continue
 
-    return sorted(workspaces, key=lambda x: x.get("last_updated", ""), reverse=True)
+    return workspaces
 
-def cleanup_old_state_locks():
-    """Clean up unused state locks to prevent memory leaks."""
-    with _state_lock:
-        # Keep only locks for recently accessed workspaces
-        # In practice, this would need more sophisticated cleanup logic
-        pass
-
-if __name__ == "__main__":
-    # Simple CLI for testing
-    import sys
-    if len(sys.argv) > 1:
-        workspace = sys.argv[1]
-        state = get_workspace_state(workspace)
-        print(json.dumps(state, indent=2))
-    else:
-        workspaces = list_workspaces()
-        for ws in workspaces:
-            print(f"{ws['workspace_path']}: {ws['collection_name']} ({ws['indexing_state']})")
+# Add missing functions that callers expect (already defined above)

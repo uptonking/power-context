@@ -1,9 +1,9 @@
 ---
-# Persistent Volume Claim for workspace storage (CephFS RWX)
+# Persistent Volume Claim for code repositories storage (CephFS RWX)
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: upload-work-pvc
+  name: code-repos-pvc
   namespace: context-engine
   labels:
     app: context-engine
@@ -20,14 +20,14 @@ spec:
   # selector:
   #   matchLabels:
   #     app: context-engine
-  #     component: upload-work
+  #     component: code-repos
 
 ---
-# Persistent Volume Claim for codebase metadata storage (CephFS RWX)
+# Persistent Volume Claim for code metadata storage (CephFS RWX)
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: upload-codebase-pvc
+  name: code-metadata-pvc
   namespace: context-engine
   labels:
     app: context-engine
@@ -44,4 +44,4 @@ spec:
   # selector:
   #   matchLabels:
   #     app: context-engine
-  #     component: upload-codebase
+  #     component: code-metadata
