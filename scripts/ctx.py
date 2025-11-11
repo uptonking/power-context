@@ -33,14 +33,16 @@ import os
 import argparse
 import subprocess
 from urllib import request
+from urllib.parse import urlparse
 from urllib.error import HTTPError, URLError
 from typing import Dict, Any, List, Optional, Tuple
 
 # Configuration from environment
 MCP_URL = os.environ.get("MCP_INDEXER_URL", "http://localhost:8003/mcp")
 DEFAULT_LIMIT = int(os.environ.get("CTX_LIMIT", "5"))
-DEFAULT_CONTEXT_LINES = int(os.environ.get("CTX_CONTEXT_LINES", "3"))
-DEFAULT_REWRITE_TOKENS = int(os.environ.get("CTX_REWRITE_MAX_TOKENS", "400"))
+DEFAULT_CONTEXT_LINES = int(os.environ.get("CTX_CONTEXT_LINES", "0"))
+DEFAULT_REWRITE_TOKENS = int(os.environ.get("CTX_REWRITE_MAX_TOKENS", "320"))
+DEFAULT_PER_PATH = int(os.environ.get("CTX_PER_PATH", "2"))
 
 # Local decoder configuration (llama.cpp server)
 def resolve_decoder_url() -> str:
@@ -181,28 +183,39 @@ def parse_mcp_response(result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return {"raw": text}
 
 
-def format_search_results(results: List[Dict[str, Any]]) -> str:
-    """Format search results with enough detail for the LLM rewrite."""
+def format_search_results(results: List[Dict[str, Any]], include_snippets: bool = False) -> str:
+    """Format search results succinctly for LLM rewrite.
+
+    When include_snippets is False (default), only include headers with path and line ranges.
+    This keeps prompts small and fast for Granite via llama.cpp.
+    """
     lines: List[str] = []
-    for idx, hit in enumerate(results, 1):
+    for hit in results:
         path = hit.get("path", "unknown")
         start = hit.get("start_line", "?")
         end = hit.get("end_line", "?")
-        score = hit.get("score", 0.0)
         language = hit.get("language") or ""
         symbol = hit.get("symbol") or ""
         snippet = (hit.get("snippet") or "").strip()
 
-        header = f"### Ref {idx}: {path}:{start}-{end} (score {score:.3f})"
+        # Only include line ranges when both start and end are known
+        if start in (None, "?") or end in (None, "?"):
+            header = f"- {path}"
+        else:
+            header = f"- {path}:{start}-{end}"
+        meta: List[str] = []
         if language:
-            header += f" [{language}]"
+            meta.append(language)
         if symbol:
-            header += f" symbol=`{symbol}`"
+            meta.append(f"{symbol}")
+        if meta:
+            header += f" ({', '.join(meta)})"
         lines.append(header)
-        if snippet:
+
+        if include_snippets and snippet:
             lang_tag = language.lower() if language else ""
             lines.append(f"```{lang_tag}\n{snippet}\n```")
-        lines.append("")  # spacer
+
     return "\n".join(lines).strip()
 
 
@@ -210,25 +223,30 @@ def enhance_prompt(query: str, **filters) -> str:
     """Retrieve context, invoke the LLM, and return a final enhanced prompt."""
     context_text, context_note = fetch_context(query, **filters)
     rewrite_opts = filters.get("rewrite_options") or {}
-    include_context = bool(filters.get("include_context", False))
     rewritten = rewrite_prompt(
         query,
         context_text,
         context_note,
         max_tokens=rewrite_opts.get("max_tokens"),
     )
-    return build_final_output(rewritten, context_text, context_note, include_context)
+    # Always return only the enhanced prompt text by default (no context block)
+    return rewritten.strip()
 
 
 def fetch_context(query: str, **filters) -> Tuple[str, str]:
-    """Fetch repository context text plus a note describing the status."""
+    """Fetch repository context text plus a note describing the status.
+
+    Defaults to header-only refs for speed unless with_snippets=True is provided.
+    """
+    with_snippets = bool(filters.get("with_snippets", False))
     params = {
         "query": query,
         "limit": filters.get("limit", DEFAULT_LIMIT),
-        "include_snippet": True,
+        "include_snippet": with_snippets,
         "context_lines": filters.get("context_lines", DEFAULT_CONTEXT_LINES),
+        "per_path": filters.get("per_path", DEFAULT_PER_PATH),
     }
-    for key in ["language", "under", "path_glob", "not_glob", "kind", "symbol", "ext", "per_path"]:
+    for key in ["language", "under", "path_glob", "not_glob", "kind", "symbol", "ext"]:
         if filters.get(key):
             params[key] = filters[key]
 
@@ -244,7 +262,7 @@ def fetch_context(query: str, **filters) -> Tuple[str, str]:
     if not hits:
         return "", "No relevant context found for the prompt."
 
-    return format_search_results(hits), ""
+    return format_search_results(hits, include_snippets=with_snippets), ""
 
 
 def rewrite_prompt(original_prompt: str, context: str, note: str, max_tokens: Optional[int]) -> str:
@@ -254,22 +272,35 @@ def rewrite_prompt(original_prompt: str, context: str, note: str, max_tokens: Op
     """
     effective_context = context.strip() if context.strip() else (note or "No context available.")
 
-    meta_prompt = f"""Task: Rewrite the user's question to be more specific by adding references to relevant files, line numbers, and function names from the context.
-
-DO NOT answer the question. Only rewrite it to be more precise.
-
-Context from codebase:
-{effective_context}
-
-User's original question: {original_prompt.strip()}
-
-Rewritten question (do not answer, only rewrite):"""
+    # Granite 4.0 chat template with explicit rewrite-only instruction
+    system_msg = (
+        "You are a prompt rewriter. "
+        "Rewrite the user's question to be specific and actionable using only the provided context. "
+        "Cite file paths, line ranges, and symbols only if they appear verbatim in the Context refs; never invent references. "
+        "If line ranges are not shown for a file, cite only the file path. "
+        "Prefer a multi-clause question that explicitly calls out what to analyze across the referenced components (e.g., algorithmic steps; inputs/outputs; configuration/parameters; performance; error handling; edge cases), when applicable. "
+        "Do not answer the question. Return only the rewritten question as plain text with no markdown or code fences."
+    )
+    user_msg = (
+        f"Context refs (headers only):\n{effective_context}\n\n"
+        f"Original question: {original_prompt.strip()}\n\n"
+        "Rewrite the question now. Ground it in the context above; include concrete file/symbol references only when present, avoid generic phrasing, and do not include markdown."
+    )
+    meta_prompt = (
+        "<|start_of_role|>system<|end_of_role|>" + system_msg + "<|end_of_text|>\n"
+        "<|start_of_role|>user<|end_of_role|>" + user_msg + "<|end_of_text|>\n"
+        "<|start_of_role|>assistant<|end_of_role|>"
+    )
 
     decoder_url = DECODER_URL
+    # Safety: only allow local decoder hosts
+    parsed = urlparse(decoder_url)
+    if parsed.hostname not in {"localhost", "127.0.0.1", "host.docker.internal"}:
+        raise ValueError(f"Unsafe decoder host: {parsed.hostname}")
     payload = {
         "prompt": meta_prompt,
         "n_predict": int(max_tokens or DEFAULT_REWRITE_TOKENS),
-        "temperature": 0.7,
+        "temperature": 0.35,
         "stream": False,
     }
 
@@ -290,7 +321,7 @@ Rewritten question (do not answer, only rewrite):"""
             or (data.get("generated_text") if isinstance(data, dict) else None)
             or (data.get("text") if isinstance(data, dict) else None)
         )
-        enhanced = (enhanced or "").strip()
+        enhanced = (enhanced or "").replace("```", "").replace("`", "").strip()
 
         if not enhanced:
             raise ValueError(f"Decoder returned empty response (stop_type={data.get('stop_type')}, tokens={data.get('tokens_predicted')})")
