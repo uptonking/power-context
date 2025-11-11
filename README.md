@@ -250,7 +250,7 @@ scripts/ctx.py "add error handling" --unicorn --language python
 **How it works:**
 
 <p align="center">
-  <img src="enhance.png" alt="Unicorn Usage" width="50%"/>
+  <img src="enhance1.png" alt="Unicorn Usage" width="50%"/>
 </p>
 
 Unicorn mode uses multiple LLM passes with progressively richer code context:
