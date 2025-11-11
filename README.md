@@ -189,12 +189,17 @@ This re-enables the `llamacpp` container and resets `.env` to `http://llamacpp:8
 
 ### CLI: ctx prompt enhancer
 
-A thin CLI that retrieves code context and rewrites your input into a better, context-aware prompt using the local LLM decoder. By default it prints ONLY the improved prompt.
+A thin CLI that retrieves code context and rewrites your input into a better, context-aware prompt using the local LLM decoder. Works with both questions and commands/instructions. By default it prints ONLY the improved prompt.
 
 Examples:
 ````bash
-# Default: print only the improved prompt (uses Docker llama.cpp on port 8080)
-scripts/ctx.py "Explain the caching logic to me in detail"
+# Questions: Enhanced with specific details and multiple aspects
+scripts/ctx.py "What is ReFRAG?"
+# Output: Two detailed question paragraphs with file/line references
+
+# Commands: Enhanced with concrete targets and implementation details
+scripts/ctx.py "Refactor ctx.py"
+# Output: Two detailed instruction paragraphs with specific steps
 
 # Via Make target (default improved prompt only)
 make ctx Q="Explain the caching logic to me in detail"
@@ -209,8 +214,11 @@ make ctx Q="Hybrid search details" ARGS="--language python --under scripts/ --li
 Include compact code snippets in the retrieved context for richer rewrites (trades a bit of speed for quality):
 
 ````bash
-# Enable detail mode (adds short snippets)
+# Enable detail mode (adds short snippets) - works with questions
 scripts/ctx.py "Explain the caching logic" --detail
+
+# Detail mode with commands - gets more specific implementation details
+scripts/ctx.py "Add error handling to ctx.py" --detail
 
 # Adjust snippet size if needed (default is 1 line when --detail is used)
 make ctx Q="Explain hybrid search" ARGS="--detail --context-lines 2"
@@ -219,6 +227,8 @@ make ctx Q="Explain hybrid search" ARGS="--detail --context-lines 2"
 Notes:
 - Default behavior is header-only (fastest). `--detail` adds short snippets.
 - If `--detail` is set and `--context-lines` remains at its default (0), ctx.py automatically uses 1 line to keep snippets concise. Override with `--context-lines N`.
+- Detail mode is optimized for speed: automatically clamps to max 4 results and 1 result per file.
+- Performance: ~12-15s with detail mode vs ~45-50s without optimization.
 
 GPU Acceleration (Apple Silicon):
 For faster prompt rewriting, use the native Metal-accelerated decoder:
