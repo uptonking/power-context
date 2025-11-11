@@ -278,7 +278,7 @@ def rewrite_prompt(original_prompt: str, context: str, note: str, max_tokens: Op
         "Rewrite the user's question to be specific and actionable using only the provided context. "
         "Cite file paths, line ranges, and symbols only if they appear verbatim in the Context refs; never invent references. "
         "If line ranges are not shown for a file, cite only the file path. "
-        "Prefer a multi-clause question that explicitly calls out what to analyze across the referenced components (e.g., algorithmic steps; inputs/outputs; configuration/parameters; performance; error handling; edge cases), when applicable. "
+        "Prefer a multi-clause question that explicitly calls out what to analyze across the referenced components when applicable; focus on concrete aspects such as algorithmic steps, inputs/outputs, parameters/configuration, performance, error handling, tests, and edge cases. "
         "Do not answer the question. Return only the rewritten question as plain text with no markdown or code fences."
     )
     user_msg = (
@@ -300,7 +300,7 @@ def rewrite_prompt(original_prompt: str, context: str, note: str, max_tokens: Op
     payload = {
         "prompt": meta_prompt,
         "n_predict": int(max_tokens or DEFAULT_REWRITE_TOKENS),
-        "temperature": 0.35,
+        "temperature": 0.45,
         "stream": False,
     }
 
