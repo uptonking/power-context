@@ -201,6 +201,9 @@ scripts/ctx.py "What is ReFRAG?"
 scripts/ctx.py "Refactor ctx.py"
 # Output: Two detailed instruction paragraphs with specific steps
 
+# Unicorn mode: staged 2–3 pass enhancement for best results
+scripts/ctx.py "Refactor ctx.py" --unicorn
+
 # Via Make target (default improved prompt only)
 make ctx Q="Explain the caching logic to me in detail"
 
@@ -228,7 +231,115 @@ Notes:
 - Default behavior is header-only (fastest). `--detail` adds short snippets.
 - If `--detail` is set and `--context-lines` remains at its default (0), ctx.py automatically uses 1 line to keep snippets concise. Override with `--context-lines N`.
 - Detail mode is optimized for speed: automatically clamps to max 4 results and 1 result per file.
-- Performance: ~12-15s with detail mode vs ~45-50s without optimization.
+
+### Unicorn mode (staged multi-pass for best quality)
+
+Use `--unicorn` for the highest quality prompt enhancement with a staged 2-3 pass approach:
+
+````bash
+# Unicorn mode with commands - produces exceptional, detailed instructions
+scripts/ctx.py "refactor ctx.py" --unicorn
+
+# Unicorn mode with questions - produces highly intelligent, multi-faceted questions
+scripts/ctx.py "what is ReFRAG and how does it work?" --unicorn
+
+# Works with all filters
+scripts/ctx.py "add error handling" --unicorn --language python
+````
+
+**How it works:**
+
+Unicorn mode uses multiple LLM passes with progressively richer code context:
+
+1. **Pass 1 (Draft)**: Retrieves rich code snippets (8 lines of context per match) to understand the codebase and sharpen the intent
+2. **Pass 2 (Refine)**: Retrieves even richer snippets (12 lines of context) based on the draft to ground the prompt with concrete code behaviors
+3. **Pass 3 (Polish)**: Optional cleanup pass that runs only if the output appears generic or incomplete
+
+**Key features:**
+
+- **Code-grounded**: References actual code behaviors and patterns from your codebase, not file paths or line numbers
+- **No hallucinations**: Only uses real code from your indexed repository - never invents references
+- **Multi-paragraph output**: Produces detailed, comprehensive prompts that explore multiple aspects
+- **Works with both questions and commands**: Enhances any type of prompt
+
+**When to use:**
+
+- **Normal mode**: Quick, everyday prompts (fastest)
+- **--detail**: Richer context without multi-pass overhead (balanced)
+- **--unicorn**: When you need the absolute best prompt quality (highest quality)
+
+### Advanced Features
+
+#### 1. Streaming Output (Default)
+
+All modes now stream tokens as they arrive for instant feedback:
+
+````bash
+# Streaming is enabled by default - see output appear immediately
+scripts/ctx.py "refactor ctx.py" --unicorn
+````
+
+To disable streaming (wait for full response):
+- Set `"streaming": false` in `~/.ctx_config.json`
+
+#### 2. Memory Blending
+
+Automatically falls back to `context_search` with memories when repo search returns no hits:
+
+````bash
+# If no code matches, ctx.py will search design docs and ADRs
+scripts/ctx.py "What is our authentication strategy?"
+````
+
+This ensures you get relevant context even when the query doesn't match code directly.
+
+#### 3. Adaptive Context Sizing
+
+Automatically adjusts `limit` and `context_lines` based on query characteristics:
+
+- **Short/vague queries** → More context for richer grounding
+- **Queries with file/function names** → Lighter settings for speed
+
+````bash
+# Short query → auto-increases context
+scripts/ctx.py "caching"
+
+# Specific query → optimized for speed
+scripts/ctx.py "refactor fetch_context function in ctx.py"
+````
+
+#### 4. Automatic Quality Assurance
+
+Enhanced `_needs_polish()` heuristic automatically triggers a third polish pass when:
+
+- Output is too short (< 180 chars)
+- Contains generic/vague language
+- Missing concrete code references
+- Lacks proper paragraph structure
+
+This happens transparently in `--unicorn` mode - no user action needed.
+
+#### 5. Personalized Templates
+
+Create `~/.ctx_config.json` to customize prompt enhancement behavior:
+
+````json
+{
+  "always_include_tests": true,
+  "prefer_bullet_commands": false,
+  "extra_instructions": "Always consider error handling and edge cases",
+  "streaming": true
+}
+````
+
+**Available preferences:**
+
+- `always_include_tests`: Add testing considerations to all prompts
+- `prefer_bullet_commands`: Format commands as bullet points
+- `extra_instructions`: Custom instructions added to every rewrite
+- `streaming`: Enable/disable streaming output (default: true)
+
+See `ctx_config.example.json` for a template.
 
 GPU Acceleration (Apple Silicon):
 For faster prompt rewriting, use the native Metal-accelerated decoder:

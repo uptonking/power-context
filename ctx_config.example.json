@@ -1,0 +1,7 @@
+{
+  "always_include_tests": true,
+  "prefer_bullet_commands": false,
+  "extra_instructions": "Always consider error handling and edge cases",
+  "streaming": true
+}
+

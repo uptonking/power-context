@@ -26,6 +26,10 @@ Examples:
   # Detail mode: include short code snippets (slower but richer)
   ctx --detail "explain the caching logic"
 
+  # Unicorn mode: staged 2-3 pass enhancement for best quality
+  ctx --unicorn "refactor ctx.py"
+  ctx --unicorn "what is ReFRAG and how does it work?"
+
   # Pipe to LLM
   ctx "fix the bug in watcher.py" | llm
 
@@ -57,6 +61,9 @@ DEFAULT_LIMIT = int(os.environ.get("CTX_LIMIT", "5"))
 DEFAULT_CONTEXT_LINES = int(os.environ.get("CTX_CONTEXT_LINES", "0"))
 DEFAULT_REWRITE_TOKENS = int(os.environ.get("CTX_REWRITE_MAX_TOKENS", "320"))
 DEFAULT_PER_PATH = int(os.environ.get("CTX_PER_PATH", "2"))
+
+# User preferences config file
+CTX_CONFIG_FILE = os.path.expanduser("~/.ctx_config.json")
 
 # Local decoder configuration (llama.cpp server)
 def resolve_decoder_url() -> str:
@@ -315,9 +322,163 @@ def _ensure_two_paragraph_questions(text: str) -> str:
     return normalize_paragraph(p1) + "\n\n" + normalize_paragraph(p2)
 
 
+# --- Grounding helpers to reduce hallucinated paths/symbols
+from typing import Set
+
+def extract_allowed_citations(context_text: str) -> tuple[Set[str], Set[str]]:
+    """Extract allowed file paths and symbols from formatted context lines.
+
+    Parses lines produced by format_search_results. Returns (paths, symbols).
+    """
+    allowed_paths: Set[str] = set()
+    allowed_symbols: Set[str] = set()
+    for raw in (context_text or "").splitlines():
+        line = (raw or "").strip()
+        if not line:
+            continue
+        if line.startswith("- "):
+            header = line[2:].strip()
+            header_main = header.split(" (")[0]
+            path_part = header_main.split(":")[0]
+            if path_part:
+                allowed_paths.add(path_part)
+            # symbols are inside parens, after optional language
+            m = re.search(r"\(([^)]+)\)", header)
+            if m:
+                for part in m.group(1).split(","):
+                    sym = part.strip()
+                    if sym and sym.lower() not in {
+                        "python", "typescript", "javascript", "go", "rust", "java", "c", "c++", "c#", "shell", "bash", "markdown", "json", "yaml", "toml"
+                    }:
+                        allowed_symbols.add(sym)
+    return allowed_paths, allowed_symbols
+
+
+def build_refined_query(original_query: str, allowed_paths: Set[str], allowed_symbols: Set[str], max_terms: int = 6) -> str:
+    """Construct a grounded follow-up query using only known paths/symbols."""
+    from os.path import basename
+    terms: list[str] = []
+    for p in list(allowed_paths)[: max_terms // 2]:
+        base = basename(p)
+        if base and base not in terms:
+            terms.append(base)
+    for s in list(allowed_symbols)[: max_terms - len(terms)]:
+        if s and s not in terms:
+            terms.append(s)
+    return (original_query or "").strip() + (" " + " ".join(terms) if terms else "")
+
+
+def sanitize_citations(text: str, allowed_paths: Set[str]) -> str:
+    """Replace path-like strings not present in allowed_paths with a neutral phrase.
+
+    Keeps exact paths and basenames that appear in allowed_paths; replaces others.
+    """
+    if not text:
+        return text
+    from os.path import basename
+    allowed_set = set(allowed_paths or set())
+    allowed_basenames = {basename(p) for p in allowed_set}
+
+    def _repl(m):
+        p = m.group(0)
+        if p in allowed_set or basename(p) in allowed_basenames:
+            return p
+        return "the referenced file"
+
+    cleaned = re.sub(r"/path/to/[^\s]+", "the referenced file", text)
+    # Simple path-like matcher: segments with a slash and a dot-ext
+    cleaned = re.sub(r"(?<!\w)[./\w-]+/[./\w-]+\.[A-Za-z0-9_-]+", _repl, cleaned)
+    return cleaned
+
+
+
+def _load_user_preferences() -> dict:
+    """Load user preferences from ~/.ctx_config.json if it exists.
+
+    Example config:
+    {
+        "always_include_tests": true,
+        "prefer_bullet_commands": true,
+        "extra_instructions": "Always include error handling considerations",
+        "default_mode": "unicorn",
+        "streaming": true
+    }
+    """
+    if not os.path.exists(CTX_CONFIG_FILE):
+        return {}
+    try:
+        with open(CTX_CONFIG_FILE, 'r') as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _apply_user_preferences(system_msg: str, user_msg: str, prefs: dict) -> tuple[str, str]:
+    """Apply user preferences to system and user messages.
+
+    Allows personalization like:
+    - Always include test-plan paragraph
+    - Prefer bullet commands
+    - Custom instructions
+    """
+    if not prefs:
+        return system_msg, user_msg
+
+    # Add extra instructions to system message
+    if prefs.get("extra_instructions"):
+        system_msg += f"\n\nUser preference: {prefs['extra_instructions']}"
+
+    # Modify user message based on preferences
+    if prefs.get("always_include_tests"):
+        user_msg += "\n\nAlways include a paragraph about testing considerations and test cases."
+
+    if prefs.get("prefer_bullet_commands"):
+        user_msg += "\n\nFor commands/instructions, prefer bullet-point format for clarity."
+
+    return system_msg, user_msg
+
+
+def _adaptive_context_sizing(query: str, filters: dict) -> dict:
+    """Adaptively adjust limit and context_lines based on query characteristics.
+
+    - Short/vague queries → increase limit and context for richer grounding
+    - Queries with file/function names → lighter settings for speed
+    """
+    import re
+    adjusted = dict(filters)
+
+    # Detect if query mentions specific files or functions
+    has_file_ref = bool(re.search(r'\b\w+\.(py|js|ts|go|rs|java|cpp|c|h)\b', query))
+    has_function_ref = bool(re.search(r'\b(function|class|def|func|fn|method)\s+\w+', query))
+    is_specific = has_file_ref or has_function_ref
+
+    # Query length heuristic
+    word_count = len(query.split())
+    is_short = word_count < 5
+
+    # Adaptive sizing
+    if is_short and not is_specific:
+        # Short, vague query → need more context
+        adjusted["limit"] = max(adjusted.get("limit", DEFAULT_LIMIT), 6)
+        if adjusted.get("with_snippets"):
+            adjusted["context_lines"] = max(adjusted.get("context_lines", DEFAULT_CONTEXT_LINES), 10)
+    elif is_specific:
+        # Specific query → can use lighter settings
+        adjusted["limit"] = min(adjusted.get("limit", DEFAULT_LIMIT), 4)
+        if adjusted.get("with_snippets"):
+            adjusted["context_lines"] = min(adjusted.get("context_lines", DEFAULT_CONTEXT_LINES) or 8, 6)
+
+    return adjusted
+
 
 def enhance_prompt(query: str, **filters) -> str:
-    """Retrieve context, invoke the LLM, and return a final enhanced prompt."""
+    """Retrieve context, invoke the LLM, and return a final enhanced prompt.
+
+    Uses adaptive context sizing to balance quality and speed.
+    """
+    # Apply adaptive sizing
+    filters = _adaptive_context_sizing(query, filters)
+
     context_text, context_note = fetch_context(query, **filters)
     rewrite_opts = filters.get("rewrite_options") or {}
     rewritten = rewrite_prompt(
@@ -326,14 +487,244 @@ def enhance_prompt(query: str, **filters) -> str:
         context_note,
         max_tokens=rewrite_opts.get("max_tokens"),
     )
-    # Always return only the enhanced prompt text by default (no context block)
     return rewritten.strip()
+
+
+def _generate_plan(enhanced_prompt: str, context: str, note: str) -> str:
+    """Generate a step-by-step execution plan for a command/instruction.
+
+    Uses the LLM to create a concrete action plan based on the enhanced prompt and code context.
+    Returns empty string if plan generation fails or is not applicable.
+    """
+    import sys
+
+    # Detect if we have actual code context
+    has_code_context = bool((context or "").strip() and not (note and ("failed" in note.lower() or "no relevant" in note.lower() or "no data" in note.lower())))
+
+    if not has_code_context:
+        # No code context - skip plan generation
+        return ""
+
+    system_msg = (
+        "You are a technical planning assistant. Your job is to create a step-by-step execution plan. "
+        "Given an enhanced prompt and code context, generate a numbered list of concrete steps to accomplish the task. "
+        "Each step should be specific and actionable. "
+        "Format: Start with 'EXECUTION PLAN:' followed by numbered steps (1., 2., 3., etc.). "
+        "Keep it concise - aim for 3-7 steps maximum. "
+        "Only reference files, functions, or code elements that appear in the provided context. "
+        "Do NOT invent file paths or function names. "
+        "Output format: plain text only, no markdown, no code fences."
+    )
+
+    user_msg = (
+        f"Code context:\n{context}\n\n"
+        f"Enhanced prompt:\n{enhanced_prompt}\n\n"
+        "Generate a step-by-step execution plan to accomplish this task. "
+        "Use only the files and functions mentioned in the code context above. "
+        "Format as: EXECUTION PLAN: followed by numbered steps."
+    )
+
+    meta_prompt = (
+        "<|start_of_role|>system<|end_of_role|>" + system_msg + "<|end_of_text|>\n"
+        "<|start_of_role|>user<|end_of_role|>" + user_msg + "<|end_of_text|>\n"
+        "<|start_of_role|>assistant<|end_of_role|>"
+    )
+
+    decoder_url = DECODER_URL
+    # Safety: restrict to local decoder hosts
+    parsed = urlparse(decoder_url)
+    if parsed.hostname not in {"localhost", "127.0.0.1", "host.docker.internal"}:
+        return ""
+
+    payload = {
+        "prompt": meta_prompt,
+        "n_predict": 200,  # Shorter for plan generation
+        "temperature": 0.3,  # Lower temperature for more focused plans
+        "stream": False,  # Silent plan generation
+    }
+
+    try:
+        req = request.Request(
+            decoder_url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+
+        with request.urlopen(req, timeout=DECODER_TIMEOUT) as resp:
+            raw = resp.read().decode("utf-8", errors="ignore")
+            data = json.loads(raw)
+
+            plan = (
+                (data.get("content") if isinstance(data, dict) else None)
+                or ((data.get("choices") or [{}])[0].get("content") if isinstance(data, dict) else None)
+                or ((data.get("choices") or [{}])[0].get("text") if isinstance(data, dict) else None)
+                or (data.get("generated_text") if isinstance(data, dict) else None)
+                or (data.get("text") if isinstance(data, dict) else None)
+                or ""
+            )
+
+            plan = plan.strip()
+
+            # Validate that it looks like a plan
+            if plan and ("EXECUTION PLAN" in plan.upper() or any(plan.startswith(f"{i}.") for i in range(1, 10))):
+                return plan
+            else:
+                return ""
+
+    except Exception:
+        # Plan generation failed - not critical, just skip it
+        return ""
+
+
+def _needs_polish(text: str) -> bool:
+    """Enhanced QA heuristic to decide if a third polishing pass is needed.
+
+    Checks for:
+    - Too short output
+    - Generic/vague language
+    - Missing concrete details
+    - Lack of code-specific references
+    """
+    if not text:
+        return True
+    t = text.strip()
+
+    # Length check
+    if len(t) < 180:
+        return True
+
+    # Generic language cues (expanded list)
+    generic_cues = (
+        "overall structure", "consider ", "ensure ", "improve its",
+        "you should", "it is important", "make sure", "be sure to",
+        "in general", "typically", "usually", "often"
+    )
+    generic_count = sum(1 for cue in generic_cues if cue in t.lower())
+    if generic_count >= 3:
+        return True
+
+    # Check for concrete details (file paths, line numbers, function names, etc.)
+    import re
+    has_file_ref = bool(re.search(r'\b\w+\.(py|js|ts|go|rs|java|cpp|c|h)\b', t))
+    has_line_ref = bool(re.search(r'\bline[s]?\s+\d+', t, re.IGNORECASE))
+    has_function_ref = bool(re.search(r'\b(function|class|method|def|fn)\s+\w+', t))
+    has_concrete = has_file_ref or has_line_ref or has_function_ref
+
+    # If no concrete references and has generic language, needs polish
+    if not has_concrete and generic_count >= 2:
+        return True
+
+    # Check paragraph structure (should have at least 2 paragraphs)
+    paragraphs = [p.strip() for p in t.split('\n\n') if p.strip()]
+    if len(paragraphs) < 2:
+        return True
+
+    return False
+
+
+def enhance_unicorn(query: str, **filters) -> str:
+    """Multi-pass staged enhancement for higher quality with optional plan generation.
+
+    Pass 1: rich snippets to draft sharper intent
+    Pass 2: refined retrieval using the draft, with even richer snippets to ground specifics
+    Pass 3: polish if output looks short/generic
+    Pass 4 (optional): generate execution plan if query is a command/instruction
+
+    Falls back to single-pass enhance_prompt if no context is available.
+    Stops immediately when repo search returns no hits to avoid hallucinated references.
+    """
+    # ---- Pass 1: draft (rich snippets for grounding)
+    f1 = dict(filters)
+    f1.update({
+        "with_snippets": True,
+        "limit": max(1, min(int(f1.get("limit", DEFAULT_LIMIT) or 3), 3)),
+        "per_path": 2,
+        "context_lines": 8,  # Rich context for understanding
+    })
+    ctx1, note1 = fetch_context(query, **f1)
+
+    # Early exit: if first pass has no context AND note indicates failure/no results, fall back immediately
+    has_context1 = bool((ctx1 or "").strip())
+    has_error1 = note1 and ("failed" in note1.lower() or "no relevant" in note1.lower() or "no data" in note1.lower())
+
+    if not has_context1:
+        # No context at all - fall back to single-pass with the diagnostic note
+        return enhance_prompt(query, **filters)
+
+    # Pass 1: silent (no streaming)
+    draft = rewrite_prompt(query, ctx1, note1, max_tokens=min(180, int((filters.get("rewrite_options") or {}).get("max_tokens", DEFAULT_REWRITE_TOKENS))), citation_policy="snippets", stream=False)
+
+    # Build a grounded follow-up query; keep it simple and rely on snippets
+    allowed_paths1, _ = extract_allowed_citations(ctx1)
+    refined_query = draft
+
+    # ---- Pass 2: refine (even richer snippets, focused results)
+    f2 = dict(filters)
+    f2.update({
+        "with_snippets": True,
+        "limit": 4,
+        "per_path": 1,
+        "context_lines": 12,  # Very rich context for detailed grounding
+    })
+    ctx2, note2 = fetch_context(refined_query, **f2)
+
+    # Check if second pass has context
+    has_context2 = bool((ctx2 or "").strip())
+
+    # If second-pass retrieval is empty, reuse first-pass context to avoid invented refs
+    if not has_context2:
+        ctx2 = ctx1
+        note2 = note1
+
+    # Pass 2: silent (no streaming)
+    final = rewrite_prompt(draft, ctx2, note2, max_tokens=min(240, int((filters.get("rewrite_options") or {}).get("max_tokens", DEFAULT_REWRITE_TOKENS))), citation_policy="snippets", stream=False)
+
+    # ---- Pass 3: polish if clearly needed
+    if _needs_polish(final):
+        # Polish pass: silent (no streaming yet)
+        final = rewrite_prompt(final, ctx2, note2, max_tokens=140, citation_policy="snippets", stream=False)
+
+    # ---- Pass 4: Generate execution plan if this is a command/instruction
+    plan = ""
+    is_command = not query.strip().endswith("?")
+
+    # Only generate plan if we have actual code context (not just error notes)
+    has_real_context = has_context1 and bool((ctx2 or "").strip())
+
+    import sys as _sys
+    _sys.stderr.write(f"[DEBUG] Plan generation: is_command={is_command}, has_real_context={has_real_context}\n")
+    _sys.stderr.flush()
+
+    if is_command and has_real_context:
+        # Generate a step-by-step execution plan based on code context
+        _sys.stderr.write("[DEBUG] Generating plan...\n")
+        _sys.stderr.flush()
+        plan = _generate_plan(final, ctx2, note2)
+        _sys.stderr.write(f"[DEBUG] Plan length: {len(plan)} chars\n")
+        _sys.stderr.flush()
+
+    # Combine enhanced prompt with plan if available
+    if plan:
+        output = final + "\n\n" + plan
+    else:
+        output = final
+
+    # Stream the final output
+    import sys
+    sys.stdout.write(output)
+    sys.stdout.write("\n")
+    sys.stdout.flush()
+
+    # Sanitize citations on the final output
+    allowed_paths2, _ = extract_allowed_citations(ctx2)
+    return sanitize_citations(output.strip(), allowed_paths1.union(allowed_paths2))
 
 
 def fetch_context(query: str, **filters) -> Tuple[str, str]:
     """Fetch repository context text plus a note describing the status.
 
     Defaults to header-only refs for speed unless with_snippets=True is provided.
+    Falls back to context_search (with memories) if repo_search returns no hits.
     """
     with_snippets = bool(filters.get("with_snippets", False))
     params = {
@@ -342,6 +733,7 @@ def fetch_context(query: str, **filters) -> Tuple[str, str]:
         "include_snippet": with_snippets,
         "context_lines": filters.get("context_lines", DEFAULT_CONTEXT_LINES),
         "per_path": filters.get("per_path", DEFAULT_PER_PATH),
+        "collection": "codebase",  # Use the correct collection name
     }
     for key in ["language", "under", "path_glob", "not_glob", "kind", "symbol", "ext"]:
         if filters.get(key):
@@ -349,53 +741,140 @@ def fetch_context(query: str, **filters) -> Tuple[str, str]:
 
     result = call_mcp_tool("repo_search", params)
     if "error" in result:
-        return "", f"Context retrieval failed: {result['error']}"
+        error_msg = result.get('error', 'Unknown error')
+        sys.stderr.write(f"[DEBUG] repo_search error: {error_msg}\n")
+        sys.stderr.flush()
+        return "", f"Context retrieval failed: {error_msg}"
 
     data = parse_mcp_response(result)
     if not data:
+        sys.stderr.write("[DEBUG] repo_search returned no data\n")
+        sys.stderr.flush()
         return "", "Context retrieval returned no data."
 
     hits = data.get("results") or []
+    sys.stderr.write(f"[DEBUG] repo_search returned {len(hits)} hits\n")
+    sys.stderr.flush()
+
     if not hits:
+        # Memory blending: try context_search with memories as fallback
+        memory_params = {
+            "query": query,
+            "limit": filters.get("limit", DEFAULT_LIMIT),
+            "include_memories": True,
+            "include_snippet": with_snippets,
+            "context_lines": filters.get("context_lines", DEFAULT_CONTEXT_LINES),
+            "collection": "codebase",  # Use the correct collection name
+        }
+        memory_result = call_mcp_tool("context_search", memory_params)
+        if "error" not in memory_result:
+            memory_data = parse_mcp_response(memory_result)
+            if memory_data:
+                memory_hits = memory_data.get("results") or []
+                if memory_hits:
+                    return format_search_results(memory_hits, include_snippets=with_snippets), "Using memories and design docs"
         return "", "No relevant context found for the prompt."
 
     return format_search_results(hits, include_snippets=with_snippets), ""
 
 
-def rewrite_prompt(original_prompt: str, context: str, note: str, max_tokens: Optional[int]) -> str:
+def rewrite_prompt(original_prompt: str, context: str, note: str, max_tokens: Optional[int], citation_policy: str = "paths", stream: bool = True) -> str:
     """Use the local decoder (llama.cpp) to rewrite the prompt with repository context.
 
     Returns ONLY the improved prompt text. Raises exception if decoder fails.
+    If stream=True (default), prints tokens as they arrive for instant feedback.
     """
+    import sys
     ctx = (context or "").strip()
     nt = (note or "").strip()
     effective_context = ctx if ctx else (nt or "No context available.")
 
     # Granite 4.0 chat template with explicit rewrite-only instruction
+    if (citation_policy or "paths") == "snippets":
+        policy_system = (
+            "Use code snippets provided in Context refs to ground the rewrite. "
+            "Do NOT include file paths or line numbers. "
+            "You may quote very short code fragments directly from the snippets if essential, but never use markdown or code fences. "
+            "Never invent identifiers not present in the snippets. "
+        )
+        policy_user = (
+            "When relevant, reference concrete behaviors and small code fragments from the snippets above. "
+            "Do not mention file paths or line numbers. "
+        )
+    else:
+        policy_system = (
+            "If context is provided, use it to make the prompt more concrete by citing specific file paths, line ranges, and symbols that appear in the Context refs. "
+            "Never invent references - only cite what appears verbatim in the Context refs. "
+        )
+        policy_user = (
+            "If the context above contains relevant references, cite concrete file paths, line ranges, and symbols in your rewrite. "
+        )
+
+    # Detect if we have actual code context or just a diagnostic note
+    has_code_context = bool((ctx or "").strip() and not (nt and ("failed" in nt.lower() or "no relevant" in nt.lower() or "no data" in nt.lower())))
+
     system_msg = (
         "You are a prompt rewriter. Your ONLY job is to rewrite prompts to be more specific and detailed. "
         "CRITICAL: You must NEVER answer questions or execute commands. You must ONLY rewrite the prompt to be better and more specific. "
         "ALWAYS enhance the prompt to be more detailed and actionable. "
-        "If context is provided, use it to make the prompt more concrete by citing specific file paths, line ranges, and symbols that appear in the Context refs. "
-        "If no relevant context is available, still enhance the prompt by expanding it to cover multiple aspects: implementation details, edge cases, error handling, performance, configuration, tests, and related components. "
-        "Never invent references - only cite what appears verbatim in the Context refs. "
-        "Your rewrite must be at least two short paragraphs separated by a single blank line. "
-        "For questions: rewrite as more specific questions. For commands/instructions: rewrite as more detailed, specific instructions with concrete targets. "
-        "Each paragraph should explore different aspects of the topic. "
-        "Output format: plain text only, no markdown, no code fences, no answers, no explanations."
+        + policy_system
     )
+
+    if has_code_context:
+        # We have real code context - encourage using it
+        system_msg += (
+            "Use the provided context to make the prompt more concrete and specific. "
+            "Your rewrite must be at least two short paragraphs separated by a single blank line. "
+            "For questions: rewrite as more specific questions. For commands/instructions: rewrite as more detailed, specific instructions with concrete targets. "
+            "Each paragraph should explore different aspects of the topic. "
+            "Output format: plain text only, no markdown, no code fences, no answers, no explanations."
+        )
+    else:
+        # No code context - stay generic and don't invent details
+        system_msg += (
+            "IMPORTANT: No code context is available for this query. "
+            "Do NOT invent file paths, line numbers, function names, or other specific code references. "
+            "Instead, rewrite the prompt to be more general and exploratory, asking about concepts, approaches, and best practices. "
+            "Your rewrite must be at least two short paragraphs separated by a single blank line. "
+            "For questions: expand into multiple related questions about the topic. For commands/instructions: expand into general guidance about the task. "
+            "Stay generic - do not hallucinate specific files, functions, or code locations. "
+            "Output format: plain text only, no markdown, no code fences, no answers, no explanations."
+        )
+
     label = "with snippets" if "\n    " in effective_context else "headers only"
     user_msg = (
         f"Context refs ({label}):\n{effective_context}\n\n"
         f"Original prompt: {(original_prompt or '').strip()}\n\n"
         "Rewrite this as a more specific, detailed prompt using at least two short paragraphs separated by a blank line. "
-        "If the context above contains relevant references, cite concrete file paths, line ranges, and symbols in your rewrite. "
-        "If the context is not relevant or empty, still enhance the prompt by expanding it to cover multiple aspects. "
-        "For questions: make them more specific and multi-faceted (each paragraph should be a question ending with '?'). "
-        "For commands/instructions: make them more detailed and concrete (specify exact files, functions, parameters, edge cases to handle). "
+        + policy_user
+    )
+
+    if has_code_context:
+        user_msg += (
+            "Use the context above to make the rewrite concrete and specific. "
+            "For questions: make them more specific and multi-faceted (each paragraph should be a question ending with '?'). "
+            "For commands/instructions: make them more detailed and concrete (specify exact functions, parameters, edge cases to handle). "
+        )
+    else:
+        user_msg += (
+            "Since no code context is available, keep the rewrite general and exploratory. "
+            "Do NOT invent specific file paths, line numbers, or function names. "
+            "For questions: expand into related conceptual questions. For commands/instructions: provide general guidance about the task. "
+        )
+
+    user_msg += (
         "Remember: ONLY rewrite the prompt - do NOT answer questions or execute commands. "
         "Avoid generic phrasing. No markdown or code fences."
     )
+
+    # Apply user preferences if config exists
+    prefs = _load_user_preferences()
+    system_msg, user_msg = _apply_user_preferences(system_msg, user_msg, prefs)
+
+    # Override stream setting from preferences if specified
+    if prefs.get("streaming") is not None:
+        stream = prefs.get("streaming")
+
     meta_prompt = (
         "<|start_of_role|>system<|end_of_role|>" + system_msg + "<|end_of_text|>\n"
         "<|start_of_role|>user<|end_of_role|>" + user_msg + "<|end_of_text|>\n"
@@ -411,7 +890,7 @@ def rewrite_prompt(original_prompt: str, context: str, note: str, max_tokens: Op
         "prompt": meta_prompt,
         "n_predict": int(max_tokens or DEFAULT_REWRITE_TOKENS),
         "temperature": 0.45,
-        "stream": False,
+        "stream": stream,
     }
 
     req = request.Request(
@@ -419,26 +898,53 @@ def rewrite_prompt(original_prompt: str, context: str, note: str, max_tokens: Op
         data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json"},
     )
-    with request.urlopen(req, timeout=DECODER_TIMEOUT) as resp:
-        raw = resp.read().decode("utf-8", errors="ignore")
-        data = json.loads(raw)
 
-        # Extract content from llama.cpp response
-        enhanced = (
-            (data.get("content") if isinstance(data, dict) else None)
-            or ((data.get("choices") or [{}])[0].get("content") if isinstance(data, dict) else None)
-            or ((data.get("choices") or [{}])[0].get("text") if isinstance(data, dict) else None)
-            or (data.get("generated_text") if isinstance(data, dict) else None)
-            or (data.get("text") if isinstance(data, dict) else None)
-        )
-        enhanced = (enhanced or "").replace("```", "").replace("`", "").strip()
+    enhanced = ""
+    if stream:
+        # Streaming mode: print tokens as they arrive for instant feedback
+        with request.urlopen(req, timeout=DECODER_TIMEOUT) as resp:
+            for line in resp:
+                line_str = line.decode("utf-8", errors="ignore").strip()
+                if not line_str or line_str.startswith(":"):
+                    continue
+                if line_str.startswith("data: "):
+                    line_str = line_str[6:]
+                try:
+                    chunk = json.loads(line_str)
+                    token = chunk.get("content", "")
+                    if token:
+                        sys.stdout.write(token)
+                        sys.stdout.flush()
+                        enhanced += token
+                    if chunk.get("stop", False):
+                        break
+                except json.JSONDecodeError:
+                    continue
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+    else:
+        # Non-streaming mode: wait for full response
+        with request.urlopen(req, timeout=DECODER_TIMEOUT) as resp:
+            raw = resp.read().decode("utf-8", errors="ignore")
+            data = json.loads(raw)
 
-        if not enhanced:
-            raise ValueError(f"Decoder returned empty response (stop_type={data.get('stop_type')}, tokens={data.get('tokens_predicted')})")
+            # Extract content from llama.cpp response
+            enhanced = (
+                (data.get("content") if isinstance(data, dict) else None)
+                or ((data.get("choices") or [{}])[0].get("content") if isinstance(data, dict) else None)
+                or ((data.get("choices") or [{}])[0].get("text") if isinstance(data, dict) else None)
+                or (data.get("generated_text") if isinstance(data, dict) else None)
+                or (data.get("text") if isinstance(data, dict) else None)
+            )
 
-        # Enforce at least two question paragraphs
-        enhanced = _ensure_two_paragraph_questions(enhanced)
-        return enhanced
+    enhanced = (enhanced or "").replace("```", "").replace("`", "").strip()
+
+    if not enhanced:
+        raise ValueError("Decoder returned empty response")
+
+    # Enforce at least two question paragraphs
+    enhanced = _ensure_two_paragraph_questions(enhanced)
+    return enhanced
 
 
 
@@ -476,6 +982,9 @@ Examples:
   # Commands: enhanced with concrete implementation steps
   ctx "refactor ctx.py to improve modularity"
 
+  # Unicorn mode: staged 2–3 pass enhancement for best results
+  ctx --unicorn "refactor ctx.py"
+
   # Detail mode: include code snippets (slower but richer)
   ctx --detail "explain the caching logic"
 
@@ -491,6 +1000,8 @@ Examples:
     parser.add_argument("--cmd", "-c", help="Command to pipe enhanced prompt to (e.g., llm, pbcopy)")
     parser.add_argument("--with-context", action="store_true",
                         help="Append supporting context after the improved prompt")
+    parser.add_argument("--unicorn", action="store_true",
+                        help="One-size 'amazing' mode: staged 2–3 calls for best prompts (keeps defaults unchanged)")
 
     # Search filters
     parser.add_argument("--language", "-l", help="Filter by language (e.g., python, typescript)")
@@ -550,10 +1061,13 @@ Examples:
     filters = {k: v for k, v in filters.items() if v is not None}
 
     try:
-        # Fetch context and rewrite with LLM
-        context_text, context_note = fetch_context(args.query, **filters)
-        rewritten = rewrite_prompt(args.query, context_text, context_note, max_tokens=args.rewrite_max_tokens)
-        output = rewritten.strip()
+        # Enhance prompt
+        if args.unicorn:
+            output = enhance_unicorn(args.query, **filters)
+        else:
+            context_text, context_note = fetch_context(args.query, **filters)
+            rewritten = rewrite_prompt(args.query, context_text, context_note, max_tokens=args.rewrite_max_tokens)
+            output = rewritten.strip()
 
         if args.cmd:
             subprocess.run(args.cmd, input=output.encode("utf-8"), shell=True, check=False)
