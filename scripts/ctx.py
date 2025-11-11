@@ -1,3 +1,5 @@
+import re
+
 #!/usr/bin/env python3
 """
 Context-aware prompt enhancer CLI.
@@ -24,7 +26,7 @@ Examples:
 Environment:
   MCP_INDEXER_URL  - MCP indexer endpoint (default: http://localhost:8003/mcp)
   CTX_LIMIT        - Default result limit (default: 5)
-  CTX_CONTEXT_LINES - Context lines for snippets (default: 3)
+  CTX_CONTEXT_LINES - Context lines for snippets (default: 0)
 """
 
 import sys
@@ -183,6 +185,28 @@ def parse_mcp_response(result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return {"raw": text}
 
 
+def _compress_snippet(snippet: str, max_lines: int = 6) -> str:
+    """Compact, high-signal subset of a code snippet.
+
+    Heuristics: prefer signatures, guards, returns/raises, asserts; fall back to head/tail.
+    """
+    try:
+        raw_lines = [ln.rstrip() for ln in snippet.splitlines() if ln.strip()]
+        if not raw_lines:
+            return ""
+        keys = ("def ", "class ", "return", "raise", "assert", "if ", "except", "try:")
+        scored = [(sum(k in ln for k in keys), idx, ln) for idx, ln in enumerate(raw_lines)]
+        keep_idx = sorted({idx for _, idx, _ in sorted(scored, key=lambda t: (-t[0], t[1]))[:max_lines]})
+        kept = [raw_lines[i] for i in keep_idx]
+        if not kept:
+            head = raw_lines[: max(1, max_lines // 2)]
+            tail = raw_lines[-(max_lines - len(head)) :]
+            kept = head + tail
+        return "\n".join(kept[:max_lines])
+    except Exception:
+        return (snippet or "").splitlines()[0][:160]
+
+
 def format_search_results(results: List[Dict[str, Any]], include_snippets: bool = False) -> str:
     """Format search results succinctly for LLM rewrite.
 
@@ -213,10 +237,71 @@ def format_search_results(results: List[Dict[str, Any]], include_snippets: bool 
         lines.append(header)
 
         if include_snippets and snippet:
-            lang_tag = language.lower() if language else ""
-            lines.append(f"```{lang_tag}\n{snippet}\n```")
+            compact = _compress_snippet(snippet, max_lines=6)
+            if compact:
+                for ln in compact.splitlines():
+                    # Inline compact snippet (no fences to keep token count small)
+                    lines.append(f"    {ln}")
 
-    return "\n".join(lines).strip()
+
+
+def _ensure_two_paragraph_questions(text: str) -> str:
+    """Normalize to at least two paragraphs.
+
+    - Collapse excessive whitespace
+    - For questions: ensure each paragraph ends with '?'
+    - For commands/instructions: ensure proper punctuation
+    - If only one paragraph, split heuristically or add a generic follow-up
+    """
+    if not text:
+        return ""
+    # Normalize whitespace/newlines
+    t = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    # Collapse triple+ newlines to double
+    while "\n\n\n" in t:
+        t = t.replace("\n\n\n", "\n\n")
+    paras = [p.strip() for p in t.split("\n\n") if p.strip()]
+
+    def normalize_paragraph(s: str) -> str:
+        """Ensure proper punctuation - keep questions as questions, commands as commands."""
+        s = s.strip()
+        if not s:
+            return s
+        # If already ends with proper punctuation, keep as-is
+        if s[-1] in "?!.":
+            return s
+        # Check if it looks like a question (starts with question words or contains '?')
+        question_starters = ("what", "how", "why", "when", "where", "who", "which", "can", "could", "would", "should", "is", "are", "does", "do")
+        first_word = s.split()[0].lower() if s.split() else ""
+        if first_word in question_starters or "?" in s:
+            # It's a question - ensure it ends with '?'
+            if s[-1] in ".!:":
+                return s[:-1].rstrip() + "?"
+            return s + "?"
+        # It's a command/statement - ensure it ends with '.'
+        if s[-1] in ":":
+            return s[:-1].rstrip() + "."
+        return s + "."
+
+    if len(paras) >= 2:
+        p1, p2 = normalize_paragraph(paras[0]), normalize_paragraph(paras[1])
+        return p1 + "\n\n" + p2
+
+    # Single paragraph: try to split by sentence boundary
+    p = paras[0] if paras else t
+    # Naive sentence split
+    sentences = [s.strip() for s in p.replace("?", ". ").replace("!", ". ").split(". ") if s.strip()]
+    if len(sentences) > 1:
+        half = max(1, len(sentences) // 2)
+        p1 = ". ".join(sentences[:half]).strip()
+        p2 = ". ".join(sentences[half:]).strip()
+    else:
+        p1 = p.strip()
+        p2 = (
+            "Additionally, clarify algorithmic steps, inputs/outputs, configuration parameters, performance considerations, error handling behavior, tests, and edge cases relevant to the referenced components"
+        )
+    return normalize_paragraph(p1) + "\n\n" + normalize_paragraph(p2)
+
 
 
 def enhance_prompt(query: str, **filters) -> str:
@@ -270,21 +355,34 @@ def rewrite_prompt(original_prompt: str, context: str, note: str, max_tokens: Op
 
     Returns ONLY the improved prompt text. Raises exception if decoder fails.
     """
-    effective_context = context.strip() if context.strip() else (note or "No context available.")
+    ctx = (context or "").strip()
+    nt = (note or "").strip()
+    effective_context = ctx if ctx else (nt or "No context available.")
 
     # Granite 4.0 chat template with explicit rewrite-only instruction
     system_msg = (
-        "You are a prompt rewriter. "
-        "Rewrite the user's question to be specific and actionable using only the provided context. "
-        "Cite file paths, line ranges, and symbols only if they appear verbatim in the Context refs; never invent references. "
-        "If line ranges are not shown for a file, cite only the file path. "
-        "Prefer a multi-clause question that explicitly calls out what to analyze across the referenced components when applicable; focus on concrete aspects such as algorithmic steps, inputs/outputs, parameters/configuration, performance, error handling, tests, and edge cases. "
-        "Do not answer the question. Return only the rewritten question as plain text with no markdown or code fences."
+        "You are a prompt rewriter. Your ONLY job is to rewrite prompts to be more specific and detailed. "
+        "CRITICAL: You must NEVER answer questions or execute commands. You must ONLY rewrite the prompt to be better and more specific. "
+        "ALWAYS enhance the prompt to be more detailed and actionable. "
+        "If context is provided, use it to make the prompt more concrete by citing specific file paths, line ranges, and symbols that appear in the Context refs. "
+        "If no relevant context is available, still enhance the prompt by expanding it to cover multiple aspects: implementation details, edge cases, error handling, performance, configuration, tests, and related components. "
+        "Never invent references - only cite what appears verbatim in the Context refs. "
+        "Your rewrite must be at least two short paragraphs separated by a single blank line. "
+        "For questions: rewrite as more specific questions. For commands/instructions: rewrite as more detailed, specific instructions with concrete targets. "
+        "Each paragraph should explore different aspects of the topic. "
+        "Output format: plain text only, no markdown, no code fences, no answers, no explanations."
     )
+    label = "with snippets" if "\n    " in effective_context else "headers only"
     user_msg = (
-        f"Context refs (headers only):\n{effective_context}\n\n"
-        f"Original question: {original_prompt.strip()}\n\n"
-        "Rewrite the question now. Ground it in the context above; include concrete file/symbol references only when present, avoid generic phrasing, and do not include markdown."
+        f"Context refs ({label}):\n{effective_context}\n\n"
+        f"Original prompt: {(original_prompt or '').strip()}\n\n"
+        "Rewrite this as a more specific, detailed prompt using at least two short paragraphs separated by a blank line. "
+        "If the context above contains relevant references, cite concrete file paths, line ranges, and symbols in your rewrite. "
+        "If the context is not relevant or empty, still enhance the prompt by expanding it to cover multiple aspects. "
+        "For questions: make them more specific and multi-faceted (each paragraph should be a question ending with '?'). "
+        "For commands/instructions: make them more detailed and concrete (specify exact files, functions, parameters, edge cases to handle). "
+        "Remember: ONLY rewrite the prompt - do NOT answer questions or execute commands. "
+        "Avoid generic phrasing. No markdown or code fences."
     )
     meta_prompt = (
         "<|start_of_role|>system<|end_of_role|>" + system_msg + "<|end_of_text|>\n"
@@ -326,6 +424,8 @@ def rewrite_prompt(original_prompt: str, context: str, note: str, max_tokens: Op
         if not enhanced:
             raise ValueError(f"Decoder returned empty response (stop_type={data.get('stop_type')}, tokens={data.get('tokens_predicted')})")
 
+        # Enforce at least two question paragraphs
+        enhanced = _ensure_two_paragraph_questions(enhanced)
         return enhanced
 
 
@@ -390,6 +490,10 @@ Examples:
     parser.add_argument("--rewrite-max-tokens", type=int, default=DEFAULT_REWRITE_TOKENS,
                        help=f"Max tokens for LLM rewrite (default: {DEFAULT_REWRITE_TOKENS})")
 
+    # Detail mode
+    parser.add_argument("--detail", action="store_true",
+                       help="Include short code snippets in the retrieved context for richer rewrites (slower)")
+
     args = parser.parse_args()
 
     # Build filter dict
@@ -404,10 +508,22 @@ Examples:
         "symbol": args.symbol,
         "ext": args.ext,
         "per_path": args.per_path,
+        "with_snippets": args.detail,
         "rewrite_options": {
             "max_tokens": args.rewrite_max_tokens,
         },
     }
+
+    # If detail mode is on and context_lines equals the default (0), bump to 1 for a short snippet
+    if args.detail and args.context_lines == DEFAULT_CONTEXT_LINES:
+        filters["context_lines"] = 1
+    # Clamp result counts in detail mode for latency
+    if args.detail:
+        try:
+            filters["limit"] = max(1, min(int(filters.get("limit", DEFAULT_LIMIT)), 4))
+        except Exception:
+            filters["limit"] = 4
+        filters["per_path"] = 1
 
     # Remove None values
     filters = {k: v for k, v in filters.items() if v is not None}

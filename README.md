@@ -203,6 +203,23 @@ make ctx Q="Explain the caching logic to me in detail"
 make ctx Q="Hybrid search details" ARGS="--language python --under scripts/ --limit 2 --rewrite-max-tokens 200"
 ````
 
+
+### Detail mode (short snippets)
+
+Include compact code snippets in the retrieved context for richer rewrites (trades a bit of speed for quality):
+
+````bash
+# Enable detail mode (adds short snippets)
+scripts/ctx.py "Explain the caching logic" --detail
+
+# Adjust snippet size if needed (default is 1 line when --detail is used)
+make ctx Q="Explain hybrid search" ARGS="--detail --context-lines 2"
+````
+
+Notes:
+- Default behavior is header-only (fastest). `--detail` adds short snippets.
+- If `--detail` is set and `--context-lines` remains at its default (0), ctx.py automatically uses 1 line to keep snippets concise. Override with `--context-lines N`.
+
 GPU Acceleration (Apple Silicon):
 For faster prompt rewriting, use the native Metal-accelerated decoder:
 ````bash
