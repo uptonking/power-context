@@ -249,6 +249,10 @@ scripts/ctx.py "add error handling" --unicorn --language python
 
 **How it works:**
 
+<p align="center">
+  <img src="enhance.png" alt="Unicorn Usage" width="50%"/>
+</p>
+
 Unicorn mode uses multiple LLM passes with progressively richer code context:
 
 1. **Pass 1 (Draft)**: Retrieves rich code snippets (8 lines of context per match) to understand the codebase and sharpen the intent

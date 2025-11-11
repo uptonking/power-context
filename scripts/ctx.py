@@ -712,13 +712,7 @@ def enhance_unicorn(query: str, **filters) -> str:
     else:
         output = final
 
-    # Stream the final output
-    import sys
-    sys.stdout.write(output)
-    sys.stdout.write("\n")
-    sys.stdout.flush()
-
-    # Sanitize citations on the final output
+    # Sanitize citations on the final output and return
     allowed_paths2, _ = extract_allowed_citations(ctx2)
     return sanitize_citations(output.strip(), allowed_paths1.union(allowed_paths2))
 
