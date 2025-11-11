@@ -262,6 +262,8 @@ def format_search_results(results: List[Dict[str, Any]], include_snippets: bool 
                     # Inline compact snippet (no fences to keep token count small)
                     lines.append(f"    {ln}")
 
+    return "\n".join(lines)
+
 
 
 def _ensure_two_paragraph_questions(text: str) -> str:
@@ -565,11 +567,12 @@ def _generate_plan(enhanced_prompt: str, context: str, note: str) -> str:
 
             plan = plan.strip()
 
-            # Validate that it looks like a plan
-            if plan and ("EXECUTION PLAN" in plan.upper() or any(plan.startswith(f"{i}.") for i in range(1, 10))):
-                return plan
-            else:
+            # Relaxed validation: return any non-empty plan; add header if missing
+            if not plan:
                 return ""
+            if "EXECUTION PLAN" not in plan.upper():
+                plan = "EXECUTION PLAN:\n" + plan
+            return plan
 
     except Exception:
         # Plan generation failed - not critical, just skip it
