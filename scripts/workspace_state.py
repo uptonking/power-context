@@ -55,6 +55,14 @@ class LastActivity(TypedDict, total=False):
     file_path: Optional[str]
     details: Optional[ActivityDetails]
 
+class OriginInfo(TypedDict, total=False):
+    repo_name: Optional[str]
+    container_path: Optional[str]
+    source_path: Optional[str]
+    collection_name: Optional[str]
+    updated_at: Optional[str]
+
+
 class WorkspaceState(TypedDict, total=False):
     created_at: str
     updated_at: str
@@ -62,6 +70,7 @@ class WorkspaceState(TypedDict, total=False):
     indexing_status: Optional[IndexingStatus]
     last_activity: Optional[LastActivity]
     qdrant_stats: Optional[Dict[str, Any]]
+    origin: Optional[OriginInfo]
 
 def is_multi_repo_mode() -> bool:
     """Check if multi-repo mode is enabled."""
@@ -223,6 +232,47 @@ def update_indexing_status(
         repo_name=repo_name,
     )
 
+
+def update_repo_origin(
+    workspace_path: Optional[str] = None,
+    repo_name: Optional[str] = None,
+    *,
+    container_path: Optional[str] = None,
+    source_path: Optional[str] = None,
+    collection_name: Optional[str] = None,
+) -> WorkspaceState:
+    """Update origin metadata for a repository/workspace."""
+
+    resolved_workspace, resolved_repo = _resolve_repo_context(workspace_path, repo_name)
+
+    if is_multi_repo_mode() and resolved_repo is None:
+        return {}
+
+    state = get_workspace_state(resolved_workspace, resolved_repo)
+    if not state:
+        state = {}
+
+    origin: OriginInfo = dict(state.get("origin", {}))  # type: ignore[arg-type]
+    if resolved_repo:
+        origin["repo_name"] = resolved_repo
+    if container_path or workspace_path:
+        origin["container_path"] = container_path or workspace_path
+    if source_path:
+        origin["source_path"] = source_path
+    if collection_name:
+        origin["collection_name"] = collection_name
+    origin["updated_at"] = datetime.now().isoformat()
+
+    updates: Dict[str, Any] = {"origin": origin}
+    if collection_name:
+        updates.setdefault("qdrant_collection", collection_name)
+
+    return update_workspace_state(
+        workspace_path=resolved_workspace,
+        updates=updates,
+        repo_name=resolved_repo,
+    )
+
 def log_activity(repo_name: Optional[str] = None, action: Optional[ActivityAction] = None,
                file_path: Optional[str] = None, details: Optional[ActivityDetails] = None) -> None:
     """Log activity to workspace state."""
@@ -262,8 +312,11 @@ def log_activity(repo_name: Optional[str] = None, action: Optional[ActivityActio
         pass
 
 def _generate_collection_name_from_repo(repo_name: str) -> str:
-    """Generate a collection name from repository name with hash suffix."""
-    # Create a short hash from repo name to ensure uniqueness
+    """Generate collection name with 8-char hash for local workspaces.
+
+    Used by local indexer/watcher. Remote uploads use 16+8 char pattern
+    for collision avoidance when folder names may be identical.
+    """
     hash_obj = hashlib.sha256(repo_name.encode())
     short_hash = hash_obj.hexdigest()[:8]
     return f"{repo_name}-{short_hash}"
@@ -289,35 +342,45 @@ def get_collection_name(repo_name: Optional[str] = None) -> str:
 def _detect_repo_name_from_path(path: Path) -> str:
     """Detect repository name from path. Clean, robust implementation."""
     try:
-        # Normalize path
         resolved_path = path.resolve()
-
-        # Get workspace root
-        workspace_root = Path(os.environ.get("WATCH_ROOT") or os.environ.get("WORKSPACE_PATH") or "/work")
-
-        # Path must be under workspace root
-        try:
-            rel_path = resolved_path.relative_to(workspace_root)
-        except ValueError:
-            return None  # Path is outside workspace root
-
-        # Get first path component as repo name
-        if rel_path.parts:
-            repo_name = rel_path.parts[0]
-
-            # Exclude system directories
-            if repo_name in (".codebase", ".git", "__pycache__"):
-                return None
-
-            # Verify the path exists (handles bindmounts)
-            repo_path = workspace_root / repo_name
-            if repo_path.exists() or str(resolved_path).startswith(str(repo_path) + "/"):
-                return repo_name
-
-        return None  # Not a valid repo path
-
     except Exception:
         return None
+
+    candidate_roots: List[Path] = []
+    for root_str in (
+        os.environ.get("WATCH_ROOT"),
+        os.environ.get("WORKSPACE_PATH"),
+        "/work",
+        os.environ.get("HOST_ROOT"),
+        "/home/coder/project/Context-Engine/dev-workspace",
+    ):
+        if not root_str:
+            continue
+        try:
+            root_path = Path(root_str).resolve()
+        except Exception:
+            continue
+        if root_path not in candidate_roots:
+            candidate_roots.append(root_path)
+
+    for base in candidate_roots:
+        try:
+            rel_path = resolved_path.relative_to(base)
+        except ValueError:
+            continue
+
+        if not rel_path.parts:
+            continue
+
+        repo_name = rel_path.parts[0]
+        if repo_name in (".codebase", ".git", "__pycache__"):
+            continue
+
+        repo_path = base / repo_name
+        if repo_path.exists() or str(resolved_path).startswith(str(repo_path) + os.sep):
+            return repo_name
+
+    return None
 
 def _extract_repo_name_from_path(workspace_path: str) -> str:
     """Extract repository name from workspace path."""
@@ -468,5 +531,68 @@ def list_workspaces(search_root: Optional[str] = None) -> List[Dict[str, Any]]:
             continue
 
     return workspaces
+
+
+def get_collection_mappings(search_root: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Enumerate collection mappings with origin metadata."""
+
+    root_path = Path(search_root or _resolve_workspace_root()).resolve()
+    mappings: List[Dict[str, Any]] = []
+
+    try:
+        if is_multi_repo_mode():
+            repos_root = root_path / STATE_DIRNAME / "repos"
+            if repos_root.exists():
+                for repo_dir in sorted(p for p in repos_root.iterdir() if p.is_dir()):
+                    repo_name = repo_dir.name
+                    state_path = repo_dir / STATE_FILENAME
+                    if not state_path.exists():
+                        continue
+                    try:
+                        with open(state_path, "r", encoding="utf-8") as f:
+                            state = json.load(f) or {}
+                    except Exception:
+                        continue
+
+                    origin = state.get("origin", {}) or {}
+                    mappings.append(
+                        {
+                            "repo_name": repo_name,
+                            "collection_name": state.get("qdrant_collection")
+                            or get_collection_name(repo_name),
+                            "container_path": origin.get("container_path")
+                            or str((Path(_resolve_workspace_root()) / repo_name).resolve()),
+                            "source_path": origin.get("source_path"),
+                            "state_file": str(state_path),
+                            "updated_at": state.get("updated_at"),
+                        }
+                    )
+        else:
+            state_path = root_path / STATE_DIRNAME / STATE_FILENAME
+            if state_path.exists():
+                try:
+                    with open(state_path, "r", encoding="utf-8") as f:
+                        state = json.load(f) or {}
+                except Exception:
+                    state = {}
+
+                origin = state.get("origin", {}) or {}
+                repo_name = origin.get("repo_name") or Path(root_path).name
+                mappings.append(
+                    {
+                        "repo_name": repo_name,
+                        "collection_name": state.get("qdrant_collection")
+                        or get_collection_name(repo_name),
+                        "container_path": origin.get("container_path")
+                        or str(root_path),
+                        "source_path": origin.get("source_path"),
+                        "state_file": str(state_path),
+                        "updated_at": state.get("updated_at"),
+                    }
+                )
+    except Exception:
+        return mappings
+
+    return mappings
 
 # Add missing functions that callers expect (already defined above)

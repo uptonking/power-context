@@ -1695,7 +1695,7 @@ def main():
     ap.add_argument("--ext", type=str, default=None)
     ap.add_argument("--not", dest="not_filter", type=str, default=None)
     ap.add_argument("--collection", type=str, default=None,
-                     help="Target collection name (overrides COLLECTION_NAME env var)")
+                     help="Target collection name")
     ap.add_argument(
         "--case",
         type=str,

@@ -31,6 +31,8 @@ try:
         get_cached_file_hash,
         set_cached_file_hash,
         _extract_repo_name_from_path,
+        update_repo_origin,
+        get_collection_mappings,
     )
 except ImportError:
     # Fallback for testing without full environment
@@ -39,6 +41,8 @@ except ImportError:
     get_cached_file_hash = None
     set_cached_file_hash = None
     _extract_repo_name_from_path = None
+    update_repo_origin = None
+    get_collection_mappings = None
 
 
 # Configure logging
@@ -100,10 +104,14 @@ class HealthResponse(BaseModel):
     work_dir: str
 
 def get_workspace_key(workspace_path: str) -> str:
-    """Generate a unique key for workspace tracking using repository name."""
-    # Extract repository name from path for consistent identification
-    # Both host paths (/home/user/project/repo) and container paths (/work/repo)
-    # should generate the same key for the same repository
+    """Generate 16-char hash for collision avoidance in remote uploads.
+
+    Remote uploads may have identical folder names from different users,
+    so uses longer hash than local indexing (8-chars) to ensure uniqueness.
+
+    Both host paths (/home/user/project/repo) and container paths (/work/repo)
+    should generate the same key for the same repository.
+    """
     repo_name = Path(workspace_path).name
     return hashlib.sha256(repo_name.encode('utf-8')).hexdigest()[:16]
 
@@ -176,6 +184,9 @@ async def process_delta_bundle(workspace_path: str, bundle_path: Path, manifest:
         # This caused watcher service to never see uploaded files
         if _extract_repo_name_from_path:
             repo_name = _extract_repo_name_from_path(workspace_path)
+            # Fallback to directory name if repo detection fails
+            if not repo_name:
+                repo_name = Path(workspace_path).name
         else:
             # Fallback: use directory name
             repo_name = Path(workspace_path).name
@@ -346,7 +357,8 @@ async def upload_delta_bundle(
     workspace_path: str = Form(...),
     collection_name: Optional[str] = Form(None),
     sequence_number: Optional[int] = Form(None),
-    force: Optional[bool] = Form(False)
+    force: Optional[bool] = Form(False),
+    source_path: Optional[str] = Form(None),
 ):
     """Upload and process delta bundle."""
     start_time = datetime.now()
@@ -363,9 +375,27 @@ async def upload_delta_bundle(
         if not collection_name:
             if get_collection_name:
                 repo_name = _extract_repo_name_from_path(workspace_path) if _extract_repo_name_from_path else None
+                # Fallback to directory name if repo detection fails
+                if not repo_name:
+                    repo_name = Path(workspace_path).name
                 collection_name = get_collection_name(repo_name)
             else:
                 collection_name = DEFAULT_COLLECTION
+
+        # Persist origin metadata for remote lookups
+        try:
+            if update_repo_origin and repo_name:
+                workspace_key = get_workspace_key(workspace_path)
+                container_workspace = str(Path(WORK_DIR) / f"{repo_name}-{workspace_key}")
+                update_repo_origin(
+                    workspace_path=container_workspace,
+                    repo_name=repo_name,
+                    container_path=container_workspace,
+                    source_path=source_path or workspace_path,
+                    collection_name=collection_name,
+                )
+        except Exception as origin_err:
+            logger.debug(f"[upload_service] Failed to persist origin info: {origin_err}")
 
         # Validate bundle size
         if bundle.size and bundle.size > MAX_BUNDLE_SIZE_MB * 1024 * 1024:

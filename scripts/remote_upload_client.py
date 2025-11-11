@@ -4,6 +4,11 @@ Remote upload client for delta bundles in Context-Engine.
 
 This module provides functionality to create and upload delta bundles to a remote
 server, enabling real-time code synchronization across distributed environments.
+
+Example usage:
+    export HOST_ROOT="/tmp/testupload" && export CONTAINER_ROOT="/work" && export
+      PYTHONPATH="/home/coder/project/Context-Engine:$PYTHONPATH" && python3
+      scripts/remote_upload_client.py --path /tmp/testupload)
 """
 
 import os
@@ -123,6 +128,27 @@ class RemoteUploadClient:
                 logger.warning(f"[remote_upload] Failed to cleanup temp directory {self.temp_dir}: {e}")
             finally:
                 self.temp_dir = None
+
+    def get_mapping_summary(self) -> Dict[str, Any]:
+        """Return derived collection mapping details."""
+        container_path = self._translate_to_container_path(self.workspace_path)
+        return {
+            "repo_name": self.repo_name,
+            "collection_name": self.collection_name,
+            "source_path": self.workspace_path,
+            "container_path": container_path,
+            "upload_endpoint": self.upload_endpoint,
+        }
+
+    def log_mapping_summary(self) -> None:
+        """Log mapping summary for user visibility."""
+        info = self.get_mapping_summary()
+        logger.info("[remote_upload] Collection mapping:")
+        logger.info(f"  repo_name       : {info['repo_name']}")
+        logger.info(f"  collection_name : {info['collection_name']}")
+        logger.info(f"  source_path     : {info['source_path']}")
+        logger.info(f"  container_path  : {info['container_path']}")
+        logger.info("[remote_upload] To query remote state later, call the MCP `collection_map` tool.")
 
     def _get_temp_bundle_dir(self) -> Path:
         """Get or create temporary directory for bundle creation."""
@@ -510,7 +536,8 @@ class RemoteUploadClient:
                         'workspace_path': self._translate_to_container_path(self.workspace_path),
                         'collection_name': self.collection_name,
                         # CLI is stateless - server handles sequence numbers
-                        'force': 'false'
+                        'force': 'false',
+                        'source_path': self.workspace_path,
                     }
 
                     logger.info(f"[remote_upload] Uploading bundle {manifest['bundle_id']} (size: {bundle_size} bytes)")
@@ -888,6 +915,9 @@ def get_remote_config(cli_path: Optional[str] = None) -> Dict[str, str]:
 
     # Use auto-generated collection name based on repo name
     repo_name = _extract_repo_name_from_path(workspace_path)
+    # Fallback to directory name if repo detection fails
+    if not repo_name:
+        repo_name = Path(workspace_path).name
     collection_name = get_collection_name(repo_name)
 
     return {
@@ -947,6 +977,12 @@ Examples:
         help="Force upload of all files (ignore cached state and treat all files as new)"
     )
 
+    parser.add_argument(
+        "--show-mapping",
+        action="store_true",
+        help="Print collection↔workspace mapping information and exit"
+    )
+
     args = parser.parse_args()
 
     # Validate path if provided
@@ -977,6 +1013,17 @@ Examples:
     logger.info(f"Collection name: {config['collection_name']}")
     logger.info(f"Upload endpoint: {config['upload_endpoint']}")
 
+    if args.show_mapping:
+        with RemoteUploadClient(
+            upload_endpoint=config["upload_endpoint"],
+            workspace_path=config["workspace_path"],
+            collection_name=config["collection_name"],
+            max_retries=config["max_retries"],
+            timeout=config["timeout"],
+        ) as client:
+            client.log_mapping_summary()
+        return 0
+
     # Check if remote mode is enabled
     if not is_remote_mode_enabled():
         logger.error("Remote upload mode is not enabled. Set REMOTE_UPLOAD_ENABLED=1 in environment variables.")
@@ -993,6 +1040,8 @@ Examples:
         ) as client:
 
             logger.info("Remote upload client initialized successfully")
+
+            client.log_mapping_summary()
 
             # Test server connection
             logger.info("Checking server status...")
