@@ -918,7 +918,10 @@ def rewrite_prompt(original_prompt: str, context: str, note: str, max_tokens: Op
                         enhanced += token
                     if chunk.get("stop", False):
                         break
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as e:
+                    # Warn once per malformed line but keep streaming the final output only
+                    sys.stderr.write(f"[WARN] decoder stream JSON decode failed: {str(e)}\n")
+                    sys.stderr.flush()
                     continue
         sys.stdout.write("\n")
         sys.stdout.flush()
