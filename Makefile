@@ -271,3 +271,17 @@ qdrant-prune:
 
 qdrant-index-root:
 	python3 scripts/mcp_router.py --run "reindex repo"
+
+
+# --- ctx CLI helper ---
+# Usage examples (default prints ONLY the improved prompt):
+#   make ctx Q="how does hybrid search work?"
+#   make ctx Q="explain caching" ARGS="--language python --under scripts/"
+# To include Supporting Context:
+#   make ctx Q="explain caching" ARGS="--with-context --limit 2"
+ctx: ## enhance a prompt with repo context: make ctx Q="your question" [ARGS='--language python --under scripts/ --with-context']
+	@if [ -z "$(Q)" ]; then \
+	  echo 'Usage: make ctx Q="your question" [ARGS="--language python --under scripts/ --with-context"]'; \
+	  exit 1; \
+	fi; \
+	python3 scripts/ctx.py "$(Q)" $(ARGS)

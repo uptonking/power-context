@@ -186,6 +186,47 @@ This re-enables the `llamacpp` container and resets `.env` to `http://llamacpp:8
 - llama-model / tokenizer: Fetch tiny GGUF model and tokenizer.json
 - qdrant-status / qdrant-list / qdrant-prune / qdrant-index-root: Convenience wrappers that route through the MCP bridge to inspect or maintain collections
 
+
+### CLI: ctx prompt enhancer
+
+A thin CLI that retrieves code context and rewrites your input into a better, context-aware prompt using the local LLM decoder. By default it prints ONLY the improved prompt.
+
+Examples:
+````bash
+# Default: print only the improved prompt (uses Docker llama.cpp on port 8080)
+scripts/ctx.py "Explain the caching logic to me in detail"
+
+# Via Make target (default improved prompt only)
+make ctx Q="Explain the caching logic to me in detail"
+
+# Filter by language/path or adjust tokens
+make ctx Q="Hybrid search details" ARGS="--language python --under scripts/ --limit 2 --rewrite-max-tokens 200"
+````
+
+GPU Acceleration (Apple Silicon):
+For faster prompt rewriting, use the native Metal-accelerated decoder:
+````bash
+# 1. Set USE_GPU_DECODER=1 in your .env file (already set by default)
+# 2. Start the native llama.cpp server with Metal GPU
+scripts/gpu_toggle.sh start
+
+# Now ctx.py will automatically use the GPU decoder on port 8081
+make ctx Q="Explain the caching logic to me in detail"
+
+# Stop the native GPU server
+scripts/gpu_toggle.sh stop
+
+# To use Docker decoder instead, set USE_GPU_DECODER=0 in .env and restart:
+docker compose up -d llamacpp
+````
+
+Notes:
+- Defaults to the Indexer HTTP RMCP endpoint at http://localhost:8003/mcp (override with MCP_INDEXER_URL)
+- Decoder endpoint: automatically detects GPU mode via USE_GPU_DECODER env var (set by gpu_toggle.sh)
+- Docker decoder (default): http://localhost:8080/completion
+- GPU decoder (after gpu_toggle.sh gpu): http://localhost:8081/completion
+- See also: `make ctx`
+
 ## Index another codebase (outside this repo)
 
 You can index any local folder by mounting it at /work. Three easy ways:
