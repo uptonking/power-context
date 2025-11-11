@@ -5,17 +5,26 @@ import re
 Context-aware prompt enhancer CLI.
 
 Retrieves relevant code context from the Context-Engine MCP server and enhances
-your prompts with it. Perfect for piping to LLMs or getting quick context.
+your prompts with it using a local LLM decoder. Works with both questions and
+commands/instructions. Outputs at least two detailed paragraphs.
 
 Usage:
-  ctx "how does hybrid search work?"
-  ctx --language python "explain the caching logic"
-  ctx --under scripts/ "how is the watcher implemented?"
-  ctx --limit 3 "authentication onboarding flow"
+  ctx "how does hybrid search work?"              # Question → enhanced question
+  ctx "refactor the caching logic"                # Command → enhanced instructions
+  ctx --language python "explain the indexer"     # Filter by language
+  ctx --detail "add error handling to ctx.py"     # Include code snippets
 
 Examples:
-  # Enhance prompt with context
+  # Enhance questions with context
   ctx "how does the indexer work?"
+  # Output: Two detailed question paragraphs with file/line references
+
+  # Enhance commands with specific details
+  ctx "refactor ctx.py to improve modularity"
+  # Output: Two detailed instruction paragraphs with concrete steps
+
+  # Detail mode: include short code snippets (slower but richer)
+  ctx --detail "explain the caching logic"
 
   # Pipe to LLM
   ctx "fix the bug in watcher.py" | llm
@@ -24,9 +33,12 @@ Examples:
   ctx --language python --under scripts/ "caching implementation"
 
 Environment:
-  MCP_INDEXER_URL  - MCP indexer endpoint (default: http://localhost:8003/mcp)
-  CTX_LIMIT        - Default result limit (default: 5)
-  CTX_CONTEXT_LINES - Context lines for snippets (default: 0)
+  MCP_INDEXER_URL       - MCP indexer endpoint (default: http://localhost:8003/mcp)
+  CTX_LIMIT             - Default result limit (default: 5)
+  CTX_CONTEXT_LINES     - Context lines for snippets (default: 0)
+  CTX_REWRITE_MAX_TOKENS - Max tokens for LLM rewrite (default: 320)
+  DECODER_URL           - Override decoder endpoint
+  USE_GPU_DECODER       - Use GPU decoder on port 8081 (default: 0)
 """
 
 import sys
@@ -454,17 +466,26 @@ def build_final_output(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Context-aware prompt enhancer for Context-Engine",
+        description="Context-aware prompt enhancer - rewrites questions and commands with codebase context",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  # Questions: enhanced with specific details
   ctx "how does hybrid search work?"
+
+  # Commands: enhanced with concrete implementation steps
+  ctx "refactor ctx.py to improve modularity"
+
+  # Detail mode: include code snippets (slower but richer)
+  ctx --detail "explain the caching logic"
+
+  # Pipe to LLM or clipboard
   ctx --cmd llm "explain the caching logic"
   ctx --cmd pbcopy --language python "fix bug in watcher"
         """
     )
 
-    parser.add_argument("query", help="Your question or prompt")
+    parser.add_argument("query", help="Your question or command to enhance")
 
     # Command execution
     parser.add_argument("--cmd", "-c", help="Command to pipe enhanced prompt to (e.g., llm, pbcopy)")
@@ -492,7 +513,7 @@ Examples:
 
     # Detail mode
     parser.add_argument("--detail", action="store_true",
-                       help="Include short code snippets in the retrieved context for richer rewrites (slower)")
+                       help="Include short code snippets for richer rewrites (slower but more specific; auto-clamps to limit=4, per_path=1)")
 
     args = parser.parse_args()
 
