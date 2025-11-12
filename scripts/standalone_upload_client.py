@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-Remote upload client for delta bundles in Context-Engine.
+Standalone Remote Upload Client for Context-Engine.
 
-This module provides functionality to create and upload delta bundles to a remote
-server, enabling real-time code synchronization across distributed environments.
+This is a self-contained version of the remote upload client that doesn't require
+the full Context-Engine repository. It includes only the essential functions
+needed for delta bundle creation and upload.
 
 Example usage:
-    export HOST_ROOT="/tmp/testupload" && export CONTAINER_ROOT="/work" && export
-      PYTHONPATH="/home/coder/project/Context-Engine:$PYTHONPATH" && python3
-      scripts/remote_upload_client.py --path /tmp/testupload)
+    python3 standalone_upload_client.py --path /path/to/your/project --server https://your-server.com
 """
 
 import os
@@ -18,7 +17,6 @@ import uuid
 import hashlib
 import tarfile
 import tempfile
-import threading
 import logging
 import argparse
 from pathlib import Path
@@ -32,16 +30,173 @@ from urllib3.util.retry import Retry
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Import existing workspace state functions
-from scripts.workspace_state import (
-    get_cached_file_hash,
-    set_cached_file_hash,
-    get_collection_name,
-    _extract_repo_name_from_path,
-)
+# =============================================================================
+# EMBEDDED DEPENDENCIES (Extracted from Context-Engine)
+# =============================================================================
 
-# Import existing hash function
-import scripts.ingest_code as idx
+# Language detection mapping (from ingest_code.py)
+CODE_EXTS = {
+    ".py": "python",
+    ".js": "javascript",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    ".jsx": "javascript",
+    ".java": "java",
+    ".go": "go",
+    ".rs": "rust",
+    ".rb": "ruby",
+    ".php": "php",
+    ".c": "c",
+    ".h": "c",
+    ".cpp": "cpp",
+    ".cc": "cpp",
+    ".hpp": "cpp",
+    ".cs": "csharp",
+    ".kt": "kotlin",
+    ".swift": "swift",
+    ".scala": "scala",
+    ".sh": "shell",
+    ".ps1": "powershell",
+    ".psm1": "powershell",
+    ".psd1": "powershell",
+    ".sql": "sql",
+    ".md": "markdown",
+    ".yml": "yaml",
+    ".yaml": "yaml",
+    ".toml": "toml",
+    ".ini": "ini",
+    ".cfg": "ini",
+    ".conf": "ini",
+    ".xml": "xml",
+    ".html": "html",
+    ".htm": "html",
+    ".css": "css",
+    ".scss": "scss",
+    ".sass": "sass",
+    ".less": "less",
+    ".json": "json",
+    "Dockerfile": "dockerfile",
+    "Makefile": "makefile",
+    ".tf": "terraform",
+    ".tfvars": "terraform",
+    ".hcl": "terraform",
+    ".vue": "vue",
+    ".svelte": "svelte",
+    ".elm": "elm",
+    ".dart": "dart",
+    ".lua": "lua",
+    ".r": "r",
+    ".R": "r",
+    ".m": "matlab",
+    ".pl": "perl",
+    ".swift": "swift",
+    ".kt": "kotlin",
+    ".cljs": "clojure",
+    ".clj": "clojure",
+    ".hs": "haskell",
+    ".ml": "ocaml",
+    ".zig": "zig",
+    ".nim": "nim",
+    ".v": "verilog",
+    ".sv": "verilog",
+    ".vhdl": "vhdl",
+    ".asm": "assembly",
+    ".s": "assembly",
+    ". Dockerfile": "dockerfile",
+}
+
+def hash_id(text: str, path: str, start: int, end: int) -> str:
+    """Generate hash ID for content (from ingest_code.py)."""
+    h = hashlib.sha1(
+        f"{path}:{start}-{end}\n{text}".encode("utf-8", errors="ignore")
+    ).hexdigest()
+    return h[:16]
+
+def get_collection_name(repo_name: Optional[str] = None) -> str:
+    """Generate collection name with 8-char hash for local workspaces.
+
+    Simplified version from workspace_state.py.
+    """
+    if not repo_name:
+        return "default-collection"
+    hash_obj = hashlib.sha256(repo_name.encode())
+    short_hash = hash_obj.hexdigest()[:8]
+    return f"{repo_name}-{short_hash}"
+
+def _extract_repo_name_from_path(workspace_path: str) -> str:
+    """Extract repository name from workspace path.
+
+    Simplified version from workspace_state.py.
+    """
+    try:
+        path = Path(workspace_path).resolve()
+        # Get the directory name as repo name
+        return path.name
+    except Exception:
+        return "unknown-repo"
+
+# Simple file-based hash cache (simplified from workspace_state.py)
+class SimpleHashCache:
+    """Simple file-based hash cache for tracking file changes."""
+
+    def __init__(self, workspace_path: str, repo_name: str):
+        self.workspace_path = Path(workspace_path).resolve()
+        self.repo_name = repo_name
+        self.cache_dir = self.workspace_path / ".context-engine"
+        self.cache_file = self.cache_dir / "file_cache.json"
+        self.cache_dir.mkdir(exist_ok=True)
+
+    def _load_cache(self) -> Dict[str, str]:
+        """Load cache from disk."""
+        if not self.cache_file.exists():
+            return {}
+        try:
+            with open(self.cache_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                return data.get("file_hashes", {})
+        except Exception:
+            return {}
+
+    def _save_cache(self, file_hashes: Dict[str, str]):
+        """Save cache to disk."""
+        try:
+            data = {
+                "file_hashes": file_hashes,
+                "updated_at": datetime.now().isoformat()
+            }
+            with open(self.cache_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2)
+        except Exception:
+            pass
+
+    def get_hash(self, file_path: str) -> str:
+        """Get cached file hash."""
+        file_hashes = self._load_cache()
+        abs_path = str(Path(file_path).resolve())
+        return file_hashes.get(abs_path, "")
+
+    def set_hash(self, file_path: str, file_hash: str):
+        """Set cached file hash."""
+        file_hashes = self._load_cache()
+        abs_path = str(Path(file_path).resolve())
+        file_hashes[abs_path] = file_hash
+        self._save_cache(file_hashes)
+
+# Create global cache instance (will be initialized in RemoteUploadClient)
+_hash_cache: Optional[SimpleHashCache] = None
+
+def get_cached_file_hash(file_path: str, repo_name: Optional[str] = None) -> str:
+    """Get cached file hash for tracking changes."""
+    global _hash_cache
+    if _hash_cache:
+        return _hash_cache.get_hash(file_path)
+    return ""
+
+def set_cached_file_hash(file_path: str, file_hash: str, repo_name: Optional[str] = None):
+    """Set cached file hash for tracking changes."""
+    global _hash_cache
+    if _hash_cache:
+        _hash_cache.set_hash(file_path, file_hash)
 
 
 class RemoteUploadClient:
@@ -90,13 +245,11 @@ class RemoteUploadClient:
         self.bundle_dir = None  # No persistent bundle directory in CLI mode
 
         # Store repo name for cache operations
-        # Import here to avoid circular imports
-        try:
-            from scripts.workspace_state import _extract_repo_name_from_path
-            self.repo_name = _extract_repo_name_from_path(workspace_path)
-        except ImportError:
-            # Fallback: use directory name as repo name
-            self.repo_name = Path(workspace_path).name
+        self.repo_name = _extract_repo_name_from_path(workspace_path)
+
+        # Initialize hash cache
+        global _hash_cache
+        _hash_cache = SimpleHashCache(workspace_path, self.repo_name)
 
         # Setup HTTP session with retry strategy
         self.session = requests.Session()
@@ -310,7 +463,7 @@ class RemoteUploadClient:
 
                     # Get file info
                     stat = path.stat()
-                    language = idx.CODE_EXTS.get(path.suffix.lower(), "unknown")
+                    language = CODE_EXTS.get(path.suffix.lower(), "unknown")
 
                     operation = {
                         "operation": "created",
@@ -319,7 +472,7 @@ class RemoteUploadClient:
                         "absolute_path": str(path.resolve()),
                         "size_bytes": stat.st_size,
                         "content_hash": content_hash,
-                        "file_hash": f"sha1:{idx.hash_id(content.decode('utf-8', errors='ignore'), rel_path, 1, len(content.splitlines()))}",
+                        "file_hash": f"sha1:{hash_id(content.decode('utf-8', errors='ignore'), rel_path, 1, len(content.splitlines()))}",
                         "modified_time": datetime.fromtimestamp(stat.st_mtime).isoformat(),
                         "language": language
                     }
@@ -348,7 +501,7 @@ class RemoteUploadClient:
 
                     # Get file info
                     stat = path.stat()
-                    language = idx.CODE_EXTS.get(path.suffix.lower(), "unknown")
+                    language = CODE_EXTS.get(path.suffix.lower(), "unknown")
 
                     operation = {
                         "operation": "updated",
@@ -358,7 +511,7 @@ class RemoteUploadClient:
                         "size_bytes": stat.st_size,
                         "content_hash": content_hash,
                         "previous_hash": f"sha1:{previous_hash}" if previous_hash else None,
-                        "file_hash": f"sha1:{idx.hash_id(content.decode('utf-8', errors='ignore'), rel_path, 1, len(content.splitlines()))}",
+                        "file_hash": f"sha1:{hash_id(content.decode('utf-8', errors='ignore'), rel_path, 1, len(content.splitlines()))}",
                         "modified_time": datetime.fromtimestamp(stat.st_mtime).isoformat(),
                         "language": language
                     }
@@ -387,7 +540,7 @@ class RemoteUploadClient:
 
                     # Get file info
                     stat = dest_path.stat()
-                    language = idx.CODE_EXTS.get(dest_path.suffix.lower(), "unknown")
+                    language = CODE_EXTS.get(dest_path.suffix.lower(), "unknown")
 
                     operation = {
                         "operation": "moved",
@@ -792,26 +945,6 @@ class RemoteUploadClient:
             logger.error(f"[remote_upload] Unexpected error in process_changes_and_upload: {e}")
             return False
 
-    def get_all_code_files(self) -> List[Path]:
-        """Get all code files in the workspace."""
-        all_files = []
-        try:
-            workspace_path = Path(self.workspace_path)
-            for ext in idx.CODE_EXTS:
-                all_files.extend(workspace_path.rglob(f"*{ext}"))
-
-            # Filter out directories and hidden files
-            all_files = [
-                f for f in all_files
-                if f.is_file()
-                and not any(part.startswith('.') for part in f.parts)
-                and '.codebase' not in str(f)
-            ]
-        except Exception as e:
-            logger.error(f"[watch] Error scanning files: {e}")
-
-        return all_files
-
     def watch_loop(self, interval: int = 5):
         """Main file watching loop using existing detection and upload methods."""
         logger.info(f"[watch] Starting file monitoring (interval: {interval}s)")
@@ -853,6 +986,26 @@ class RemoteUploadClient:
 
         except KeyboardInterrupt:
             logger.info(f"[watch] File monitoring stopped by user")
+
+    def get_all_code_files(self) -> List[Path]:
+        """Get all code files in the workspace."""
+        all_files = []
+        try:
+            workspace_path = Path(self.workspace_path)
+            for ext in CODE_EXTS:
+                all_files.extend(workspace_path.rglob(f"*{ext}"))
+
+            # Filter out directories and hidden files
+            all_files = [
+                f for f in all_files
+                if f.is_file()
+                and not any(part.startswith('.') for part in f.parts)
+                and '.context-engine' not in str(f)
+            ]
+        except Exception as e:
+            logger.error(f"[watch] Error scanning files: {e}")
+
+        return all_files
 
     def process_and_upload_changes(self, changed_paths: List[Path]) -> bool:
         """
@@ -1006,12 +1159,6 @@ Examples:
 
   # Upload from specific directory with custom endpoint
   python remote_upload_client.py --path /path/to/repo --endpoint http://remote-server:8080
-
-  # Watch for file changes and upload automatically
-  python remote_upload_client.py --path /path/to/repo --watch
-
-  # Watch with custom interval (check every 3 seconds)
-  python remote_upload_client.py --path /path/to/repo --watch --interval 3
         """
     )
 
@@ -1154,6 +1301,7 @@ Examples:
             logger.error(f"Watch mode failed: {e}")
             return 1
 
+    # Single upload mode (original logic)
     # Initialize client with context manager for cleanup
     try:
         with RemoteUploadClient(
