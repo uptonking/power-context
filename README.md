@@ -345,6 +345,8 @@ Indexer/Search MCP (8001 SSE, 8003 RMCP):
 - search_callers_for — intent wrapper for probable callers/usages
 - search_importers_for — intent wrapper for files importing a module/symbol
 - change_history_for_path(path) — summarize recent changes using stored metadata
+- collection_map - return collection↔repo mappings
+- default_collection - set the collection to use for the session
 
 Notes:
 - Most search tools accept filters like language, under, path_glob, kind, symbol, ext.
@@ -502,10 +504,24 @@ For production-grade backup/migration strategies, see the official Qdrant docume
 
 Operational notes:
 - Collection name comes from `COLLECTION_NAME` (see .env). This stack defaults to a single collection for both code and memories; filtering uses `metadata.kind`.
-- If you switch to a dedicated memory collection, update the MCP Memory server and the Indexer’s memory blending env to point at it.
+- If you switch to a dedicated memory collection, update the MCP Memory server and the Indexer's memory blending env to point at it.
 - Consider pruning expired memories by filtering `expires_at < now`.
 
 - Call `context_search` on :8001 (SSE) or :8003 (RMCP) with `{ "include_memories": true }` to return both memory and code results.
+
+### Collection Naming Strategies
+
+Different hash lengths are used for different workspace types:
+
+**Local Workspaces:** `repo-name-8charhash`
+- Example: `Anesidara-e8d0f5fc`
+- Used by local indexer/watcher
+- Assumes unique repo names within workspace
+
+**Remote Uploads:** `folder-name-16charhash-8charhash`
+- Example: `testupload2-04e680d5939dd035-b8b8d4cc`
+- Collision avoidance for duplicate folder names for different codebases
+- 16-char hash identifies workspace, 8-char hash identifies collection
 
 
 ### Enable memory blending (for context_search)
