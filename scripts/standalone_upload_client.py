@@ -214,50 +214,30 @@ class RemoteUploadClient:
             # Fallback: if path doesn't match expected pattern, use as-is
             return host_path
 
-    def __init__(self,
-                 upload_endpoint: str,
-                 workspace_path: str,
-                 collection_name: str,
-                 max_retries: int = 3,
-                 timeout: int = 30,
-                 metadata_path: Optional[str] = None):
-        """
-        Initialize remote upload client.
-
-        Args:
-            upload_endpoint: HTTP endpoint for delta uploads
-            workspace_path: Absolute path to workspace (where files are located)
-            collection_name: Target collection name
-            max_retries: Maximum number of upload retries
-            timeout: Request timeout in seconds
-            metadata_path: Absolute path to metadata directory (for delta bundles)
-                           If None, uses workspace_path/.codebase/delta_bundles
-        """
+    def __init__(self, upload_endpoint: str, workspace_path: str, collection_name: str,
+                 max_retries: int = 3, timeout: int = 30, metadata_path: Optional[str] = None):
+        """Initialize remote upload client."""
         self.upload_endpoint = upload_endpoint.rstrip('/')
         self.workspace_path = workspace_path
         self.collection_name = collection_name
         self.max_retries = max_retries
         self.timeout = timeout
-
-        # Use temporary directory for bundle creation - CLI should be stateless
-        # Temporary bundles are cleaned up after upload
         self.temp_dir = None
-        self.bundle_dir = None  # No persistent bundle directory in CLI mode
 
-        # Store repo name for cache operations
+        # Set environment variables for cache functions
+        os.environ["WORKSPACE_PATH"] = workspace_path
+
+        # Store repo name and initialize hash cache
         self.repo_name = _extract_repo_name_from_path(workspace_path)
-
-        # Initialize hash cache
+        # Fallback to directory name if repo detection fails (for non-git repos)
+        if not self.repo_name:
+            self.repo_name = Path(workspace_path).name
         global _hash_cache
         _hash_cache = SimpleHashCache(workspace_path, self.repo_name)
 
-        # Setup HTTP session with retry strategy
+        # Setup HTTP session with simple retry
         self.session = requests.Session()
-        retry_strategy = Retry(
-            total=max_retries,
-            backoff_factor=1,
-            status_forcelist=[429, 500, 502, 503, 504],
-        )
+        retry_strategy = Retry(total=max_retries, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
         adapter = HTTPAdapter(max_retries=retry_strategy)
         self.session.mount("http://", adapter)
         self.session.mount("https://", adapter)
@@ -297,11 +277,10 @@ class RemoteUploadClient:
         """Log mapping summary for user visibility."""
         info = self.get_mapping_summary()
         logger.info("[remote_upload] Collection mapping:")
-        logger.info(f"  repo_name       : {info['repo_name']}")
-        logger.info(f"  collection_name : {info['collection_name']}")
-        logger.info(f"  source_path     : {info['source_path']}")
-        logger.info(f"  container_path  : {info['container_path']}")
-        logger.info("[remote_upload] To query remote state later, call the MCP `collection_map` tool.")
+        logger.info(f"  repo_name: {info['repo_name']}")
+        logger.info(f"  collection_name: {info['collection_name']}")
+        logger.info(f"  source_path: {info['source_path']}")
+        logger.info(f"  container_path: {info['container_path']}")
 
     def _get_temp_bundle_dir(self) -> Path:
         """Get or create temporary directory for bundle creation."""
@@ -648,37 +627,20 @@ class RemoteUploadClient:
 
         for attempt in range(self.max_retries + 1):
             try:
-                # Calculate backoff delay (exponential with jitter)
+                # Simple exponential backoff
                 if attempt > 0:
-                    base_delay = 2 ** (attempt - 1)  # 1, 2, 4, 8...
-                    jitter = base_delay * 0.1 * (0.5 + (hash(str(time.time())) % 100) / 100)
-                    delay = min(base_delay + jitter, 30)  # Cap at 30 seconds
-                    logger.info(f"[remote_upload] Retry attempt {attempt + 1}/{self.max_retries + 1} after {delay:.2f}s delay")
+                    delay = min(2 ** (attempt - 1), 30)  # 1, 2, 4, 8... capped at 30s
+                    logger.info(f"[remote_upload] Retry attempt {attempt + 1}/{self.max_retries + 1} after {delay}s delay")
                     time.sleep(delay)
 
-                # Verify bundle exists before attempting upload
+                # Verify bundle exists
                 if not os.path.exists(bundle_path):
-                    return {
-                        "success": False,
-                        "error": {
-                            "code": "BUNDLE_NOT_FOUND",
-                            "message": f"Bundle file not found: {bundle_path}"
-                        }
-                    }
+                    return {"success": False, "error": {"code": "BUNDLE_NOT_FOUND", "message": f"Bundle not found: {bundle_path}"}}
 
-                # Check bundle size
+                # Check bundle size (100MB limit)
                 bundle_size = os.path.getsize(bundle_path)
-                max_size_mb = 100  # Default max size
-                max_size_bytes = max_size_mb * 1024 * 1024
-
-                if bundle_size > max_size_bytes:
-                    return {
-                        "success": False,
-                        "error": {
-                            "code": "BUNDLE_TOO_LARGE",
-                            "message": f"Bundle size {bundle_size} bytes exceeds maximum {max_size_bytes} bytes"
-                        }
-                    }
+                if bundle_size > 100 * 1024 * 1024:
+                    return {"success": False, "error": {"code": "BUNDLE_TOO_LARGE", "message": f"Bundle too large: {bundle_size} bytes"}}
 
                 with open(bundle_path, 'rb') as bundle_file:
                     files = {
@@ -706,71 +668,39 @@ class RemoteUploadClient:
                         result = response.json()
                         logger.info(f"[remote_upload] Successfully uploaded bundle {manifest['bundle_id']}")
                         return result
-                    else:
-                        error_msg = f"Upload failed with status {response.status_code}"
-                        try:
-                            error_detail = response.json()
-                            error_detail_msg = error_detail.get('error', {}).get('message', 'Unknown error')
-                            error_msg += f": {error_detail_msg}"
-                            error_code = error_detail.get('error', {}).get('code', 'HTTP_ERROR')
-                        except:
-                            error_msg += f": {response.text[:200]}"  # Truncate long responses
-                            error_code = "HTTP_ERROR"
+                    # Handle error
+                    error_msg = f"Upload failed with status {response.status_code}"
+                    try:
+                        error_detail = response.json()
+                        error_detail_msg = error_detail.get('error', {}).get('message', 'Unknown error')
+                        error_msg += f": {error_detail_msg}"
+                        error_code = error_detail.get('error', {}).get('code', 'HTTP_ERROR')
+                    except:
+                        error_msg += f": {response.text[:200]}"
+                        error_code = "HTTP_ERROR"
 
-                        last_error = {
-                            "success": False,
-                            "error": {
-                                "code": error_code,
-                                "message": error_msg,
-                                "status_code": response.status_code
-                            }
-                        }
+                    last_error = {"success": False, "error": {"code": error_code, "message": error_msg, "status_code": response.status_code}}
 
-                        # Don't retry on client errors (4xx)
-                        if 400 <= response.status_code < 500 and response.status_code != 429:
-                            logger.warning(f"[remote_upload] Client error {response.status_code}, not retrying: {error_msg}")
-                            return last_error
+                    # Don't retry on client errors (except 429)
+                    if 400 <= response.status_code < 500 and response.status_code != 429:
+                        return last_error
 
-                        logger.warning(f"[remote_upload] Upload attempt {attempt + 1} failed: {error_msg}")
+                    logger.warning(f"[remote_upload] Upload attempt {attempt + 1} failed: {error_msg}")
 
             except requests.exceptions.Timeout as e:
-                last_error = {
-                    "success": False,
-                    "error": {
-                        "code": "TIMEOUT_ERROR",
-                        "message": f"Upload timeout after {self.timeout}s: {str(e)}"
-                    }
-                }
+                last_error = {"success": False, "error": {"code": "TIMEOUT_ERROR", "message": f"Upload timeout: {str(e)}"}}
                 logger.warning(f"[remote_upload] Upload timeout on attempt {attempt + 1}: {e}")
 
             except requests.exceptions.ConnectionError as e:
-                last_error = {
-                    "success": False,
-                    "error": {
-                        "code": "CONNECTION_ERROR",
-                        "message": f"Connection error during upload: {str(e)}"
-                    }
-                }
+                last_error = {"success": False, "error": {"code": "CONNECTION_ERROR", "message": f"Connection error: {str(e)}"}}
                 logger.warning(f"[remote_upload] Connection error on attempt {attempt + 1}: {e}")
 
             except requests.exceptions.RequestException as e:
-                last_error = {
-                    "success": False,
-                    "error": {
-                        "code": "NETWORK_ERROR",
-                        "message": f"Network error during upload: {str(e)}"
-                    }
-                }
+                last_error = {"success": False, "error": {"code": "NETWORK_ERROR", "message": f"Network error: {str(e)}"}}
                 logger.warning(f"[remote_upload] Network error on attempt {attempt + 1}: {e}")
 
             except Exception as e:
-                last_error = {
-                    "success": False,
-                    "error": {
-                        "code": "UPLOAD_ERROR",
-                        "message": f"Unexpected error during upload: {str(e)}"
-                    }
-                }
+                last_error = {"success": False, "error": {"code": "UPLOAD_ERROR", "message": f"Upload error: {str(e)}"}}
                 logger.error(f"[remote_upload] Unexpected error on attempt {attempt + 1}: {e}")
 
         # All retries exhausted
@@ -784,82 +714,35 @@ class RemoteUploadClient:
         }
 
     def get_server_status(self) -> Dict[str, Any]:
-        """Get server status and last sequence number with enhanced error handling."""
+        """Get server status with simplified error handling."""
         try:
-            logger.debug(f"[remote_upload] Checking server status at {self.upload_endpoint}")
-
-            # Translate host path to container path for API communication
             container_workspace_path = self._translate_to_container_path(self.workspace_path)
 
             response = self.session.get(
                 f"{self.upload_endpoint}/api/v1/delta/status",
                 params={'workspace_path': container_workspace_path},
-                timeout=min(self.timeout, 10)  # Use shorter timeout for status checks
+                timeout=min(self.timeout, 10)
             )
 
             if response.status_code == 200:
-                status_data = response.json()
-                logger.debug(f"[remote_upload] Server status: {status_data}")
-                return status_data
-            else:
-                error_msg = f"Status check failed with HTTP {response.status_code}"
-                try:
-                    error_detail = response.json()
-                    error_detail_msg = error_detail.get('error', {}).get('message', 'Unknown error')
-                    error_msg += f": {error_detail_msg}"
-                except:
-                    error_msg += f": {response.text[:100]}"
+                return response.json()
 
-                logger.warning(f"[remote_upload] {error_msg}")
-                return {
-                    "success": False,
-                    "error": {
-                        "code": "STATUS_ERROR",
-                        "message": error_msg,
-                        "status_code": response.status_code
-                    }
-                }
+            # Handle error response
+            error_msg = f"Status check failed with HTTP {response.status_code}"
+            try:
+                error_detail = response.json()
+                error_msg += f": {error_detail.get('error', {}).get('message', 'Unknown error')}"
+            except:
+                error_msg += f": {response.text[:100]}"
 
-        except requests.exceptions.Timeout as e:
-            error_msg = f"Status check timeout after {min(self.timeout, 10)}s"
-            logger.warning(f"[remote_upload] {error_msg}: {e}")
-            return {
-                "success": False,
-                "error": {
-                    "code": "STATUS_TIMEOUT",
-                    "message": error_msg
-                }
-            }
-        except requests.exceptions.ConnectionError as e:
-            error_msg = f"Cannot connect to server at {self.upload_endpoint}"
-            logger.warning(f"[remote_upload] {error_msg}: {e}")
-            return {
-                "success": False,
-                "error": {
-                    "code": "CONNECTION_ERROR",
-                    "message": error_msg
-                }
-            }
-        except requests.exceptions.RequestException as e:
-            error_msg = f"Network error during status check: {str(e)}"
-            logger.warning(f"[remote_upload] {error_msg}")
-            return {
-                "success": False,
-                "error": {
-                    "code": "NETWORK_ERROR",
-                    "message": error_msg
-                }
-            }
+            return {"success": False, "error": {"code": "STATUS_ERROR", "message": error_msg}}
+
+        except requests.exceptions.Timeout:
+            return {"success": False, "error": {"code": "STATUS_TIMEOUT", "message": "Status check timeout"}}
+        except requests.exceptions.ConnectionError:
+            return {"success": False, "error": {"code": "CONNECTION_ERROR", "message": f"Cannot connect to server"}}
         except Exception as e:
-            error_msg = f"Unexpected error during status check: {str(e)}"
-            logger.error(f"[remote_upload] {error_msg}")
-            return {
-                "success": False,
-                "error": {
-                    "code": "STATUS_CHECK_ERROR",
-                    "message": error_msg
-                }
-            }
+            return {"success": False, "error": {"code": "STATUS_CHECK_ERROR", "message": f"Status check error: {str(e)}"}}
 
     def has_meaningful_changes(self, changes: Dict[str, List]) -> bool:
         """Check if changes warrant a delta upload."""
