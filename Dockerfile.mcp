@@ -3,10 +3,15 @@ FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    WORK_ROOTS="/work,/app"
+    WORK_ROOTS="/work,/app" \
+    HF_HOME=/tmp/cache \
+    TRANSFORMERS_CACHE=/tmp/cache
 
 # Install latest FastMCP with Streamable HTTP (RMCP) support + deps
 RUN pip install --no-cache-dir --upgrade mcp fastmcp qdrant-client fastembed
+
+# Create cache directory with proper permissions
+RUN mkdir -p /tmp/cache && chmod 755 /tmp/cache
 
 # Bake scripts into image so server can run even when /work points elsewhere
 COPY scripts /app/scripts

@@ -41,8 +41,17 @@ except ImportError:
 logger = logging.getLogger("hybrid_search")
 
 
-def _collection() -> str:
-    return os.environ.get("COLLECTION_NAME", "codebase")
+def _collection(collection_name: str | None = None) -> str:
+    """Determine collection name with priority: CLI arg > env > default."""
+
+    if collection_name and collection_name.strip():
+        return collection_name.strip()
+
+    env_coll = os.environ.get("COLLECTION_NAME", "").strip()
+    if env_coll:
+        return env_coll
+
+    return "my-collection"
 
 
 MODEL_NAME = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
@@ -118,6 +127,29 @@ def _coerce_points(result: Any) -> List[Any]:
         return list(result)
     except TypeError:
         return [result]
+
+
+def _legacy_vector_search(
+    client: QdrantClient,
+    collection: str,
+    vec_name: str,
+    vector: List[float],
+    per_query: int,
+    flt,
+) -> List[Any]:
+    """Fallback to legacy client.search when query_points is unavailable."""
+
+    try:
+        result = client.search(
+            collection_name=collection,
+            query_vector={"name": vec_name, "vector": vector},
+            limit=per_query,
+            with_payload=True,
+            query_filter=flt,
+        )
+        return _coerce_points(getattr(result, "points", result))
+    except Exception:
+        return []
 
 
 def _embed_queries_cached(
@@ -1159,14 +1191,15 @@ def _sanitize_filter_obj(flt):
         return None
 
 
-def lex_query(client: QdrantClient, v: List[float], flt, per_query: int) -> List[Any]:
+def lex_query(client: QdrantClient, v: List[float], flt, per_query: int, collection_name: str | None = None) -> List[Any]:
     ef = max(EF_SEARCH, 32 + 4 * int(per_query))
     flt = _sanitize_filter_obj(flt)
+    collection = _collection(collection_name)
 
     # Prefer modern API; handle kwarg rename between client versions (query_filter -> filter)
     try:
         qp = client.query_points(
-            collection_name=_collection(),
+            collection_name=collection,
             query=v,
             using=LEX_VECTOR_NAME,
             query_filter=flt,
@@ -1180,7 +1213,7 @@ def lex_query(client: QdrantClient, v: List[float], flt, per_query: int) -> List
         if os.environ.get("DEBUG_HYBRID_SEARCH"):
             logger.debug("QP_FILTER_KWARG_SWITCH", extra={"using": LEX_VECTOR_NAME})
         qp = client.query_points(
-            collection_name=_collection(),
+            collection_name=collection,
             query=v,
             using=LEX_VECTOR_NAME,
             filter=flt,
@@ -1189,6 +1222,8 @@ def lex_query(client: QdrantClient, v: List[float], flt, per_query: int) -> List
             with_payload=True,
         )
         return _coerce_points(getattr(qp, "points", qp))
+    except AttributeError:
+        return _legacy_vector_search(client, collection, LEX_VECTOR_NAME, v, per_query, flt)
     except Exception as e:
         # Retry without a filter at all (handles servers that reject certain filter shapes)
         if os.environ.get("DEBUG_HYBRID_SEARCH"):
@@ -1198,7 +1233,7 @@ def lex_query(client: QdrantClient, v: List[float], flt, per_query: int) -> List
                 pass
         try:
             qp = client.query_points(
-                collection_name=_collection(),
+                collection_name=collection,
                 query=v,
                 using=LEX_VECTOR_NAME,
                 query_filter=None,
@@ -1209,7 +1244,7 @@ def lex_query(client: QdrantClient, v: List[float], flt, per_query: int) -> List
             return _coerce_points(getattr(qp, "points", qp))
         except TypeError:
             qp = client.query_points(
-                collection_name=_collection(),
+                collection_name=collection,
                 query=v,
                 using=LEX_VECTOR_NAME,
                 filter=None,
@@ -1224,18 +1259,19 @@ def lex_query(client: QdrantClient, v: List[float], flt, per_query: int) -> List
                     logger.debug("QP_FILTER_DROP_FAILED", extra={"using": LEX_VECTOR_NAME, "reason": str(e2)[:200]})
                 except Exception:
                     pass
-            return []
+        return _legacy_vector_search(client, collection, LEX_VECTOR_NAME, v, per_query, flt)
 
 
 def dense_query(
-    client: QdrantClient, vec_name: str, v: List[float], flt, per_query: int
+    client: QdrantClient, vec_name: str, v: List[float], flt, per_query: int, collection_name: str | None = None
 ) -> List[Any]:
     ef = max(EF_SEARCH, 32 + 4 * int(per_query))
     flt = _sanitize_filter_obj(flt)
+    collection = _collection(collection_name)
 
     try:
         qp = client.query_points(
-            collection_name=_collection(),
+            collection_name=collection,
             query=v,
             using=vec_name,
             query_filter=flt,
@@ -1248,7 +1284,7 @@ def dense_query(
         if os.environ.get("DEBUG_HYBRID_SEARCH"):
             logger.debug("QP_FILTER_KWARG_SWITCH", extra={"using": vec_name})
         qp = client.query_points(
-            collection_name=_collection(),
+            collection_name=collection,
             query=v,
             using=vec_name,
             filter=flt,
@@ -1278,7 +1314,7 @@ def dense_query(
         except TypeError:
             try:
                 qp = client.query_points(
-                    collection_name=_collection(),
+                    collection_name=collection,
                     query=v,
                     using=vec_name,
                     filter=None,
@@ -1293,7 +1329,7 @@ def dense_query(
                         logger.debug("QP_FILTER_DROP_FAILED", extra={"using": vec_name, "reason": str(e2)[:200]})
                     except Exception:
                         pass
-                return []
+        return _legacy_vector_search(client, collection, vec_name, v, per_query, flt)
 
 
 # In-process API: run hybrid search and return structured items list
@@ -1316,6 +1352,7 @@ def run_hybrid_search(
     not_glob: str | list[str] | None = None,
     expand: bool = True,
     model: TextEmbedding | None = None,
+    collection: str | None = None,
 ) -> List[Dict[str, Any]]:
     client = QdrantClient(url=os.environ.get("QDRANT_URL", QDRANT_URL), api_key=API_KEY)
     model_name = os.environ.get("EMBEDDING_MODEL", MODEL_NAME)
@@ -1622,7 +1659,7 @@ def run_hybrid_search(
     score_map: Dict[str, Dict[str, Any]] = {}
     try:
         lex_vec = lex_hash_vector(qlist)
-        lex_results = lex_query(client, lex_vec, flt, max(24, limit))
+        lex_results = lex_query(client, lex_vec, flt, max(24, limit), collection)
     except Exception:
         lex_results = []
 
@@ -1664,7 +1701,7 @@ def run_hybrid_search(
     try:
         if embedded:
             dim = len(embedded[0])
-            _ensure_collection(client, _collection(), dim, vec_name)
+            _ensure_collection(client, _collection(collection), dim, vec_name)
     except Exception:
         pass
     # Optional gate-first using mini vectors to restrict dense search to candidates
@@ -1721,7 +1758,7 @@ def run_hybrid_search(
             # Get top candidates using MINI vectors (fast prefilter)
             candidate_ids = set()
             for mv in mini_queries:
-                mini_results = dense_query(client, MINI_VECTOR_NAME, mv, flt, cand_n)
+                mini_results = dense_query(client, MINI_VECTOR_NAME, mv, flt, cand_n, collection)
                 for result in mini_results:
                     if hasattr(result, 'id'):
                         candidate_ids.add(result.id)
@@ -1775,7 +1812,7 @@ def run_hybrid_search(
     flt_gated = _sanitize_filter_obj(flt_gated)
 
     result_sets: List[List[Any]] = [
-        dense_query(client, vec_name, v, flt_gated, max(24, limit)) for v in embedded
+        dense_query(client, vec_name, v, flt_gated, max(24, limit), collection) for v in embedded
     ]
     if os.environ.get("DEBUG_HYBRID_SEARCH"):
         total_dense_results = sum(len(rs) for rs in result_sets)
@@ -1792,7 +1829,7 @@ def run_hybrid_search(
             try:
                 mini_queries = [_project_mini(list(v), MINI_VEC_DIM) for v in embedded]
                 mini_sets: List[List[Any]] = [
-                    dense_query(client, MINI_VECTOR_NAME, mv, flt, max(24, limit))
+                    dense_query(client, MINI_VECTOR_NAME, mv, flt, max(24, limit), collection)
                     for mv in mini_queries
                 ]
                 for res in mini_sets:
@@ -1947,7 +1984,7 @@ def run_hybrid_search(
             try:
                 lex_vec2 = lex_hash_vector(prf_qs)
                 lex_results2 = lex_query(
-                    client, lex_vec2, flt, max(12, limit // 2 or 6)
+                    client, lex_vec2, flt, max(12, limit // 2 or 6), collection
                 )
             except Exception:
                 lex_results2 = []
@@ -1976,7 +2013,7 @@ def run_hybrid_search(
             try:
                 embedded2 = _embed_queries_cached(_model, prf_qs)
                 result_sets2: List[List[Any]] = [
-                    dense_query(client, vec_name, v, flt, max(12, limit // 2 or 6))
+                    dense_query(client, vec_name, v, flt, max(12, limit // 2 or 6), collection)
                     for v in embedded2
                 ]
                 for res2 in result_sets2:
@@ -2695,6 +2732,8 @@ def main():
     # Structured filters to mirror MCP tool fields
     ap.add_argument("--ext", type=str, default=None)
     ap.add_argument("--not", dest="not_filter", type=str, default=None)
+    ap.add_argument("--collection", type=str, default=None,
+                     help="Target collection name")
     ap.add_argument(
         "--case",
         type=str,
@@ -2707,6 +2746,9 @@ def main():
 
     args = ap.parse_args()
 
+    # Resolve effective collection early to avoid variable usage errors
+    eff_collection = args.collection or os.environ.get("COLLECTION_NAME", "my-collection")
+
     model = TextEmbedding(model_name=MODEL_NAME)
     vec_name = _sanitize_vector_name(MODEL_NAME)
     client = QdrantClient(url=QDRANT_URL, api_key=API_KEY or None)
@@ -2715,7 +2757,7 @@ def main():
     try:
         first_vec = next(model.embed(["__dim__warmup__"]))
         dim = len(first_vec.tolist())
-        _ensure_collection(client, _collection(), dim, vec_name)
+        _ensure_collection(client, _collection(eff_collection), dim, vec_name)
     except Exception:
         pass
 
@@ -2822,7 +2864,7 @@ def main():
     # Server-side lexical vector search (hashing) as an additional ranked list
     try:
         lex_vec = lex_hash_vector(queries)
-        lex_results = lex_query(client, lex_vec, flt, args.per_query)
+        lex_results = lex_query(client, lex_vec, flt, args.per_query, eff_collection)
     except Exception:
         lex_results = []
 
@@ -2874,7 +2916,7 @@ def main():
 
     embedded = _embed_queries_cached(model, queries)
     result_sets: List[List[Any]] = [
-        dense_query(client, vec_name, v, flt, args.per_query) for v in embedded
+        dense_query(client, vec_name, v, flt, args.per_query, eff_collection) for v in embedded
     ]
 
     # RRF fusion (weighted)

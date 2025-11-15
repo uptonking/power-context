@@ -1,0 +1,23 @@
+---
+# Persistent Volume Claim for codebase metadata storage (CephFS RWX)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: upload-codebase-pvc
+  namespace: context-engine
+  labels:
+    app: context-engine
+    component: upload-service
+    type: storage
+spec:
+  accessModes:
+    - ReadWriteMany  # CephFS supports RWX for multiple pods
+  storageClassName: rook-cephfs  # Adjust based on your CephFS storage class
+  resources:
+    requests:
+      storage: 5Gi  # Smaller size for metadata/cache
+  # Optional: selector for specific PV
+  # selector:
+  #   matchLabels:
+  #     app: context-engine
+  #     component: upload-codebase

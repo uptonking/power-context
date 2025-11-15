@@ -17,12 +17,31 @@ class _FastMCP:
             return fn
         return _decorator
 
+class _Context:
+    def __init__(self, *args, **kwargs):
+        self.session = kwargs.get("session")
+
 setattr(fastmcp_pkg, "FastMCP", _FastMCP)
+setattr(fastmcp_pkg, "Context", _Context)
 sys.modules.setdefault("mcp", mcp_pkg)
 sys.modules.setdefault("mcp.server", server_pkg)
 sys.modules.setdefault("mcp.server.fastmcp", fastmcp_pkg)
 
 srv = importlib.import_module("scripts.mcp_indexer_server")
+
+
+def _make_hybrid_stub(fake_run):
+    mod = types.ModuleType("scripts.hybrid_search")
+    mod.run_hybrid_search = fake_run
+    mod.lang_matches_path = lambda path, lang=None: True
+    mod._merge_and_budget_spans = lambda spans, *args, **kwargs: spans
+    mod.TextEmbedding = object
+    mod.QdrantClient = object
+    return mod
+
+
+def _fake_embedding_model(*args, **kwargs):
+    return object()
 
 
 @pytest.mark.service
@@ -58,17 +77,32 @@ async def test_rerank_inproc_changes_order(monkeypatch):
 
     # Patch hybrid and rerank
     monkeypatch.setenv("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
+    monkeypatch.setitem(sys.modules, "scripts.hybrid_search", _make_hybrid_stub(fake_run_hybrid_search))
+    monkeypatch.delitem(sys.modules, "scripts.mcp_indexer_server", raising=False)
+    server = importlib.import_module("scripts.mcp_indexer_server")
     monkeypatch.setattr(
-        importlib.import_module("scripts.hybrid_search"), "run_hybrid_search", fake_run_hybrid_search
+        server,
+        "_get_embedding_model",
+        _fake_embedding_model,
     )
-    monkeypatch.setattr(importlib.import_module("scripts.rerank_local"), "rerank_local", fake_rerank_local)
+    monkeypatch.setattr(
+        server,
+        "run_hybrid_search",
+        fake_run_hybrid_search,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        importlib.import_module("scripts.rerank_local"),
+        "rerank_local",
+        fake_rerank_local,
+    )
 
     # Baseline (rerank disabled) preserves hybrid order A then B
-    base = await srv.repo_search(query="q", limit=2, per_path=2, rerank_enabled=False, compact=True)
+    base = await server.repo_search(query="q", limit=2, per_path=2, rerank_enabled=False, compact=True)
     assert [r["path"] for r in base["results"]] == ["/work/a.py", "/work/b.py"]
 
     # With rerank enabled, order should flip to B then A; counters should show inproc_hybrid
-    rr = await srv.repo_search(query="q", limit=2, per_path=2, rerank_enabled=True, compact=True)
+    rr = await server.repo_search(query="q", limit=2, per_path=2, rerank_enabled=True, compact=True)
     assert rr.get("used_rerank") is True
     assert rr.get("rerank_counters", {}).get("inproc_hybrid", 0) >= 1
     assert [r["path"] for r in rr["results"]] == ["/work/b.py", "/work/a.py"]
@@ -91,12 +125,19 @@ async def test_rerank_subprocess_timeout_fallback(monkeypatch):
         # Simulate subprocess reranker timing out
         return {"ok": False, "code": -1, "stdout": "", "stderr": f"Command timed out after {timeout}s"}
 
+    monkeypatch.setitem(sys.modules, "scripts.hybrid_search", _make_hybrid_stub(fake_run_hybrid_search))
+    monkeypatch.delitem(sys.modules, "scripts.mcp_indexer_server", raising=False)
+    server = importlib.import_module("scripts.mcp_indexer_server")
     monkeypatch.setattr(
-        importlib.import_module("scripts.hybrid_search"), "run_hybrid_search", fake_run_hybrid_search
+        server,
+        "run_hybrid_search",
+        fake_run_hybrid_search,
+        raising=False,
     )
-    monkeypatch.setattr(srv, "_run_async", fake_run_async)
+    monkeypatch.setattr(server, "_get_embedding_model", _fake_embedding_model)
+    monkeypatch.setattr(server, "_run_async", fake_run_async)
 
-    rr = await srv.repo_search(query="q", limit=2, per_path=2, rerank_enabled=True, compact=True)
+    rr = await server.repo_search(query="q", limit=2, per_path=2, rerank_enabled=True, compact=True)
     # Fallback should keep original order from hybrid; timeout counter incremented
     assert rr.get("used_rerank") is False
     assert rr.get("rerank_counters", {}).get("timeout", 0) >= 1

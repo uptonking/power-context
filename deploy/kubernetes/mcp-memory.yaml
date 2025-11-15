@@ -1,5 +1,5 @@
 ---
-# MCP Memory Deployment
+# MCP Memory Server (SSE) Deployment
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -21,10 +21,9 @@ spec:
         component: mcp-memory
     spec:
       serviceAccountName: context-engine
-
       containers:
       - name: mcp-memory
-        image: context-engine:latest
+        image: context-engine-memory
         imagePullPolicy: IfNotPresent
         command: ["python", "/app/scripts/mcp_memory_server.py"]
         ports:
@@ -47,6 +46,8 @@ spec:
               key: FASTMCP_PORT
         - name: FASTMCP_HEALTH_PORT
           value: "18000"
+        - name: FASTMCP_TRANSPORT
+          value: "sse"
         - name: QDRANT_URL
           valueFrom:
             configMapKeyRef:
@@ -62,11 +63,6 @@ spec:
             configMapKeyRef:
               name: context-engine-config
               key: EMBEDDING_MODEL
-        - name: EMBEDDING_PROVIDER
-          valueFrom:
-            configMapKeyRef:
-              name: context-engine-config
-              key: EMBEDDING_PROVIDER
         resources:
           requests:
             memory: "1Gi"
@@ -75,7 +71,7 @@ spec:
             memory: "4Gi"
             cpu: "2"
         volumeMounts:
-        - name: work
+        - name: work-volume
           mountPath: /work
           readOnly: true
         livenessProbe:
@@ -91,13 +87,12 @@ spec:
           initialDelaySeconds: 10
           periodSeconds: 5
       volumes:
-      - name: work
-        hostPath:
-          path: /tmp/context-engine-work
-          type: DirectoryOrCreate
+      - name: work-volume
+        persistentVolumeClaim:
+          claimName: code-repos-pvc
 
 ---
-# MCP Memory Service
+# MCP Memory Server (SSE) Service
 apiVersion: v1
 kind: Service
 metadata:
@@ -107,15 +102,17 @@ metadata:
     app: context-engine
     component: mcp-memory
 spec:
-  type: ClusterIP
+  type: NodePort  # Change to LoadBalancer for external access
   ports:
   - name: sse
     port: 8000
     targetPort: sse
+    nodePort: 30800  # Optional: specify node port
     protocol: TCP
   - name: health
     port: 18000
     targetPort: health
+    nodePort: 30801  # Optional: specify node port
     protocol: TCP
   selector:
     app: context-engine

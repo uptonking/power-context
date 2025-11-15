@@ -12,6 +12,7 @@ resources:
 
   # Core services
   - qdrant.yaml
+  - code-models-pvc.yaml
 
   # MCP servers
   - mcp-memory.yaml
@@ -22,20 +23,17 @@ resources:
   - indexer-services.yaml
   - rbac.yaml
   - networkpolicy.yaml
-
   - hpa.yaml
-
 
   # Optional services
   - llamacpp.yaml
   - ingress.yaml
 
 # Common labels
-labels:
-  - pairs:
-      app.kubernetes.io/name: context-engine
-      app.kubernetes.io/component: kubernetes-deployment
-      app.kubernetes.io/managed-by: kustomize
+commonLabels:
+  app.kubernetes.io/name: context-engine
+  app.kubernetes.io/component: kubernetes-deployment
+  app.kubernetes.io/managed-by: kustomize
 
 # Patches for production customization
 patchesStrategicMerge: []
@@ -81,4 +79,3 @@ patches:
     target:
       kind: Deployment
       name: mcp-memory
-

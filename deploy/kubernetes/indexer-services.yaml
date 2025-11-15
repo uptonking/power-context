@@ -1,5 +1,5 @@
 ---
-# Watcher Deployment (File change monitoring and reindexing)
+# Indexer Service Deployment (file change monitoring and reindexing)
 # This is a template - copy and customize for each repository
 apiVersion: apps/v1
 kind: Deployment
@@ -8,24 +8,23 @@ metadata:
   namespace: context-engine
   labels:
     app: context-engine
-    component: watcher
+    component: indexer-service
 spec:
   replicas: 1
   selector:
     matchLabels:
       app: context-engine
-      component: watcher
+      component: indexer-service
   template:
     metadata:
       labels:
         app: context-engine
-        component: watcher
+        component: indexer-service
     spec:
       serviceAccountName: context-engine
-
       containers:
       - name: watcher
-        image: context-engine:latest
+        image: context-engine-indexer-service
         imagePullPolicy: IfNotPresent
         command: ["python", "/app/scripts/watch_index.py"]
         workingDir: /work
@@ -78,15 +77,20 @@ spec:
             cpu: "250m"
           limits:
             memory: "2Gi"
-            cpu: "1"
+            cpu: "1000m"
         volumeMounts:
-        - name: work
+        - name: work-volume
           mountPath: /work
+          readOnly: true
+        - name: metadata-volume
+          mountPath: /work/.codebase
       volumes:
-      - name: work
-        hostPath:
-          path: /tmp/context-engine-work
-          type: DirectoryOrCreate
+      - name: work-volume
+        persistentVolumeClaim:
+          claimName: code-repos-pvc
+      - name: metadata-volume
+        persistentVolumeClaim:
+          claimName: code-metadata-pvc
 
 ---
 # Indexer Job (One-shot code indexing)
@@ -109,7 +113,7 @@ spec:
       restartPolicy: OnFailure
       containers:
       - name: indexer
-        image: context-engine:latest
+        image: context-engine-indexer-service
         imagePullPolicy: IfNotPresent
         command: ["python", "/app/scripts/ingest_code.py"]
         workingDir: /work
@@ -135,16 +139,20 @@ spec:
             cpu: "500m"
           limits:
             memory: "4Gi"
-            cpu: "2"
+            cpu: "2000m"
         volumeMounts:
-        - name: work
+        - name: work-volume
           mountPath: /work
           readOnly: true
+        - name: metadata-volume
+          mountPath: /work/.codebase
       volumes:
-      - name: work
-        hostPath:
-          path: /tmp/context-engine-work
-          type: DirectoryOrCreate
+      - name: work-volume
+        persistentVolumeClaim:
+          claimName: code-repos-pvc
+      - name: metadata-volume
+        persistentVolumeClaim:
+          claimName: code-metadata-pvc
 
 ---
 # Index Initialization Job
@@ -167,7 +175,7 @@ spec:
       restartPolicy: OnFailure
       containers:
       - name: init-payload
-        image: context-engine:latest
+        image: context-engine-indexer-service
         imagePullPolicy: IfNotPresent
         command: ["python", "/app/scripts/create_indexes.py"]
         workingDir: /work
@@ -190,12 +198,15 @@ spec:
             memory: "1Gi"
             cpu: "500m"
         volumeMounts:
-        - name: work
+        - name: work-volume
           mountPath: /work
           readOnly: true
+        - name: metadata-volume
+          mountPath: /work/.codebase
       volumes:
-      - name: work
-        hostPath:
-          path: /tmp/context-engine-work
-          type: DirectoryOrCreate
-
+      - name: work-volume
+        persistentVolumeClaim:
+          claimName: code-repos-pvc
+      - name: metadata-volume
+        persistentVolumeClaim:
+          claimName: code-metadata-pvc

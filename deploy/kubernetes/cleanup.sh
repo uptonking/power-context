@@ -48,60 +48,150 @@ check_kubectl() {
     log_success "Kubernetes connection verified"
 }
 
-# Confirm cleanup
-confirm_cleanup() {
-    if [[ "$FORCE" != "true" ]]; then
-        log_warning "This will delete all Context-Engine resources in namespace: $NAMESPACE"
-        read -p "Are you sure you want to continue? (yes/no): " -r
+# Check if namespace exists
+check_namespace() {
+    if ! kubectl get namespace $NAMESPACE &> /dev/null; then
+        log_warning "Namespace $NAMESPACE does not exist"
+        return 1
+    fi
+    return 0
+}
+
+# Show what will be deleted
+show_deletion_plan() {
+    log_info "The following resources will be deleted:"
+    echo
+
+    # Show current resources
+    echo "Pods:"
+    kubectl get pods -n $NAMESPACE 2>/dev/null || echo "  No pods found"
+    echo
+    echo "Services:"
+    kubectl get services -n $NAMESPACE 2>/dev/null || echo "  No services found"
+    echo
+    echo "Deployments:"
+    kubectl get deployments -n $NAMESPACE 2>/dev/null || echo "  No deployments found"
+    echo
+    echo "StatefulSets:"
+    kubectl get statefulsets -n $NAMESPACE 2>/dev/null || echo "  No statefulsets found"
+    echo
+    echo "Jobs:"
+    kubectl get jobs -n $NAMESPACE 2>/dev/null || echo "  No jobs found"
+    echo
+    echo "PersistentVolumeClaims:"
+    kubectl get pvc -n $NAMESPACE 2>/dev/null || echo "  No PVCs found"
+    echo
+    echo "ConfigMaps:"
+    kubectl get configmaps -n $NAMESPACE 2>/dev/null || echo "  No configmaps found"
+    echo
+    if kubectl get ingress -n $NAMESPACE &> /dev/null; then
+        echo "Ingress:"
+        kubectl get ingress -n $NAMESPACE
         echo
-        if [[ ! $REPLY =~ ^[Yy][Ee][Ss]$ ]]; then
-            log_info "Cleanup cancelled"
-            exit 0
-        fi
+    fi
+
+    log_warning "This will permanently delete all data in Qdrant and any other persistent storage!"
+}
+
+confirm_cleanup() {
+    if [[ "$FORCE" == "true" ]]; then
+        return 0
+    fi
+    read -p "Are you sure you want to delete all Context-Engine resources? (yes/no): " -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy][Ee][Ss]$ ]]; then
+        log_info "Cleanup cancelled"
+        exit 0
     fi
 }
 
-# Delete resources
-cleanup_resources() {
-    log_info "Cleaning up Context-Engine resources..."
+# Delete namespace and all resources
+delete_namespace() {
+    log_info "Deleting namespace: $NAMESPACE"
+    kubectl delete namespace $NAMESPACE --ignore-not-found=true
+    log_success "Namespace deleted"
+}
 
-    # Delete deployments
-    log_info "Deleting deployments..."
-    kubectl delete deployment --all -n $NAMESPACE --ignore-not-found=true
+# Wait for namespace deletion
+wait_for_deletion() {
+    log_info "Waiting for namespace deletion to complete..."
 
-    # Delete statefulsets
-    log_info "Deleting statefulsets..."
-    kubectl delete statefulset --all -n $NAMESPACE --ignore-not-found=true
+    local timeout=60
+    local count=0
 
-    # Delete jobs
-    log_info "Deleting jobs..."
-    kubectl delete job --all -n $NAMESPACE --ignore-not-found=true
+    while kubectl get namespace $NAMESPACE &> /dev/null; do
+        if [[ $count -ge $timeout ]]; then
+            log_warning "Namespace deletion is taking longer than expected"
+            log_info "You may need to manually delete remaining resources"
+            return 1
+        fi
 
-    # Delete services
-    log_info "Deleting services..."
-    kubectl delete service --all -n $NAMESPACE --ignore-not-found=true
+        echo -n "."
+        sleep 1
+        ((count++))
+    done
 
-    # Delete ingress
-    log_info "Deleting ingress..."
-    kubectl delete ingress --all -n $NAMESPACE --ignore-not-found=true
+    echo
+    log_success "Namespace deletion completed"
+}
 
-    # Delete configmaps
-    log_info "Deleting configmaps..."
-    kubectl delete configmap --all -n $NAMESPACE --ignore-not-found=true
+# Force delete if needed
+force_delete() {
+    log_warning "Attempting to force delete remaining resources..."
 
-    # Delete secrets
-    log_info "Deleting secrets..."
-    kubectl delete secret --all -n $NAMESPACE --ignore-not-found=true
+    # Force delete any remaining pods
+    kubectl delete pods --all -n $NAMESPACE --grace-period=0 --force 2>/dev/null || true
 
-    # Delete PVCs
-    log_info "Deleting persistent volume claims..."
-    kubectl delete pvc --all -n $NAMESPACE --ignore-not-found=true
+    # Force delete any remaining PVCs
+    kubectl delete pvc --all -n $NAMESPACE --grace-period=0 --force 2>/dev/null || true
+
+    log_success "Force delete completed"
+}
+
+# Verify cleanup
+verify_cleanup() {
+    log_info "Verifying cleanup..."
+
+    if kubectl get namespace $NAMESPACE &> /dev/null; then
+        log_error "Namespace $NAMESPACE still exists"
+        return 1
+    fi
+
+    log_success "Cleanup completed successfully"
+}
+
+# Main cleanup function
+main() {
+    log_info "Starting Context-Engine Kubernetes cleanup"
+
+    # Check prerequisites
+    check_kubectl
+
+    # Check if namespace exists
+    if ! check_namespace; then
+        log_success "Nothing to clean up - namespace $NAMESPACE does not exist"
+        exit 0
+    fi
+
+    # Show what will be deleted
+    show_deletion_plan
+
+    # Ask for confirmation (unless forced)
+    confirm_cleanup
 
     # Delete namespace
-    log_info "Deleting namespace..."
-    kubectl delete namespace $NAMESPACE --ignore-not-found=true
+    delete_namespace
 
-    log_success "Cleanup complete!"
+    # Wait for deletion
+    if ! wait_for_deletion; then
+        log_warning "Standard deletion incomplete, attempting force delete..."
+        force_delete
+    fi
+
+    # Verify cleanup
+    verify_cleanup
+
+    log_success "Context-Engine cleanup completed!"
 }
 
 # Help function
@@ -111,14 +201,17 @@ show_help() {
     echo "Usage: $0 [OPTIONS]"
     echo
     echo "Options:"
-    echo "  -h, --help                Show this help message"
-    echo "  --namespace NAMESPACE     Kubernetes namespace (default: context-engine)"
-    echo "  --force                   Skip confirmation prompt"
+    echo "  -h, --help                    Show this help message"
+    echo "  -n, --namespace NAMESPACE     Kubernetes namespace (default: context-engine)"
+    echo "  -f, --force                   Skip confirmation prompt"
+    echo
+    echo "Environment variables:"
+    echo "  NAMESPACE=context-engine      Kubernetes namespace"
     echo
     echo "Examples:"
-    echo "  $0                        # Interactive cleanup"
-    echo "  $0 --force                # Force cleanup without confirmation"
-    echo "  $0 --namespace my-ns      # Cleanup specific namespace"
+    echo "  $0                            # Interactive cleanup with confirmation"
+    echo "  $0 --force                    # Cleanup without confirmation"
+    echo "  $0 -n my-namespace            # Cleanup different namespace"
 }
 
 # Parse command line arguments
@@ -128,11 +221,11 @@ while [[ $# -gt 0 ]]; do
             show_help
             exit 0
             ;;
-        --namespace)
+        -n|--namespace)
             NAMESPACE="$2"
             shift 2
             ;;
-        --force)
+        -f|--force|--force=true)
             FORCE=true
             shift
             ;;
@@ -144,20 +237,11 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Main cleanup function
-main() {
-    log_info "Starting Context-Engine Kubernetes cleanup"
-
-    # Check prerequisites
-    check_kubectl
-
-    # Confirm cleanup
-    confirm_cleanup
-
-    # Cleanup resources
-    cleanup_resources
-}
+# Check if we're in the right directory
+if [[ ! -f "qdrant.yaml" ]]; then
+    log_error "Please run this script from the deploy/kubernetes directory"
+    exit 1
+fi
 
 # Run main cleanup
 main
-

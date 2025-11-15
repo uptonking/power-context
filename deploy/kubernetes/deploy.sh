@@ -7,8 +7,9 @@ set -e
 
 # Configuration
 NAMESPACE="context-engine"
-IMAGE_REGISTRY="context-engine"
+IMAGE_REGISTRY="context-engine"  # Change to your registry if needed
 IMAGE_TAG="latest"
+USE_KUSTOMIZE=${USE_KUSTOMIZE:-"false"}
 
 # Colors for output
 RED='\033[0;31m'
@@ -73,7 +74,7 @@ deploy_core() {
 
     # Wait for Qdrant to be ready
     log_info "Waiting for Qdrant to be ready..."
-    kubectl wait --for=condition=ready pod -l component=qdrant -n $NAMESPACE --timeout=300s || log_warning "Qdrant may not be ready yet"
+    kubectl wait --for=condition=ready pod -l component=qdrant -n "$NAMESPACE" --timeout=300s
 
     log_success "Core services deployed"
 }
@@ -88,8 +89,8 @@ deploy_mcp_servers() {
 
     # Wait for MCP servers to be ready
     log_info "Waiting for MCP servers to be ready..."
-    kubectl wait --for=condition=ready pod -l component=mcp-memory -n $NAMESPACE --timeout=300s || log_warning "MCP Memory may not be ready yet"
-    kubectl wait --for=condition=ready pod -l component=mcp-indexer -n $NAMESPACE --timeout=300s || log_warning "MCP Indexer may not be ready yet"
+    kubectl wait --for=condition=ready pod -l component=mcp-memory -n "$NAMESPACE" --timeout=300s
+    kubectl wait --for=condition=ready pod -l component=mcp-indexer -n "$NAMESPACE" --timeout=300s
 
     log_success "MCP servers deployed"
 }
@@ -99,9 +100,9 @@ deploy_http_servers() {
     log_info "Deploying HTTP servers (optional)"
     kubectl apply -f mcp-http.yaml
 
-    # Wait for HTTP servers to be ready
-    kubectl wait --for=condition=ready pod -l component=mcp-memory-http -n $NAMESPACE --timeout=300s || log_warning "MCP Memory HTTP may not be ready yet"
-    kubectl wait --for=condition=ready pod -l component=mcp-indexer-http -n $NAMESPACE --timeout=300s || log_warning "MCP Indexer HTTP may not be ready yet"
+    log_info "Waiting for HTTP servers to be ready..."
+    kubectl wait --for=condition=ready pod -l component=mcp-memory-http -n "$NAMESPACE" --timeout=300s
+    kubectl wait --for=condition=ready pod -l component=mcp-indexer-http -n "$NAMESPACE" --timeout=300s
 
     log_success "HTTP servers deployed"
 }
@@ -132,7 +133,7 @@ deploy_ingress() {
         kubectl apply -f ingress.yaml
         log_success "Ingress deployed"
     else
-        log_warning "Skipping Ingress deployment (set --deploy-ingress to enable)"
+        log_warning "Skipping Ingress deployment (set DEPLOY_INGRESS=true or pass --deploy-ingress to enable)"
     fi
 }
 
@@ -148,6 +149,9 @@ show_status() {
     echo "Services:"
     kubectl get services -n $NAMESPACE
     echo
+    echo "Persistent Volumes:"
+    kubectl get pvc -n $NAMESPACE || echo "No PVCs found"
+    echo
 
     log_success "Deployment complete!"
     echo
@@ -161,7 +165,6 @@ show_status() {
         echo "  Llama.cpp: http://<node-ip>:30808"
     fi
 }
-
 
 # Patch images to the chosen registry:tag and refresh jobs
 set_images() {
@@ -233,7 +236,6 @@ apply_with_kustomize() {
   # Clean up temp dir
   rm -rf "${tmp_dir}"
 }
-
 
 # Main deployment function
 main() {
@@ -329,6 +331,4 @@ if [[ ! -f "qdrant.yaml" ]]; then
     exit 1
 fi
 
-# Run main deployment
 main
-

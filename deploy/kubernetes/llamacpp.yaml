@@ -1,5 +1,5 @@
 ---
-# Llama.cpp Deployment (Optional - for text generation)
+# Optional Llama.cpp Service (Text Generation)
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -9,7 +9,7 @@ metadata:
     app: context-engine
     component: llamacpp
 spec:
-  replicas: 1
+  replicas: 1  # Set to 0 if not needed
   selector:
     matchLabels:
       app: context-engine
@@ -86,26 +86,33 @@ spec:
         - name: http
           containerPort: 8080
           protocol: TCP
-        command:
-          - /app/llama-server
+        env:
+        - name: LLAMA_ARG_MODEL
+          value: "/models/model.gguf"
+        - name: LLAMA_ARG_CTX_SIZE
+          value: "8192"
+        - name: LLAMA_ARG_HOST
+          value: "0.0.0.0"
+        - name: LLAMA_ARG_PORT
+          value: "8080"
+        command: ["llama-server"]
         args:
-          - --host
-          - "0.0.0.0"
-          - --port
-          - "8080"
-          - --model
-          - /models/qwen2.5-1.5b-instruct-q8_0.gguf
-          - --ctx-size
-          - "4096"
-          - --n-gpu-layers
-          - "0"
+        - "--model"
+        - "/models/model.gguf"
+        - "--host"
+        - "0.0.0.0"
+        - "--port"
+        - "8080"
+        - "--ctx-size"
+        - "8192"
+        - "--no-warmup"
         resources:
           requests:
             memory: "2Gi"
-            cpu: "1"
+            cpu: "1000m"
           limits:
             memory: "8Gi"
-            cpu: "4"
+            cpu: "4000m"
         volumeMounts:
         - name: models
           mountPath: /models
@@ -115,18 +122,19 @@ spec:
             path: /health
             port: http
           initialDelaySeconds: 60
-          periodSeconds: 10
+          periodSeconds: 30
+          timeoutSeconds: 10
         readinessProbe:
           httpGet:
             path: /health
             port: http
           initialDelaySeconds: 30
-          periodSeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 5
       volumes:
       - name: models
-        hostPath:
-          path: /tmp/context-engine-models
-          type: DirectoryOrCreate
+        persistentVolumeClaim:
+          claimName: code-models-pvc
 
 ---
 # Llama.cpp Service
@@ -139,16 +147,16 @@ metadata:
     app: context-engine
     component: llamacpp
 spec:
-  type: ClusterIP
+  type: NodePort  # Change to LoadBalancer for external access
   ports:
   - name: http
     port: 8080
     targetPort: http
+    nodePort: 30808  # Optional: specify node port
     protocol: TCP
   selector:
     app: context-engine
     component: llamacpp
-
 ---
 # Optional: Llama.cpp External Service
 apiVersion: v1
@@ -170,4 +178,3 @@ spec:
   selector:
     app: context-engine
     component: llamacpp
-

@@ -1,5 +1,5 @@
 ---
-# Ingress for Context-Engine services
+# Ingress for Context-Engine services (optional)
 # Requires an Ingress controller (e.g., nginx-ingress, traefik)
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -8,15 +8,14 @@ metadata:
   namespace: context-engine
   labels:
     app: context-engine
+    component: ingress
   annotations:
-    # Nginx Ingress annotations
     nginx.ingress.kubernetes.io/use-regex: "true"
     nginx.ingress.kubernetes.io/rewrite-target: /$2
-    nginx.ingress.kubernetes.io/ssl-redirect: "true"
-    # Increase timeouts for SSE connections
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
-    # Enable CORS if needed
     # nginx.ingress.kubernetes.io/enable-cors: "true"
     # nginx.ingress.kubernetes.io/cors-allow-origin: "*"
 spec:
@@ -25,7 +24,6 @@ spec:
   - host: context-engine.example.com  # Change to your domain
     http:
       paths:
-      # Qdrant
       - path: /qdrant(/|$)(.*)
         pathType: ImplementationSpecific
         backend:
@@ -33,8 +31,6 @@ spec:
             name: qdrant
             port:
               number: 6333
-      
-      # MCP Memory (SSE)
       - path: /mcp/memory(/|$)(.*)
         pathType: ImplementationSpecific
         backend:
@@ -42,8 +38,6 @@ spec:
             name: mcp-memory
             port:
               number: 8000
-      
-      # MCP Indexer (SSE)
       - path: /mcp/indexer(/|$)(.*)
         pathType: ImplementationSpecific
         backend:
@@ -51,8 +45,6 @@ spec:
             name: mcp-indexer
             port:
               number: 8001
-      
-      # MCP Memory HTTP
       - path: /mcp-http/memory(/|$)(.*)
         pathType: ImplementationSpecific
         backend:
@@ -60,8 +52,6 @@ spec:
             name: mcp-memory-http
             port:
               number: 8002
-      
-      # MCP Indexer HTTP
       - path: /mcp-http/indexer(/|$)(.*)
         pathType: ImplementationSpecific
         backend:
@@ -69,8 +59,6 @@ spec:
             name: mcp-indexer-http
             port:
               number: 8003
-      
-      # Llama.cpp (optional)
       - path: /llamacpp(/|$)(.*)
         pathType: ImplementationSpecific
         backend:
@@ -78,10 +66,9 @@ spec:
             name: llamacpp
             port:
               number: 8080
-  
+
   # TLS configuration (optional)
   # tls:
   # - hosts:
   #   - context-engine.example.com
   #   secretName: context-engine-tls
-

@@ -3,7 +3,7 @@ import os
 import time
 import threading
 from pathlib import Path
-from typing import Set
+from typing import Optional, Set
 
 from qdrant_client import QdrantClient, models
 from fastembed import TextEmbedding
@@ -20,26 +20,70 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from scripts.workspace_state import (
-    get_workspace_state,
-    update_indexing_status,
-    update_last_activity,
-    update_workspace_state,
+    _extract_repo_name_from_path,
+    get_collection_name,
+    _get_global_state_dir,
+    is_multi_repo_mode,
     get_cached_file_hash,
     set_cached_file_hash,
     remove_cached_file,
+    update_indexing_status,
+    update_workspace_state,
 )
 import hashlib
 from datetime import datetime
 
 import scripts.ingest_code as idx
+from scripts.logger import get_logger
+
+
+try:
+    logger = get_logger(__name__)
+except Exception:  # pragma: no cover - fallback for logger import issues
+    import logging
+
+    logger = logging.getLogger(__name__)
 
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
-COLLECTION = os.environ.get("COLLECTION_NAME", "codebase")
 MODEL = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
 ROOT = Path(os.environ.get("WATCH_ROOT", "/work")).resolve()
 
+# Back-compat: legacy modules/tests expect a module-level COLLECTION constant.
+# It will be updated in main() once the resolved collection is known.
+COLLECTION = os.environ.get("COLLECTION_NAME", "my-collection")
+
 # Debounce interval
 DELAY_SECS = float(os.environ.get("WATCH_DEBOUNCE_SECS", "1.0"))
+
+
+def _detect_repo_for_file(file_path: Path) -> Optional[Path]:
+    """Detect repository root for a file under WATCH root."""
+    try:
+        rel_path = file_path.resolve().relative_to(ROOT.resolve())
+    except Exception:
+        return None
+    if not rel_path.parts:
+        return ROOT
+    return ROOT / rel_path.parts[0]
+
+
+def _get_collection_for_repo(repo_path: Path) -> str:
+    try:
+        repo_name = _extract_repo_name_from_path(str(repo_path))
+        if repo_name:
+            return get_collection_name(repo_name)
+    except Exception:
+        pass
+    return os.environ.get("COLLECTION_NAME", "my-collection")
+
+
+def _get_collection_for_file(file_path: Path) -> str:
+    if not is_multi_repo_mode():
+        return os.environ.get("COLLECTION_NAME", "my-collection")
+    repo_path = _detect_repo_for_file(file_path)
+    if repo_path is not None:
+        return _get_collection_for_repo(repo_path)
+    return os.environ.get("COLLECTION_NAME", "my-collection")
 
 
 class ChangeQueue:
@@ -59,7 +103,10 @@ class ChangeQueue:
                 try:
                     self._timer.cancel()
                 except Exception as e:
-                    logger.error(f"Failed to cancel timer in ChangeQueue.add: {e}")
+                    logger.error(
+                        "Failed to cancel timer in ChangeQueue.add",
+                        extra={"error": str(e)},
+                    )
             self._timer = threading.Timer(DELAY_SECS, self._flush)
             self._timer.daemon = True
             self._timer.start()
@@ -88,9 +135,10 @@ class ChangeQueue:
                 except Exception as e:
                     try:
                         print(f"[watcher_error] processing batch failed: {e}")
-                    except Exception as inner_e:
+                    except Exception as inner_e:  # pragma: no cover - logging fallback
                         logger.error(
-                            f"Exception in ChangeQueue._flush during batch processing: {inner_e}"
+                            "Exception in ChangeQueue._flush during batch processing",
+                            extra={"error": str(inner_e)},
                         )
                 # drain any pending accumulated during processing
                 with self._lock:
@@ -104,25 +152,40 @@ class ChangeQueue:
 
 class IndexHandler(FileSystemEventHandler):
     def __init__(
-        self, root: Path, queue: ChangeQueue, client: QdrantClient, collection: str
+        self,
+        root: Path,
+        queue: ChangeQueue,
+        client: Optional[QdrantClient],
+        default_collection: Optional[str] = None,
+        *,
+        collection: Optional[str] = None,
     ):
         super().__init__()
         self.root = root
         self.queue = queue
         self.client = client
-        self.collection = collection
+        resolved_collection = collection if collection is not None else default_collection
+        self.default_collection = resolved_collection
+        self.collection = resolved_collection
         self.excl = idx._Excluder(root)
         # Track ignore file for live reloads
         try:
             ig_name = os.environ.get("QDRANT_IGNORE_FILE", ".qdrantignore")
             self._ignore_path = (self.root / ig_name).resolve()
-        except Exception:
+        except (OSError, ValueError) as e:
+            try:
+                print(f"[ignore_file] Could not resolve ignore file path: {e}")
+            except Exception:
+                pass
             self._ignore_path = None
-        self._ignore_mtime = (
-            self._ignore_path.stat().st_mtime
-            if self._ignore_path and self._ignore_path.exists()
-            else 0.0
-        )
+        try:
+            self._ignore_mtime = (
+                self._ignore_path.stat().st_mtime
+                if self._ignore_path and self._ignore_path.exists()
+                else 0.0
+            )
+        except Exception:
+            self._ignore_mtime = 0.0
 
     def _maybe_reload_excluder(self):
         try:
@@ -146,7 +209,6 @@ class IndexHandler(FileSystemEventHandler):
         self._maybe_reload_excluder()
         p = Path(src_path)
         try:
-            # normalize to absolute within root
             p = p.resolve()
         except Exception:
             return
@@ -157,6 +219,17 @@ class IndexHandler(FileSystemEventHandler):
         try:
             rel = p.resolve().relative_to(self.root.resolve())
         except ValueError:
+            return
+
+        try:
+            if _get_global_state_dir is not None:
+                global_state_dir = _get_global_state_dir()
+                if p.is_relative_to(global_state_dir):
+                    return
+        except (OSError, ValueError):
+            pass
+
+        if any(part == ".codebase" for part in p.parts):
             return
         # directory-level excludes (parent dir)
         rel_dir = "/" + str(rel.parent).replace(os.sep, "/")
@@ -191,19 +264,30 @@ class IndexHandler(FileSystemEventHandler):
         # Only attempt deletion for code files we would have indexed
         if p.suffix.lower() not in idx.CODE_EXTS:
             return
-        try:
-            idx.delete_points_by_path(self.client, self.collection, str(p))
-            print(f"[deleted] {p}")
-            # Drop local cache entry
+        if self.client is not None:
             try:
-                remove_cached_file(str(self.root), str(p))
+                collection = self.collection or _get_collection_for_file(p)
+                idx.delete_points_by_path(self.client, collection, str(p))
+                print(f"[deleted] {p} -> {collection}")
             except Exception:
                 pass
+        else:
+            print(f"File deletion detected: {p}")
 
-            try:
-                _log_activity(str(self.root), "deleted", p)
-            except Exception:
-                pass
+        try:
+            repo_path = _detect_repo_for_file(p)
+            if repo_path:
+                repo_name = _extract_repo_name_from_path(str(repo_path))
+                remove_cached_file(str(p), repo_name)
+            else:
+                root_repo_name = _extract_repo_name_from_path(str(self.root))
+                remove_cached_file(str(p), root_repo_name)
+        except Exception:
+            pass
+
+        try:
+            repo_path = _detect_repo_for_file(p) or self.root
+            _log_activity(str(repo_path), "deleted", p)
         except Exception as e:
             try:
                 print(f"[delete_error] {p}: {e}")
@@ -240,7 +324,13 @@ class IndexHandler(FileSystemEventHandler):
                         )
                         print(f"[moved:ignored_dest_deleted_src] {src} -> {dest}")
                         try:
-                            remove_cached_file(str(self.root), str(src))
+                            src_repo_path = _detect_repo_for_file(src)
+                            src_repo_name = (
+                                _extract_repo_name_from_path(str(src_repo_path))
+                                if src_repo_path is not None
+                                else None
+                            )
+                            remove_cached_file(str(src), src_repo_name)
                         except Exception:
                             pass
 
@@ -249,35 +339,53 @@ class IndexHandler(FileSystemEventHandler):
                 return
         except Exception:
             pass
-        # Try in-place rename (preserve vectors)
+        src_collection = _get_collection_for_file(src)
+        dest_collection = _get_collection_for_file(dest)
+        is_cross_collection = src_collection != dest_collection
+        if is_cross_collection:
+            print(f"[cross_collection_move] {src} -> {dest}")
+
         moved_count = -1
-        try:
-            moved_count = _rename_in_store(self.client, self.collection, src, dest)
-        except Exception:
-            moved_count = -1
+        renamed_hash: str | None = None
+        if self.client is not None:
+            try:
+                moved_count, renamed_hash = _rename_in_store(
+                    self.client, src_collection, src, dest, dest_collection
+                )
+            except Exception:
+                moved_count, renamed_hash = -1, None
         if moved_count and moved_count > 0:
             try:
-                print(f"[moved] {src} -> {dest} ({moved_count} chunk(s) relinked)")
-                # Update local cache: carry hash from src to dest if present
-                prev_hash = None
-                try:
-                    prev_hash = get_cached_file_hash(str(self.root), str(src))
-                except Exception:
-                    prev_hash = None
-                if prev_hash:
-                    try:
-                        set_cached_file_hash(str(self.root), str(dest), prev_hash)
-                    except Exception:
-                        pass
-                    try:
-                        remove_cached_file(str(self.root), str(src))
-                    except Exception:
-                        pass
+                print(
+                    f"[moved] {src} -> {dest} ({moved_count} chunk(s) relinked)"
+                )
+                src_repo_path = _detect_repo_for_file(src)
+                dest_repo_path = _detect_repo_for_file(dest)
+                src_repo_name = (
+                    _extract_repo_name_from_path(str(src_repo_path))
+                    if src_repo_path is not None
+                    else None
+                )
+                dest_repo_name = (
+                    _extract_repo_name_from_path(str(dest_repo_path))
+                    if dest_repo_path is not None
+                    else None
+                )
+                src_hash = ""
+                if src_repo_name:
+                    src_hash = get_cached_file_hash(str(src), src_repo_name)
+                    remove_cached_file(str(src), src_repo_name)
+                if not src_hash and renamed_hash:
+                    src_hash = renamed_hash
+                if dest_repo_name and src_hash:
+                    set_cached_file_hash(
+                        str(dest), src_hash, dest_repo_name
+                    )
             except Exception:
                 pass
             try:
                 _log_activity(
-                    str(self.root),
+                    str(dest_repo_path or self.root),
                     "moved",
                     dest,
                     {"from": str(src), "chunks": int(moved_count)},
@@ -285,13 +393,22 @@ class IndexHandler(FileSystemEventHandler):
             except Exception:
                 pass
             return
-        # Fallback: delete old then index new destination
-        try:
-            if src.suffix.lower() in idx.CODE_EXTS:
-                idx.delete_points_by_path(self.client, self.collection, str(src))
-                print(f"[moved:deleted_src] {src}")
-        except Exception:
-            pass
+        if self.client is not None:
+            try:
+                if src.suffix.lower() in idx.CODE_EXTS:
+                    try:
+                        idx.delete_points_by_path(self.client, src_collection, str(src))
+                    except Exception:
+                        idx.delete_points_by_path(
+                            self.client,
+                            self.collection or src_collection,
+                            str(src),
+                        )
+                    print(f"[moved:deleted_src] {src}")
+            except Exception:
+                pass
+        else:
+            print(f"[remote_mode] Move detected: {src} -> {dest}")
         try:
             self._maybe_enqueue(str(dest))
         except Exception:
@@ -301,9 +418,10 @@ class IndexHandler(FileSystemEventHandler):
 # --- Workspace state helpers ---
 def _set_status_indexing(workspace_path: str, total_files: int) -> None:
     try:
+        repo_name = _extract_repo_name_from_path(workspace_path)
         update_indexing_status(
-            workspace_path,
-            {
+            repo_name=repo_name,
+            status={
                 "state": "indexing",
                 "started_at": datetime.now().isoformat(),
                 "progress": {"files_processed": 0, "total_files": int(total_files)},
@@ -321,9 +439,10 @@ def _update_progress(
     current_file: Path | None,
 ) -> None:
     try:
+        repo_name = _extract_repo_name_from_path(workspace_path)
         update_indexing_status(
-            workspace_path,
-            {
+            repo_name=repo_name,
+            status={
                 "state": "indexing",
                 "started_at": started_at,
                 "progress": {
@@ -341,14 +460,18 @@ def _log_activity(
     workspace_path: str, action: str, file_path: Path, details: dict | None = None
 ) -> None:
     try:
-        update_last_activity(
-            workspace_path,
-            {
-                "timestamp": datetime.now().isoformat(),
-                "action": action,
-                "file_path": str(file_path),
-                "details": details or {},
-            },
+        repo_name = _extract_repo_name_from_path(workspace_path)
+        from scripts.workspace_state import log_activity
+
+        valid_actions = {"indexed", "deleted", "skipped", "scan-completed", "initialized", "moved"}
+        if action not in valid_actions:
+            action = "indexed"
+
+        log_activity(
+            repo_name=repo_name,
+            action=action,  # type: ignore[arg-type]
+            file_path=str(file_path),
+            details=details,
         )
     except Exception:
         pass
@@ -356,13 +479,19 @@ def _log_activity(
 
 # --- Move/Rename optimization: reuse vectors when file content unchanged ---
 def _rename_in_store(
-    client: QdrantClient, collection: str, src: Path, dest: Path
-) -> int:
+    client: QdrantClient,
+    src_collection: str,
+    src: Path,
+    dest: Path,
+    dest_collection: Optional[str] = None,
+) -> tuple[int, str | None]:
     """Best-effort: if dest content hash matches previously indexed src hash,
     update points in-place to the new path without re-embedding.
 
     Returns number of points moved, or -1 if not applicable/failure.
     """
+    if dest_collection is None:
+        dest_collection = src_collection
     try:
         if not dest.exists() or dest.is_dir():
             return -1
@@ -371,9 +500,16 @@ def _rename_in_store(
         except Exception:
             return -1
         dest_hash = hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest()
-        prev = idx.get_indexed_file_hash(client, collection, str(src))
+        prev = idx.get_indexed_file_hash(client, src_collection, str(src))
+        logger.debug(
+            "rename fast-path candidate src=%s dest=%s prev_hash=%s dest_hash=%s",
+            str(src),
+            str(dest),
+            prev,
+            dest_hash,
+        )
         if not prev or prev != dest_hash:
-            return -1
+            return -1, prev if prev else None
 
         moved = 0
         next_offset = None
@@ -386,7 +522,7 @@ def _rename_in_store(
                 ]
             )
             points, next_offset = client.scroll(
-                collection_name=collection,
+                collection_name=src_collection,
                 scroll_filter=filt,
                 with_payload=True,
                 with_vectors=True,
@@ -445,16 +581,34 @@ def _rename_in_store(
                 except Exception:
                     continue
             if new_points:
-                idx.upsert_points(client, collection, new_points)
+                logger.debug(
+                    "rename fast-path upserting %d chunk(s) %s -> %s into %s",
+                    len(new_points),
+                    str(src),
+                    str(dest),
+                    dest_collection,
+                )
+                idx.upsert_points(client, dest_collection, new_points)
                 moved += len(new_points)
+            if next_offset is None:
+                break
 
         try:
-            idx.delete_points_by_path(client, collection, str(src))
+            idx.delete_points_by_path(client, src_collection, str(src))
         except Exception:
             pass
-        return moved
-    except Exception:
-        return -1
+        return moved, dest_hash
+    except Exception as exc:
+        try:
+            logger.warning(
+                "[rename_debug] rename failed for %s -> %s: %s",
+                str(src),
+                str(dest),
+                exc,
+            )
+        except Exception:
+            pass
+        return -1, None
 
 
 def main():
@@ -463,26 +617,47 @@ def main():
         from scripts.workspace_state import get_collection_name as _get_coll
     except Exception:
         _get_coll = None
-    global COLLECTION
+
+    multi_repo_enabled = False
     try:
-        if _get_coll:
-            COLLECTION = _get_coll(str(ROOT))
+        multi_repo_enabled = bool(is_multi_repo_mode())
     except Exception:
-        pass
+        multi_repo_enabled = False
+
+    default_collection = os.environ.get("COLLECTION_NAME", "my-collection")
+    if _get_coll:
+        try:
+            resolved = _get_coll(str(ROOT))
+            if resolved:
+                default_collection = resolved
+        except Exception:
+            pass
+    if multi_repo_enabled:
+        print("[multi_repo] Multi-repo mode enabled - per-repo collections in use")
+    else:
+        print("[single_repo] Single-repo mode enabled - using single collection")
+
+    global COLLECTION
+    COLLECTION = default_collection
 
     print(
-        f"Watch mode: root={ROOT} qdrant={QDRANT_URL} collection={COLLECTION} model={MODEL}"
+        f"Watch mode: root={ROOT} qdrant={QDRANT_URL} collection={default_collection} model={MODEL}"
     )
 
     # Health check: detect and auto-heal cache/collection sync issues
     try:
         from scripts.collection_health import auto_heal_if_needed
+
         print("[health_check] Checking collection health...")
-        heal_result = auto_heal_if_needed(str(ROOT), COLLECTION, QDRANT_URL, dry_run=False)
-        if heal_result["action_taken"] == "cleared_cache":
+        heal_result = auto_heal_if_needed(
+            str(ROOT), default_collection, QDRANT_URL, dry_run=False
+        )
+        if heal_result.get("action_taken") == "cleared_cache":
             print("[health_check] Cache cleared due to sync issue - files will be reindexed")
-        elif not heal_result["health_check"]["healthy"]:
-            print(f"[health_check] Issue detected: {heal_result['health_check']['issue']}")
+        elif not heal_result.get("health_check", {}).get("healthy", True):
+            print(
+                f"[health_check] Issue detected: {heal_result['health_check'].get('issue', 'unknown')}"
+            )
         else:
             print("[health_check] Collection health OK")
     except Exception as e:
@@ -492,23 +667,19 @@ def main():
         url=QDRANT_URL, timeout=int(os.environ.get("QDRANT_TIMEOUT", "20") or 20)
     )
 
-    # Compute embedding dimension first (for deterministic dense vector selection)
     model = TextEmbedding(model_name=MODEL)
-    dim = len(next(model.embed(["dimension probe"])))
+    model_dim = len(next(model.embed(["dimension probe"])))
 
-    # Determine dense vector name deterministically
     try:
-        info = client.get_collection(COLLECTION)
+        info = client.get_collection(default_collection)
         cfg = info.config.params.vectors
         if isinstance(cfg, dict) and cfg:
-            # Prefer vector whose size matches embedding dim
             vector_name = None
             for name, params in cfg.items():
                 psize = getattr(params, "size", None) or getattr(params, "dim", None)
-                if psize and int(psize) == int(dim):
+                if psize and int(psize) == int(model_dim):
                     vector_name = name
                     break
-            # If LEX vector exists, pick a different name as dense
             if vector_name is None and getattr(idx, "LEX_VECTOR_NAME", None) in cfg:
                 for name in cfg.keys():
                     if name != idx.LEX_VECTOR_NAME:
@@ -521,24 +692,43 @@ def main():
     except Exception:
         vector_name = idx._sanitize_vector_name(MODEL)
 
-    # Ensure collection + payload indexes exist
     try:
-        idx.ensure_collection(client, COLLECTION, dim, vector_name)
+        idx.ensure_collection(client, default_collection, model_dim, vector_name)
     except Exception:
         pass
-    idx.ensure_payload_indexes(client, COLLECTION)
+    idx.ensure_payload_indexes(client, default_collection)
 
-    # Ensure workspace state exists and set collection
     try:
-        update_workspace_state(str(ROOT), {"qdrant_collection": COLLECTION})
-        update_indexing_status(str(ROOT), {"state": "watching"})
-    except Exception:
-        pass
+        if multi_repo_enabled:
+            root_repo_name = _extract_repo_name_from_path(str(ROOT))
+            if root_repo_name:
+                root_collection = get_collection_name(root_repo_name)
+                update_indexing_status(
+                    repo_name=root_repo_name,
+                    status={"state": "watching"},
+                )
+                print(
+                    f"[workspace_state] Initialized repo state: {root_repo_name} -> {root_collection}"
+                )
+            else:
+                print(
+                    "[workspace_state] Multi-repo: root path is not a repo; skipping state initialization"
+                )
+        else:
+            update_workspace_state(
+                workspace_path=str(ROOT),
+                updates={"qdrant_collection": default_collection},
+            )
+            update_indexing_status(status={"state": "watching"})
+    except Exception as e:
+        print(f"[workspace_state] Error initializing workspace state: {e}")
 
     q = ChangeQueue(
-        lambda paths: _process_paths(paths, client, model, vector_name, str(ROOT))
+        lambda paths: _process_paths(
+            paths, client, model, vector_name, model_dim, str(ROOT)
+        )
     )
-    handler = IndexHandler(ROOT, q, client, COLLECTION)
+    handler = IndexHandler(ROOT, q, client, default_collection)
 
     obs = Observer()
     obs.schedule(handler, str(ROOT), recursive=True)
@@ -554,58 +744,86 @@ def main():
         obs.join()
 
 
-def _process_paths(paths, client, model, vector_name: str, workspace_path: str):
-    # Prepare progress
+def _process_paths(paths, client, model, vector_name: str, model_dim: int, workspace_path: str):
     unique_paths = sorted(set(Path(x) for x in paths))
-    total = len(unique_paths)
+    if not unique_paths:
+        return
+
     started_at = datetime.now().isoformat()
-    try:
-        update_indexing_status(
-            workspace_path,
-            {
-                "state": "indexing",
-                "started_at": started_at,
-                "progress": {"files_processed": 0, "total_files": total},
-            },
-        )
-    except Exception:
-        pass
 
-    processed = 0
-    try:
-        for p in unique_paths:
-            current = p
-            if not p.exists():
-                # File was removed; ensure its points and cache are deleted
+    repo_groups: dict[str, list[Path]] = {}
+    for p in unique_paths:
+        repo_path = _detect_repo_for_file(p) or Path(workspace_path)
+        repo_groups.setdefault(str(repo_path), []).append(p)
+
+    for repo_path, repo_files in repo_groups.items():
+        try:
+            repo_name = _extract_repo_name_from_path(repo_path)
+            update_indexing_status(
+                repo_name=repo_name,
+                status={
+                    "state": "indexing",
+                    "started_at": started_at,
+                    "progress": {
+                        "files_processed": 0,
+                        "total_files": len(repo_files),
+                    },
+                },
+            )
+        except Exception:
+            pass
+
+    repo_progress: dict[str, int] = {key: 0 for key in repo_groups.keys()}
+
+    for p in unique_paths:
+        repo_path = _detect_repo_for_file(p) or Path(workspace_path)
+        repo_key = str(repo_path)
+        repo_files = repo_groups.get(repo_key, [])
+        repo_name = _extract_repo_name_from_path(repo_key)
+        collection = _get_collection_for_file(p)
+
+        if not p.exists():
+            if client is not None:
                 try:
-                    idx.delete_points_by_path(client, COLLECTION, str(p))
-                    print(f"[deleted] {p}")
+                    idx.delete_points_by_path(client, collection, str(p))
+                    print(f"[deleted] {p} -> {collection}")
                 except Exception:
                     pass
-                try:
-                    remove_cached_file(workspace_path, str(p))
-                except Exception:
-                    pass
-                _log_activity(workspace_path, "deleted", p)
-                processed += 1
-                _update_progress(workspace_path, started_at, processed, total, current)
-                continue
-            # Lazily instantiate model if needed
-            if model is None:
-                from fastembed import TextEmbedding
+            try:
+                remove_cached_file(str(p), repo_name)
+            except Exception:
+                pass
+            _log_activity(repo_key, "deleted", p)
+            repo_progress[repo_key] = repo_progress.get(repo_key, 0) + 1
+            try:
+                _update_progress(
+                    repo_key,
+                    started_at,
+                    repo_progress[repo_key],
+                    len(repo_files),
+                    p,
+                )
+            except Exception:
+                pass
+            continue
 
-                mname = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
-                model = TextEmbedding(model_name=mname)
+        if client is not None and model is not None:
+            try:
+                idx.ensure_collection(client, collection, model_dim, vector_name)
+                idx.ensure_payload_indexes(client, collection)
+            except Exception:
+                pass
+
             ok = False
             try:
                 ok = idx.index_single_file(
                     client,
                     model,
-                    COLLECTION,
+                    collection,
                     vector_name,
                     p,
                     dedupe=True,
-                    skip_unchanged=True,
+                    skip_unchanged=False,
                 )
             except Exception as e:
                 try:
@@ -614,23 +832,40 @@ def _process_paths(paths, client, model, vector_name: str, workspace_path: str):
                     pass
                 ok = False
             status = "indexed" if ok else "skipped"
-            print(f"[{status}] {p}")
+            print(f"[{status}] {p} -> {collection}")
             if ok:
                 try:
                     size = int(p.stat().st_size)
                 except Exception:
                     size = None
-                _log_activity(workspace_path, "indexed", p, {"file_size": size})
+                _log_activity(repo_key, "indexed", p, {"file_size": size})
             else:
                 _log_activity(
-                    workspace_path, "skipped", p, {"reason": "no-change-or-error"}
+                    repo_key, "skipped", p, {"reason": "no-change-or-error"}
                 )
-            processed += 1
-            _update_progress(workspace_path, started_at, processed, total, current)
-    finally:
-        # Always return to watching state even if processing raised
+        else:
+            print(f"Not processing locally: {p}")
+            _log_activity(repo_key, "skipped", p, {"reason": "remote-mode"})
+
+        repo_progress[repo_key] = repo_progress.get(repo_key, 0) + 1
         try:
-            update_indexing_status(workspace_path, {"state": "watching"})
+            _update_progress(
+                repo_key,
+                started_at,
+                repo_progress[repo_key],
+                len(repo_files),
+                p,
+            )
+        except Exception:
+            pass
+
+    for repo_path in repo_groups.keys():
+        try:
+            repo_name = _extract_repo_name_from_path(repo_path)
+            update_indexing_status(
+                repo_name=repo_name,
+                status={"state": "watching"},
+            )
         except Exception:
             pass
 

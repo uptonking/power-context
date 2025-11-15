@@ -1,5 +1,5 @@
 ---
-# MCP Memory HTTP Deployment
+# MCP Memory Server (HTTP) Deployment
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -21,31 +21,20 @@ spec:
         component: mcp-memory-http
     spec:
       serviceAccountName: context-engine
-
       containers:
       - name: mcp-memory-http
-        image: context-engine:latest
+        image: context-engine-memory
         imagePullPolicy: IfNotPresent
-        command: ["python", "/app/scripts/mcp_memory_server.py"]
+        command: ["python", "-m", "mcp.server.fastmcp"]
+        args: ["--server-name", "context-engine-http", "--host", "0.0.0.0", "--port", "8000", "--transport", "http", "/app/scripts/memory_server.py"]
         ports:
         - name: http
-          containerPort: 8002
+          containerPort: 8000
           protocol: TCP
         - name: health
-          containerPort: 18002
+          containerPort: 18000
           protocol: TCP
         env:
-        - name: FASTMCP_TRANSPORT
-          value: "streamable-http"
-        - name: FASTMCP_HOST
-          valueFrom:
-            configMapKeyRef:
-              name: context-engine-config
-              key: FASTMCP_HOST
-        - name: FASTMCP_PORT
-          value: "8002"
-        - name: FASTMCP_HEALTH_PORT
-          value: "18002"
         - name: QDRANT_URL
           valueFrom:
             configMapKeyRef:
@@ -61,15 +50,44 @@ spec:
             configMapKeyRef:
               name: context-engine-config
               key: EMBEDDING_MODEL
+        - name: EMBEDDING_PROVIDER
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: EMBEDDING_PROVIDER
+        - name: TOOL_STORE_DESCRIPTION
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: TOOL_STORE_DESCRIPTION
+        - name: TOOL_FIND_DESCRIPTION
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: TOOL_FIND_DESCRIPTION
+        - name: FASTMCP_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: FASTMCP_HOST
+        - name: FASTMCP_PORT
+          value: "8000"
+        - name: FASTMCP_TRANSPORT
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: FASTMCP_HTTP_TRANSPORT
+        - name: FASTMCP_HEALTH_PORT
+          value: "18000"
         resources:
           requests:
-            memory: "1Gi"
-            cpu: "500m"
+            memory: "512Mi"
+            cpu: "250m"
           limits:
-            memory: "4Gi"
-            cpu: "2"
+            memory: "2Gi"
+            cpu: "1000m"
         volumeMounts:
-        - name: work
+        - name: work-volume
           mountPath: /work
           readOnly: true
         livenessProbe:
@@ -85,13 +103,12 @@ spec:
           initialDelaySeconds: 10
           periodSeconds: 5
       volumes:
-      - name: work
-        hostPath:
-          path: /tmp/context-engine-work
-          type: DirectoryOrCreate
+      - name: work-volume
+        persistentVolumeClaim:
+          claimName: code-repos-pvc
 
 ---
-# MCP Memory HTTP Service
+# MCP Memory Server (HTTP) Service
 apiVersion: v1
 kind: Service
 metadata:
@@ -101,15 +118,17 @@ metadata:
     app: context-engine
     component: mcp-memory-http
 spec:
-  type: ClusterIP
+  type: NodePort  # Change to LoadBalancer for external access
   ports:
   - name: http
     port: 8002
     targetPort: http
+    nodePort: 30804  # Optional: specify node port
     protocol: TCP
   - name: health
     port: 18002
     targetPort: health
+    nodePort: 30805  # Optional: specify node port
     protocol: TCP
   selector:
     app: context-engine
@@ -143,7 +162,7 @@ spec:
     component: mcp-memory-http
 
 ---
-# MCP Indexer HTTP Deployment
+# MCP Indexer Server (HTTP) Deployment
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -167,28 +186,18 @@ spec:
       serviceAccountName: context-engine
       containers:
       - name: mcp-indexer-http
-        image: context-engine:latest
+        image: context-engine-indexer
         imagePullPolicy: IfNotPresent
-        command: ["python", "/app/scripts/mcp_indexer_server.py"]
+        command: ["python", "-m", "mcp.server.fastmcp"]
+        args: ["--server-name", "context-engine-indexer-http", "--host", "0.0.0.0", "--port", "8001", "--transport", "http", "/app/scripts/indexer_server.py"]
         ports:
         - name: http
-          containerPort: 8003
+          containerPort: 8001
           protocol: TCP
         - name: health
-          containerPort: 18003
+          containerPort: 18001
           protocol: TCP
         env:
-        - name: FASTMCP_TRANSPORT
-          value: "streamable-http"
-        - name: FASTMCP_HOST
-          valueFrom:
-            configMapKeyRef:
-              name: context-engine-config
-              key: FASTMCP_HOST
-        - name: FASTMCP_INDEXER_PORT
-          value: "8003"
-        - name: FASTMCP_HEALTH_PORT
-          value: "18003"
         - name: QDRANT_URL
           valueFrom:
             configMapKeyRef:
@@ -244,16 +253,32 @@ spec:
             configMapKeyRef:
               name: context-engine-config
               key: CTX_MULTI_COLLECTION
+        - name: FASTMCP_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: FASTMCP_HOST
+        - name: FASTMCP_INDEXER_PORT
+          value: "8001"
+        - name: FASTMCP_TRANSPORT
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: FASTMCP_HTTP_TRANSPORT
+        - name: FASTMCP_HEALTH_PORT
+          value: "18001"
         resources:
           requests:
-            memory: "1Gi"
-            cpu: "500m"
+            memory: "512Mi"
+            cpu: "250m"
           limits:
-            memory: "4Gi"
-            cpu: "2"
+            memory: "2Gi"
+            cpu: "1000m"
         volumeMounts:
-        - name: work
+        - name: work-volume
           mountPath: /work
+        - name: codebase-volume
+          mountPath: /work/.codebase
         livenessProbe:
           httpGet:
             path: /readyz
@@ -267,13 +292,15 @@ spec:
           initialDelaySeconds: 10
           periodSeconds: 5
       volumes:
-      - name: work
-        hostPath:
-          path: /tmp/context-engine-work
-          type: DirectoryOrCreate
+      - name: work-volume
+        persistentVolumeClaim:
+          claimName: code-repos-pvc
+      - name: codebase-volume
+        persistentVolumeClaim:
+          claimName: code-metadata-pvc
 
 ---
-# MCP Indexer HTTP Service
+# MCP Indexer Server (HTTP) Service
 apiVersion: v1
 kind: Service
 metadata:
@@ -283,15 +310,17 @@ metadata:
     app: context-engine
     component: mcp-indexer-http
 spec:
-  type: ClusterIP
+  type: NodePort  # Change to LoadBalancer for external access
   ports:
   - name: http
     port: 8003
     targetPort: http
+    nodePort: 30806  # Optional: specify node port
     protocol: TCP
   - name: health
     port: 18003
     targetPort: health
+    nodePort: 30807  # Optional: specify node port
     protocol: TCP
   selector:
     app: context-engine
@@ -323,4 +352,3 @@ spec:
   selector:
     app: context-engine
     component: mcp-indexer-http
-

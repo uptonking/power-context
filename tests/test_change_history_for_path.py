@@ -16,7 +16,13 @@ class _FastMCP:
             return fn
         return _decorator
 
+class _Context:
+    def __init__(self, *args, **kwargs):
+        # Tests only access .session when present; keep permissive defaults
+        self.session = kwargs.get("session")
+
 setattr(fastmcp_pkg, "FastMCP", _FastMCP)
+setattr(fastmcp_pkg, "Context", _Context)
 sys.modules.setdefault("mcp", mcp_pkg)
 sys.modules.setdefault("mcp.server", server_pkg)
 sys.modules.setdefault("mcp.server.fastmcp", fastmcp_pkg)
