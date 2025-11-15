@@ -1,3 +1,30 @@
+[![CI](https://github.com/m1rl0k/Context-Engine/actions/workflows/ci.yml/badge.svg)](https://github.com/m1rl0k/Context-Engine/actions/workflows/ci.yml)
+
+## Context-Engine at a Glance
+
+Context-Engine is a plug-and-play MCP retrieval stack that unifies code indexing, hybrid search, and optional llama.cpp decoding so product teams can ship context-aware agents in minutes, not weeks.
+
+<p align="center">
+  <img src="useage.png" alt="Context-Engine Usage" width="50%"/>
+</p>
+
+**Key differentiators**
+- One-command bring-up delivers dual SSE/RMCP endpoints, seeded Qdrant, and live watch/reindex loops for fast local validation.
+- ReFRAG-inspired micro-chunking, token budgeting, and gate-first filtering surface precise spans while keeping prompts lean.
+- Shared memory/indexer schema and reranker tooling make it easy to mix dense, lexical, and semantic signals without bespoke glue code.
+- **NEW: Performance optimizations** including connection pooling, intelligent caching, request deduplication, and async subprocess management that cut redundant calls and smooth spikes under load.
+- Operational playbooks (prune, warm, health, cache) plus rich tests give teams confidence to take the stack from laptop to production.
+
+**Built for**
+- AI platform and IDE tooling teams that need an MCP-compliant context layer without rebuilding indexing, embeddings, or retrieval heuristics.
+- DevEx and documentation groups standing up internal assistants that must ingest large or fast-changing codebases with minimal babysitting.
+
+**Solves**
+- Slow agent onboarding caused by fractured infra—ship a consistent stack for memory, search, and decoding under one config.
+- Context drift in monorepos—automatic micro-chunking and watcher-driven reindexing keep embeddings aligned with reality.
+- Fragmented client compatibility—serve both legacy SSE and modern HTTP RMCP clients from the same deployment.
+- **NEW: Performance relief** via intelligent caching, connection pooling, and async I/O patterns that eliminate redundant processing.
+
 ## Context-Engine
 
 
@@ -17,6 +44,13 @@ INDEX_MICRO_CHUNKS=1 MAX_MICRO_CHUNKS_PER_FILE=200 make reset-dev-dual
 ```
 - Default ports: Memory MCP :8000, Indexer MCP :8001, Qdrant :6333, llama.cpp :8080
 
+**Seamless Setup Note:**
+- The stack uses a **single unified `codebase` collection** by default
+- All your code goes into one collection for seamless cross-repo search
+- No per-workspace fragmentation - search across everything at once
+- Health checks auto-detect and fix cache/collection sync issues
+- Just run `make reset-dev-dual` on any machine and it works™
+
 ### Make targets: SSE, RMCP, and dual-compat
 - Legacy SSE only (default):
   - Ports: 8000 (/sse), 8001 (/sse)
@@ -28,15 +62,80 @@ INDEX_MICRO_CHUNKS=1 MAX_MICRO_CHUNKS_PER_FILE=200 make reset-dev-dual
   - Ports: 8000/8001 (/sse) and 8002/8003 (/mcp)
   - Command: `INDEX_MICRO_CHUNKS=1 MAX_MICRO_CHUNKS_PER_FILE=200 make reset-dev-dual`
 
-- You can skip the decoder; it’s feature-flagged off by default.
+### Environment Configuration
+
+**Default Setup:**
+- The repository includes `.env.example` with sensible defaults for local development
+- On first run, copy it to `.env`: `cp .env.example .env`
+- The `make reset-dev*` targets will use your `.env` settings automatically
+
+**Key Configuration Files:**
+- `.env` — Your local environment variables (gitignored, safe to customize)
+- `.env.example` — Template with documented defaults (committed to repo)
+- `docker-compose.yml` — Service definitions that read from `.env`
+
+**Recommended Customizations:**
+
+1. **Enable micro-chunking** (better retrieval quality):
+   ```bash
+   INDEX_MICRO_CHUNKS=1
+   MAX_MICRO_CHUNKS_PER_FILE=200
+   ```
+
+2. **Enable decoder for Q&A** (context_answer tool):
+   ```bash
+   REFRAG_DECODER=1              # Enable decoder (default: 1)
+   REFRAG_RUNTIME=llamacpp       # Use llama.cpp (default) or glm
+   ```
+
+3. **GPU acceleration** (Apple Silicon Metal):
+   ```bash
+   # Option A: Use the toggle script (recommended)
+   scripts/gpu_toggle.sh gpu
+   scripts/gpu_toggle.sh start
+
+   # Option B: Manual .env settings
+   USE_GPU_DECODER=1
+   LLAMACPP_URL=http://host.docker.internal:8081
+   LLAMACPP_GPU_LAYERS=32        # or -1 for all layers
+   ```
+
+4. **Alternative: GLM API** (instead of local llama.cpp):
+   ```bash
+   REFRAG_RUNTIME=glm
+   GLM_API_KEY=your-api-key-here
+   GLM_MODEL=glm-4.6             # Optional, defaults to glm-4.6
+   ```
+
+5. **Collection name** (unified by default):
+   ```bash
+   COLLECTION_NAME=codebase      # Default: single unified collection for all code
+   # Only change this if you need isolated collections per project
+   ```
+
+**After changing `.env`:**
+- Restart services: `docker compose restart mcp_indexer mcp_indexer_http`
+- For indexing changes: `make reindex` or `make reindex-hard`
+- For decoder changes: `docker compose up -d --force-recreate llamacpp` (or restart native server)
+
 ### Switch decoder model (llama.cpp)
-- Default tiny model: Qwen2.5 Coder 1.5B (GGUF)
+- Default tiny model: Granite 4.0 Micro (Q4_K_M GGUF)
 - Change the model by overriding Make vars (downloads to ./models/model.gguf):
 ```bash
 LLAMACPP_MODEL_URL="https://huggingface.co/ORG/MODEL/resolve/main/model.gguf" \
   INDEX_MICRO_CHUNKS=1 MAX_MICRO_CHUNKS_PER_FILE=200 make reset-dev-dual
 ```
+- Want GPU acceleration? Set `LLAMACPP_USE_GPU=1` (optionally `LLAMACPP_GPU_LAYERS=-1`) in your `.env` before `docker compose up`, or simply run `scripts/gpu_toggle.sh gpu` (described below) to flip the switch for you.
 - Embeddings: set EMBEDDING_MODEL in .env and reindex (make reindex)
+
+
+Decoder env toggles (set in `.env` and managed automatically by `scripts/gpu_toggle.sh`):
+
+| Variable              | Description                                           | Typical values |
+|-----------------------|-------------------------------------------------------|----------------|
+| `USE_GPU_DECODER`     | Feature-flag for native Metal decoder                | `0` (docker), `1` (native) |
+| `LLAMACPP_URL`        | Decoder endpoint containers should use               | `http://llamacpp:8080` or `http://host.docker.internal:8081` |
+| `LLAMACPP_GPU_LAYERS` | Number of layers to offload to GPU (`-1` = all)      | `0`, `32`, `-1` |
 
 
 Alternative (compose only)
@@ -44,12 +143,40 @@ Alternative (compose only)
 HOST_INDEX_PATH="$(pwd)" FASTMCP_INDEXER_PORT=8001 docker compose up -d qdrant mcp mcp_indexer indexer watcher
 ```
 
+### Recommended development flow
+1. Bring the stack up with the reset target that matches your client (`make reset-dev`, `make reset-dev-codex`, or `make reset-dev-dual`).
+2. When you need a clean ingest (after large edits or when the `qdrant_status` tool/`make qdrant-status` reports zero points), run `make reindex-hard`. This clears `.codebase/cache.json` before recreating the collection so unchanged files cannot be skipped.
+3. Confirm collection health with `make qdrant-status` (calls the MCP router to print counts and timestamps).
+4. Iterate using search helpers such as `make hybrid ARGS="--query 'async file watcher'"` or invoke the MCP tools directly from your client.
+
+### Apple Silicon Metal GPU (native) vs Docker decoder
+
+On Apple Silicon you can run the llama.cpp decoder natively with Metal while keeping the rest of the stack in Docker:
+
+1. Install the Metal-enabled llama.cpp binary (e.g. `brew install llama.cpp`).
+2. Flip to GPU mode and start the native server:
+   ```bash
+   scripts/gpu_toggle.sh gpu
+   scripts/gpu_toggle.sh start   # launches llama-server on localhost:8081
+   docker compose up -d --force-recreate mcp_indexer mcp_indexer_http
+   docker compose stop llamacpp   # optional once the native server is healthy
+   ```
+   The toggle updates `.env` to point at `http://host.docker.internal:8081` so containers reach the host process.
+3. Run `scripts/gpu_toggle.sh status` to confirm the native server is healthy. All MCP `context_answer` calls will now use the Metal-backed decoder.
+
+Want the original dockerised decoder (CPU-only or x86 GPU fallback)? Swap back with:
+```bash
+scripts/gpu_toggle.sh docker
+docker compose up -d --force-recreate mcp_indexer mcp_indexer_http llamacpp
+```
+This re-enables the `llamacpp` container and resets `.env` to `http://llamacpp:8080`.
+
 ### Make targets (quick reference)
 - reset-dev: SSE stack on 8000/8001; seeds Qdrant, downloads tokenizer + tiny llama.cpp model, reindexes, brings up memory + indexer + watcher
 - reset-dev-codex: RMCP stack on 8002/8003; same seeding + bring-up for Codex/Qodo
 - reset-dev-dual: SSE + RMCP together (8000/8001 and 8002/8003)
 - up / down / logs / ps: Docker Compose lifecycle helpers
-- index / reindex: Index current repo; reindex recreates the collection first
+- index / reindex / reindex-hard: Index current repo; `reindex` recreates the collection; `reindex-hard` also clears the local cache so unchanged files are re-uploaded
 - index-here / index-path: Index arbitrary host path without cloning into this repo
 - watch: Watch-and-reindex on file changes
 - warm / health: Warm caches and run health checks
@@ -57,6 +184,190 @@ HOST_INDEX_PATH="$(pwd)" FASTMCP_INDEXER_PORT=8001 docker compose up -d qdrant m
 - setup-reranker / rerank-local / quantize-reranker: Manage ONNX reranker assets and local runs
 - prune / prune-path: Remove stale points (missing files or hash mismatch)
 - llama-model / tokenizer: Fetch tiny GGUF model and tokenizer.json
+- qdrant-status / qdrant-list / qdrant-prune / qdrant-index-root: Convenience wrappers that route through the MCP bridge to inspect or maintain collections
+
+
+### CLI: ctx prompt enhancer
+
+A thin CLI that retrieves code context and rewrites your input into a better, context-aware prompt using the local LLM decoder. Works with both questions and commands/instructions. By default it prints ONLY the improved prompt.
+
+Examples:
+````bash
+# Questions: Enhanced with specific details and multiple aspects
+scripts/ctx.py "What is ReFRAG?"
+# Output: Two detailed question paragraphs with file/line references
+
+# Commands: Enhanced with concrete targets and implementation details
+scripts/ctx.py "Refactor ctx.py"
+# Output: Two detailed instruction paragraphs with specific steps
+
+# Unicorn mode: staged 2–3 pass enhancement for best results
+scripts/ctx.py "Refactor ctx.py" --unicorn
+
+# Via Make target (default improved prompt only)
+make ctx Q="Explain the caching logic to me in detail"
+
+# Filter by language/path or adjust tokens
+make ctx Q="Hybrid search details" ARGS="--language python --under scripts/ --limit 2 --rewrite-max-tokens 200"
+````
+
+
+### Detail mode (short snippets)
+
+Include compact code snippets in the retrieved context for richer rewrites (trades a bit of speed for quality):
+
+````bash
+# Enable detail mode (adds short snippets) - works with questions
+scripts/ctx.py "Explain the caching logic" --detail
+
+# Detail mode with commands - gets more specific implementation details
+scripts/ctx.py "Add error handling to ctx.py" --detail
+
+# Adjust snippet size if needed (default is 1 line when --detail is used)
+make ctx Q="Explain hybrid search" ARGS="--detail --context-lines 2"
+````
+
+Notes:
+- Default behavior is header-only (fastest). `--detail` adds short snippets.
+- If `--detail` is set and `--context-lines` remains at its default (0), ctx.py automatically uses 1 line to keep snippets concise. Override with `--context-lines N`.
+- Detail mode is optimized for speed: automatically clamps to max 4 results and 1 result per file.
+
+### Unicorn mode (staged multi-pass for best quality)
+
+Use `--unicorn` for the highest quality prompt enhancement with a staged 2-3 pass approach:
+
+````bash
+# Unicorn mode with commands - produces exceptional, detailed instructions
+scripts/ctx.py "refactor ctx.py" --unicorn
+
+# Unicorn mode with questions - produces highly intelligent, multi-faceted questions
+scripts/ctx.py "what is ReFRAG and how does it work?" --unicorn
+
+# Works with all filters
+scripts/ctx.py "add error handling" --unicorn --language python
+````
+
+**How it works:**
+
+<p align="center">
+  <img src="enhance1.png" alt="Unicorn Usage" width="50%"/>
+</p>
+
+Unicorn mode uses multiple LLM passes with progressively richer code context:
+
+1. **Pass 1 (Draft)**: Retrieves rich code snippets (8 lines of context per match) to understand the codebase and sharpen the intent
+2. **Pass 2 (Refine)**: Retrieves even richer snippets (12 lines of context) based on the draft to ground the prompt with concrete code behaviors
+3. **Pass 3 (Polish)**: Optional cleanup pass that runs only if the output appears generic or incomplete
+
+**Key features:**
+
+- **Code-grounded**: References actual code behaviors and patterns from your codebase, not file paths or line numbers
+- **No hallucinations**: Only uses real code from your indexed repository - never invents references
+- **Multi-paragraph output**: Produces detailed, comprehensive prompts that explore multiple aspects
+- **Works with both questions and commands**: Enhances any type of prompt
+
+**When to use:**
+
+- **Normal mode**: Quick, everyday prompts (fastest)
+- **--detail**: Richer context without multi-pass overhead (balanced)
+- **--unicorn**: When you need the absolute best prompt quality (highest quality)
+
+### Advanced Features
+
+#### 1. Streaming Output (Default)
+
+All modes now stream tokens as they arrive for instant feedback:
+
+````bash
+# Streaming is enabled by default - see output appear immediately
+scripts/ctx.py "refactor ctx.py" --unicorn
+````
+
+To disable streaming (wait for full response):
+- Set `"streaming": false` in `~/.ctx_config.json`
+
+#### 2. Memory Blending
+
+Automatically falls back to `context_search` with memories when repo search returns no hits:
+
+````bash
+# If no code matches, ctx.py will search design docs and ADRs
+scripts/ctx.py "What is our authentication strategy?"
+````
+
+This ensures you get relevant context even when the query doesn't match code directly.
+
+#### 3. Adaptive Context Sizing
+
+Automatically adjusts `limit` and `context_lines` based on query characteristics:
+
+- **Short/vague queries** → More context for richer grounding
+- **Queries with file/function names** → Lighter settings for speed
+
+````bash
+# Short query → auto-increases context
+scripts/ctx.py "caching"
+
+# Specific query → optimized for speed
+scripts/ctx.py "refactor fetch_context function in ctx.py"
+````
+
+#### 4. Automatic Quality Assurance
+
+Enhanced `_needs_polish()` heuristic automatically triggers a third polish pass when:
+
+- Output is too short (< 180 chars)
+- Contains generic/vague language
+- Missing concrete code references
+- Lacks proper paragraph structure
+
+This happens transparently in `--unicorn` mode - no user action needed.
+
+#### 5. Personalized Templates
+
+Create `~/.ctx_config.json` to customize prompt enhancement behavior:
+
+````json
+{
+  "always_include_tests": true,
+  "prefer_bullet_commands": false,
+  "extra_instructions": "Always consider error handling and edge cases",
+  "streaming": true
+}
+````
+
+**Available preferences:**
+
+- `always_include_tests`: Add testing considerations to all prompts
+- `prefer_bullet_commands`: Format commands as bullet points
+- `extra_instructions`: Custom instructions added to every rewrite
+- `streaming`: Enable/disable streaming output (default: true)
+
+See `ctx_config.example.json` for a template.
+
+GPU Acceleration (Apple Silicon):
+For faster prompt rewriting, use the native Metal-accelerated decoder:
+````bash
+# 1. Set USE_GPU_DECODER=1 in your .env file (already set by default)
+# 2. Start the native llama.cpp server with Metal GPU
+scripts/gpu_toggle.sh start
+
+# Now ctx.py will automatically use the GPU decoder on port 8081
+make ctx Q="Explain the caching logic to me in detail"
+
+# Stop the native GPU server
+scripts/gpu_toggle.sh stop
+
+# To use Docker decoder instead, set USE_GPU_DECODER=0 in .env and restart:
+docker compose up -d llamacpp
+````
+
+Notes:
+- Defaults to the Indexer HTTP RMCP endpoint at http://localhost:8003/mcp (override with MCP_INDEXER_URL)
+- Decoder endpoint: automatically detects GPU mode via USE_GPU_DECODER env var (set by gpu_toggle.sh)
+- Docker decoder (default): http://localhost:8080/completion
+- GPU decoder (after gpu_toggle.sh gpu): http://localhost:8081/completion
+- See also: `make ctx`
 
 ## Index another codebase (outside this repo)
 
@@ -86,6 +397,10 @@ Notes:
 - MCP clients can connect to the running servers and operate on whichever folder is mounted at /work.
 
 ## Supported IDE clients/extensions
+- Roo (SSE/RMCP): supports both SSE and RMCP connections; see config examples below
+- Cline (SSE/RMCP): supports both SSE and RMCP connections; see config examples below
+- Windsurf (SSE/RMCP): supports both SSE and RMCP connections; see config examples below
+- Zed (SSE): uses mcp-remote bridge via command/args; see config below
 - Kiro (SSE): uses mcp-remote bridge via command/args; see config below
 - Qodo (RMCP): connects directly to HTTP endpoints; add each tool individually
 - OpenAI Codex (RMCP): TOML config for memory/indexer URLs
@@ -132,6 +447,25 @@ Reranker
 - RERANKER_ENABLED: 1/true to enable, 0/false to disable; default is enabled in server
   - Timeouts/failures automatically fall back to hybrid results
 
+Decoder (llama.cpp / GLM)
+- REFRAG_DECODER: 1 to enable decoder for context_answer; 0 to disable (default: 1)
+- REFRAG_RUNTIME: llamacpp or glm (default: llamacpp)
+- LLAMACPP_URL: llama.cpp server endpoint (default: http://llamacpp:8080 or http://host.docker.internal:8081 for GPU)
+- LLAMACPP_TIMEOUT_SEC: Decoder request timeout in seconds (default: 300)
+- DECODER_MAX_TOKENS: Max tokens for decoder responses (default: 4000)
+- REFRAG_DECODER_MODE: prompt or soft (default: prompt; soft requires patched llama.cpp)
+- GLM_API_KEY: API key for GLM provider (required when REFRAG_RUNTIME=glm)
+- GLM_MODEL: GLM model name (default: glm-4.6)
+- USE_GPU_DECODER: 1 for native Metal decoder on host, 0 for Docker (managed by gpu_toggle.sh)
+- LLAMACPP_GPU_LAYERS: Number of layers to offload to GPU, -1 for all (default: 32)
+
+ReFRAG (micro-chunking and retrieval)
+- REFRAG_MODE: 1 to enable micro-chunking and span budgeting (default: 1)
+- REFRAG_GATE_FIRST: 1 to enable mini-vector gating before dense search (default: 1)
+- REFRAG_CANDIDATES: Number of candidates for gate-first filtering (default: 200)
+- MICRO_BUDGET_TOKENS: Global token budget for context_answer spans (default: 512)
+- MICRO_OUT_MAX_SPANS: Max number of spans to return per query (default: 3)
+
 Ports
 - FASTMCP_PORT (SSE/RMCP): Override Memory MCP ports (defaults: 8000/8002)
 - FASTMCP_INDEXER_PORT (SSE/RMCP): Override Indexer MCP ports (defaults: 8001/8003)
@@ -141,11 +475,12 @@ Ports
 
 | Name | Description | Default |
 |------|-------------|---------|
-| COLLECTION_NAME | Qdrant collection name used by both servers | my-collection |
+| COLLECTION_NAME | Qdrant collection name (unified across all repos) | codebase |
 | REPO_NAME | Logical repo tag stored in payload for filtering | auto-detect from git/folder |
 | HOST_INDEX_PATH | Host path mounted at /work in containers | current repo (.) |
 | QDRANT_URL | Qdrant base URL | container: http://qdrant:6333; local: http://localhost:6333 |
 | INDEX_MICRO_CHUNKS | Enable token-based micro-chunking | 0 (off) |
+| HYBRID_EXPAND | Enable heuristic multi-query expansion | 0 (off) |
 | MAX_MICRO_CHUNKS_PER_FILE | Cap micro-chunks per file | 200 |
 | TOKENIZER_URL | HF tokenizer.json URL (for Make download) | n/a (use Make target) |
 | TOKENIZER_PATH | Local path where tokenizer is saved (Make) | models/tokenizer.json |
@@ -165,6 +500,19 @@ Ports
 | FASTMCP_HTTP_PORT | Memory RMCP host port mapping | 8002 |
 | FASTMCP_INDEXER_HTTP_PORT | Indexer RMCP host port mapping | 8003 |
 | FASTMCP_HEALTH_PORT | Health port (memory/indexer) | memory: 18000; indexer: 18001 |
+| LLM_EXPAND_MAX | Max alternate queries generated via LLM | 0 |
+| REFRAG_DECODER | Enable decoder for context_answer | 1 (enabled) |
+| REFRAG_RUNTIME | Decoder backend: llamacpp or glm | llamacpp |
+| LLAMACPP_URL | llama.cpp server endpoint | http://llamacpp:8080 or http://host.docker.internal:8081 |
+| LLAMACPP_TIMEOUT_SEC | Decoder request timeout | 300 |
+| DECODER_MAX_TOKENS | Max tokens for decoder responses | 4000 |
+| GLM_API_KEY | API key for GLM provider | unset |
+| GLM_MODEL | GLM model name | glm-4.6 |
+| USE_GPU_DECODER | Native Metal decoder (1) vs Docker (0) | 0 (docker) |
+| REFRAG_MODE | Enable micro-chunking and span budgeting | 1 (enabled) |
+| REFRAG_GATE_FIRST | Enable mini-vector gating | 1 (enabled) |
+| REFRAG_CANDIDATES | Candidates for gate-first filtering | 200 |
+| MICRO_BUDGET_TOKENS | Token budget for context_answer | 512 |
 
 ## Running tests
 
@@ -220,7 +568,8 @@ curl -sI http://localhost:8001/sse | head -n1
 4) Single command to index + search
 ```bash
 # Fresh index of your repo and a quick hybrid example
-make reindex
+make reindex-hard
+make qdrant-status
 make hybrid ARGS="--query 'async file watcher' --limit 5 --include-snippet"
 ```
 
@@ -236,9 +585,40 @@ Create `.kiro/settings/mcp.json` in your workspace:
   }
 }
 ````
+
+Zed (SSE):
+Add to your Zed `settings.json` (accessed via Command Palette → "Settings: Open Settings (JSON)"):
+````json
+{
+  /// The name of your MCP server
+  "qdrant-indexer": {
+    /// The command which runs the MCP server
+    "command": "npx",
+    /// The arguments to pass to the MCP server
+    "args": [
+      "mcp-remote",
+      "http://localhost:8001/sse",
+      "--transport",
+      "sse-only"
+    ],
+    /// The environment variables to set
+    "env": {}
+  }
+}
+````
 Notes:
-- Kiro expects command/args (stdio). mcp-remote bridges to remote SSE endpoints.
-- If npx prompts, add -y right after npx.
+- Zed expects MCP servers at the root level of settings.json
+- Uses command/args (stdio). mcp-remote bridges to remote SSE endpoints
+- If npx prompts, add `-y` right after npx: `"command": "npx", "args": ["-y", "mcp-remote", ...]`
+- Alternative: Use direct HTTP connection if mcp-remote has issues:
+  ```json
+  {
+    "qdrant-indexer": {
+      "type": "http",
+      "url": "http://localhost:8001/sse"
+    }
+  }
+  ```
 - For Qodo (RMCP) clients, see "Qodo Integration (RMCP config)" below for the direct `url`-based snippet.
 
 6) Common troubleshooting
@@ -249,7 +629,7 @@ Notes:
 - SSE “Invalid session ID” when POSTing /messages directly:
   - Expected if you didn’t initiate an SSE session first. Use an MCP client (e.g., mcp-remote) to handle the handshake.
 - llama.cpp platform warning on Apple Silicon:
-  - Safe to ignore for local dev, or set platform: linux/amd64 for the service, or build a native image.
+  - Prefer the native path above (`scripts/gpu_toggle.sh gpu`). If you stick with Docker, add `platform: linux/amd64` to the service or ignore the warning during local dev.
 - Indexing feels stuck on very large files:
   - Use MAX_MICRO_CHUNKS_PER_FILE=200 during dev runs.
 
@@ -332,13 +712,18 @@ Memory MCP (8000 SSE, 8002 RMCP):
 Indexer/Search MCP (8001 SSE, 8003 RMCP):
 - repo_search — hybrid code search (dense + lexical + optional reranker)
 - context_search — search that can also blend memory results (include_memories)
+- context_answer — natural-language Q&A with retrieval + local LLM (llama.cpp or GLM)
 - code_search — alias of repo_search
 - repo_search_compat — permissive wrapper that normalizes q/text/queries/top_k payloads
+- context_answer_compat — permissive wrapper for context_answer with lenient argument handling
+- expand_query(query, max_new?) — LLM-assisted query expansion (generates 1-2 alternates)
 - qdrant_index_root — index /work (mounted repo root) with safe defaults
 - qdrant_index(subdir?, recreate?, collection?) — index a subdir or recreate collection
 - qdrant_prune — remove points for missing files or file_hash mismatch
 - qdrant_list — list Qdrant collections
 - qdrant_status — collection counts and recent ingestion timestamps
+- workspace_info(workspace_path?) — read .codebase/state.json and resolve default collection
+- list_workspaces(search_root?) — scan for multiple workspaces in multi-repo environments
 - memory_store — convenience memory store from the indexer (uses default collection)
 - search_tests_for — intent wrapper for test files
 - search_config_for — intent wrapper for likely config files
@@ -351,6 +736,7 @@ Indexer/Search MCP (8001 SSE, 8003 RMCP):
 Notes:
 - Most search tools accept filters like language, under, path_glob, kind, symbol, ext.
 - Reranker enabled by default; timeouts fall back to hybrid results.
+- context_answer requires decoder enabled (REFRAG_DECODER=1) with llama.cpp or GLM backend.
 
 ### Qodo Integration (RMCP config)
 
@@ -588,6 +974,50 @@ Notes:
 - Named vector remains aligned with the MCP server (fast-bge-base-en-v1.5). If you change EMBEDDING_MODEL, run `make reindex` to recreate the collection.
 - For very large repos, consider running `make index` on a schedule (or pre-commit) to keep Qdrant warm without full reingestion.
 
+### Multi-repo indexing (unified search)
+
+The stack uses a **single unified `codebase` collection** by default, making multi-repo search seamless:
+
+**Index another repo into the same collection:**
+```bash
+# From your qdrant directory
+make index-here HOST_INDEX_PATH=/path/to/other/repo REPO_NAME=other-repo
+
+# Or with full control:
+HOST_INDEX_PATH=/path/to/other/repo \
+COLLECTION_NAME=codebase \
+REPO_NAME=other-repo \
+docker compose run --rm indexer --root /work
+```
+
+**What happens:**
+- Files from the other repo get indexed into the unified `codebase` collection
+- Each file is tagged with `metadata.repo = "other-repo"` for filtering
+- Search across all repos by default, or filter by specific repo
+
+**Search examples:**
+```bash
+# Search across all indexed repos
+make hybrid QUERY="authentication logic"
+
+# Filter by specific repo
+python scripts/hybrid_search.py \
+  --query "authentication logic" \
+  --repo other-repo
+
+# Filter by repo + language
+python scripts/hybrid_search.py \
+  --query "authentication logic" \
+  --repo other-repo \
+  --language python
+```
+
+**Benefits:**
+- One collection = unified search across all your code
+- No fragmentation or collection management overhead
+- Filter by repo when you need isolation
+- All repos share the same vector space for better semantic search
+
 ### Multi-query re-ranker (no new deps)
 
 - Run a fused query with several phrasings and metadata-aware boosts:
@@ -671,6 +1101,39 @@ Example calls (semantics vary by client):
 - qdrant-index with args {"subdir":"scripts","recreate":true}
 
 ### MCP client configuration examples
+
+Roo (SSE/RMCP):
+
+```json
+{
+  "mcpServers": {
+    "memory": { "type": "sse", "url": "http://localhost:8000/sse", "disabled": false },
+    "qdrant-indexer": { "type": "sse", "url": "http://localhost:8001/sse", "disabled": false }
+  }
+}
+```
+
+Cline (SSE/RMCP):
+
+```json
+{
+  "mcpServers": {
+    "memory": { "type": "sse", "url": "http://localhost:8000/sse", "disabled": false },
+    "qdrant-indexer": { "type": "sse", "url": "http://localhost:8001/sse", "disabled": false }
+  }
+}
+```
+
+Windsurf (SSE/RMCP):
+
+```json
+{
+  "mcpServers": {
+    "memory": { "type": "sse", "url": "http://localhost:8000/sse", "disabled": false },
+    "qdrant-indexer": { "type": "sse", "url": "http://localhost:8001/sse", "disabled": false }
+  }
+}
+```
 
 Windsurf/Cursor (stdio for search + SSE for indexer):
 
@@ -948,6 +1411,33 @@ Notes:
 - In soft mode, the client will require a patched server to accept soft embeddings. The flag ensures no breakage.
 
 
+### Alternative: GLM API Provider
+
+Instead of running llama.cpp locally, you can use the GLM API (ZhipuAI) as your decoder backend:
+
+**Setup:**
+```bash
+# In .env
+REFRAG_DECODER=1
+REFRAG_RUNTIME=glm          # Switch from llamacpp to glm
+GLM_API_KEY=your-api-key    # Required
+GLM_MODEL=glm-4.6           # Optional, defaults to glm-4.6
+```
+
+**How it works:**
+- Uses OpenAI SDK with `base_url="https://api.z.ai/api/paas/v4/"`
+- Supports prompt mode only (soft embeddings ignored)
+- Handles GLM-4.6's reasoning mode (`reasoning_content` field)
+- Drop-in replacement for llama.cpp—same interface, no code changes needed
+
+**Switch back to llama.cpp:**
+```bash
+REFRAG_RUNTIME=llamacpp
+```
+
+The GLM provider is implemented in `scripts/refrag_glm.py` and automatically selected when `REFRAG_RUNTIME=glm`.
+
+
 ## How context_answer works (with decoder)
 
 The `context_answer` MCP tool answers natural-language questions using retrieval + a decoder sidecar.
@@ -963,7 +1453,7 @@ Pipeline
 1) Hybrid search (gate-first): Uses MINI-vector gating when `REFRAG_GATE_FIRST=1` to prefilter candidates, then runs dense+lexical fusion
 2) Micro-span budgeting: Merges adjacent micro hits and applies a global token budget (`REFRAG_MODE=1`, `MICRO_BUDGET_TOKENS`, `MICRO_OUT_MAX_SPANS`)
 3) Prompt assembly: Builds compact context blocks and a “Sources” footer
-4) Decoder call (llama.cpp): When `REFRAG_DECODER=1`, calls `LLAMACPP_URL` to synthesize the final answer
+4) Decoder call: When `REFRAG_DECODER=1`, calls the configured runtime (`REFRAG_RUNTIME=llamacpp` or `glm`) to synthesize the final answer
 5) Return: Answer + citations + usage flags; errors keep citations for debugging
 
 Environment toggles
@@ -1061,6 +1551,39 @@ Client tips:
 
 ## Troubleshooting
 
+### Collection Health & Cache Sync
+
+The stack includes automatic health checks that detect and fix cache/collection sync issues:
+
+**Check collection health:**
+```bash
+python scripts/collection_health.py --workspace . --collection codebase
+```
+
+**Auto-heal cache issues:**
+```bash
+python scripts/collection_health.py --workspace . --collection codebase --auto-heal
+```
+
+**What it detects:**
+- Empty collection with cached files (cache thinks files are indexed but they're not)
+- Significant mismatch between cached files and actual collection contents
+- Missing metadata in collection points
+
+**When to use:**
+- After manually deleting collections
+- If searches return no results despite indexing
+- After Qdrant crashes or data loss
+- When switching between collection names
+
+**Automatic healing:**
+- Health checks run automatically on watcher and indexer startup
+- Cache is cleared when sync issues are detected
+- Files are reindexed on next run
+
+### General Issues
+
 - If the MCP servers can’t reach Qdrant, confirm both containers are up: `make ps`.
 - If the SSE port collides, change `FASTMCP_PORT` in `.env` and the mapped port in `docker-compose.yml`.
 - If you customize tool descriptions, restart: `make restart`.
+- If searches return no results, check collection health (see above).

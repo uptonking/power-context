@@ -290,6 +290,8 @@ def _git_metadata(file_path: Path) -> tuple[int, int, int]:
 _DEFAULT_EXCLUDE_DIRS = [
     "/models",
     "/.vs",
+    "/.cache",
+    "/.codebase",
 
     "/node_modules",
     "/dist",
@@ -1698,7 +1700,22 @@ def index_single_file(
             _cap = int(os.environ.get("MAX_MICRO_CHUNKS_PER_FILE", "500") or 500)
             if _cap > 0 and len(chunks) > _cap:
                 _before = len(chunks)
-                chunks = chunks[:_cap]
+                # Priority: keep ALL_CAPS assignments near top so constants survive capping
+                try:
+                    import re as _re
+                    if os.environ.get("INGEST_CONSTANT_PRIORITY", "1").lower() not in {"0", "false", "off", "no"}:
+                        _pat = _re.compile(r"\b[A-Z_]{2,}\s*=\s*")
+                        _important = []
+                        _rest = []
+                        for c in chunks:
+                            txt = c.get("text", "")
+                            (_important if _pat.search(txt) else _rest).append(c)
+                        # Preserve relative order within groups
+                        chunks = (_important + _rest)[:_cap]
+                    else:
+                        chunks = chunks[:_cap]
+                except Exception:
+                    chunks = chunks[:_cap]
                 try:
                     print(
                         f"[ingest] micro-chunks capped path={file_path} count={_before}->{len(chunks)} cap={_cap}"
@@ -1777,6 +1794,7 @@ def index_single_file(
             "metadata": {
                 "path": str(file_path),
                 "path_prefix": str(file_path.parent),
+                "ext": str(file_path.suffix).lstrip(".").lower(),
                 "language": language,
                 "kind": kind,
                 "symbol": sym,
@@ -1887,43 +1905,36 @@ def index_repo(
         if vector_name is None:
             vector_name = _sanitize_vector_name(model_name)
 
-    # Workspace state: ensure unique per-workspace collection and announce start
+    use_per_repo_collections = False
+
+    # Workspace state: derive collection and persist metadata
     try:
         ws_path = str(root)
         repo_tag = _detect_repo_name_from_path(root) if _detect_repo_name_from_path else None
 
-        # KNOWN LIMITATION: In multi-repo mode, when called with /work as root (e.g., --root /work),
-        # this indexer treats the entire /work directory as one repository instead of detecting
-        # individual subdirectories. The watcher service handles individual repos correctly.
-        # TODO: Add a shared helper function in workspace_state.py for repository detection
-        # that both watcher and indexer can use to avoid duplication. Then either skip
-        # /work indexing in multi-repo mode or detect subdirectories properly.
-        # This creates collections like "work-342f2f" instead of "test-repo-xxxxx".
-
-        # Use per-repo collections for /work root in multi-repo mode
-        is_multi_repo = is_multi_repo_mode() if is_multi_repo_mode else False
-        is_work_root = Path(ws_path).resolve() == Path("/work").resolve()
-        use_per_repo_collections = is_multi_repo_mode() and _get_collection_for_file
+        is_multi_repo = bool(is_multi_repo_mode and is_multi_repo_mode())
+        use_per_repo_collections = bool(is_multi_repo and _get_collection_for_file)
 
         if use_per_repo_collections:
-            collection = None  # Will be determined per-file during indexing
-            print("[multi_repo] Using per-repo collections for /work root (surgical fix)")
+            collection = None  # Determined per file later
+            print("[multi_repo] Using per-repo collections for root")
         else:
-            # Original logic: single collection for entire root
-            # If collection is unset or default placeholder, generate a per-workspace one
             if 'get_collection_name' in globals() and get_collection_name:
-                placeholders = {"", "default-collection"}
-                if (not collection) or (collection in placeholders):
-                    collection = get_collection_name(ws_path)
-        if update_workspace_state:
-            # For multi-repo mode, don't set a single collection since we use per-repo collections
-            if not use_per_repo_collections:
-                update_workspace_state(
-                    workspace_path=ws_path,
-                    updates={"qdrant_collection": collection},
-                    repo_name=repo_tag,
-                )
-        if update_indexing_status:
+                try:
+                    resolved = get_collection_name(ws_path)
+                    placeholders = {"", "default-collection", "my-collection", "codebase"}
+                    if resolved and collection in placeholders:
+                        collection = resolved
+                except Exception:
+                    pass
+
+        if update_workspace_state and not use_per_repo_collections:
+            update_workspace_state(
+                workspace_path=ws_path,
+                updates={"qdrant_collection": collection},
+                repo_name=repo_tag,
+            )
+        if update_indexing_status and repo_tag:
             update_indexing_status(
                 workspace_path=ws_path,
                 status={
@@ -1944,6 +1955,22 @@ def index_repo(
         f"Indexing root={root} -> {qdrant_url} collection={collection} model={model_name} recreate={recreate}"
     )
 
+    # Health check: detect cache/collection sync issues before indexing (single-collection mode only)
+    if not recreate and skip_unchanged and not use_per_repo_collections and collection:
+        try:
+            from scripts.collection_health import auto_heal_if_needed
+
+            print("[health_check] Checking collection health...")
+            heal_result = auto_heal_if_needed(str(root), collection, qdrant_url, dry_run=False)
+            if heal_result["action_taken"] == "cleared_cache":
+                print("[health_check] Cache cleared due to sync issue - forcing full reindex")
+            elif not heal_result["health_check"]["healthy"]:
+                print(f"[health_check] Issue detected: {heal_result['health_check']['issue']}")
+            else:
+                print("[health_check] Collection health OK")
+        except Exception as e:
+            print(f"[health_check] Warning: health check failed: {e}")
+
     # Skip single collection setup in multi-repo mode
     if not use_per_repo_collections:
         if recreate:
@@ -1956,6 +1983,9 @@ def index_repo(
         print("[multi_repo] Skipping single collection setup - will create per-repo collections during indexing")
     # Repo tag for filtering: auto-detect from git or folder name
     repo_tag = _detect_repo_name_from_path(root)
+    workspace_root = os.environ.get("WATCH_ROOT") or os.environ.get("WORKSPACE_PATH") or "/work"
+    touched_repos: set[str] = set()
+    repo_roots: dict[str, str] = {}
 
     # Batch and scaling config (env/CLI overridable)
     batch_texts: list[str] = []
@@ -2026,20 +2056,37 @@ def index_repo(
         language = detect_language(file_path)
         file_hash = hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest()
 
+        per_file_repo = (
+            _detect_repo_name_from_path(file_path)
+            if _detect_repo_name_from_path
+            else repo_tag
+        )
+        if per_file_repo:
+            touched_repos.add(per_file_repo)
+            repo_roots.setdefault(
+                per_file_repo,
+                str(Path(workspace_root).resolve() / per_file_repo),
+            )
+
         # Skip unchanged files if enabled (default)
         if skip_unchanged:
             # Prefer local workspace cache to avoid Qdrant lookups
             try:
                 if get_cached_file_hash:
-                    prev_local = get_cached_file_hash(str(file_path), repo_tag)
+                    prev_local = get_cached_file_hash(str(file_path), per_file_repo)
                     if prev_local and file_hash and prev_local == file_hash:
                         if PROGRESS_EVERY <= 0 and files_seen % 50 == 0:
                             print(f"... processed {files_seen} files (skipping unchanged, cache)")
                             try:
                                 if update_indexing_status:
-                                    per_file_repo = _detect_repo_name_from_path(file_path) if _detect_repo_name_from_path else repo_tag
+                                    target_workspace = (
+                                        ws_path if not use_per_repo_collections else str(file_path.parent)
+                                    )
+                                    target_repo = (
+                                        repo_tag if not use_per_repo_collections else per_file_repo
+                                    )
                                     update_indexing_status(
-                                        workspace_path=str(file_path.parent),
+                                        workspace_path=target_workspace,
                                         status={
                                             "state": "indexing",
                                             "progress": {
@@ -2048,7 +2095,7 @@ def index_repo(
                                                 "current_file": str(file_path),
                                             },
                                         },
-                                        repo_name=per_file_repo,
+                                        repo_name=target_repo,
                                     )
                             except Exception:
                                 pass
@@ -2062,8 +2109,7 @@ def index_repo(
                 # File exists in Qdrant with same hash - cache it locally for next time
                 try:
                     if set_cached_file_hash:
-                        file_repo_tag = _detect_repo_name_from_path(file_path)
-                        set_cached_file_hash(str(file_path), file_hash, file_repo_tag)
+                        set_cached_file_hash(str(file_path), file_hash, per_file_repo)
                 except Exception:
                     pass
                 if PROGRESS_EVERY <= 0 and files_seen % 50 == 0:
@@ -2071,9 +2117,14 @@ def index_repo(
                     print(f"... processed {files_seen} files (skipping unchanged)")
                     try:
                         if update_indexing_status:
-                            per_file_repo = _detect_repo_name_from_path(file_path) if _detect_repo_name_from_path else repo_tag
+                            target_workspace = (
+                                ws_path if not use_per_repo_collections else str(file_path.parent)
+                            )
+                            target_repo = (
+                                repo_tag if not use_per_repo_collections else per_file_repo
+                            )
                             update_indexing_status(
-                                workspace_path=str(file_path.parent),
+                                workspace_path=target_workspace,
                                 status={
                                     "state": "indexing",
                                     "progress": {
@@ -2082,7 +2133,7 @@ def index_repo(
                                         "current_file": str(file_path),
                                     },
                                 },
-                                repo_name=per_file_repo,
+                                repo_name=target_repo,
                             )
                     except Exception:
                         pass
@@ -2112,7 +2163,21 @@ def index_repo(
                 _cap = int(os.environ.get("MAX_MICRO_CHUNKS_PER_FILE", "500") or 500)
                 if _cap > 0 and len(chunks) > _cap:
                     _before = len(chunks)
-                    chunks = chunks[:_cap]
+                    # Priority: keep ALL_CAPS assignments near top so constants survive capping
+                    try:
+                        import re as _re
+                        if os.environ.get("INGEST_CONSTANT_PRIORITY", "1").lower() not in {"0", "false", "off", "no"}:
+                            _pat = _re.compile(r"\b[A-Z_]{2,}\s*=\s*")
+                            _important = []
+                            _rest = []
+                            for c in chunks:
+                                txt = c.get("text", "")
+                                (_important if _pat.search(txt) else _rest).append(c)
+                            chunks = (_important + _rest)[:_cap]
+                        else:
+                            chunks = chunks[:_cap]
+                    except Exception:
+                        chunks = chunks[:_cap]
                     try:
                         print(
                             f"[ingest] micro-chunks capped path={file_path} count={_before}->{len(chunks)} cap={_cap}"
@@ -2168,11 +2233,12 @@ def index_repo(
                 "metadata": {
                     "path": str(file_path),
                     "path_prefix": str(file_path.parent),
+                    "ext": str(file_path.suffix).lstrip(".").lower(),
                     "language": language,
                     "kind": kind,
                     "symbol": sym,
                     "symbol_path": sym_path or "",
-                    "repo": repo_tag,
+                    "repo": per_file_repo,
                     "start_line": ch["start"],
                     "end_line": ch["end"],
                     "code": ch["text"],
@@ -2232,6 +2298,13 @@ def index_repo(
                             try:
                                 if _p and _h:
                                     file_repo_tag = _detect_repo_name_from_path(Path(_p))
+                                    repos_touched_name = file_repo_tag or per_file_repo
+                                    if repos_touched_name:
+                                        touched_repos.add(repos_touched_name)
+                                        repo_roots.setdefault(
+                                            repos_touched_name,
+                                            str(Path(workspace_root).resolve() / repos_touched_name),
+                                        )
                                     set_cached_file_hash(_p, _h, file_repo_tag)
                             except Exception:
                                 continue
@@ -2247,18 +2320,19 @@ def index_repo(
             try:
                 if update_indexing_status:
                     per_file_repo = _detect_repo_name_from_path(file_path) if _detect_repo_name_from_path else repo_tag
-                    update_indexing_status(
-                        workspace_path=str(file_path.parent),
-                        status={
-                            "state": "indexing",
-                            "progress": {
-                                "files_processed": files_indexed,
-                                "total_files": None,
-                                "current_file": str(file_path),
+                    if per_file_repo:
+                        update_indexing_status(
+                            workspace_path=str(file_path.parent),
+                            status={
+                                "state": "indexing",
+                                "progress": {
+                                    "files_processed": repo_progress.get(per_file_repo, 0),
+                                    "total_files": repo_total.get(per_file_repo, None),
+                                    "current_file": str(file_path),
+                                },
                             },
-                        },
-                        repo_name=per_file_repo,
-                    )
+                            repo_name=per_file_repo,
+                        )
             except Exception as e:
                 # Log progress update errors instead of silent failure
                 import traceback
@@ -2284,8 +2358,9 @@ def index_repo(
                 for _p, _h in list(batch_file_hashes.items()):
                     try:
                         if _p and _h:
-                            file_repo_tag = _detect_repo_name_from_path(Path(_p))
-                            set_cached_file_hash(_p, _h, file_repo_tag)
+                            per_file_repo = _detect_repo_name_from_path(Path(_p))
+                            if per_file_repo:
+                                set_cached_file_hash(_p, _h, per_file_repo)
                     except Exception:
                         continue
         except Exception:
@@ -2316,14 +2391,19 @@ def index_repo(
                 },
             )
         if update_indexing_status:
-            update_indexing_status(
-                workspace_path=ws_path,
-                status={
-                    "state": "idle",
-                    "progress": {"files_processed": files_indexed, "total_files": None},
-                },
-                repo_name=repo_tag,
-            )
+            for repo_name in touched_repos or ({repo_tag} if repo_tag else set()):
+                try:
+                    target_ws = repo_roots.get(repo_name) or ws_path
+                    update_indexing_status(
+                        workspace_path=target_ws,
+                        status={
+                            "state": "idle",
+                            "progress": {"files_processed": files_indexed, "total_files": None},
+                        },
+                        repo_name=repo_name,
+                    )
+                except Exception:
+                    continue
     except Exception as e:
         # Log the error instead of silently swallowing it
         import traceback
@@ -2420,16 +2500,27 @@ def main():
 
     qdrant_url = os.environ.get("QDRANT_URL", "http://localhost:6333")
     api_key = os.environ.get("QDRANT_API_KEY")
+    collection = os.environ.get("COLLECTION_NAME") or os.environ.get("DEFAULT_COLLECTION") or "codebase"
     model_name = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
 
     # Resolve collection name based on multi-repo mode
-    if is_multi_repo_mode and is_multi_repo_mode():
+    multi_repo = bool(is_multi_repo_mode and is_multi_repo_mode())
+    if multi_repo:
         # Multi-repo mode: pass collection=None to trigger per-repo collection resolution
         collection = None
         print("[multi_repo] Multi-repo mode enabled - will create separate collections per repository")
     else:
         # Single-repo mode: use environment variable
-        collection = os.environ.get("COLLECTION_NAME", "my-collection")
+        if 'get_collection_name' in globals() and get_collection_name:
+            try:
+                resolved = get_collection_name(str(Path(args.root).resolve()))
+                placeholders = {"", "default-collection", "my-collection", "codebase"}
+                if resolved and collection in placeholders:
+                    collection = resolved
+            except Exception:
+                pass
+        if not collection:
+            collection = os.environ.get("COLLECTION_NAME", "codebase")
         print(f"[single_repo] Single-repo mode enabled - using collection: {collection}")
 
     index_repo(

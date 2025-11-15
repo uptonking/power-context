@@ -10,6 +10,7 @@ This module provides functionality to track workspace-specific state including:
 """
 import json
 import os
+import re
 import uuid
 import subprocess
 import hashlib
@@ -17,6 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Literal, TypedDict
 import threading
+import time
 
 # Type definitions
 IndexingState = Literal['idle', 'initializing', 'scanning', 'indexing', 'watching', 'error']
@@ -78,8 +80,10 @@ def is_multi_repo_mode() -> bool:
         "1", "true", "yes", "on"
     }
 
-# Simple locking for concurrent access
+_state_lock = threading.Lock()
+# Track last-used timestamps for cleanup of idle workspace locks
 _state_locks: Dict[str, threading.RLock] = {}
+_state_lock_last_used: Dict[str, float] = {}
 
 def _resolve_workspace_root() -> str:
     """Determine the default workspace root path."""
@@ -106,21 +110,20 @@ def _resolve_repo_context(
     return resolved_workspace, repo_name
 
 def _get_state_lock(workspace_path: Optional[str] = None, repo_name: Optional[str] = None) -> threading.RLock:
-    """Get or create a lock for the workspace or repo state."""
-    if workspace_path:
-        key = str(Path(workspace_path).resolve())
-    elif repo_name:
+    """Get or create a lock for the workspace or repo state and track usage."""
+    if repo_name and is_multi_repo_mode():
         key = f"repo::{repo_name}"
     else:
-        key = str(Path(_resolve_workspace_root()).resolve())
+        key = str(Path(workspace_path or _resolve_workspace_root()).resolve())
 
-    if key not in _state_locks:
-        _state_locks[key] = threading.RLock()
-    return _state_locks[key]
+    with _state_lock:
+        if key not in _state_locks:
+            _state_locks[key] = threading.RLock()
+        _state_lock_last_used[key] = time.time()
+        return _state_locks[key]
 
 def _get_repo_state_dir(repo_name: str) -> Path:
     """Get the state directory for a repository."""
-    # Use workspace root (typically /work in containers) not script directory
     base_dir = Path(os.environ.get("WORKSPACE_PATH") or os.environ.get("WATCH_ROOT") or "/work")
     if is_multi_repo_mode():
         return base_dir / STATE_DIRNAME / "repos" / repo_name
@@ -132,8 +135,136 @@ def _get_state_path(workspace_path: str) -> Path:
     state_dir = workspace / STATE_DIRNAME
     return state_dir / STATE_FILENAME
 
-def get_workspace_state(workspace_path: Optional[str] = None, repo_name: Optional[str] = None) -> WorkspaceState:
+
+def _get_global_state_dir(workspace_path: Optional[str] = None) -> Path:
+    """Return the root .codebase directory used for workspace metadata."""
+
+    base_dir = Path(workspace_path or _resolve_workspace_root()).resolve()
+    return base_dir / STATE_DIRNAME
+
+def _ensure_state_dir(workspace_path: str) -> Path:
+    """Ensure the .codebase directory exists and return the state file path."""
+    workspace = Path(workspace_path).resolve()
+    state_dir = workspace / STATE_DIRNAME
+    state_dir.mkdir(exist_ok=True)
+    return state_dir / STATE_FILENAME
+
+def _sanitize_name(s: str, max_len: int = 64) -> str:
+    s = s.lower().strip()
+    s = re.sub(r"[^a-z0-9_.-]+", "-", s)
+    s = re.sub(r"-+", "-", s).strip("-")
+    if not s:
+        s = "workspace"
+    return s[:max_len]
+
+
+# Cross-process file locking (POSIX fcntl), falls back to no-op if unavailable
+try:
+    import fcntl  # type: ignore
+except Exception:  # pragma: no cover
+    fcntl = None  # type: ignore
+
+from contextlib import contextmanager
+
+@contextmanager
+def _cross_process_lock(lock_path: Path):
+    """Advisory cross-process exclusive lock using a companion .lock file.
+    Safe across container/process boundaries; pairs with atomic rename writes.
+    Ensures group-writable permissions so non-root indexers/watchers can operate.
+    """
+
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    lock_file = None
+    fd = None
+    try:
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o664)
+        lock_file = os.fdopen(fd, "a+")
+    except PermissionError:
+        # If we cannot create or open the requested lock, fall back to /tmp (permissive)
+        tmp_path = Path("/tmp") / (lock_path.name)
+        tmp_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(tmp_path, os.O_CREAT | os.O_RDWR, 0o664)
+        lock_file = os.fdopen(fd, "a+")
+        lock_path = tmp_path
+
+    try:
+        try:
+            os.chmod(lock_path, 0o664)
+        except PermissionError:
+            pass
+
+        if fcntl is not None:
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            except Exception:
+                pass
+        yield
+    finally:
+        try:
+            if fcntl is not None:
+                try:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                except Exception:
+                    pass
+        finally:
+            try:
+                lock_file.close()
+            except Exception:
+                pass
+
+def _detect_repo_name_from_path(path: Path) -> str:
+    try:
+        base = path if path.is_dir() else path.parent
+        r = subprocess.run(["git", "-C", str(base), "rev-parse", "--show-toplevel"],
+                           capture_output=True, text=True)
+        top = (r.stdout or "").strip()
+        if r.returncode == 0 and top:
+            return Path(top).name
+    except Exception:
+        pass
+    try:
+        # Walk up to find .git
+        cur = path if path.is_dir() else path.parent
+        for p in [cur] + list(cur.parents):
+            try:
+                if (p / ".git").exists():
+                    return p.name
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return (path if path.is_dir() else path.parent).name or "workspace"
+
+
+def _generate_collection_name(workspace_path: str) -> str:
+    ws = Path(workspace_path).resolve()
+    repo = _sanitize_name(_detect_repo_name_from_path(ws))
+    # stable suffix from absolute path
+    h = hashlib.sha1(str(ws).encode("utf-8", errors="ignore")).hexdigest()[:6]
+    return _sanitize_name(f"{repo}-{h}")
+
+def _atomic_write_state(state_path: Path, state: WorkspaceState) -> None:
+    """Atomically write state to prevent corruption during concurrent access."""
+    # Write to temp file first, then rename (atomic on most filesystems)
+    temp_path = state_path.with_suffix(f".tmp.{uuid.uuid4().hex[:8]}")
+    try:
+        with open(temp_path, 'w', encoding='utf-8') as f:
+            json.dump(state, f, indent=2, ensure_ascii=False)
+        temp_path.replace(state_path)
+    except Exception:
+        # Clean up temp file if something went wrong
+        try:
+            temp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
+
+def get_workspace_state(
+    workspace_path: Optional[str] = None, repo_name: Optional[str] = None
+) -> WorkspaceState:
     """Get the current workspace state, creating it if it doesn't exist."""
+
     workspace_path, repo_name = _resolve_repo_context(workspace_path, repo_name)
 
     if is_multi_repo_mode() and repo_name is None:
@@ -144,45 +275,56 @@ def get_workspace_state(workspace_path: Optional[str] = None, repo_name: Optiona
 
     lock = _get_state_lock(workspace_path, repo_name)
     with lock:
-        # In multi-repo mode, use repo-based state path
+        state_path: Path
+        lock_scope_path: Path
+
         if is_multi_repo_mode() and repo_name:
-            state_path = _get_repo_state_dir(repo_name) / STATE_FILENAME
+            state_dir = _get_repo_state_dir(repo_name)
+            state_dir.mkdir(parents=True, exist_ok=True)
+            state_path = state_dir / STATE_FILENAME
+            lock_scope_path = state_dir
         else:
-            state_path = _get_state_path(workspace_path)
-
-        if state_path.exists():
             try:
-                with open(state_path, 'r', encoding='utf-8') as f:
-                    state = json.load(f)
-                    # Ensure required fields exist
-                    if not isinstance(state, dict):
-                        raise ValueError("Invalid state format")
-                    return state
-            except (json.JSONDecodeError, ValueError, OSError):
-                # Corrupted or invalid state file, recreate
-                pass
+                state_path = _ensure_state_dir(workspace_path)
+                lock_scope_path = state_path.parent
+            except PermissionError:
+                lock_scope_path = _get_global_state_dir(workspace_path)
+                lock_scope_path.mkdir(parents=True, exist_ok=True)
+                state_path = lock_scope_path / STATE_FILENAME
 
-        # Create new state
-        state = {
-            "created_at": datetime.now().isoformat(),
-            "updated_at": datetime.now().isoformat(),
-            "qdrant_collection": get_collection_name(repo_name),
-            "indexing_status": {"state": "idle"},
-        }
+        lock_path = lock_scope_path / (STATE_FILENAME + ".lock")
+        with _cross_process_lock(lock_path):
+            if state_path.exists():
+                try:
+                    with open(state_path, "r", encoding="utf-8") as f:
+                        state = json.load(f)
+                        if isinstance(state, dict):
+                            return state
+                except (json.JSONDecodeError, ValueError, OSError):
+                    pass
 
-        # Write state
-        state_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(state_path, 'w', encoding='utf-8') as f:
-            json.dump(state, f, ensure_ascii=False, indent=2)
+            now = datetime.now().isoformat()
+            collection_name = get_collection_name(repo_name)
 
-        return state
+            state: WorkspaceState = {
+                "workspace_path": str(Path(workspace_path or _resolve_workspace_root()).resolve()),
+                "created_at": now,
+                "updated_at": now,
+                "qdrant_collection": collection_name,
+                "indexing_status": {"state": "idle"},
+            }
+
+            _atomic_write_state(state_path, state)
+            return state
+
 
 def update_workspace_state(
     workspace_path: Optional[str] = None,
     updates: Optional[Dict[str, Any]] = None,
     repo_name: Optional[str] = None,
 ) -> WorkspaceState:
-    """Update workspace state with new values."""
+    """Update workspace state with the given changes."""
+
     workspace_path, repo_name = _resolve_repo_context(workspace_path, repo_name)
     updates = updates or {}
 
@@ -195,18 +337,25 @@ def update_workspace_state(
     lock = _get_state_lock(workspace_path, repo_name)
     with lock:
         state = get_workspace_state(workspace_path, repo_name)
-        state.update(updates)
+        for key, value in updates.items():
+            if key in state or key in WorkspaceState.__annotations__:
+                state[key] = value
+
         state["updated_at"] = datetime.now().isoformat()
 
-        # Write updated state using same path logic as get_workspace_state
         if is_multi_repo_mode() and repo_name:
-            state_path = _get_repo_state_dir(repo_name) / STATE_FILENAME
+            state_dir = _get_repo_state_dir(repo_name)
+            state_dir.mkdir(parents=True, exist_ok=True)
+            state_path = state_dir / STATE_FILENAME
         else:
-            state_path = _get_state_path(workspace_path)
+            try:
+                state_path = _ensure_state_dir(workspace_path)
+            except PermissionError:
+                state_dir = _get_global_state_dir(workspace_path)
+                state_dir.mkdir(parents=True, exist_ok=True)
+                state_path = state_dir / STATE_FILENAME
 
-        with open(state_path, 'w', encoding='utf-8') as f:
-            json.dump(state, f, ensure_ascii=False, indent=2)
-
+        _atomic_write_state(state_path, state)
         return state
 
 def update_indexing_status(
@@ -273,9 +422,16 @@ def update_repo_origin(
         repo_name=resolved_repo,
     )
 
-def log_activity(repo_name: Optional[str] = None, action: Optional[ActivityAction] = None,
-               file_path: Optional[str] = None, details: Optional[ActivityDetails] = None) -> None:
+
+def log_activity(
+    repo_name: Optional[str] = None,
+    action: Optional[ActivityAction] = None,
+    file_path: Optional[str] = None,
+    details: Optional[ActivityDetails] = None,
+    workspace_path: Optional[str] = None,
+) -> None:
     """Log activity to workspace state."""
+
     if not action:
         return
 
@@ -283,33 +439,37 @@ def log_activity(repo_name: Optional[str] = None, action: Optional[ActivityActio
         "timestamp": datetime.now().isoformat(),
         "action": action,
         "file_path": file_path,
-        "details": details or {}
+        "details": details or {},
     }
 
+    resolved_workspace = workspace_path or _resolve_workspace_root()
+
     if is_multi_repo_mode() and repo_name:
-        # Multi-repo mode: use repo-based state
         state_dir = _get_repo_state_dir(repo_name)
+        state_dir.mkdir(parents=True, exist_ok=True)
         state_path = state_dir / STATE_FILENAME
+        lock_path = state_path.with_suffix(".lock")
 
-        state_path.parent.mkdir(parents=True, exist_ok=True)
-
-        if state_path.exists():
+        with _cross_process_lock(lock_path):
             try:
-                with open(state_path, 'r', encoding='utf-8') as f:
-                    state = json.load(f)
-            except (json.JSONDecodeError, OSError):
+                if state_path.exists():
+                    with open(state_path, "r", encoding="utf-8") as f:
+                        state = json.load(f)
+                else:
+                    state = {"created_at": datetime.now().isoformat()}
+            except Exception:
                 state = {"created_at": datetime.now().isoformat()}
-        else:
-            state = {"created_at": datetime.now().isoformat()}
 
-        state["last_activity"] = activity
-        state["updated_at"] = datetime.now().isoformat()
-
-        with open(state_path, 'w', encoding='utf-8') as f:
-            json.dump(state, f, ensure_ascii=False, indent=2)
+            state["last_activity"] = activity
+            state["updated_at"] = datetime.now().isoformat()
+            _atomic_write_state(state_path, state)
     else:
-        # Single-repo mode: use workspace-based state (not implemented here)
-        pass
+        update_workspace_state(
+            workspace_path=resolved_workspace,
+            updates={"last_activity": activity},
+            repo_name=repo_name,
+        )
+
 
 def _generate_collection_name_from_repo(repo_name: str) -> str:
     """Generate collection name with 8-char hash for local workspaces.
@@ -392,36 +552,45 @@ def _get_cache_path(workspace_path: str) -> Path:
     workspace = Path(workspace_path).resolve()
     return workspace / STATE_DIRNAME / CACHE_FILENAME
 
+
 def _read_cache(workspace_path: str) -> Dict[str, Any]:
-    """Read cache file, return empty dict if doesn't exist."""
+    """Read cache file, return empty dict if it doesn't exist or is invalid."""
+
     cache_path = _get_cache_path(workspace_path)
     if not cache_path.exists():
         return {"file_hashes": {}, "updated_at": datetime.now().isoformat()}
 
     try:
-        with open(cache_path, 'r', encoding='utf-8') as f:
+        with open(cache_path, "r", encoding="utf-8") as f:
             obj = json.load(f)
             if isinstance(obj, dict) and isinstance(obj.get("file_hashes"), dict):
                 return obj
-            return {"file_hashes": {}, "updated_at": datetime.now().isoformat()}
     except Exception:
-        return {"file_hashes": {}, "updated_at": datetime.now().isoformat()}
+        pass
+
+    return {"file_hashes": {}, "updated_at": datetime.now().isoformat()}
+
 
 def _write_cache(workspace_path: str, cache: Dict[str, Any]) -> None:
-    """Write cache file atomically."""
-    cache_path = _get_cache_path(workspace_path)
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    """Atomic write of cache file with cross-process locking."""
 
-    tmp = cache_path.with_suffix(f".tmp.{uuid.uuid4().hex[:8]}")
-    try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(cache, f, ensure_ascii=False, indent=2)
-        tmp.replace(cache_path)
-    finally:
-        try:
-            tmp.unlink(missing_ok=True)
-        except Exception:
-            pass
+    lock = _get_state_lock(workspace_path)
+    with lock:
+        cache_path = _get_cache_path(workspace_path)
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = cache_path.with_suffix(cache_path.suffix + ".lock")
+        with _cross_process_lock(lock_path):
+            tmp = cache_path.with_suffix(f".tmp.{uuid.uuid4().hex[:8]}")
+            try:
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(cache, f, ensure_ascii=False, indent=2)
+                tmp.replace(cache_path)
+            finally:
+                try:
+                    tmp.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
 
 def get_cached_file_hash(file_path: str, repo_name: Optional[str] = None) -> str:
     """Get cached file hash for tracking changes."""
@@ -437,34 +606,43 @@ def get_cached_file_hash(file_path: str, repo_name: Optional[str] = None) -> str
                     return file_hashes.get(str(Path(file_path).resolve()), "")
             except Exception:
                 pass
+    else:
+        cache = _read_cache(_resolve_workspace_root())
+        return cache.get("file_hashes", {}).get(str(Path(file_path).resolve()), "")
 
     return ""
 
+
 def set_cached_file_hash(file_path: str, file_hash: str, repo_name: Optional[str] = None) -> None:
     """Set cached file hash for tracking changes."""
+
+    fp = str(Path(file_path).resolve())
+
     if is_multi_repo_mode() and repo_name:
         state_dir = _get_repo_state_dir(repo_name)
         cache_path = state_dir / CACHE_FILENAME
-
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        state_dir.mkdir(parents=True, exist_ok=True)
 
         try:
             if cache_path.exists():
-                with open(cache_path, 'r', encoding='utf-8') as f:
+                with open(cache_path, "r", encoding="utf-8") as f:
                     cache = json.load(f)
             else:
                 cache = {"file_hashes": {}, "created_at": datetime.now().isoformat()}
 
-            cache.setdefault("file_hashes", {})[str(Path(file_path).resolve())] = file_hash
+            cache.setdefault("file_hashes", {})[fp] = file_hash
             cache["updated_at"] = datetime.now().isoformat()
 
-            # Atomic write
-            tmp = cache_path.with_suffix(f".tmp.{uuid.uuid4().hex[:8]}")
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(cache, f, ensure_ascii=False, indent=2)
-            tmp.replace(cache_path)
+            _atomic_write_state(cache_path, cache)  # reuse atomic writer for files
         except Exception:
             pass
+        return
+
+    cache = _read_cache(_resolve_workspace_root())
+    cache.setdefault("file_hashes", {})[fp] = file_hash
+    cache["updated_at"] = datetime.now().isoformat()
+    _write_cache(_resolve_workspace_root(), cache)
+
 
 def remove_cached_file(file_path: str, repo_name: Optional[str] = None) -> None:
     """Remove file entry from cache."""
@@ -483,54 +661,57 @@ def remove_cached_file(file_path: str, repo_name: Optional[str] = None) -> None:
                     file_hashes.pop(fp, None)
                     cache["updated_at"] = datetime.now().isoformat()
 
-                    tmp = cache_path.with_suffix(f".tmp.{uuid.uuid4().hex[:8]}")
-                    with open(tmp, "w", encoding="utf-8") as f:
-                        json.dump(cache, f, ensure_ascii=False, indent=2)
-                    tmp.replace(cache_path)
+                    _atomic_write_state(cache_path, cache)
             except Exception:
                 pass
+        return
 
-# Additional functions needed by callers
-def _state_file_path(workspace_path: Optional[str] = None, repo_name: Optional[str] = None) -> Path:
-    """Get state file path for workspace or repo."""
-    if repo_name and is_multi_repo_mode():
-        state_dir = _get_repo_state_dir(repo_name)
-        return state_dir / STATE_FILENAME
+    cache = _read_cache(_resolve_workspace_root())
+    fp = str(Path(file_path).resolve())
+    if fp in cache.get("file_hashes", {}):
+        cache["file_hashes"].pop(fp, None)
+        cache["updated_at"] = datetime.now().isoformat()
+        _write_cache(_resolve_workspace_root(), cache)
 
-    if workspace_path:
-        return _get_state_path(workspace_path)
 
-    # Default to current directory
-    return Path.cwd() / STATE_DIRNAME / STATE_FILENAME
+def cleanup_old_cache_locks(max_idle_seconds: int = 900) -> int:
+    """Best-effort cleanup of idle cache locks.
 
-def _get_global_state_dir() -> Path:
-    """Get the global .codebase directory."""
-    base_dir = Path.cwd()
-    return base_dir / ".codebase"
-
-def list_workspaces(search_root: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Find all workspaces with .codebase/state.json files."""
-    if search_root is None:
-        # Use workspace root instead of current directory
-        search_root = os.environ.get("WORKSPACE_PATH") or "/work"
-
-    workspaces = []
-    root_path = Path(search_root)
-
-    # Look for state files
-    for state_file in root_path.rglob(STATE_FILENAME):
-        try:
-            rel_path = state_file.relative_to(root_path)
-            workspace_info = {
-                "path": str(rel_path.parent),
-                "state_file": str(state_file),
-                "relative_path": str(rel_path.parent)
-            }
-            workspaces.append(workspace_info)
-        except (ValueError, OSError):
-            continue
-
-    return workspaces
+    Removes locks that have been idle (not requested via _get_state_lock) for longer than max_idle_seconds
+    and whose lock can be acquired without blocking (i.e., not held).
+    Returns the number of locks removed.
+    """
+    now = time.time()
+    removed = 0
+    with _state_lock:
+        stale_keys = []
+        for ws, lock in list(_state_locks.items()):
+            last = _state_lock_last_used.get(ws, 0.0)
+            # Prefer also pruning locks whose workspace no longer exists
+            ws_exists = True
+            try:
+                ws_exists = Path(ws).exists()
+            except Exception:
+                ws_exists = False
+            if (now - last) > max_idle_seconds or not ws_exists:
+                acquired = False
+                try:
+                    acquired = lock.acquire(blocking=False)
+                except Exception:
+                    acquired = False
+                if acquired:
+                    try:
+                        stale_keys.append(ws)
+                    finally:
+                        try:
+                            lock.release()
+                        except Exception:
+                            pass
+        for ws in stale_keys:
+            _state_locks.pop(ws, None)
+            _state_lock_last_used.pop(ws, None)
+            removed += 1
+    return removed
 
 
 def get_collection_mappings(search_root: Optional[str] = None) -> List[Dict[str, Any]]:

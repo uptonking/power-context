@@ -7,6 +7,8 @@ export DOCKER_HOST =
 .PHONY: help up down logs ps restart rebuild index reindex watch watch-remote env hybrid bootstrap history rerank-local setup-reranker prune warm health test-e2e
 .PHONY: venv venv-install dev-remote-up dev-remote-down dev-remote-logs dev-remote-restart dev-remote-bootstrap dev-remote-test dev-remote-client dev-remote-clean
 
+.PHONY: qdrant-status qdrant-list qdrant-prune qdrant-index-root
+
 venv: ## create local virtualenv .venv
 	python3 -m venv .venv && . .venv/bin/activate && pip install -U pip
 
@@ -47,6 +49,11 @@ index: ## index code into Qdrant without dropping the collection
 
 reindex: ## recreate collection then index from scratch (will remove existing points!)
 	docker compose run --rm indexer --root /work --recreate
+
+reindex-hard: ## clear .codebase/cache.json then recreate collection and index from scratch
+	@rm -f .codebase/cache.json || true
+	docker compose run --rm indexer --root /work --recreate
+
 
 # Index an arbitrary local path without cloning into this repo
 index-path: ## index an arbitrary repo: make index-path REPO_PATH=/abs/path [RECREATE=1] [REPO_NAME=name] [COLLECTION=name]
@@ -204,12 +211,11 @@ reset-dev-dual: ## bring up BOTH legacy SSE and Streamable HTTP MCPs (dual-compa
 	docker compose run --rm -e INDEX_MICRO_CHUNKS -e MAX_MICRO_CHUNKS_PER_FILE -e TOKENIZER_PATH -e TOKENIZER_URL indexer --root /work --recreate
 	$(MAKE) llama-model
 	docker compose up -d mcp mcp_indexer mcp_http mcp_indexer_http watcher llamacpp
-	# Ensure watcher is up even if a prior step or manual bring-up omitted it
 	docker compose up -d watcher
 	docker compose ps
 
 # --- llama.cpp tiny model provisioning ---
-LLAMACPP_MODEL_URL ?= https://huggingface.co/Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF/resolve/main/qwen2.5-coder-1.5b-instruct-q4_k_m.gguf
+LLAMACPP_MODEL_URL ?= https://huggingface.co/ibm-granite/granite-4.0-micro-GGUF/resolve/main/granite-4.0-micro-Q4_K_M.gguf
 LLAMACPP_MODEL_PATH ?= models/model.gguf
 
 llama-model: ## download tiny GGUF model into ./models/model.gguf (override with LLAMACPP_MODEL_URL/LLAMACPP_MODEL_PATH)
@@ -276,4 +282,65 @@ dev-remote-clean: ## clean up dev-remote volumes and containers
 	rm -rf dev-workspace
 
 
+# Router helpers
+Q ?= what is hybrid search?
+route-plan: ## plan-only route for a query: make route-plan Q="your question"
+	python3 scripts/mcp_router.py --plan "$(Q)"
 
+route-run: ## execute routed tool(s) over HTTP: make route-run Q="your question"
+	python3 scripts/mcp_router.py --run "$(Q)"
+router-eval: ## run the mock-based router eval harness
+	python3 scripts/router_eval.py
+
+
+# Live orchestration smoke test (no CI): bring up stack, reindex, run router
+router-smoke: ## spin up compose, reindex, store a memory via router, then answer; exits nonzero on failure
+	set -e; \
+	docker compose down || true; \
+	docker compose up -d qdrant; \
+	./scripts/wait-for-qdrant.sh; \
+	$(MAKE) llama-model; \
+	docker compose up -d mcp_http mcp_indexer_http llamacpp; \
+	echo "Waiting for MCP HTTP health..."; \
+	for i in $$(seq 1 30); do \
+	  code1=$$(curl -s -o /dev/null -w "%{http_code}" http://localhost:$${FASTMCP_HTTP_HEALTH_PORT:-18002}/readyz || true); \
+	  code2=$$(curl -s -o /dev/null -w "%{http_code}" http://localhost:$${FASTMCP_INDEXER_HTTP_HEALTH_PORT:-18003}/readyz || true); \
+	  if [ "$$code1" = "200" ] && [ "$$code2" = "200" ]; then echo "MCP HTTP ready"; break; fi; \
+	  sleep 1; \
+	  if [ $$i -eq 30 ]; then echo "MCP HTTP health timeout"; exit 1; fi; \
+	done; \
+	$(MAKE) reindex; \
+	echo "Storing a smoke memory via router..."; \
+	python3 scripts/mcp_router.py --run "remember this: router smoke memory"; \
+	echo "Running a router answer..."; \
+	python3 scripts/mcp_router.py --run "recap our architecture decisions for the indexer"; \
+	echo "router-smoke: PASS"
+
+
+
+# Qdrant via MCP router convenience targets
+qdrant-status:
+	python3 scripts/mcp_router.py --run "status"
+
+qdrant-list:
+	python3 scripts/mcp_router.py --run "list collections"
+
+qdrant-prune:
+	python3 scripts/mcp_router.py --run "prune"
+
+qdrant-index-root:
+	python3 scripts/mcp_router.py --run "reindex repo"
+
+
+# --- ctx CLI helper ---
+# Usage examples (default prints ONLY the improved prompt):
+#   make ctx Q="how does hybrid search work?"
+#   make ctx Q="explain caching" ARGS="--language python --under scripts/"
+# To include Supporting Context:
+#   make ctx Q="explain caching" ARGS="--with-context --limit 2"
+ctx: ## enhance a prompt with repo context: make ctx Q="your question" [ARGS='--language python --under scripts/ --with-context']
+	@if [ -z "$(Q)" ]; then \
+	  echo 'Usage: make ctx Q="your question" [ARGS="--language python --under scripts/ --with-context"]'; \
+	  exit 1; \
+	fi; \
+	python3 scripts/ctx.py "$(Q)" $(ARGS)

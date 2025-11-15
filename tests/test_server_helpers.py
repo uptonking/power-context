@@ -63,7 +63,7 @@ def test_repo_search_arg_normalization(monkeypatch, tmp_path):
             kind=None,
             symbol=None,
             ext=None,
-            not_filter=None,
+            not_=None,  # Fixed: was not_filter
             case=None,
             path_regex=None,
             path_glob=None,

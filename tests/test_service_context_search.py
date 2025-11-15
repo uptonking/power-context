@@ -34,7 +34,8 @@ class FakeEmbed:
 
 
 @pytest.mark.service
-def test_context_search_blend_compact(monkeypatch):
+@pytest.mark.asyncio
+async def test_context_search_blend_compact(monkeypatch):
     # repo_search returns two code hits (async stub)
     async def fake_repo_search(**kwargs):
         return {
@@ -58,15 +59,13 @@ def test_context_search_blend_compact(monkeypatch):
         qdrant_client, "QdrantClient", lambda *a, **k: FakeQdrantMem(mem_items)
     )
 
-    res = srv.asyncio.get_event_loop().run_until_complete(
-        srv.context_search(
-            query="foo bar",
-            limit=3,
-            per_path=1,
-            include_memories=True,
-            memory_weight=0.5,
-            compact=True,
-        )
+    res = await srv.context_search(
+        query="foo bar",
+        limit=3,
+        per_path=1,
+        include_memories=True,
+        memory_weight=0.5,
+        compact=True,
     )
 
     assert "results" in res
@@ -79,7 +78,8 @@ def test_context_search_blend_compact(monkeypatch):
 
 
 @pytest.mark.service
-def test_context_search_weight_scaling(monkeypatch):
+@pytest.mark.asyncio
+async def test_context_search_weight_scaling(monkeypatch):
     # repo_search returns one code hit (async stub)
     async def fake_repo_search(**kwargs):
         return {
@@ -118,19 +118,23 @@ def test_context_search_weight_scaling(monkeypatch):
         async def call_tool(self, *a, **k):
             return Resp()
 
+    # Import fastmcp inside test to avoid module-level import conflicts
+    # Clear any broken mcp modules from sys.modules first
+    import sys
+    mcp_modules = [k for k in sys.modules.keys() if k == 'mcp' or k.startswith('mcp.')]
+    for mod in mcp_modules:
+        if mod in sys.modules and not hasattr(sys.modules.get(mod, object()), 'types'):
+            del sys.modules[mod]
     import fastmcp
-
     monkeypatch.setattr(fastmcp, "Client", lambda *a, **k: FakeClient())
 
-    res = srv.asyncio.get_event_loop().run_until_complete(
-        srv.context_search(
-            query="foo",
-            limit=2,
-            per_path=1,
-            include_memories=True,
-            memory_weight=2.0,
-            compact=False,
-        )
+    res = await srv.context_search(
+        query="foo",
+        limit=2,
+        per_path=1,
+        include_memories=True,
+        memory_weight=2.0,
+        compact=False,
     )
 
     mem_scores = [r["score"] for r in res["results"] if r.get("source") == "memory"]
@@ -141,7 +145,8 @@ def test_context_search_weight_scaling(monkeypatch):
 
 
 @pytest.mark.service
-def test_context_search_per_source_limits(monkeypatch):
+@pytest.mark.asyncio
+async def test_context_search_per_source_limits(monkeypatch):
     # repo_search returns three code hits
     async def fake_repo_search(**kwargs):
         return {
@@ -183,19 +188,23 @@ def test_context_search_per_source_limits(monkeypatch):
         async def call_tool(self, *a, **k):
             return Resp()
 
+    # Import fastmcp inside test to avoid module-level import conflicts
+    # Clear any broken mcp modules from sys.modules first
+    import sys
+    mcp_modules = [k for k in sys.modules.keys() if k == 'mcp' or k.startswith('mcp.')]
+    for mod in mcp_modules:
+        if mod in sys.modules and not hasattr(sys.modules.get(mod, object()), 'types'):
+            del sys.modules[mod]
     import fastmcp
-
     monkeypatch.setattr(fastmcp, "Client", lambda *a, **k: FakeClient())
 
-    res = srv.asyncio.get_event_loop().run_until_complete(
-        srv.context_search(
-            query="foo",
-            limit=5,
-            per_path=1,
-            include_memories=True,
-            per_source_limits=json.dumps({"code": 1, "memory": 2}),
-            compact=True,
-        )
+    res = await srv.context_search(
+        query="foo",
+        limit=5,
+        per_path=1,
+        include_memories=True,
+        per_source_limits=json.dumps({"code": 1, "memory": 2}),
+        compact=True,
     )
 
     kinds = [r.get("source") for r in res.get("results", [])]

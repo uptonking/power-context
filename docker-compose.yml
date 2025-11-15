@@ -24,7 +24,7 @@ services:
       - FASTMCP_HOST=${FASTMCP_HOST}
       - FASTMCP_PORT=${FASTMCP_PORT}
       - QDRANT_URL=${QDRANT_URL}
-      - COLLECTION_NAME=${COLLECTION_NAME}
+      - COLLECTION_NAME=${COLLECTION_NAME:-codebase}
       - EMBEDDING_MODEL=${EMBEDDING_MODEL}
       - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER}
       - TOOL_STORE_DESCRIPTION=${TOOL_STORE_DESCRIPTION}
@@ -51,10 +51,17 @@ services:
       - .env
     environment:
       - FASTMCP_HEALTH_PORT=18001
-
       - FASTMCP_HOST=${FASTMCP_HOST}
       - FASTMCP_INDEXER_PORT=${FASTMCP_INDEXER_PORT}
       - QDRANT_URL=${QDRANT_URL}
+      - DEBUG_CONTEXT_ANSWER=${DEBUG_CONTEXT_ANSWER:-1}
+      - REFRAG_DECODER=${REFRAG_DECODER:-1}
+      - LLAMACPP_URL=${LLAMACPP_URL:-http://llamacpp:8080}
+      - USE_GPU_DECODER=${USE_GPU_DECODER:-0}
+      - LLAMACPP_TIMEOUT_SEC=${LLAMACPP_TIMEOUT_SEC:-180}
+      - CTX_REQUIRE_IDENTIFIER=${CTX_REQUIRE_IDENTIFIER:-0}
+      - COLLECTION_NAME=${COLLECTION_NAME:-codebase}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL}
     # SSE endpoint for IDE agents at http://localhost:${FASTMCP_INDEXER_PORT:-8001}/sse
     ports:
       - "${FASTMCP_INDEXER_PORT:-8001}:8001"
@@ -77,7 +84,7 @@ services:
       - FASTMCP_PORT=8000
       - FASTMCP_TRANSPORT=${FASTMCP_HTTP_TRANSPORT}
       - QDRANT_URL=${QDRANT_URL}
-      - COLLECTION_NAME=${COLLECTION_NAME}
+      - COLLECTION_NAME=${COLLECTION_NAME:-codebase}
       - EMBEDDING_MODEL=${EMBEDDING_MODEL}
       - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER}
       - TOOL_STORE_DESCRIPTION=${TOOL_STORE_DESCRIPTION}
@@ -97,6 +104,7 @@ services:
     container_name: mcp-indexer-http
     depends_on:
       - qdrant
+      - llamacpp
     env_file:
       - .env
     environment:
@@ -105,6 +113,14 @@ services:
       - FASTMCP_TRANSPORT=${FASTMCP_HTTP_TRANSPORT}
       - QDRANT_URL=${QDRANT_URL}
       - FASTMCP_HEALTH_PORT=18001
+      - DEBUG_CONTEXT_ANSWER=${DEBUG_CONTEXT_ANSWER:-1}
+      - REFRAG_DECODER=${REFRAG_DECODER:-1}
+      - LLAMACPP_URL=${LLAMACPP_URL:-http://llamacpp:8080}
+      - USE_GPU_DECODER=${USE_GPU_DECODER:-0}
+      - LLAMACPP_TIMEOUT_SEC=${LLAMACPP_TIMEOUT_SEC:-180}
+      - CTX_REQUIRE_IDENTIFIER=${CTX_REQUIRE_IDENTIFIER:-0}
+      - COLLECTION_NAME=${COLLECTION_NAME:-codebase}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL}
     # Streamable HTTP endpoint for IDE agents at http://localhost:${FASTMCP_INDEXER_HTTP_PORT:-8003}/mcp/
     ports:
       - "${FASTMCP_INDEXER_HTTP_PORT:-8003}:8001"
@@ -112,23 +128,53 @@ services:
     volumes:
       - ${HOST_INDEX_PATH:-.}:/work
 
+    # Dev override: run server from host code so changes apply without rebuild
+    command: ["python", "/work/scripts/mcp_indexer_server.py"]
+
   llamacpp:
     image: ghcr.io/ggerganov/llama.cpp:server
     container_name: llama-decoder
     # Optional sidecar providing a text-generation API on :8080
     # No behavior change unless REFRAG_DECODER=1
     environment:
-      - LLAMA_ARG_MODEL=/models/model.gguf
-      - LLAMA_ARG_CTX_SIZE=8192
-      - LLAMA_ARG_HOST=0.0.0.0
-      - LLAMA_ARG_PORT=8080
+      - LLAMACPP_CTX_SIZE=${LLAMACPP_CTX_SIZE:-8192}
+      - LLAMACPP_HOST=0.0.0.0
+      - LLAMACPP_PORT=8080
+      - LLAMACPP_USE_GPU=${LLAMACPP_USE_GPU:-0}
+      - LLAMACPP_GPU_LAYERS=${LLAMACPP_GPU_LAYERS:-0}
+      - LLAMACPP_GPU_SPLIT=${LLAMACPP_GPU_SPLIT:-}
+      - LLAMACPP_THREADS=${LLAMACPP_THREADS:-}
+      - LLAMACPP_EXTRA_ARGS=${LLAMACPP_EXTRA_ARGS:-}
+      - LLAMACPP_NO_WARMUP=${LLAMACPP_NO_WARMUP:-1}
+      - LLAMACPP_TEMPERATURE=${LLAMACPP_TEMPERATURE:-}
     ports:
       - "8080:8080"
     volumes:
       - ./models:/models:ro
-    # The server image's entrypoint is already the server binary; pass args only
-    command: ["--model", "/models/model.gguf", "--host", "0.0.0.0", "--port", "8080", "--no-warmup"]
-
+    entrypoint: ["/bin/sh","-lc"]
+    command:
+      - |
+        set -e
+        ARGS="--model /models/model.gguf --host ${LLAMACPP_HOST:-0.0.0.0} --port ${LLAMACPP_PORT:-8080} --ctx-size ${LLAMACPP_CTX_SIZE:-8192}"
+        if [ "${LLAMACPP_USE_GPU:-0}" = "1" ]; then
+          LAYERS="${LLAMACPP_GPU_LAYERS:--1}"
+        else
+          LAYERS="${LLAMACPP_GPU_LAYERS:-0}"
+        fi
+        ARGS="$$ARGS --n-gpu-layers $${LAYERS}"
+        if [ -n "${LLAMACPP_GPU_SPLIT:-}" ]; then
+          ARGS="$$ARGS --tensor-split ${LLAMACPP_GPU_SPLIT}"
+        fi
+        if [ "${LLAMACPP_NO_WARMUP:-1}" != "0" ]; then
+          ARGS="$$ARGS --no-warmup"
+        fi
+        if [ -n "${LLAMACPP_THREADS:-}" ]; then
+          ARGS="$$ARGS --threads ${LLAMACPP_THREADS}"
+        fi
+        if [ -n "${LLAMACPP_EXTRA_ARGS:-}" ]; then
+          ARGS="$$ARGS ${LLAMACPP_EXTRA_ARGS}"
+        fi
+        exec /app/llama-server $$ARGS
 
   indexer:
     build:
@@ -140,7 +186,7 @@ services:
       - .env
     environment:
       - QDRANT_URL=${QDRANT_URL}
-      - COLLECTION_NAME=${COLLECTION_NAME}
+      - COLLECTION_NAME=${COLLECTION_NAME:-codebase}
       - EMBEDDING_MODEL=${EMBEDDING_MODEL}
     working_dir: /work
     volumes:
@@ -159,15 +205,15 @@ services:
       - .env
     environment:
       - QDRANT_URL=${QDRANT_URL}
-      - COLLECTION_NAME=${COLLECTION_NAME}
+      - COLLECTION_NAME=${COLLECTION_NAME:-codebase}
       - EMBEDDING_MODEL=${EMBEDDING_MODEL}
       - WATCH_ROOT=/work
       # Watcher-specific backpressure & timeouts (safer defaults)
       - QDRANT_TIMEOUT=60
-      - MAX_MICRO_CHUNKS_PER_FILE=200
+      - MAX_MICRO_CHUNKS_PER_FILE=${MAX_MICRO_CHUNKS_PER_FILE:-200}
       - INDEX_UPSERT_BATCH=128
       - INDEX_UPSERT_RETRIES=5
-      - WATCH_DEBOUNCE_SECS=1.5
+      - WATCH_DEBOUNCE_SECS=${WATCH_DEBOUNCE_SECS:-1.5}
     working_dir: /work
     volumes:
       - ${HOST_INDEX_PATH:-.}:/work:ro
@@ -185,7 +231,7 @@ services:
       - .env
     environment:
       - QDRANT_URL=${QDRANT_URL}
-      - COLLECTION_NAME=${COLLECTION_NAME}
+      - COLLECTION_NAME=${COLLECTION_NAME:-codebase}
     working_dir: /work
     volumes:
       - ${HOST_INDEX_PATH:-.}:/work:ro
@@ -196,4 +242,3 @@ services:
 volumes:
   qdrant_storage:
     driver: local
-

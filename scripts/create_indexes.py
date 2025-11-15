@@ -17,19 +17,23 @@ try:
 except Exception:
     log_activity = None  # type: ignore
 
-COLLECTION = os.environ.get("COLLECTION_NAME", "my-collection")
+COLLECTION = os.environ.get("COLLECTION_NAME", "codebase")
 # Discover workspace path for state updates (allows subdir indexing)
 WS_PATH = os.environ.get("INDEX_ROOT") or os.environ.get("WORKSPACE_PATH") or "/work"
 
-# Skip creating root collection in multi-repo mode
+# Skip creating root collection in multi-repo mode when indexing entire /work tree
 if is_multi_repo_mode and is_multi_repo_mode() and WS_PATH == "/work":
     print("Multi-repo mode enabled - skipping root collection creation for /work")
     exit(0)
 
-# Prefer per-workspace unique collection if none provided
-if (COLLECTION == "my-collection") and ('get_collection_name' in globals()) and get_collection_name:
+# Prefer workspace-derived collection names when env value is a placeholder
+if 'get_collection_name' in globals() and get_collection_name:
     try:
-        COLLECTION = get_collection_name(None)  # Use global state in single-repo mode
+        resolved = get_collection_name(None)
+        if resolved:
+            placeholders = {"", "default-collection", "my-collection", "codebase"}
+            if COLLECTION in placeholders:
+                COLLECTION = resolved
     except Exception:
         pass
 

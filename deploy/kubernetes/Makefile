@@ -41,6 +41,18 @@ deploy-full: check-kubectl ## Deploy all services including optional ones
 deploy-minimal: check-kubectl ## Deploy minimal setup (skip Llama.cpp and Ingress)
 	./deploy.sh --namespace $(NAMESPACE) --registry $(IMAGE_REGISTRY) --tag $(IMAGE_TAG) --skip-llamacpp
 
+# Kustomize targets
+.PHONY: kustomize-build
+kustomize-build: ## Build manifests with Kustomize
+	kustomize build .
+
+.PHONY: kustomize-apply
+kustomize-apply: check-kubectl ## Apply manifests with Kustomize
+	kustomize build . | kubectl apply -f -
+
+.PHONY: kustomize-delete
+kustomize-delete: check-kubectl ## Delete manifests with Kustomize
+	kustomize build . | kubectl delete -f -
 # Management targets
 .PHONY: status
 status: check-kubectl ## Show deployment status
@@ -66,23 +78,23 @@ status: check-kubectl ## Show deployment status
 	kubectl get jobs -n $(NAMESPACE) || echo "No jobs found"
 
 .PHONY: logs
-logs: check-kubectl ## Show logs for all services
+logs: check-kubectl ## Show logs for core services (tail 100)
 	@echo "=== Qdrant Logs ==="
-	kubectl logs -f statefulset/qdrant -n $(NAMESPACE) || echo "Qdrant logs not available"
+	kubectl logs -f statefulset/qdrant -n $(NAMESPACE) --tail=100 || echo "Qdrant logs not available"
 	@echo ""
 	@echo "=== MCP Memory Logs ==="
-	kubectl logs -f deployment/mcp-memory -n $(NAMESPACE) || echo "MCP Memory logs not available"
+	kubectl logs -f deployment/mcp-memory -n $(NAMESPACE) --tail=100 || echo "MCP Memory logs not available"
 	@echo ""
 	@echo "=== MCP Indexer Logs ==="
-	kubectl logs -f deployment/mcp-indexer -n $(NAMESPACE) || echo "MCP Indexer logs not available"
+	kubectl logs -f deployment/mcp-indexer -n $(NAMESPACE) --tail=100 || echo "MCP Indexer logs not available"
 	@echo ""
 	@echo "=== Watcher Logs ==="
-	kubectl logs -f deployment/watcher -n $(NAMESPACE) || echo "Watcher logs not available"
+	kubectl logs -f deployment/watcher -n $(NAMESPACE) --tail=100 || echo "Watcher logs not available"
 
 .PHONY: logs-service
 logs-service: check-kubectl ## Show logs for specific service (usage: make logs-service SERVICE=mcp-memory)
 	@if [ -z "$(SERVICE)" ]; then echo "Usage: make logs-service SERVICE=<service-name>"; exit 1; fi
-	kubectl logs -f deployment/$(SERVICE) -n $(NAMESPACE) || kubectl logs -f statefulset/$(SERVICE) -n $(NAMESPACE) || kubectl logs -f job/$(SERVICE) -n $(NAMESPACE) || echo "Service $(SERVICE) not found"
+	kubectl logs -f deployment/$(SERVICE) -n $(NAMESPACE) --tail=100 || kubectl logs -f statefulset/$(SERVICE) -n $(NAMESPACE) --tail=100 || kubectl logs -f job/$(SERVICE) -n $(NAMESPACE) --tail=100 || echo "Service $(SERVICE) not found"
 
 .PHONY: shell
 shell: check-kubectl ## Get a shell in a running pod (usage: make shell POD=mcp-memory-xxx)
@@ -132,7 +144,6 @@ port-forward-service: check-kubectl ## Port forward specific service (usage: mak
 stop-port-forward: ## Stop all port forwards
 	pkill -f "kubectl port-forward" || echo "No port forwards found"
 
-# Build and push targets (if you're building your own images)
 .PHONY: build-image
 build-image: ## Build Docker image (requires Docker)
 	docker build -t $(IMAGE_REGISTRY)/context-engine:$(IMAGE_TAG) ../../
@@ -141,29 +152,16 @@ build-image: ## Build Docker image (requires Docker)
 push-image: build-image ## Push Docker image to registry
 	docker push $(IMAGE_REGISTRY)/context-engine:$(IMAGE_TAG)
 
-# Kustomize targets
-.PHONY: kustomize-build
-kustomize-build: ## Build manifests with Kustomize
-	kustomize build .
-
-.PHONY: kustomize-apply
-kustomize-apply: check-kubectl ## Apply manifests with Kustomize
-	kustomize build . | kubectl apply -f -
-
-.PHONY: kustomize-delete
-kustomize-delete: check-kubectl ## Delete manifests with Kustomize
-	kustomize build . | kubectl delete -f -
-
 # Test targets
 .PHONY: test-connection
 test-connection: check-kubectl ## Test connectivity to all services
 	@echo "Testing service connectivity..."
 	@echo "Qdrant:"
-	@kubectl run qdrant-test --image=curlimages/curl --rm -i --restart=Never -- curl -f http://qdrant.$(NAMESPACE).svc.cluster.local:6333/health || echo "Qdrant test failed"
+	@kubectl run qdrant-test --image=curlimages/curl --rm -i --restart=Never -n $(NAMESPACE) -- curl -f http://qdrant.$(NAMESPACE).svc.cluster.local:6333/health || echo "Qdrant test failed"
 	@echo "MCP Memory:"
-	@kubectl run memory-test --image=curlimages/curl --rm -i --restart=Never -- curl -f http://mcp-memory.$(NAMESPACE).svc.cluster.local:8000/health || echo "MCP Memory test failed"
+	@kubectl run memory-test --image=curlimages/curl --rm -i --restart=Never -n $(NAMESPACE) -- curl -f http://mcp-memory.$(NAMESPACE).svc.cluster.local:8000/health || echo "MCP Memory test failed"
 	@echo "MCP Indexer:"
-	@kubectl run indexer-test --image=curlimages/curl --rm -i --restart=Never -- curl -f http://mcp-indexer.$(NAMESPACE).svc.cluster.local:8001/health || echo "MCP Indexer test failed"
+	@kubectl run indexer-test --image=curlimages/curl --rm -i --restart=Never -n $(NAMESPACE) -- curl -f http://mcp-indexer.$(NAMESPACE).svc.cluster.local:8001/health || echo "MCP Indexer test failed"
 
 # Configuration targets
 .PHONY: show-config
@@ -176,7 +174,7 @@ show-config: ## Show current configuration
 	@echo "Quick start commands:"
 	@echo "  make deploy              # Deploy all services"
 	@echo "  make status              # Show deployment status"
-	@echo "  make logs                # Show all logs"
+	@echo "  make logs                # Show logs"
 	@echo "  make cleanup             # Remove everything"
 
 .PHONY: show-urls

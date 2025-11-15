@@ -1,290 +1,535 @@
-# Context-Engine Kubernetes Deployment
+# Kubernetes Deployment Guide
 
-This directory contains Kubernetes manifests for deploying Context-Engine on a Kubernetes cluster. The deployment maintains local-first defaults while providing optional remote hosting capabilities.
+## Overview
 
-## Architecture Overview
+This directory contains Kubernetes manifests for deploying Context Engine on a remote cluster using **Kustomize**. This enables:
 
-### Services Deployed
+- **Remote development** from thin clients with cluster-based heavy lifting
+- **Multi-repository indexing** with unified `codebase` collection
+- **Scalable architecture** with independent watcher deployments per repo
+- **Kustomize-based configuration** for easy customization and overlays
 
-| Service | Port(s) | Description | Protocol |
-|---------|---------|-------------|----------|
-| **qdrant** | 6333, 6334 | Vector database | HTTP/gRPC |
-| **mcp-memory** | 8000, 18000 | Memory server (SSE) | SSE |
-| **mcp-memory-http** | 8002, 18002 | Memory server (HTTP) | HTTP |
-| **mcp-indexer** | 8001, 18001 | Indexer server (SSE) | SSE |
-| **mcp-indexer-http** | 8003, 18003 | Indexer server (HTTP) | HTTP |
-| **watcher** | - | File change monitoring | - |
-| **llamacpp** (optional) | 8080 | Text generation | HTTP |
+## Architecture
 
-### NodePort Mappings
+```mermaid
+graph TB
+    subgraph cluster["Kubernetes Cluster (namespace: context-engine)"]
+        subgraph ingress["Ingress Layer"]
+            nginx["NGINX Ingress<br/>Routes: /qdrant, /mcp/*, /mcp-http/*, /llamacpp"]
+        end
 
-For local development or direct access, services are exposed via NodePort:
+        subgraph services["Core Services"]
+            qdrant["Qdrant StatefulSet<br/>Port: 6333<br/>Vector Database"]
 
-| Service | NodePort | Local Access |
-|---------|----------|--------------|
-| qdrant | 30333, 30334 | `http://<node-ip>:30333` |
-| mcp-memory | 30800, 30801 | `http://<node-ip>:30800` |
-| mcp-indexer | 30802, 30803 | `http://<node-ip>:30802` |
-| mcp-memory-http | 30804, 30805 | `http://<node-ip>:30804` |
-| mcp-indexer-http | 30806, 30807 | `http://<node-ip>:30806` |
-| llamacpp | 30808 | `http://<node-ip>:30808` |
+            subgraph mcp["MCP Services (4 Deployments)"]
+                mcp_mem_sse["Memory SSE<br/>Port: 8000"]
+                mcp_mem_http["Memory HTTP<br/>Port: 8002"]
+                mcp_idx_sse["Indexer SSE<br/>Port: 8001<br/>(HPA: 1-5 replicas)"]
+                mcp_idx_http["Indexer HTTP<br/>Port: 8003"]
+            end
 
-## Prerequisites
+            llama["Llama.cpp Deployment<br/>Port: 8080<br/>Init: Model Download"]
+            watcher["Watcher Deployment<br/>Watches: /work"]
+        end
 
-1. **Kubernetes Cluster** (v1.20+)
-2. **kubectl** configured to access your cluster
-3. **Docker images** built and pushed to registry:
-   ```bash
-   # Build all service images
-   ./build-images.sh --push
+        subgraph security["Security & Scaling"]
+            rbac["RBAC: ServiceAccount<br/>(context-engine)"]
+            netpol["NetworkPolicy<br/>Intra-namespace ingress<br/>for watcher/indexer/init"]
+            hpa["HPA: mcp-indexer<br/>1-5 replicas @ 70% CPU"]
+        end
 
-   # Or build individually
-   docker build -f Dockerfile.mcp -t context-engine-memory:latest .
-   docker build -f Dockerfile.mcp-indexer -t context-engine-indexer:latest .
-   docker build -f Dockerfile.indexer -t context-engine-indexer-service:latest .
-   ```
+        subgraph storage["Persistent Storage (HostPath)"]
+            qdrant_vol["Qdrant Data<br/>/tmp/context-engine-qdrant"]
+            models_vol["LLM Models<br/>/tmp/context-engine-models"]
+            work_vol["Workspace<br/>/tmp/context-engine-work"]
+        end
+    end
 
-4. **Source Code Access**: Source code should be pre-distributed to all cluster nodes at `/tmp/context-engine-work`
+    nginx --> qdrant
+    nginx --> mcp
+    nginx --> llama
+
+    mcp --> qdrant
+    llama -.-> mcp
+    watcher --> qdrant
+
+    qdrant --> qdrant_vol
+    llama --> models_vol
+    watcher --> work_vol
+
+    style nginx fill:#e1f5ff
+    style qdrant fill:#fff4e1
+    style mcp fill:#e8f5e9
+    style llama fill:#f3e5f5
+    style watcher fill:#fce4ec
+    style security fill:#fff9c4
+    style storage fill:#e0e0e0
+```
 
 ## Quick Start
 
-### Manual Deployment
+### Prerequisites
 
-### 1. Deploy Core Services
+- Kubernetes cluster (1.19+)
+- `kubectl` configured to access your cluster
+- `kustomize` (optional, kubectl has built-in support)
+- Docker image built and pushed to a registry
+
+### 1. Build and Push Image
 
 ```bash
-# Deploy namespace and configuration
-kubectl apply -f namespace.yaml
-kubectl apply -f configmap.yaml
+# Build unified image
+docker build -t your-registry/context-engine:latest .
 
-# Deploy Qdrant database
-kubectl apply -f qdrant.yaml
-
-# Wait for Qdrant to be ready
-kubectl wait --for=condition=ready pod -l component=qdrant -n context-engine --timeout=300s
-
-# Initialize indexes
-kubectl apply -f indexer-services.yaml
+# Push to registry
+docker push your-registry/context-engine:latest
 ```
 
-### 2. Deploy MCP Servers
+### 2. Update Image References
 
-```bash
-# Deploy MCP Memory and Indexer servers (SSE)
-kubectl apply -f mcp-memory.yaml
-kubectl apply -f mcp-indexer.yaml
+Edit `kustomization.yaml` to use your registry:
 
-# Deploy HTTP versions (optional)
-kubectl apply -f mcp-http.yaml
+```yaml
+images:
+  - name: context-engine
+    newName: your-registry/context-engine
+    newTag: latest
 ```
 
-### 3. Deploy Optional Services
+### 3. Deploy Using Kustomize
 
 ```bash
-# Deploy Llama.cpp (optional, for text generation)
-kubectl apply -f llamacpp.yaml
+# Option 1: Using the deploy script with Kustomize (recommended)
+./deploy.sh --use-kustomize --registry your-registry/context-engine --tag latest --deploy-ingress
 
-# Deploy Ingress (optional, for domain-based access)
-kubectl apply -f ingress.yaml
+# Option 2: Using kubectl with kustomize directly
+kubectl apply -k .
+
+# Option 3: Using kustomize CLI
+kustomize build . | kubectl apply -f -
+
+# Option 4: Using the deploy script without Kustomize (legacy)
+./deploy.sh --registry your-registry/context-engine --tag latest --deploy-ingress
 ```
 
-### 4. Verify Deployment
+**Deploy Script Flags:**
+- `--use-kustomize`: Use Kustomize for declarative image management (recommended)
+- `--registry <registry/name>`: Docker registry and image name (default: context-engine)
+- `--tag <tag>`: Image tag (default: latest)
+- `--deploy-ingress`: Deploy NGINX ingress routes
+- `--skip-llamacpp`: Skip llama.cpp decoder deployment
+
+### 4. Deploy Using Makefile
 
 ```bash
-# Check all pods
+# Deploy all services
+make deploy
+
+# Or deploy core services only
+make deploy-core
+
+# Check status
+make status
+```
+
+### 5. Verify Deployment
+
+```bash
+# Check all pods are running
 kubectl get pods -n context-engine
 
 # Check services
-kubectl get services -n context-engine
+kubectl get svc -n context-engine
 
-# Check logs for any service
-kubectl logs -f deployment/mcp-memory -n context-engine
+# View logs
+make logs-service SERVICE=mcp-memory
+```
+
+### 6. Access Services
+
+```bash
+# Port forward to localhost
+make port-forward
+
+# Or access via NodePort
+# Qdrant: http://<node-ip>:30333
+# MCP Memory: http://<node-ip>:30800
+# MCP Indexer: http://<node-ip>:30802
 ```
 
 ## Configuration
 
-### Environment Variables
+### Automatic Model Download
 
-All configuration is managed through the `context-engine-config` ConfigMap in `configmap.yaml`. Key variables include:
+The Llama.cpp deployment includes an **init container** that automatically downloads the model on first startup:
 
-- **QDRANT_URL**: Database connection (automatically set to Kubernetes service)
-- **COLLECTION_NAME**: Default collection name (`my-collection`)
-- **EMBEDDING_MODEL**: Embedding model (`BAAI/bge-base-en-v1.5`)
-- **EMBEDDING_PROVIDER**: Provider (`fastembed`)
+- **Default Model**: Qwen2.5-1.5B-Instruct (Q8_0 quantization, ~1.7GB)
+- **Download Location**: `/tmp/context-engine-models/` on the Kubernetes node
+- **Behavior**: Downloads only if model doesn't exist (idempotent)
+- **Good balance**: Fast, accurate, small footprint
 
-### Persistent Storage
+To use a different model, edit `configmap.yaml`:
 
-- **Qdrant data**: 20Gi persistent volume claim
-- **Work directory**: HostPath mounted to `/tmp/context-engine-work`
-- **Models directory**: HostPath mounted to `/tmp/context-engine-models`
-
-### Customization
-
-1. **Storage Class**: Modify `qdrant.yaml` to use your cluster's storage class
-2. **Resources**: Adjust memory/CPU limits in each deployment
-3. **Host Paths**: Update volume mounts to match your environment
-4. **Ingress**: Configure `ingress.yaml` with your domain and SSL
-
-## Source Code Management
-
-The deployment uses hostPath volumes to access source code on cluster nodes. Source code must be pre-distributed to all cluster nodes at the configured paths.
-
-## Development Workflow
-
-### Local Development
-
-For local development, you can continue using `docker-compose.yml` as before:
-
-```bash
-# Local development (unchanged)
-docker-compose up -d
+```yaml
+# Model download configuration
+LLAMACPP_MODEL_URL: "https://huggingface.co/your-org/your-model/resolve/main/model.gguf"
+LLAMACPP_MODEL_NAME: "model.gguf"
 ```
 
-### Kubernetes Development
+**Alternative Models**:
+- **Qwen2.5-0.5B-Instruct-Q8** (~500MB) - Tiny, very fast
+- **Qwen2.5-1.5B-Instruct-Q8** (default, ~1.7GB) - Best balance
+- **Granite-3.0-3B-Instruct-Q8** (~3.2GB) - Higher quality
+- **Phi-3-mini-4k-instruct-Q8** (~4GB) - High quality
 
-For Kubernetes-based development:
+### Environment Variables (ConfigMap)
 
-1. **Build and Push Image**:
-   ```bash
-   docker build -t your-registry/context-engine:latest .
-   docker push your-registry/context-engine:latest
-   ```
+Key environment variables in `configmap.yaml`:
 
-2. **Update Image References**:
-   ```bash
-   # Update all manifests to use your image
-   sed -i 's|context-engine:latest|your-registry/context-engine:latest|g' *.yaml
-   ```
-
-3. **Deploy Changes**:
-   ```bash
-   kubectl apply -f .
-   ```
-
-### File Synchronization
-
-The Kubernetes deployment uses HostPath volumes to sync files:
-
-```bash
-# Mount your local code directory
-sudo mkdir -p /tmp/context-engine-work
-sudo cp -r /path/to/your/code/* /tmp/context-engine-work/
-
-# Mount models (if using Llama.cpp)
-sudo mkdir -p /tmp/context-engine-models
-sudo cp /path/to/your/models/* /tmp/context-engine-models/
+```yaml
+COLLECTION_NAME: "codebase"           # Unified collection for all repos
+EMBEDDING_MODEL: "BAAI/bge-base-en-v1.5"
+QDRANT_URL: "http://qdrant:6333"
+INDEX_MICRO_CHUNKS: "1"
+MAX_MICRO_CHUNKS_PER_FILE: "200"
+WATCH_DEBOUNCE_SECS: "1.5"
 ```
 
-## Monitoring and Troubleshooting
+### Persistent Volumes
+
+The deployment uses HostPath volumes for simplicity (suitable for single-node clusters like minikube):
+
+1. **qdrant-storage**: Stores Qdrant vector database
+   - Path: `/tmp/context-engine-qdrant`
+   - Type: DirectoryOrCreate
+
+2. **models-storage**: Stores LLM models for llama.cpp
+   - Path: `/tmp/context-engine-models`
+   - Type: DirectoryOrCreate
+
+3. **work-storage**: Stores workspace/repository code
+   - Path: `/tmp/context-engine-work`
+   - Type: DirectoryOrCreate
+   - Mounted at: `/work` in containers
+
+For multi-node production clusters, replace HostPath with PersistentVolumeClaims (PVCs) backed by network storage (NFS, Ceph, cloud provider volumes).
+
+### Resource Requests/Limits
+
+Adjust based on your cluster capacity:
+
+```yaml
+# Qdrant (memory-intensive)
+resources:
+  requests:
+    memory: "4Gi"
+    cpu: "2"
+  limits:
+    memory: "8Gi"
+    cpu: "4"
+
+# MCP Servers (moderate)
+resources:
+  requests:
+    memory: "2Gi"
+    cpu: "1"
+  limits:
+    memory: "4Gi"
+    cpu: "2"
+
+# Watchers (light)
+resources:
+  requests:
+    memory: "512Mi"
+    cpu: "500m"
+  limits:
+    memory: "1Gi"
+    cpu: "1"
+```
+
+## Workspace Setup
+
+### Indexing Your Codebase
+
+The deployment indexes the codebase mounted at `/work` inside containers, which maps to `/tmp/context-engine-work` on the host.
+
+1. **Copy your codebase to the workspace volume**:
+   ```bash
+   # For minikube (single-node)
+   minikube ssh
+   sudo mkdir -p /tmp/context-engine-work
+   exit
+
+   # Copy your code
+   kubectl cp /local/path/to/your/repo context-engine/watcher-<pod-id>:/work
+
+   # Or mount directly on the host
+   cp -r /local/path/to/your/repo /tmp/context-engine-work/
+   ```
+
+2. **Verify indexing**:
+   ```bash
+   # Check watcher logs
+   kubectl logs -f deployment/watcher -n context-engine
+
+   # Check indexer job completion
+   kubectl get jobs -n context-engine
+
+   # Check collection status via MCP
+   kubectl port-forward -n context-engine svc/mcp-indexer 8001:8001
+   curl -X POST http://localhost:8001/mcp \
+     -H "Content-Type: application/json" \
+     -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"qdrant_status","arguments":{}}}'
+   ```
+
+### Workspace Volume Structure
+
+```
+/work/                          # Container mount point
+├── .codebase/                  # Indexing metadata
+│   └── state.json
+├── src/                        # Your source code
+├── tests/
+├── docs/
+└── ...
+```
+
+**Note**: The current deployment uses a single workspace at `/work`. For multi-repository setups, you can:
+- Use subdirectories under `/work` (e.g., `/work/backend`, `/work/frontend`)
+- Deploy multiple watcher instances with different `WATCH_ROOT` environment variables
+- Use a unified collection or separate collections per repository
+
+## Accessing Services
+
+### From Within Cluster
+
+Services are accessible via Kubernetes DNS:
+
+- Qdrant: `http://qdrant:6333`
+- Memory MCP: `http://mcp-memory:8000/sse`
+- Indexer MCP: `http://mcp-indexer:8001/sse`
+
+### From Outside Cluster
+
+#### Option 1: Port Forwarding (Development)
+
+```bash
+# Forward MCP services to localhost
+kubectl port-forward -n context-engine svc/mcp-memory 8000:8000
+kubectl port-forward -n context-engine svc/mcp-indexer 8001:8001
+kubectl port-forward -n context-engine svc/qdrant 6333:6333
+```
+
+Then configure your IDE to use `http://localhost:8000/sse` and `http://localhost:8001/sse`.
+
+#### Option 2: Ingress (Production)
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: context-engine-ingress
+  namespace: context-engine
+spec:
+  rules:
+  - host: mcp.your-domain.com
+    http:
+      paths:
+      - path: /memory
+        pathType: Prefix
+        backend:
+          service:
+            name: mcp-memory
+            port:
+              number: 8000
+      - path: /indexer
+        pathType: Prefix
+        backend:
+          service:
+            name: mcp-indexer
+            port:
+              number: 8001
+```
+
+#### Option 3: LoadBalancer (Cloud)
+
+Change service type to `LoadBalancer` in service manifests:
+
+```yaml
+spec:
+  type: LoadBalancer
+  ports:
+  - port: 8000
+    targetPort: 8000
+```
+
+## Monitoring and Maintenance
 
 ### Health Checks
 
-All services include liveness and readiness probes:
+```bash
+# Check Qdrant health
+kubectl exec -n context-engine qdrant-0 -- curl -f http://localhost:6333/readyz
 
-- **HTTP Services**: `/health` endpoint
-- **Qdrant**: `/ready` and `/health` endpoints
+# Check MCP server health
+kubectl exec -n context-engine deployment/mcp-memory -- curl -f http://localhost:18000/health
+kubectl exec -n context-engine deployment/mcp-indexer -- curl -f http://localhost:18001/health
+```
 
 ### Logs
 
 ```bash
-# View all logs
-kubectl logs -f deployment/mcp-memory -n context-engine
+# View logs for specific service
+kubectl logs -f -n context-engine deployment/mcp-memory
+kubectl logs -f -n context-engine deployment/mcp-indexer
+kubectl logs -f -n context-engine deployment/watcher
 
-# View watcher logs for indexing activity
-kubectl logs -f deployment/watcher -n context-engine
-
-# View Qdrant logs
-kubectl logs -f statefulset/qdrant -n context-engine
+# View logs for all watchers (if multiple)
+kubectl logs -f -n context-engine -l component=watcher
 ```
 
-### Common Issues
-
-1. **Storage Class Not Found**:
-   ```bash
-   kubectl get storageclass
-   # Update qdrant.yaml to use available storage class
-   ```
-
-2. **HostPath Permissions**:
-   ```bash
-   # Ensure host directories are accessible
-   sudo chmod -R 755 /tmp/context-engine-work
-   ```
-
-3. **Image Pull Errors**:
-   ```bash
-   # Check image registry access
-   kubectl describe pod <pod-name> -n context-engine
-   ```
-
-## Scaling and High Availability
-
-### Scaling MCP Servers
+### Collection Status
 
 ```bash
-# Scale memory servers
-kubectl scale deployment mcp-memory --replicas=3 -n context-engine
+# Port forward indexer MCP
+kubectl port-forward -n context-engine svc/mcp-indexer 8001:8001
 
-# Scale indexer servers
-kubectl scale deployment mcp-indexer --replicas=2 -n context-engine
+# Check collection status
+curl -X POST http://localhost:8001/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"qdrant_status","arguments":{}}}'
 ```
 
-### High Availability Qdrant
+### Backup and Restore
 
-For production, consider:
+#### Backup Qdrant Data
 
-1. **Qdrant Cloud**: Managed service with automatic scaling
-2. **Multi-replica StatefulSet**: Configure Qdrant clustering
-3. **External Database**: Use managed vector database
+```bash
+# Create snapshot
+kubectl exec -n context-engine qdrant-0 -- \
+  curl -X POST http://localhost:6333/collections/codebase/snapshots
+
+# Copy snapshot to local
+kubectl cp context-engine/qdrant-0:/qdrant/storage/snapshots/codebase-snapshot.tar \
+  ./backup/codebase-snapshot.tar
+```
+
+#### Restore Qdrant Data
+
+```bash
+# Copy snapshot to pod
+kubectl cp ./backup/codebase-snapshot.tar \
+  context-engine/qdrant-0:/qdrant/storage/snapshots/
+
+# Restore snapshot
+kubectl exec -n context-engine qdrant-0 -- \
+  curl -X PUT http://localhost:6333/collections/codebase/snapshots/upload \
+  -F 'snapshot=@/qdrant/storage/snapshots/codebase-snapshot.tar'
+```
+
+## Troubleshooting
+
+### Pods Not Starting
+
+```bash
+# Check pod status
+kubectl describe pod -n context-engine <pod-name>
+
+# Check events
+kubectl get events -n context-engine --sort-by='.lastTimestamp'
+```
+
+### Persistent Volume Issues
+
+```bash
+# Check PV/PVC status
+kubectl get pv,pvc -n context-engine
+
+# Check PVC events
+kubectl describe pvc -n context-engine <pvc-name>
+```
+
+### Watcher Not Indexing
+
+```bash
+# Check watcher logs
+kubectl logs -f -n context-engine deployment/watcher
+
+# Verify volume mount
+kubectl exec -n context-engine deployment/watcher -- ls -la /work
+
+# Check Qdrant connectivity
+kubectl exec -n context-engine deployment/watcher -- \
+  curl -f http://qdrant:6333/readyz
+```
+
+### MCP Connection Issues
+
+```bash
+# Test SSE endpoint
+kubectl exec -n context-engine deployment/mcp-indexer -- \
+  curl -H "Accept: text/event-stream" http://localhost:8001/sse
+
+# Check service endpoints
+kubectl get endpoints -n context-engine
+```
+
+## Scaling
+
+### Horizontal Scaling
+
+- **MCP Servers**: Can run multiple replicas behind a service
+- **Watchers**: One per repository (do not scale horizontally)
+- **Qdrant**: Single instance (StatefulSet with replicas=1)
+
+### Vertical Scaling
+
+Adjust resource requests/limits based on workload:
+
+```bash
+# Edit deployment
+kubectl edit deployment -n context-engine mcp-indexer
+
+# Or patch
+kubectl patch deployment -n context-engine mcp-indexer -p \
+  '{"spec":{"template":{"spec":{"containers":[{"name":"mcp-indexer","resources":{"requests":{"memory":"4Gi"}}}]}}}}'
+```
 
 ## Security Considerations
 
-1. **Network Policies**: Restrict inter-service communication
-2. **RBAC**: Implement proper role-based access control
-3. **Secrets Management**: Use Kubernetes Secrets for sensitive data
-4. **TLS**: Configure Ingress with SSL/TLS certificates
+### Implemented Security Features
 
-## Migration from Docker Compose
+1. **RBAC (Role-Based Access Control)**
+   - ServiceAccount: `context-engine` created in `rbac.yaml`
+   - Applied to all Deployments and Jobs
+   - Provides pod identity for Kubernetes API authentication
+   - Future: Add Role/RoleBinding for fine-grained permissions
 
-### Data Migration
+2. **NetworkPolicy (Soft Hardening - Option B)**
+   - Policy: `allow-intra-namespace-ingress-internal` in `networkpolicy.yaml`
+   - Scope: Applies to watcher, indexer, and init pods
+   - Rules: Allows ingress only from pods in the same namespace
+   - No egress restrictions (external downloads and Qdrant access work)
+   - MCP services and Qdrant remain accessible via Ingress/NodePort
+   - Future: Implement Option A (default-deny with explicit allow rules)
 
-1. **Export Qdrant Data**:
-   ```bash
-   docker exec qdrant-db python -c "
-   import requests
-   response = requests.get('http://localhost:6333/collections/my-collection')
-   print(response.json())
-   "
-   ```
+3. **HorizontalPodAutoscaler (HPA)**
+   - Target: mcp-indexer deployment
+   - Min replicas: 1, Max replicas: 5
+   - Trigger: 70% CPU utilization
+   - Prevents resource exhaustion under load
 
-2. **Import to Kubernetes**:
-   ```bash
-   # Copy data to Kubernetes PVC
-   kubectl cp qdrant-backup.json qdrant-0:/qdrant/storage/ -n context-engine
-   ```
+### Additional Security Recommendations
 
-### Configuration Migration
+4. **Secrets Management**: Use Kubernetes secrets or external secret managers for sensitive data
+5. **TLS**: Enable TLS for external access via Ingress with cert-manager
+6. **Resource Quotas**: Set namespace resource quotas to prevent resource exhaustion
+7. **Pod Security Standards**: Apply restricted pod security standards
+8. **Image Security**: Use signed images and vulnerability scanning
 
-The Kubernetes deployment maintains the same environment variables as Docker Compose. Most settings should work without changes.
+## See Also
 
-## Production Deployment Checklist
+- [Multi-Repository Collections Guide](../../docs/MULTI_REPO_COLLECTIONS.md)
+- [MCP API Reference](../../docs/MCP_API.md)
+- [Architecture Overview](../../docs/ARCHITECTURE.md)
 
-- [ ] Use LoadBalancer services instead of NodePort
-- [ ] Configure proper Ingress with SSL certificates
-- [ ] Set up monitoring and logging (Prometheus, Grafana)
-- [ ] Implement backup strategy for Qdrant data
-- [ ] Configure resource limits and requests appropriately
-- [ ] Set up horizontal pod autoscaling
-- [ ] Implement security policies and network segmentation
-- [ ] Configure proper secrets management
-- [ ] Set up CI/CD pipeline for automated deployments
-
-## Support
-
-For issues with Kubernetes deployment:
-
-1. Check the service logs: `kubectl logs -f <deployment> -n context-engine`
-2. Verify resource usage: `kubectl top pods -n context-engine`
-3. Check events: `kubectl get events -n context-engine --sort-by=.metadata.creationTimestamp`
-
-For application issues, refer to the main project documentation.

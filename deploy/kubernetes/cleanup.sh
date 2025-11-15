@@ -7,6 +7,7 @@ set -e
 
 # Configuration
 NAMESPACE="context-engine"
+FORCE=false
 
 # Colors for output
 RED='\033[0;31m'
@@ -92,6 +93,18 @@ show_deletion_plan() {
     log_warning "This will permanently delete all data in Qdrant and any other persistent storage!"
 }
 
+confirm_cleanup() {
+    if [[ "$FORCE" == "true" ]]; then
+        return 0
+    fi
+    read -p "Are you sure you want to delete all Context-Engine resources? (yes/no): " -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy][Ee][Ss]$ ]]; then
+        log_info "Cleanup cancelled"
+        exit 0
+    fi
+}
+
 # Delete namespace and all resources
 delete_namespace() {
     log_info "Deleting namespace: $NAMESPACE"
@@ -163,13 +176,8 @@ main() {
     # Show what will be deleted
     show_deletion_plan
 
-    # Ask for confirmation
-    echo
-    read -p "Are you sure you want to delete all Context-Engine resources? (yes/no): " -r
-    if [[ ! $REPLY =~ ^[Yy][Ee][Ss]$ ]]; then
-        log_info "Cleanup cancelled"
-        exit 0
-    fi
+    # Ask for confirmation (unless forced)
+    confirm_cleanup
 
     # Delete namespace
     delete_namespace
@@ -217,7 +225,7 @@ while [[ $# -gt 0 ]]; do
             NAMESPACE="$2"
             shift 2
             ;;
-        -f|--force)
+        -f|--force|--force=true)
             FORCE=true
             shift
             ;;

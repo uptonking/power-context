@@ -27,7 +27,7 @@ def assert_true(cond: bool, msg: str):
 def main():
     qdrant_url = os.environ.get("QDRANT_URL", "http://localhost:6333")
     api_key = os.environ.get("QDRANT_API_KEY")
-    collection = os.environ.get("COLLECTION_NAME", "my-collection")
+    collection = os.environ.get("COLLECTION_NAME", "codebase")
     model_name = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
 
     print(f"Health check -> {qdrant_url} collection={collection} model={model_name}")

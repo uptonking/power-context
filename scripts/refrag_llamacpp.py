@@ -11,6 +11,9 @@ Notes:
 from __future__ import annotations
 import os
 from typing import Any, Dict, Optional
+import threading
+import contextlib
+import time
 
 
 def _bool_env(name: str, default: str = "0") -> bool:
@@ -42,6 +45,72 @@ def get_sense_policy() -> str:
     return str(os.environ.get("REFRAG_SENSE", "heuristic")).strip().lower()
 
 
+def _max_parallel() -> int:
+    try:
+        val = int(os.environ.get("LLAMACPP_MAX_PARALLEL", "").strip() or "2")
+        return max(1, val)
+    except Exception:
+        return 2
+
+
+_LLAMACPP_PARALLEL = _max_parallel()
+_LLAMACPP_SLOT = threading.Semaphore(_LLAMACPP_PARALLEL)
+_LLAMACPP_SLOT_LOCK = threading.Lock()
+
+
+def _refresh_parallel_semaphore() -> None:
+    """Refresh semaphore when LLAMACPP_MAX_PARALLEL changes at runtime."""
+    try:
+        desired = _max_parallel()
+    except Exception:
+        desired = 2
+    with _LLAMACPP_SLOT_LOCK:
+        global _LLAMACPP_SLOT, _LLAMACPP_PARALLEL
+        if desired == _LLAMACPP_PARALLEL:
+            return
+        _LLAMACPP_PARALLEL = desired
+        _LLAMACPP_SLOT = threading.Semaphore(desired)
+
+
+@contextlib.contextmanager
+def _parallel_slot():
+    """Context manager honoring LLAMACPP_MAX_PARALLEL."""
+    _refresh_parallel_semaphore()
+    slot = globals().get("_LLAMACPP_SLOT")
+    if not isinstance(slot, threading.Semaphore):
+        slot = threading.Semaphore(_max_parallel())
+        globals()["_LLAMACPP_SLOT"] = slot
+    acquired = slot.acquire(timeout=float(os.environ.get("LLAMACPP_ACQUIRE_TIMEOUT", "30") or 30))
+    if not acquired:
+        raise RuntimeError("llama.cpp saturated: parallel limit reached")
+    try:
+        yield
+    finally:
+        slot.release()
+
+
+_WARM_CHECKED = False
+
+
+def _maybe_warm(base_url: str) -> None:
+    global _WARM_CHECKED
+    if _WARM_CHECKED:
+        return
+    _WARM_CHECKED = True
+    if not _bool_env("LLAMACPP_AUTOWARM", "1"):
+        return
+    try:
+        from urllib import request
+
+        req = request.Request(base_url.rstrip("/") + "/health", method="GET")
+        timeout = float(os.environ.get("LLAMACPP_WARM_TIMEOUT", "3") or 3)
+        with request.urlopen(req, timeout=timeout):
+            pass
+    except Exception:
+        # Ignore warm failures; decoder calls will raise later if truly unavailable
+        return
+
+
 class LlamaCppRefragClient:
     """Feature-flagged client for llama.cpp decoder.
 
@@ -51,9 +120,22 @@ class LlamaCppRefragClient:
     """
 
     def __init__(self, base_url: Optional[str] = None) -> None:
-        self.base_url = base_url or os.environ.get(
-            "LLAMACPP_URL", "http://localhost:8080"
-        )
+        if base_url:
+            self.base_url = base_url
+        else:
+            # Smart URL resolution: GPU vs Docker based on USE_GPU_DECODER flag
+            use_gpu = str(os.environ.get("USE_GPU_DECODER", "0")).strip().lower()
+            if use_gpu in {"1", "true", "yes", "on"}:
+                # Use native GPU-accelerated server
+                # Use localhost when running on host, host.docker.internal when in container
+                if os.path.exists("/.dockerenv"):
+                    self.base_url = "http://host.docker.internal:8081"
+                else:
+                    self.base_url = "http://localhost:8081"
+            else:
+                # Use configured LLAMACPP_URL (default: Docker CPU-only)
+                self.base_url = os.environ.get("LLAMACPP_URL", "http://localhost:8080")
+        _maybe_warm(self.base_url)
         if get_runtime_kind() != "llamacpp":
             raise ValueError(
                 "REFRAG_RUNTIME must be 'llamacpp' for LlamaCppRefragClient"
@@ -104,7 +186,13 @@ class LlamaCppRefragClient:
                 "stop": gen_kwargs.get("stop") or [],
             }
             try:
-                res = self._post("/soft_completion", payload)
+                with _parallel_slot():
+                    _start = time.time()
+                    res = self._post("/soft_completion", payload)
+                    elapsed = time.time() - _start
+                    os.environ.setdefault(
+                        "LLAMACPP_LAST_LATENCY_SEC", f"{elapsed:.3f}"
+                    )
             except Exception as e:
                 raise RuntimeError(f"llama.cpp soft_completion failed: {e}")
             return (res.get("content") or res.get("generation") or "").strip()
@@ -128,7 +216,13 @@ class LlamaCppRefragClient:
             "stop": gen_kwargs.get("stop") or [],
         }
         try:
-            res = self._post("/completion", payload)
+            with _parallel_slot():
+                _start = time.time()
+                res = self._post("/completion", payload)
+                elapsed = time.time() - _start
+                os.environ.setdefault(
+                    "LLAMACPP_LAST_LATENCY_SEC", f"{elapsed:.3f}"
+                )
         except Exception as e:
             raise RuntimeError(f"llama.cpp completion failed: {e}")
         # llama.cpp server returns { 'content': '...' } or { 'token': ... } streams; we expect non-stream

@@ -39,23 +39,23 @@ spec:
           value: "6334"
         resources:
           requests:
-            memory: "512Mi"
-            cpu: "250m"
+memory: "2Gi"
+            cpu: "1"
           limits:
-            memory: "2Gi"
-            cpu: "1000m"
+            memory: "8Gi"
+            cpu: "4"
         volumeMounts:
         - name: qdrant-storage
           mountPath: /qdrant/storage
         livenessProbe:
           httpGet:
-            path: /health
+path: /healthz
             port: http
           initialDelaySeconds: 30
           periodSeconds: 10
         readinessProbe:
           httpGet:
-            path: /ready
+path: /readyz
             port: http
           initialDelaySeconds: 5
           periodSeconds: 5
@@ -67,7 +67,7 @@ spec:
         component: qdrant
     spec:
       accessModes: ["ReadWriteOnce"]
-      # storageClassName: "" # Uncomment and set if you want to specify a storage class
+# storageClassName: "" # Uncomment and set if you want to specify a storage class
       resources:
         requests:
           storage: 20Gi
@@ -108,17 +108,17 @@ metadata:
     app: context-engine
     component: qdrant
 spec:
-  type: NodePort  # Change to LoadBalancer if your cluster supports it
+type: NodePort  # Change to LoadBalancer if your cluster supports it
   ports:
   - name: http
     port: 6333
     targetPort: http
-    nodePort: 30333  # Optional: specify node port
+nodePort: 30333  # Optional: specify node port
     protocol: TCP
   - name: grpc
     port: 6334
     targetPort: grpc
-    nodePort: 30334  # Optional: specify node port
+nodePort: 30334  # Optional: specify node port
     protocol: TCP
   selector:
     app: context-engine

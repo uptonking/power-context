@@ -1,67 +1,6 @@
 ---
-# Indexer Job (One-shot code indexing)
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: indexer-job
-  namespace: context-engine
-  labels:
-    app: context-engine
-    component: indexer
-spec:
-  template:
-    metadata:
-      labels:
-        app: context-engine
-        component: indexer
-    spec:
-      restartPolicy: OnFailure
-      containers:
-      - name: indexer
-        image: context-engine-indexer-service  # Use service-specific image name
-        imagePullPolicy: IfNotPresent
-        command: ["python", "/app/scripts/ingest_code.py"]
-        workingDir: /work
-        env:
-        - name: QDRANT_URL
-          valueFrom:
-            configMapKeyRef:
-              name: context-engine-config
-              key: QDRANT_URL
-        - name: COLLECTION_NAME
-          valueFrom:
-            configMapKeyRef:
-              name: context-engine-config
-              key: COLLECTION_NAME
-        - name: EMBEDDING_MODEL
-          valueFrom:
-            configMapKeyRef:
-              name: context-engine-config
-              key: EMBEDDING_MODEL
-        # CODEBASE_ROOT not needed when mounting at /work/.codebase
-        resources:
-          requests:
-            memory: "1Gi"
-            cpu: "500m"
-          limits:
-            memory: "4Gi"
-            cpu: "2000m"
-        volumeMounts:
-        - name: work-volume
-          mountPath: /work
-          readOnly: true
-        - name: metadata-volume
-          mountPath: /work/.codebase
-      volumes:
-      - name: work-volume
-        persistentVolumeClaim:
-          claimName: code-repos-pvc
-      - name: metadata-volume
-        persistentVolumeClaim:
-          claimName: code-metadata-pvc
-
----
-# Watcher Service (File change monitoring and reindexing)
+# Indexer Service Deployment (file change monitoring and reindexing)
+# This is a template - copy and customize for each repository
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -69,22 +8,23 @@ metadata:
   namespace: context-engine
   labels:
     app: context-engine
-    component: watcher
+    component: indexer-service
 spec:
   replicas: 1
   selector:
     matchLabels:
       app: context-engine
-      component: watcher
+      component: indexer-service
   template:
     metadata:
       labels:
         app: context-engine
-        component: watcher
+        component: indexer-service
     spec:
+      serviceAccountName: context-engine
       containers:
       - name: watcher
-        image: context-engine-indexer-service  # Use service-specific image name
+        image: context-engine-indexer-service
         imagePullPolicy: IfNotPresent
         command: ["python", "/app/scripts/watch_index.py"]
         workingDir: /work
@@ -106,9 +46,11 @@ spec:
               key: EMBEDDING_MODEL
         - name: WATCH_ROOT
           value: "/work"
-        # Watcher-specific settings with safer defaults
         - name: QDRANT_TIMEOUT
-          value: "60"
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: QDRANT_TIMEOUT
         - name: MAX_MICRO_CHUNKS_PER_FILE
           valueFrom:
             configMapKeyRef:
@@ -129,7 +71,6 @@ spec:
             configMapKeyRef:
               name: context-engine-config
               key: WATCH_DEBOUNCE_SECS
-        # CODEBASE_ROOT not needed when mounting at /work/.codebase
         resources:
           requests:
             memory: "512Mi"
@@ -137,6 +78,68 @@ spec:
           limits:
             memory: "2Gi"
             cpu: "1000m"
+        volumeMounts:
+        - name: work-volume
+          mountPath: /work
+          readOnly: true
+        - name: metadata-volume
+          mountPath: /work/.codebase
+      volumes:
+      - name: work-volume
+        persistentVolumeClaim:
+          claimName: code-repos-pvc
+      - name: metadata-volume
+        persistentVolumeClaim:
+          claimName: code-metadata-pvc
+
+---
+# Indexer Job (One-shot code indexing)
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: indexer-job
+  namespace: context-engine
+  labels:
+    app: context-engine
+    component: indexer
+spec:
+  template:
+    metadata:
+      labels:
+        app: context-engine
+        component: indexer
+    spec:
+      serviceAccountName: context-engine
+      restartPolicy: OnFailure
+      containers:
+      - name: indexer
+        image: context-engine-indexer-service
+        imagePullPolicy: IfNotPresent
+        command: ["python", "/app/scripts/ingest_code.py"]
+        workingDir: /work
+        env:
+        - name: QDRANT_URL
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: QDRANT_URL
+        - name: COLLECTION_NAME
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: COLLECTION_NAME
+        - name: EMBEDDING_MODEL
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: EMBEDDING_MODEL
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "4Gi"
+            cpu: "2000m"
         volumeMounts:
         - name: work-volume
           mountPath: /work
@@ -168,10 +171,11 @@ spec:
         app: context-engine
         component: init
     spec:
+      serviceAccountName: context-engine
       restartPolicy: OnFailure
       containers:
       - name: init-payload
-        image: context-engine-indexer-service  # Use service-specific image name
+        image: context-engine-indexer-service
         imagePullPolicy: IfNotPresent
         command: ["python", "/app/scripts/create_indexes.py"]
         workingDir: /work
@@ -186,7 +190,6 @@ spec:
             configMapKeyRef:
               name: context-engine-config
               key: COLLECTION_NAME
-        # CODEBASE_ROOT not needed when mounting at /work/.codebase
         resources:
           requests:
             memory: "512Mi"

@@ -17,9 +17,11 @@ from qdrant_client import QdrantClient, models
 
 # Env
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
-DEFAULT_COLLECTION = (os.environ.get("DEFAULT_COLLECTION")
-                      or os.environ.get("COLLECTION_NAME")
-                      or "my-collection")
+DEFAULT_COLLECTION = (
+    os.environ.get("DEFAULT_COLLECTION")
+    or os.environ.get("COLLECTION_NAME")
+    or "my-collection"
+)
 LEX_VECTOR_NAME = os.environ.get("LEX_VECTOR_NAME", "lex")
 LEX_VECTOR_DIM = int(os.environ.get("LEX_VECTOR_DIM", "4096") or 4096)
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
@@ -27,9 +29,25 @@ EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
 # Minimal embedding via fastembed (CPU)
 from fastembed import TextEmbedding
 
-# Simple hashing trick for lexical vector to match indexer
-import hashlib
+# Single-process embedding model cache (avoid re-initializing fastembed on each call)
+_EMBED_MODEL = None
+_EMBED_LOCK = threading.Lock()
 
+def _get_embedding_model():
+    global _EMBED_MODEL
+    m = _EMBED_MODEL
+    if m is None:
+        with _EMBED_LOCK:
+            m = _EMBED_MODEL
+            if m is None:
+                m = TextEmbedding(model_name=EMBEDDING_MODEL)
+                # Best-effort warmup to load weights once
+                try:
+                    _ = list(m.embed(["memory", "search"]))
+                except Exception:
+                    pass
+                _EMBED_MODEL = m
+    return m
 
 # Ensure repo roots are importable so 'scripts' resolves inside container
 import sys as _sys
@@ -97,6 +115,27 @@ def _ensure_once(name: str) -> bool:
         return False
 
 mcp = FastMCP(name="memory-server")
+
+# Capture tool registry automatically by wrapping the decorator once
+_TOOLS_REGISTRY: list[dict] = []
+try:
+    _orig_tool = mcp.tool
+    def _tool_capture_wrapper(*dargs, **dkwargs):
+        orig_deco = _orig_tool(*dargs, **dkwargs)
+        def _inner(fn):
+            try:
+                _TOOLS_REGISTRY.append({
+                    "name": dkwargs.get("name") or getattr(fn, "__name__", ""),
+                    "description": (getattr(fn, "__doc__", None) or "").strip(),
+                })
+            except Exception:
+                pass
+            return orig_deco(fn)
+        return _inner
+    mcp.tool = _tool_capture_wrapper  # type: ignore
+except Exception:
+    pass
+
 HOST = os.environ.get("FASTMCP_HOST", "0.0.0.0")
 PORT = int(os.environ.get("FASTMCP_PORT", "8000") or 8000)
 
@@ -126,6 +165,12 @@ def _start_readyz_server():
                         self.send_header("Content-Type", "application/json")
                         self.end_headers()
                         payload = {"ok": True, "app": "memory-server"}
+                        self.wfile.write((json.dumps(payload)).encode("utf-8"))
+                    elif self.path == "/tools":
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/json")
+                        self.end_headers()
+                        payload = {"ok": True, "tools": _TOOLS_REGISTRY}
                         self.wfile.write((json.dumps(payload)).encode("utf-8"))
                     else:
                         self.send_response(404)
@@ -290,81 +335,11 @@ def store(
 ) -> Dict[str, Any]:
     """Store a memory entry into Qdrant (dual vectors consistent with indexer).
 
-    Note: First call may be slow (model loads on first use). Subsequent calls are fast.
+    First call may be slower because the embedding model loads lazily.
     """
-    # Leniency: absorb nested 'kwargs' JSON some MCP clients send (so callers can pass
-    # collection inside a single kwargs payload)
-    try:
-        _extra = kwargs or {}
-        if isinstance(_extra, dict) and "kwargs" in _extra:
-            inner = _extra.get("kwargs")
-            if isinstance(inner, dict):
-                _extra = inner
-            elif isinstance(inner, str):
-                try:
-                    _extra = json.loads(inner)
-                except Exception:
-                    _extra = {}
-        if (not collection) and isinstance(_extra, dict) and _extra.get("collection") is not None:
-            collection = _extra.get("collection")
-    except Exception:
-        pass
-
-    # Apply session default if provided via kwargs
-    sid = None
-    try:
-        _sx = kwargs or {}
-        if isinstance(_sx, dict) and "kwargs" in _sx:
-            inner = _sx.get("kwargs")
-            if isinstance(inner, dict):
-                _sx = inner
-            elif isinstance(inner, str):
-                try:
-                    _sx = json.loads(inner)
-                except Exception:
-                    _sx = {}
-        if isinstance(_sx, dict) and _sx.get("session") is not None:
-            sid = str(_sx.get("session")).strip()
-    except Exception:
-        pass
-
-    # Prefer explicit session param if provided
-    try:
-        if session is not None and str(session).strip():
-            sid = str(session).strip()
-    except Exception:
-        pass
-
-
-    coll = (collection or "").strip()
-
-    # 1) Per-connection defaults via ctx (no token required)
-    if (not coll) and ctx is not None and getattr(ctx, "session", None) is not None:
-        try:
-            with _SESSION_CTX_LOCK:
-                _d2 = SESSION_DEFAULTS_BY_SESSION.get(ctx.session) or {}
-                _sc2 = str((_d2.get("collection") or "")).strip()
-                if _sc2:
-                    coll = _sc2
-        except Exception:
-            pass
-
-    # 2) Legacy token-based session defaults
-    if (not coll) and sid:
-        try:
-            with _SESSION_LOCK:
-                _d = SESSION_DEFAULTS.get(sid) or {}
-                _sc = str((_d.get("collection") or "")).strip()
-                if _sc:
-                    coll = _sc
-        except Exception:
-            pass
-
-    # 3) Environment fallback
-    coll = coll or DEFAULT_COLLECTION
-
-    _ensure_once(coll)  # Lazy: only ensures collection once per process
-    model = _get_embedding_model()  # Lazy: loads model on first call, cached thereafter
+    coll = _resolve_collection(collection, session=session, ctx=ctx, extra_kwargs=kwargs)
+    _ensure_once(coll)
+    model = _get_embedding_model()
     dense = next(model.embed([str(information)])).tolist()
     lex = _lex_hash_vector_text(str(information), LEX_VECTOR_DIM)
     # Use UUID to avoid point ID collisions under concurrent load
@@ -384,7 +359,7 @@ def store(
 @mcp.tool()
 def find(
     query: str,
-    limit: int = 5,
+    limit: Optional[int] = None,
     collection: Optional[str] = None,
     top_k: Optional[int] = None,
     session: Optional[str] = None,
@@ -393,85 +368,12 @@ def find(
 ) -> Dict[str, Any]:
     """Find memory-like entries by vector similarity (dense + lexical fusion).
 
-    Note: First call may be slow if dense embedding is used (model loads on first use).
-    Set MEMORY_COLD_SKIP_DENSE=1 to skip dense on the very first query (falls back to
-    lexical-only search). Default is 0 (always use dense) for backward compatibility.
+    Cold-start option: set MEMORY_COLD_SKIP_DENSE=1 to skip dense embedding until the
+    model is cached (useful on slow storage).
     """
-    # Leniency: absorb nested 'kwargs' JSON some MCP clients send
-    try:
-        _extra = kwargs or {}
-        if isinstance(_extra, dict) and "kwargs" in _extra:
-            inner = _extra.get("kwargs")
-            if isinstance(inner, dict):
-                _extra = inner
-            elif isinstance(inner, str):
-                try:
-                    _extra = json.loads(inner)
-                except Exception:
-                    _extra = {}
-        if (not collection) and isinstance(_extra, dict) and _extra.get("collection") is not None:
-            collection = _extra.get("collection")
-    except Exception:
-        pass
-
-    # Apply session default if provided via kwargs
-    sid = None
-    try:
-        _sx = kwargs or {}
-        if isinstance(_sx, dict) and "kwargs" in _sx:
-            inner = _sx.get("kwargs")
-            if isinstance(inner, dict):
-                _sx = inner
-            elif isinstance(inner, str):
-                try:
-                    _sx = json.loads(inner)
-                except Exception:
-                    _sx = {}
-        if isinstance(_sx, dict) and _sx.get("session") is not None:
-            sid = str(_sx.get("session")).strip()
-    except Exception:
-        pass
-
-    # Prefer explicit session param if provided
-    try:
-        if session is not None and str(session).strip():
-            sid = str(session).strip()
-    except Exception:
-        pass
-
-    coll = (collection or "").strip()
-
-    # 1) Per-connection defaults via ctx (no token required)
-    if (not coll) and ctx is not None and getattr(ctx, "session", None) is not None:
-        try:
-            with _SESSION_CTX_LOCK:
-                _d2 = SESSION_DEFAULTS_BY_SESSION.get(ctx.session) or {}
-                _sc2 = str((_d2.get("collection") or "")).strip()
-                if _sc2:
-                    coll = _sc2
-        except Exception:
-            pass
-
-    # 2) Legacy token-based session defaults
-    if (not coll) and sid:
-        try:
-            with _SESSION_LOCK:
-                _d = SESSION_DEFAULTS.get(sid) or {}
-                _sc = str((_d.get("collection") or "")).strip()
-                if _sc:
-                    coll = _sc
-        except Exception:
-            pass
-
-    # 3) Environment fallback
-    coll = coll or DEFAULT_COLLECTION
+    coll = _resolve_collection(collection, session=session, ctx=ctx, extra_kwargs=kwargs)
     _ensure_once(coll)
 
-    # Cold-start optimization: skip dense embedding on first query if model not yet loaded.
-    # RATIONALE: On slow storage, loading the embedding model (100–500 MB) can delay
-    # the first response by 5–10s. By skipping dense on cold start, we return results
-    # faster using lexical search alone. Subsequent queries use dense (model is cached).
-    # Set MEMORY_COLD_SKIP_DENSE=0 to disable this optimization.
     use_dense = True
     if MEMORY_COLD_SKIP_DENSE and EMBEDDING_MODEL not in _EMBED_MODEL_CACHE:
         use_dense = False
@@ -483,7 +385,7 @@ def find(
     lex = _lex_hash_vector_text(str(query), LEX_VECTOR_DIM)
 
     # Harmonize alias: top_k -> limit
-    lim = int(limit or top_k or 5)
+    lim = int(limit if limit is not None else (top_k if top_k is not None else 5))
 
     # Two searches (prefer query_points) then simple RRF-like merge
     if use_dense:
@@ -562,8 +464,67 @@ def find(
 
     ordered = sorted(
         items.values(), key=lambda x: scores.get(str(x["id"]), 0.0), reverse=True
-    )[:limit]
+    )[:lim]
     return {"ok": True, "results": ordered, "count": len(ordered)}
+
+
+def _resolve_collection(
+    collection: Optional[str],
+    session: Optional[str] = None,
+    ctx: Context = None,
+    extra_kwargs: Any = None,
+) -> str:
+    """Resolve the collection name honoring explicit args, session defaults, and env fallbacks."""
+    coll = (collection or "").strip()
+    sid: Optional[str] = None
+
+    # Extract overrides from nested kwargs payloads some clients send
+    try:
+        payload = extra_kwargs or {}
+        if isinstance(payload, dict) and "kwargs" in payload:
+            payload = payload.get("kwargs")
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except Exception:
+                    payload = {}
+        if not coll and isinstance(payload, dict) and payload.get("collection") is not None:
+            coll = str(payload.get("collection")).strip()
+        if isinstance(payload, dict) and payload.get("session") is not None:
+            sid = str(payload.get("session")).strip()
+    except Exception:
+        pass
+
+    # Explicit session parameter wins over payload session
+    try:
+        if session is not None and str(session).strip():
+            sid = str(session).strip()
+    except Exception:
+        pass
+
+    # Per-connection defaults via Context session
+    if not coll and ctx is not None and getattr(ctx, "session", None) is not None:
+        try:
+            with _SESSION_CTX_LOCK:
+                defaults = SESSION_DEFAULTS_BY_SESSION.get(ctx.session) or {}
+                candidate = str(defaults.get("collection") or "").strip()
+                if candidate:
+                    coll = candidate
+        except Exception:
+            pass
+
+    # Legacy token-based session defaults
+    if not coll and sid:
+        try:
+            with _SESSION_LOCK:
+                defaults = SESSION_DEFAULTS.get(sid) or {}
+                candidate = str(defaults.get("collection") or "").strip()
+                if candidate:
+                    coll = candidate
+        except Exception:
+            pass
+
+    return coll or DEFAULT_COLLECTION
 
 
 if __name__ == "__main__":

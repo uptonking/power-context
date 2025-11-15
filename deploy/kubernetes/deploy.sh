@@ -7,8 +7,9 @@ set -e
 
 # Configuration
 NAMESPACE="context-engine"
-IMAGE_REGISTRY="context-engine"  # Change to your registry
+IMAGE_REGISTRY="context-engine"  # Change to your registry if needed
 IMAGE_TAG="latest"
+USE_KUSTOMIZE=${USE_KUSTOMIZE:-"false"}
 
 # Colors for output
 RED='\033[0;31m'
@@ -73,7 +74,7 @@ deploy_core() {
 
     # Wait for Qdrant to be ready
     log_info "Waiting for Qdrant to be ready..."
-    kubectl wait --for=condition=ready pod -l component=qdrant -n $NAMESPACE --timeout=300s
+    kubectl wait --for=condition=ready pod -l component=qdrant -n "$NAMESPACE" --timeout=300s
 
     log_success "Core services deployed"
 }
@@ -88,8 +89,8 @@ deploy_mcp_servers() {
 
     # Wait for MCP servers to be ready
     log_info "Waiting for MCP servers to be ready..."
-    kubectl wait --for=condition=ready pod -l component=mcp-memory -n $NAMESPACE --timeout=300s
-    kubectl wait --for=condition=ready pod -l component=mcp-indexer -n $NAMESPACE --timeout=300s
+    kubectl wait --for=condition=ready pod -l component=mcp-memory -n "$NAMESPACE" --timeout=300s
+    kubectl wait --for=condition=ready pod -l component=mcp-indexer -n "$NAMESPACE" --timeout=300s
 
     log_success "MCP servers deployed"
 }
@@ -99,9 +100,9 @@ deploy_http_servers() {
     log_info "Deploying HTTP servers (optional)"
     kubectl apply -f mcp-http.yaml
 
-    # Wait for HTTP servers to be ready
-    kubectl wait --for=condition=ready pod -l component=mcp-memory-http -n $NAMESPACE --timeout=300s
-    kubectl wait --for=condition=ready pod -l component=mcp-indexer-http -n $NAMESPACE --timeout=300s
+    log_info "Waiting for HTTP servers to be ready..."
+    kubectl wait --for=condition=ready pod -l component=mcp-memory-http -n "$NAMESPACE" --timeout=300s
+    kubectl wait --for=condition=ready pod -l component=mcp-indexer-http -n "$NAMESPACE" --timeout=300s
 
     log_success "HTTP servers deployed"
 }
@@ -132,24 +133,7 @@ deploy_ingress() {
         kubectl apply -f ingress.yaml
         log_success "Ingress deployed"
     else
-        log_warning "Skipping Ingress deployment (set DEPLOY_INGRESS=true to enable)"
-    fi
-}
-
-# Update image references in manifests
-update_images() {
-    if [[ "$IMAGE_REGISTRY" != "context-engine" ]]; then
-        log_info "Updating image references to: $IMAGE_REGISTRY/context-engine:$IMAGE_TAG"
-
-        # Update all YAML files
-        for file in *.yaml; do
-            if [[ "$file" != "namespace.yaml" && "$file" != "configmap.yaml" ]]; then
-                sed -i.tmp "s|context-engine:latest|$IMAGE_REGISTRY/context-engine:$IMAGE_TAG|g" "$file"
-                rm -f "$file.tmp"
-            fi
-        done
-
-        log_success "Image references updated"
+        log_warning "Skipping Ingress deployment (set DEPLOY_INGRESS=true or pass --deploy-ingress to enable)"
     fi
 }
 
@@ -166,14 +150,8 @@ show_status() {
     kubectl get services -n $NAMESPACE
     echo
     echo "Persistent Volumes:"
-    kubectl get pvc -n $NAMESPACE
+    kubectl get pvc -n $NAMESPACE || echo "No PVCs found"
     echo
-
-    if [[ "$SHOW_INGRESS" == "true" ]]; then
-        echo "Ingress:"
-        kubectl get ingress -n $NAMESPACE
-        echo
-    fi
 
     log_success "Deployment complete!"
     echo
@@ -188,34 +166,99 @@ show_status() {
     fi
 }
 
-# Cleanup function
-cleanup() {
-    log_warning "Cleaning up failed deployment..."
-    kubectl delete namespace $NAMESPACE --ignore-not-found=true
+# Patch images to the chosen registry:tag and refresh jobs
+set_images() {
+  local full="${IMAGE_REGISTRY}:${IMAGE_TAG}"
+  log_info "Setting images to ${full}"
+  kubectl set image deployment/mcp-memory mcp-memory="${full}" -n "$NAMESPACE" || true
+  kubectl set image deployment/mcp-indexer mcp-indexer="${full}" -n "$NAMESPACE" || true
+  kubectl set image deployment/mcp-memory-http mcp-memory-http="${full}" -n "$NAMESPACE" || true
+  kubectl set image deployment/mcp-indexer-http mcp-indexer-http="${full}" -n "$NAMESPACE" || true
+  kubectl set image deployment/watcher watcher="${full}" -n "$NAMESPACE" || true
+  # Refresh Jobs so they pick up the new image
+  kubectl delete job indexer-job init-payload -n "$NAMESPACE" --ignore-not-found=true
+  kubectl apply -f indexer-services.yaml
+  log_success "Images set to ${full} and jobs refreshed"
+}
+
+# Build a temporary Kustomize overlay and apply it with images/flags respected
+apply_with_kustomize() {
+  local base_dir
+  base_dir="$(pwd)"
+  local tmp_dir
+  tmp_dir="$(mktemp -d)"
+  log_info "Building temporary kustomize overlay at ${tmp_dir}"
+
+  # Copy manifests to temp dir to avoid absolute path issues
+  cp namespace.yaml configmap.yaml qdrant.yaml mcp-memory.yaml mcp-indexer.yaml \
+     mcp-http.yaml indexer-services.yaml rbac.yaml hpa.yaml networkpolicy.yaml "${tmp_dir}/"
+
+  if [[ "${SKIP_LLAMACPP}" != "true" ]]; then
+    cp llamacpp.yaml "${tmp_dir}/"
+  fi
+
+  if [[ "${DEPLOY_INGRESS}" == "true" ]]; then
+    cp ingress.yaml "${tmp_dir}/"
+  fi
+
+  # Compose resources list based on flags
+  {
+    echo "apiVersion: kustomize.config.k8s.io/v1beta1"
+    echo "kind: Kustomization"
+    echo "namespace: ${NAMESPACE}"
+    echo "resources:"
+    echo "  - namespace.yaml"
+    echo "  - configmap.yaml"
+    echo "  - qdrant.yaml"
+    echo "  - mcp-memory.yaml"
+    echo "  - mcp-indexer.yaml"
+    echo "  - mcp-http.yaml"
+    echo "  - indexer-services.yaml"
+    echo "  - rbac.yaml"
+    echo "  - hpa.yaml"
+    echo "  - networkpolicy.yaml"
+    if [[ "${SKIP_LLAMACPP}" != "true" ]]; then
+      echo "  - llamacpp.yaml"
+    fi
+    if [[ "${DEPLOY_INGRESS}" == "true" ]]; then
+      echo "  - ingress.yaml"
+    fi
+    echo "images:"
+    echo "  - name: context-engine"
+    echo "    newName: ${IMAGE_REGISTRY}"
+    echo "    newTag: ${IMAGE_TAG}"
+  } > "${tmp_dir}/kustomization.yaml"
+
+  log_info "Applying kustomize overlay"
+  kubectl apply -k "${tmp_dir}"
+  log_success "Applied manifests via kustomize"
+
+  # Clean up temp dir
+  rm -rf "${tmp_dir}"
 }
 
 # Main deployment function
 main() {
     log_info "Starting Context-Engine Kubernetes deployment"
 
-    # Set up error handling
-    trap cleanup ERR
-
     # Check prerequisites
     check_kubectl
 
-    # Update image references if needed
-    update_images
-
-    # Deploy in order
-    create_namespace
-    deploy_config
-    deploy_core
-    deploy_mcp_servers
-    deploy_http_servers
-    deploy_indexer_services
-    deploy_llamacpp
-    deploy_ingress
+    if [[ "$USE_KUSTOMIZE" == "true" ]]; then
+        # Single-shot apply via kustomize overlay (respects flags and images)
+        apply_with_kustomize
+    else
+        # Deploy in order via raw manifests
+        create_namespace
+        deploy_config
+        deploy_core
+        deploy_mcp_servers
+        deploy_http_servers
+        deploy_indexer_services
+        deploy_llamacpp
+        deploy_ingress
+        set_images
+    fi
 
     # Show status
     show_status
@@ -233,16 +276,8 @@ show_help() {
     echo "  -t, --tag TAG                 Docker image tag (default: latest)"
     echo "  --skip-llamacpp               Skip Llama.cpp deployment"
     echo "  --deploy-ingress              Deploy Ingress configuration"
-    echo "  --show-ingress                Show Ingress status"
+    echo "  --use-kustomize               Apply via kustomize overlay (respects --registry/--tag and flags)"
     echo "  --namespace NAMESPACE         Kubernetes namespace (default: context-engine)"
-    echo
-    echo "Environment variables:"
-    echo "  SKIP_LLAMACPP=true            Skip Llama.cpp deployment"
-    echo "  DEPLOY_INGRESS=true           Deploy Ingress configuration"
-    echo "  SHOW_INGRESS=true             Show Ingress status"
-    echo "  IMAGE_REGISTRY=registry       Docker image registry"
-    echo "  IMAGE_TAG=tag                 Docker image tag"
-    echo "  NAMESPACE=context-engine      Kubernetes namespace"
     echo
     echo "Examples:"
     echo "  $0                            # Basic deployment"
@@ -274,8 +309,8 @@ while [[ $# -gt 0 ]]; do
             DEPLOY_INGRESS=true
             shift
             ;;
-        --show-ingress)
-            SHOW_INGRESS=true
+        --use-kustomize)
+            USE_KUSTOMIZE=true
             shift
             ;;
         --namespace)
@@ -296,5 +331,4 @@ if [[ ! -f "qdrant.yaml" ]]; then
     exit 1
 fi
 
-# Run main deployment
 main

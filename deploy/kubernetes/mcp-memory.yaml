@@ -20,12 +20,12 @@ spec:
         app: context-engine
         component: mcp-memory
     spec:
+      serviceAccountName: context-engine
       containers:
       - name: mcp-memory
-        image: context-engine-memory  # Use service-specific image name
+        image: context-engine-memory
         imagePullPolicy: IfNotPresent
-        command: ["python", "-m", "mcp.server.fastmcp"]
-        args: ["--server-name", "context-engine", "--host", "0.0.0.0", "--port", "8000", "--transport", "sse", "/app/scripts/memory_server.py"]
+        command: ["python", "/app/scripts/mcp_memory_server.py"]
         ports:
         - name: sse
           containerPort: 8000
@@ -34,11 +34,6 @@ spec:
           containerPort: 18000
           protocol: TCP
         env:
-        - name: QDRANT_URL
-          valueFrom:
-            configMapKeyRef:
-              name: context-engine-config
-              key: QDRANT_URL
         - name: FASTMCP_HOST
           valueFrom:
             configMapKeyRef:
@@ -49,6 +44,15 @@ spec:
             configMapKeyRef:
               name: context-engine-config
               key: FASTMCP_PORT
+        - name: FASTMCP_HEALTH_PORT
+          value: "18000"
+        - name: FASTMCP_TRANSPORT
+          value: "sse"
+        - name: QDRANT_URL
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: QDRANT_URL
         - name: COLLECTION_NAME
           valueFrom:
             configMapKeyRef:
@@ -59,46 +63,13 @@ spec:
             configMapKeyRef:
               name: context-engine-config
               key: EMBEDDING_MODEL
-        - name: EMBEDDING_PROVIDER
-          valueFrom:
-            configMapKeyRef:
-              name: context-engine-config
-              key: EMBEDDING_PROVIDER
-        - name: TOOL_STORE_DESCRIPTION
-          valueFrom:
-            configMapKeyRef:
-              name: context-engine-config
-              key: TOOL_STORE_DESCRIPTION
-        - name: TOOL_FIND_DESCRIPTION
-          valueFrom:
-            configMapKeyRef:
-              name: context-engine-config
-              key: TOOL_FIND_DESCRIPTION
-        - name: FASTMCP_HEALTH_PORT
-          value: "18000"
-        # Additional environment variables from configmap
-        - name: MEMORY_SSE_ENABLED
-          valueFrom:
-            configMapKeyRef:
-              name: context-engine-config
-              key: MEMORY_SSE_ENABLED
-        - name: MEMORY_MCP_URL
-          valueFrom:
-            configMapKeyRef:
-              name: context-engine-config
-              key: MEMORY_MCP_URL
-        - name: MEMORY_MCP_TIMEOUT
-          valueFrom:
-            configMapKeyRef:
-              name: context-engine-config
-              key: MEMORY_MCP_TIMEOUT
         resources:
           requests:
-            memory: "512Mi"
-            cpu: "250m"
+            memory: "1Gi"
+            cpu: "500m"
           limits:
-            memory: "2Gi"
-            cpu: "1000m"
+            memory: "4Gi"
+            cpu: "2"
         volumeMounts:
         - name: work-volume
           mountPath: /work
@@ -117,9 +88,8 @@ spec:
           periodSeconds: 5
       volumes:
       - name: work-volume
-        hostPath:
-          path: /tmp/context-engine-work  # Adjust for your environment
-          type: DirectoryOrCreate
+        persistentVolumeClaim:
+          claimName: code-repos-pvc
 
 ---
 # MCP Memory Server (SSE) Service
@@ -147,3 +117,31 @@ spec:
   selector:
     app: context-engine
     component: mcp-memory
+
+---
+# Optional: MCP Memory External Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-memory-external
+  namespace: context-engine
+  labels:
+    app: context-engine
+    component: mcp-memory
+spec:
+  type: NodePort
+  ports:
+  - name: sse
+    port: 8000
+    targetPort: sse
+    nodePort: 30800
+    protocol: TCP
+  - name: health
+    port: 18000
+    targetPort: health
+    nodePort: 30801
+    protocol: TCP
+  selector:
+    app: context-engine
+    component: mcp-memory
+

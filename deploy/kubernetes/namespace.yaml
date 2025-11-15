@@ -3,5 +3,6 @@ kind: Namespace
 metadata:
   name: context-engine
   labels:
+name: context-engine
     app: context-engine
     component: infrastructure

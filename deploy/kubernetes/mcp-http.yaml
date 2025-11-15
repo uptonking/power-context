@@ -20,9 +20,10 @@ spec:
         app: context-engine
         component: mcp-memory-http
     spec:
+      serviceAccountName: context-engine
       containers:
       - name: mcp-memory-http
-        image: context-engine-memory  # Use service-specific image name
+        image: context-engine-memory
         imagePullPolicy: IfNotPresent
         command: ["python", "-m", "mcp.server.fastmcp"]
         args: ["--server-name", "context-engine-http", "--host", "0.0.0.0", "--port", "8000", "--transport", "http", "/app/scripts/memory_server.py"]
@@ -39,18 +40,6 @@ spec:
             configMapKeyRef:
               name: context-engine-config
               key: QDRANT_URL
-        - name: FASTMCP_HOST
-          valueFrom:
-            configMapKeyRef:
-              name: context-engine-config
-              key: FASTMCP_HOST
-        - name: FASTMCP_PORT
-          value: "8000"
-        - name: FASTMCP_TRANSPORT
-          valueFrom:
-            configMapKeyRef:
-              name: context-engine-config
-              key: FASTMCP_HTTP_TRANSPORT
         - name: COLLECTION_NAME
           valueFrom:
             configMapKeyRef:
@@ -76,6 +65,18 @@ spec:
             configMapKeyRef:
               name: context-engine-config
               key: TOOL_FIND_DESCRIPTION
+        - name: FASTMCP_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: FASTMCP_HOST
+        - name: FASTMCP_PORT
+          value: "8000"
+        - name: FASTMCP_TRANSPORT
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: FASTMCP_HTTP_TRANSPORT
         - name: FASTMCP_HEALTH_PORT
           value: "18000"
         resources:
@@ -103,9 +104,8 @@ spec:
           periodSeconds: 5
       volumes:
       - name: work-volume
-        hostPath:
-          path: /tmp/context-engine-work  # Adjust for your environment
-          type: DirectoryOrCreate
+        persistentVolumeClaim:
+          claimName: code-repos-pvc
 
 ---
 # MCP Memory Server (HTTP) Service
@@ -135,6 +135,33 @@ spec:
     component: mcp-memory-http
 
 ---
+# Optional: MCP Memory HTTP External Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-memory-http-external
+  namespace: context-engine
+  labels:
+    app: context-engine
+    component: mcp-memory-http
+spec:
+  type: NodePort
+  ports:
+  - name: http
+    port: 8002
+    targetPort: http
+    nodePort: 30804
+    protocol: TCP
+  - name: health
+    port: 18002
+    targetPort: health
+    nodePort: 30805
+    protocol: TCP
+  selector:
+    app: context-engine
+    component: mcp-memory-http
+
+---
 # MCP Indexer Server (HTTP) Deployment
 apiVersion: apps/v1
 kind: Deployment
@@ -156,9 +183,10 @@ spec:
         app: context-engine
         component: mcp-indexer-http
     spec:
+      serviceAccountName: context-engine
       containers:
       - name: mcp-indexer-http
-        image: context-engine-indexer  # Use service-specific image name
+        image: context-engine-indexer
         imagePullPolicy: IfNotPresent
         command: ["python", "-m", "mcp.server.fastmcp"]
         args: ["--server-name", "context-engine-indexer-http", "--host", "0.0.0.0", "--port", "8001", "--transport", "http", "/app/scripts/indexer_server.py"]
@@ -175,6 +203,56 @@ spec:
             configMapKeyRef:
               name: context-engine-config
               key: QDRANT_URL
+        - name: COLLECTION_NAME
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: COLLECTION_NAME
+        - name: EMBEDDING_MODEL
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: EMBEDDING_MODEL
+        - name: INDEX_MICRO_CHUNKS
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: INDEX_MICRO_CHUNKS
+        - name: MAX_MICRO_CHUNKS_PER_FILE
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: MAX_MICRO_CHUNKS_PER_FILE
+        - name: REFRAG_MODE
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: REFRAG_MODE
+        - name: REFRAG_DECODER
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: REFRAG_DECODER
+        - name: LLAMACPP_URL
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: LLAMACPP_URL
+        - name: MEMORY_SSE_ENABLED
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: MEMORY_SSE_ENABLED
+        - name: MEMORY_MCP_URL
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: MEMORY_MCP_URL
+        - name: CTX_MULTI_COLLECTION
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: CTX_MULTI_COLLECTION
         - name: FASTMCP_HOST
           valueFrom:
             configMapKeyRef:
@@ -215,13 +293,11 @@ spec:
           periodSeconds: 5
       volumes:
       - name: work-volume
-        hostPath:
-          path: /tmp/context-engine-work  # Adjust for your environment
-          type: DirectoryOrCreate
+        persistentVolumeClaim:
+          claimName: code-repos-pvc
       - name: codebase-volume
-        hostPath:
-          path: /tmp/context-engine-work/.codebase  # Adjust for your environment
-          type: DirectoryOrCreate
+        persistentVolumeClaim:
+          claimName: code-metadata-pvc
 
 ---
 # MCP Indexer Server (HTTP) Service
@@ -245,6 +321,33 @@ spec:
     port: 18003
     targetPort: health
     nodePort: 30807  # Optional: specify node port
+    protocol: TCP
+  selector:
+    app: context-engine
+    component: mcp-indexer-http
+
+---
+# Optional: MCP Indexer HTTP External Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-indexer-http-external
+  namespace: context-engine
+  labels:
+    app: context-engine
+    component: mcp-indexer-http
+spec:
+  type: NodePort
+  ports:
+  - name: http
+    port: 8003
+    targetPort: http
+    nodePort: 30806
+    protocol: TCP
+  - name: health
+    port: 18003
+    targetPort: health
+    nodePort: 30807
     protocol: TCP
   selector:
     app: context-engine
