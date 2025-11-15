@@ -995,14 +995,6 @@ class RemoteUploadClient:
             logger.exception("[remote_upload] Full traceback:")
             return False
 
-    # CLI is stateless - sequence mismatch handling is done by server
-
-
-def is_remote_mode_enabled() -> bool:
-    """Check if remote upload mode is enabled via environment variables."""
-    return os.environ.get("REMOTE_UPLOAD_ENABLED", "").lower() in {"1", "true", "yes", "on"}
-
-
 def get_remote_config(cli_path: Optional[str] = None) -> Dict[str, str]:
     """Get remote upload configuration from environment variables and command-line arguments."""
     # Use command-line path if provided, otherwise fall back to environment variables
@@ -1134,11 +1126,6 @@ Examples:
         ) as client:
             client.log_mapping_summary()
         return 0
-
-    # Check if remote mode is enabled
-    if not is_remote_mode_enabled():
-        logger.error("Remote upload mode is not enabled. Set REMOTE_UPLOAD_ENABLED=1 in environment variables.")
-        return 1
 
     # Handle watch mode
     if args.watch:
