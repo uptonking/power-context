@@ -7,6 +7,10 @@
   "always_include_tests": true,
   "prefer_bullet_commands": false,
   "extra_instructions": "Always consider error handling and edge cases",
-  "streaming": true
+  "default_mode": "unicorn",
+  "streaming": true,
+  "require_context": true,
+  "relevance_gate_enabled": false,
+  "min_relevance": 0.1
 }
 

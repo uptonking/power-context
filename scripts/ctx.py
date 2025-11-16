@@ -377,6 +377,50 @@ def build_refined_query(original_query: str, allowed_paths: Set[str], allowed_sy
     return (original_query or "").strip() + (" " + " ".join(terms) if terms else "")
 
 
+def _simple_tokenize(text: str) -> List[str]:
+    tokens = re.findall(r"[A-Za-z0-9_]+", text or "")
+    return [t.lower() for t in tokens if t]
+
+
+def _token_overlap_ratio(a: str, b: str) -> float:
+    a_tokens = set(_simple_tokenize(a))
+    b_tokens = set(_simple_tokenize(b))
+    if not a_tokens or not b_tokens:
+        return 0.0
+    inter = len(a_tokens & b_tokens)
+    union = len(a_tokens | b_tokens)
+    if not union:
+        return 0.0
+    return inter / union
+
+
+def _estimate_query_result_relevance(query: str, results: List[Dict[str, Any]]) -> float:
+    q_tokens = set(_simple_tokenize(query))
+    if not q_tokens or not results:
+        return 0.0
+    scores: List[float] = []
+    for hit in results[:5]:
+        parts: List[str] = []
+        for key in ("path", "symbol", "snippet"):
+            val = hit.get(key)
+            if isinstance(val, str):
+                parts.append(val)
+        if not parts:
+            continue
+        r_tokens = set()
+        for part in parts:
+            r_tokens.update(_simple_tokenize(part))
+        if not r_tokens:
+            continue
+        inter = len(q_tokens & r_tokens)
+        union = len(q_tokens | r_tokens)
+        if union:
+            scores.append(inter / union)
+    if not scores:
+        return 0.0
+    return sum(scores) / len(scores)
+
+
 def sanitize_citations(text: str, allowed_paths: Set[str]) -> str:
     """Replace path-like strings not present in allowed_paths with a neutral phrase.
 
@@ -489,6 +533,19 @@ def enhance_prompt(query: str, **filters) -> str:
     filters = _adaptive_context_sizing(query, filters)
 
     context_text, context_note = fetch_context(query, **filters)
+
+    require_ctx_flag = os.environ.get("CTX_REQUIRE_CONTEXT", "").strip().lower()
+    if require_ctx_flag in {"1", "true", "yes", "on"}:
+        has_real_context = bool((context_text or "").strip()) and not (
+            context_note and (
+                "failed" in context_note.lower()
+                or "no relevant" in context_note.lower()
+                or "no data" in context_note.lower()
+            )
+        )
+        if not has_real_context:
+            return (query or "").strip()
+
     rewrite_opts = filters.get("rewrite_options") or {}
     rewritten = rewrite_prompt(
         query,
@@ -668,6 +725,20 @@ def enhance_unicorn(query: str, **filters) -> str:
     allowed_paths1, _ = extract_allowed_citations(ctx1)
     refined_query = draft
 
+    overlap = _token_overlap_ratio(query, draft)
+    sys.stderr.write(f"[DEBUG] Unicorn draft similarity={overlap:.3f}\n")
+    sys.stderr.flush()
+    gate_flag = os.environ.get("CTX_DRAFT_SIM_GATE", "").strip().lower()
+    if gate_flag in {"1", "true", "yes", "on"}:
+        try:
+            min_sim = float(os.environ.get("CTX_MIN_DRAFT_SIM", "0.4"))
+        except Exception:
+            min_sim = 0.4
+        if overlap < min_sim:
+            sys.stderr.write(f"[DEBUG] Draft similarity below threshold {min_sim:.3f}; reusing original query for pass2.\n")
+            sys.stderr.flush()
+            refined_query = query
+
     # ---- Pass 2: refine (even richer snippets, focused results)
     f2 = dict(filters)
     f2.update({
@@ -757,8 +828,20 @@ def fetch_context(query: str, **filters) -> Tuple[str, str]:
         return "", "Context retrieval returned no data."
 
     hits = data.get("results") or []
-    sys.stderr.write(f"[DEBUG] repo_search returned {len(hits)} hits\n")
+    relevance = _estimate_query_result_relevance(query, hits)
+    sys.stderr.write(f"[DEBUG] repo_search returned {len(hits)} hits (relevance={relevance:.3f})\n")
     sys.stderr.flush()
+
+    gate_flag = os.environ.get("CTX_RELEVANCE_GATE", "").strip().lower()
+    if hits and gate_flag in {"1", "true", "yes", "on"}:
+        try:
+            min_rel = float(os.environ.get("CTX_MIN_RELEVANCE", "0.15"))
+        except Exception:
+            min_rel = 0.15
+        if relevance < min_rel:
+            sys.stderr.write(f"[DEBUG] Relevance below threshold {min_rel:.3f}; treating as no relevant context.\n")
+            sys.stderr.flush()
+            return "", "No relevant context found for the prompt (low retrieval relevance)."
 
     if not hits:
         # Memory blending: try context_search with memories as fallback
@@ -1132,8 +1215,24 @@ Examples:
             output = enhance_unicorn(args.query, **filters)
         else:
             context_text, context_note = fetch_context(args.query, **filters)
-            rewritten = rewrite_prompt(args.query, context_text, context_note, max_tokens=args.rewrite_max_tokens)
-            output = rewritten.strip()
+
+            require_ctx_flag = os.environ.get("CTX_REQUIRE_CONTEXT", "").strip().lower()
+            if require_ctx_flag in {"1", "true", "yes", "on"}:
+                has_real_context = bool((context_text or "").strip()) and not (
+                    context_note and (
+                        "failed" in context_note.lower()
+                        or "no relevant" in context_note.lower()
+                        or "no data" in context_note.lower()
+                    )
+                )
+                if not has_real_context:
+                    output = (args.query or "").strip()
+                else:
+                    rewritten = rewrite_prompt(args.query, context_text, context_note, max_tokens=args.rewrite_max_tokens)
+                    output = rewritten.strip()
+            else:
+                rewritten = rewrite_prompt(args.query, context_text, context_note, max_tokens=args.rewrite_max_tokens)
+                output = rewritten.strip()
 
         if args.cmd:
             subprocess.run(args.cmd, input=output.encode("utf-8"), shell=True, check=False)
