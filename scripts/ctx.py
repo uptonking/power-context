@@ -55,6 +55,11 @@ from urllib.parse import urlparse
 from urllib.error import HTTPError, URLError
 from typing import Dict, Any, List, Optional, Tuple
 
+try:
+    from scripts.mcp_router import call_tool_http  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - local execution fallback
+    from mcp_router import call_tool_http  # type: ignore
+
 # Configuration from environment
 MCP_URL = os.environ.get("MCP_INDEXER_URL", "http://localhost:8003/mcp")
 DEFAULT_LIMIT = int(os.environ.get("CTX_LIMIT", "5"))
@@ -130,6 +135,11 @@ def get_session_id(timeout: int = 10) -> str:
             session_id = resp.headers.get("mcp-session-id")
             if not session_id:
                 raise RuntimeError("Server did not return session ID")
+            # Read the initialization response to ensure session is fully established
+            init_response = resp.read().decode('utf-8')
+            # Wait a moment for session to be fully processed
+            import time
+            time.sleep(0.5)
             _session_id = session_id
             return session_id
     except Exception as e:
@@ -138,8 +148,6 @@ def get_session_id(timeout: int = 10) -> str:
 
 def call_mcp_tool(tool_name: str, params: Dict[str, Any], timeout: int = 30) -> Dict[str, Any]:
     """Call MCP tool via HTTP JSON-RPC with session management."""
-    session_id = get_session_id()
-
     payload = {
         "jsonrpc": "2.0",
         "id": 1,
@@ -147,23 +155,12 @@ def call_mcp_tool(tool_name: str, params: Dict[str, Any], timeout: int = 30) -> 
         "params": {"name": tool_name, "arguments": params}
     }
 
+    # Debug output
+    sys.stderr.write(f"[DEBUG] Sending payload: {json.dumps(payload, indent=2)}\n")
+    sys.stderr.flush()
+
     try:
-        req = request.Request(
-            MCP_URL,
-            data=json.dumps(payload).encode(),
-            headers={
-                "Content-Type": "application/json",
-                "Accept": "application/json, text/event-stream",
-                "mcp-session-id": session_id
-            }
-        )
-        with request.urlopen(req, timeout=timeout) as resp:
-            response_text = resp.read().decode('utf-8')
-            return parse_sse_response(response_text)
-    except HTTPError as e:
-        return {"error": f"HTTP {e.code}: {e.reason}"}
-    except URLError as e:
-        return {"error": f"Connection failed: {e.reason}"}
+        return call_tool_http(MCP_URL, tool_name, params, timeout=float(timeout))
     except Exception as e:
         return {"error": f"Request failed: {str(e)}"}
 
@@ -281,7 +278,17 @@ def _ensure_two_paragraph_questions(text: str) -> str:
     # Collapse triple+ newlines to double
     while "\n\n\n" in t:
         t = t.replace("\n\n\n", "\n\n")
-    paras = [p.strip() for p in t.split("\n\n") if p.strip()]
+    raw_paras = [p.strip() for p in t.split("\n\n") if p.strip()]
+
+    # Deduplicate paragraphs while preserving order to avoid repeated GLM stanzas
+    paras: list[str] = []
+    seen_keys: set[str] = set()
+    for p in raw_paras:
+        key = re.sub(r"\s+", " ", p).strip().lower()
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        paras.append(p)
 
     def normalize_paragraph(s: str) -> str:
         """Ensure proper punctuation - keep questions as questions, commands as commands."""
@@ -729,9 +736,9 @@ def fetch_context(query: str, **filters) -> Tuple[str, str]:
         "limit": filters.get("limit", DEFAULT_LIMIT),
         "include_snippet": with_snippets,
         "context_lines": filters.get("context_lines", DEFAULT_CONTEXT_LINES),
-        "per_path": filters.get("per_path", DEFAULT_PER_PATH),
-        "collection": "codebase",  # Use the correct collection name
     }
+    if filters.get("collection"):
+        params["collection"] = filters["collection"]
     for key in ["language", "under", "path_glob", "not_glob", "kind", "symbol", "ext"]:
         if filters.get(key):
             params[key] = filters[key]
@@ -761,7 +768,7 @@ def fetch_context(query: str, **filters) -> Tuple[str, str]:
             "include_memories": True,
             "include_snippet": with_snippets,
             "context_lines": filters.get("context_lines", DEFAULT_CONTEXT_LINES),
-            "collection": "codebase",  # Use the correct collection name
+            "collection": filters.get("collection") or os.environ.get("COLLECTION_NAME", "codebase"),
         }
         memory_result = call_mcp_tool("context_search", memory_params)
         if "error" not in memory_result:
@@ -776,7 +783,7 @@ def fetch_context(query: str, **filters) -> Tuple[str, str]:
 
 
 def rewrite_prompt(original_prompt: str, context: str, note: str, max_tokens: Optional[int], citation_policy: str = "paths", stream: bool = True) -> str:
-    """Use the local decoder (llama.cpp) to rewrite the prompt with repository context.
+    """Use the configured decoder (GLM or llama.cpp) to rewrite the prompt with repository context.
 
     Returns ONLY the improved prompt text. Raises exception if decoder fails.
     If stream=True (default), prints tokens as they arrive for instant feedback.
@@ -872,70 +879,127 @@ def rewrite_prompt(original_prompt: str, context: str, note: str, max_tokens: Op
     if prefs.get("streaming") is not None:
         stream = prefs.get("streaming")
 
-    meta_prompt = (
-        "<|start_of_role|>system<|end_of_role|>" + system_msg + "<|end_of_text|>\n"
-        "<|start_of_role|>user<|end_of_role|>" + user_msg + "<|end_of_text|>\n"
-        "<|start_of_role|>assistant<|end_of_role|>"
-    )
+    # Check which decoder runtime to use
+    runtime_kind = str(os.environ.get("REFRAG_RUNTIME", "llamacpp")).strip().lower()
 
-    decoder_url = DECODER_URL
-    # Safety: only allow local decoder hosts
-    parsed = urlparse(decoder_url)
-    if parsed.hostname not in {"localhost", "127.0.0.1", "host.docker.internal"}:
-        raise ValueError(f"Unsafe decoder host: {parsed.hostname}")
-    payload = {
-        "prompt": meta_prompt,
-        "n_predict": int(max_tokens or DEFAULT_REWRITE_TOKENS),
-        "temperature": 0.45,
-        "stream": stream,
-    }
+    if runtime_kind == "glm":
+        from refrag_glm import GLMRefragClient  # type: ignore
+        client = GLMRefragClient()
 
-    req = request.Request(
-        decoder_url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-    )
+        # GLM uses OpenAI-style chat completions, convert context to user prompt format
+        # Note: For GLM, we need to convert the meta_prompt format to simple user message
+        user_msg = (
+            f"Context refs:\n{effective_context}\n\n"
+            f"Original prompt: {(original_prompt or '').strip()}\n\n"
+            "Rewrite this as a more specific, detailed prompt using at least two short paragraphs separated by a blank line. "
+        )
 
-    enhanced = ""
-    if stream:
-        # Streaming mode: print tokens as they arrive for instant feedback
-        with request.urlopen(req, timeout=DECODER_TIMEOUT) as resp:
-            for line in resp:
-                line_str = line.decode("utf-8", errors="ignore").strip()
-                if not line_str or line_str.startswith(":"):
-                    continue
-                if line_str.startswith("data: "):
-                    line_str = line_str[6:]
-                try:
-                    chunk = json.loads(line_str)
-                    token = chunk.get("content", "")
-                    if token:
-                        sys.stdout.write(token)
-                        sys.stdout.flush()
-                        enhanced += token
-                    if chunk.get("stop", False):
-                        break
-                except json.JSONDecodeError as e:
-                    # Warn once per malformed line but keep streaming the final output only
-                    sys.stderr.write(f"[WARN] decoder stream JSON decode failed: {str(e)}\n")
-                    sys.stderr.flush()
-                    continue
-        sys.stdout.write("\n")
-        sys.stdout.flush()
-    else:
-        # Non-streaming mode: wait for full response
-        with request.urlopen(req, timeout=DECODER_TIMEOUT) as resp:
-            raw = resp.read().decode("utf-8", errors="ignore")
-            data = json.loads(raw)
-
-            # Extract content from llama.cpp response
-            enhanced = (
-                (data.get("content") if isinstance(data, dict) else None)
-                or ((data.get("choices") or [{}])[0].get("content") if isinstance(data, dict) else None)
-                or ((data.get("choices") or [{}])[0].get("text") if isinstance(data, dict) else None)
-                or (data.get("generated_text") if isinstance(data, dict) else None)
-                or (data.get("text") if isinstance(data, dict) else None)
+        if has_code_context:
+            user_msg += (
+                "Use the context above to make the rewrite concrete and specific. "
+                "For questions: make them more specific and multi-faceted (each paragraph should be a question ending with '?'). "
+                "For commands/instructions: make them more detailed and concrete (specify exact functions, parameters, edge cases to handle). "
             )
+        else:
+            user_msg += (
+                "Since no code context is available, keep the rewrite general and exploratory. "
+                "Do NOT invent specific file paths, line numbers, or function names. "
+                "For questions: expand into related conceptual questions. For commands/instructions: provide general guidance about the task. "
+            )
+
+        # GLM API call
+        response = client.client.chat.completions.create(
+            model=os.environ.get("GLM_MODEL", "glm-4.6"),
+            messages=[
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_msg}
+            ],
+            max_tokens=int(max_tokens or DEFAULT_REWRITE_TOKENS),
+            temperature=0.45,
+            stream=stream
+        )
+
+        enhanced = ""
+        if stream:
+            # Streaming mode for GLM
+            for chunk in response:
+                if chunk.choices[0].delta.content:
+                    token = chunk.choices[0].delta.content
+                    sys.stdout.write(token)
+                    sys.stdout.flush()
+                    enhanced += token
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+        else:
+            # Non-streaming mode for GLM
+            enhanced = response.choices[0].message.content
+
+    else:
+        # Use llama.cpp decoder (original logic)
+        meta_prompt = (
+            "<|start_of_role|>system<|end_of_role|>" + system_msg + "<|end_of_text|>\n"
+            "<|start_of_role|>user<|end_of_role|>" + user_msg + "<|end_of_text|>\n"
+            "<|start_of_role|>assistant<|end_of_role|>"
+        )
+
+        decoder_url = DECODER_URL
+        # Safety: only allow local decoder hosts
+        parsed = urlparse(decoder_url)
+        if parsed.hostname not in {"localhost", "127.0.0.1", "host.docker.internal"}:
+            raise ValueError(f"Unsafe decoder host: {parsed.hostname}")
+        payload = {
+            "prompt": meta_prompt,
+            "n_predict": int(max_tokens or DEFAULT_REWRITE_TOKENS),
+            "temperature": 0.45,
+            "stream": stream,
+        }
+
+        req = request.Request(
+            decoder_url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+
+        enhanced = ""
+        if stream:
+            # Streaming mode: print tokens as they arrive for instant feedback
+            with request.urlopen(req, timeout=DECODER_TIMEOUT) as resp:
+                for line in resp:
+                    line_str = line.decode("utf-8", errors="ignore").strip()
+                    if not line_str or line_str.startswith(":"):
+                        continue
+                    if line_str.startswith("data: "):
+                        line_str = line_str[6:]
+                    try:
+                        chunk = json.loads(line_str)
+                        token = chunk.get("content", "")
+                        if token:
+                            sys.stdout.write(token)
+                            sys.stdout.flush()
+                            enhanced += token
+                        if chunk.get("stop", False):
+                            break
+                    except json.JSONDecodeError as e:
+                        # Warn once per malformed line but keep streaming the final output only
+                        sys.stderr.write(f"[WARN] decoder stream JSON decode failed: {str(e)}\n")
+                        sys.stderr.flush()
+                        continue
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+        else:
+            # Non-streaming mode: wait for full response
+            with request.urlopen(req, timeout=DECODER_TIMEOUT) as resp:
+                raw = resp.read().decode("utf-8", errors="ignore")
+                data = json.loads(raw)
+
+                # Extract content from llama.cpp response
+                enhanced = (
+                    (data.get("content") if isinstance(data, dict) else None)
+                    or ((data.get("choices") or [{}])[0].get("content") if isinstance(data, dict) else None)
+                    or ((data.get("choices") or [{}])[0].get("text") if isinstance(data, dict) else None)
+                    or (data.get("generated_text") if isinstance(data, dict) else None)
+                    or (data.get("text") if isinstance(data, dict) else None)
+                )
 
     enhanced = (enhanced or "").replace("```", "").replace("`", "").strip()
 
@@ -1011,6 +1075,7 @@ Examples:
     parser.add_argument("--kind", help="Filter by symbol kind (e.g., function, class)")
     parser.add_argument("--symbol", help="Filter by symbol name")
     parser.add_argument("--ext", help="Filter by file extension")
+    parser.add_argument("--collection", help="Override collection name (default: env COLLECTION_NAME)")
 
     # Output control
     parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT,
@@ -1039,6 +1104,7 @@ Examples:
         "kind": args.kind,
         "symbol": args.symbol,
         "ext": args.ext,
+        "collection": args.collection,
         "per_path": args.per_path,
         "with_snippets": args.detail,
         "rewrite_options": {

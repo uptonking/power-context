@@ -5965,11 +5965,24 @@ def _ca_build_prompt(
 
 
 def _ca_decode(
-    prompt: str, *, mtok: int, temp: float, top_k: int, top_p: float, stops: list[str]
+    prompt: str,
+    *,
+    mtok: int,
+    temp: float,
+    top_k: int,
+    top_p: float,
+    stops: list[str],
+    timeout: float | None = None,
 ) -> str:
-    from scripts.refrag_llamacpp import LlamaCppRefragClient  # type: ignore
+    runtime_kind = str(os.environ.get("REFRAG_RUNTIME", "llamacpp")).strip().lower()
+    if runtime_kind == "glm":
+        from scripts.refrag_glm import GLMRefragClient  # type: ignore
 
-    client = LlamaCppRefragClient()
+        client = GLMRefragClient()
+    else:
+        from scripts.refrag_llamacpp import LlamaCppRefragClient  # type: ignore
+
+        client = LlamaCppRefragClient()
     base_tokens = int(max(16, mtok))
     last_err: Optional[Exception] = None
     import time as _time
@@ -5979,16 +5992,41 @@ def _ca_decode(
             base_tokens if attempt == 0 else max(16, base_tokens // (2 if attempt == 1 else 3))
         )
         try:
-            return client.generate_with_soft_embeddings(
-                prompt=prompt,
-                max_tokens=cur_tokens,
-                temperature=temp,
-                top_k=top_k,
-                top_p=top_p,
-                stop=stops,
-                repeat_penalty=float(os.environ.get("DECODER_REPEAT_PENALTY", "1.15") or 1.15),
-                repeat_last_n=int(os.environ.get("DECODER_REPEAT_LAST_N", "128") or 128),
-            )
+            gen_kwargs = {
+                "max_tokens": cur_tokens,
+                "temperature": temp,
+                "top_p": top_p,
+                "stop": stops,
+            }
+            if runtime_kind == "glm":
+                timeout_value: Optional[float] = None
+                if timeout is not None:
+                    try:
+                        timeout_value = float(timeout)
+                    except Exception:
+                        timeout_value = None
+                if timeout_value is None:
+                    raw_timeout = os.environ.get("GLM_TIMEOUT_SEC", "").strip()
+                    if raw_timeout:
+                        try:
+                            timeout_value = float(raw_timeout)
+                        except Exception:
+                            timeout_value = None
+                if timeout_value is not None:
+                    gen_kwargs["timeout"] = timeout_value
+            else:
+                gen_kwargs.update(
+                    {
+                        "top_k": top_k,
+                        "repeat_penalty": float(
+                            os.environ.get("DECODER_REPEAT_PENALTY", "1.15") or 1.15
+                        ),
+                        "repeat_last_n": int(
+                            os.environ.get("DECODER_REPEAT_LAST_N", "128") or 128
+                        ),
+                    }
+                )
+            return client.generate_with_soft_embeddings(prompt=prompt, **gen_kwargs)
         except Exception as e:
             last_err = e
             # Allow quick retries with reduced budget and tiny backoff to rescue transient 5xx
@@ -6908,7 +6946,13 @@ async def context_answer(
         )
         with _env_overrides({"LLAMACPP_TIMEOUT_SEC": str(_llama_timeout)}):
             answer = _ca_decode(
-                prompt, mtok=mtok, temp=temp, top_k=top_k, top_p=top_p, stops=stops
+                prompt,
+                mtok=mtok,
+                temp=temp,
+                top_k=top_k,
+                top_p=top_p,
+                stops=stops,
+                timeout=_llama_timeout,
             )
 
         # Post-process and validate
@@ -7010,6 +7054,7 @@ async def context_answer(
                         top_k=top_k,
                         top_p=top_p,
                         stops=stops,
+                        timeout=_llama_timeout,
                     )
 
                     # Minimal post-processing with per-query identifier inference
