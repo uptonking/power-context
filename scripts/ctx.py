@@ -1,4 +1,5 @@
 import re
+import difflib
 
 #!/usr/bin/env python3
 """
@@ -280,14 +281,14 @@ def _ensure_two_paragraph_questions(text: str) -> str:
         t = t.replace("\n\n\n", "\n\n")
     raw_paras = [p.strip() for p in t.split("\n\n") if p.strip()]
 
-    # Deduplicate paragraphs while preserving order to avoid repeated GLM stanzas
+    # Deduplicate paragraphs (case/whitespace insensitive, tolerance for near-duplicates)
     paras: list[str] = []
-    seen_keys: set[str] = set()
+    dedup_keys: list[str] = []
     for p in raw_paras:
         key = re.sub(r"\s+", " ", p).strip().lower()
-        if key in seen_keys:
+        if any(difflib.SequenceMatcher(None, key, existing).ratio() >= 0.99 for existing in dedup_keys):
             continue
-        seen_keys.add(key)
+        dedup_keys.append(key)
         paras.append(p)
 
     def normalize_paragraph(s: str) -> str:
@@ -311,9 +312,10 @@ def _ensure_two_paragraph_questions(text: str) -> str:
             return s[:-1].rstrip() + "."
         return s + "."
 
+    max_paragraphs = 3
     if len(paras) >= 2:
-        p1, p2 = normalize_paragraph(paras[0]), normalize_paragraph(paras[1])
-        return p1 + "\n\n" + p2
+        selected = [normalize_paragraph(p) for p in paras[:max_paragraphs]]
+        return "\n\n".join(selected)
 
     # Single paragraph: try to split by sentence boundary
     p = paras[0] if paras else t
@@ -326,7 +328,7 @@ def _ensure_two_paragraph_questions(text: str) -> str:
     else:
         p1 = p.strip()
         p2 = (
-            "Additionally, clarify algorithmic steps, inputs/outputs, configuration parameters, performance considerations, error handling behavior, tests, and edge cases relevant to the referenced components"
+            "Detail the exact systems involved (e.g., files, classes, state machines), how data flows between them, and any validation before emitting updates."
         )
     return normalize_paragraph(p1) + "\n\n" + normalize_paragraph(p2)
 
@@ -689,6 +691,38 @@ def _needs_polish(text: str) -> bool:
     return False
 
 
+def _dedup_paragraphs(text: str, max_paragraphs: int = 3) -> str:
+    """Deterministic paragraph-level deduplication and truncation.
+
+    - Split on double-newline boundaries
+    - Drop duplicate paragraphs beyond the first occurrence (case/whitespace insensitive)
+    - Cap total paragraphs to max_paragraphs
+    """
+    if not text:
+        return ""
+
+    # Normalize newlines and split into paragraphs
+    t = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    raw_paras = [p.strip() for p in t.split("\n\n") if p.strip()]
+    if not raw_paras:
+        return text.strip()
+
+    seen_keys: set[str] = set()
+    out: list[str] = []
+    for p in raw_paras:
+        key = re.sub(r"\s+", " ", p).strip().lower()
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        out.append(p)
+        if len(out) >= max_paragraphs:
+            break
+
+    if not out:
+        return text.strip()
+    return "\n\n".join(out)
+
+
 def enhance_unicorn(query: str, **filters) -> str:
     """Multi-pass staged enhancement for higher quality with optional plan generation.
 
@@ -802,14 +836,16 @@ def fetch_context(query: str, **filters) -> Tuple[str, str]:
     Falls back to context_search (with memories) if repo_search returns no hits.
     """
     with_snippets = bool(filters.get("with_snippets", False))
+    # Resolve collection: explicit filter wins, then env COLLECTION_NAME, then default "codebase"
+    collection_name = filters.get("collection") or os.environ.get("COLLECTION_NAME", "codebase")
+
     params = {
         "query": query,
         "limit": filters.get("limit", DEFAULT_LIMIT),
         "include_snippet": with_snippets,
         "context_lines": filters.get("context_lines", DEFAULT_CONTEXT_LINES),
+        "collection": collection_name,
     }
-    if filters.get("collection"):
-        params["collection"] = filters["collection"]
     for key in ["language", "under", "path_glob", "not_glob", "kind", "symbol", "ext"]:
         if filters.get(key):
             params[key] = filters[key]
@@ -851,7 +887,7 @@ def fetch_context(query: str, **filters) -> Tuple[str, str]:
             "include_memories": True,
             "include_snippet": with_snippets,
             "context_lines": filters.get("context_lines", DEFAULT_CONTEXT_LINES),
-            "collection": filters.get("collection") or os.environ.get("COLLECTION_NAME", "codebase"),
+            "collection": collection_name,
         }
         memory_result = call_mcp_tool("context_search", memory_params)
         if "error" not in memory_result:
@@ -1089,8 +1125,9 @@ def rewrite_prompt(original_prompt: str, context: str, note: str, max_tokens: Op
     if not enhanced:
         raise ValueError("Decoder returned empty response")
 
-    # Enforce at least two question paragraphs
+    # Enforce at least two question paragraphs, then deduplicate and cap paragraphs
     enhanced = _ensure_two_paragraph_questions(enhanced)
+    enhanced = _dedup_paragraphs(enhanced, max_paragraphs=3)
     return enhanced
 
 
