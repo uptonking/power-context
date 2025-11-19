@@ -1,0 +1,103 @@
+{
+  "name": "context-engine-uploader",
+  "displayName": "Context Engine Uploader",
+  "description": "Runs the Context-Engine remote upload client with a force sync on startup followed by watch mode.",
+  "version": "0.1.0",
+  "publisher": "contextengine",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:contextEngineUploader.start",
+    "onCommand:contextEngineUploader.stop",
+    "onCommand:contextEngineUploader.restart"
+  ],
+  "main": "./extension.js",
+  "icon": "assets/icon.png",
+  "contributes": {
+    "commands": [
+      {
+        "command": "contextEngineUploader.start",
+        "title": "Context Engine Uploader: Start"
+      },
+      {
+        "command": "contextEngineUploader.stop",
+        "title": "Context Engine Uploader: Stop"
+      },
+      {
+        "command": "contextEngineUploader.restart",
+        "title": "Context Engine Uploader: Restart"
+      },
+      {
+        "command": "contextEngineUploader.indexCodebase",
+        "title": "Context Engine Uploader: Index Codebase"
+      }
+    ],
+    "configuration": {
+      "type": "object",
+      "title": "Context Engine Uploader",
+      "properties": {
+        "contextEngineUploader.runOnStartup": {
+          "type": "boolean",
+          "default": false,
+          "description": "Run the force sync followed by watch after VS Code finishes startup."
+        },
+        "contextEngineUploader.pythonPath": {
+          "type": "string",
+          "default": "python3",
+          "description": "Python executable used to run scripts.remote_upload_client."
+        },
+        "contextEngineUploader.scriptWorkingDirectory": {
+          "type": "string",
+          "default": "",
+          "description": "Optional override for the folder that contains standalone_upload_client.py. Defaults to the extension install directory."
+        },
+        "contextEngineUploader.targetPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to pass to --path for remote upload."
+        },
+        "contextEngineUploader.endpoint": {
+          "type": "string",
+          "default": "http://mcp.speramus.id:8004",
+          "description": "Endpoint URL for the remote upload client."
+        },
+        "contextEngineUploader.intervalSeconds": {
+          "type": "number",
+          "default": 5,
+          "minimum": 1,
+          "description": "Interval in seconds for watch mode polling."
+        },
+        "contextEngineUploader.extraForceArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Additional CLI arguments appended to the force sync."
+        },
+        "contextEngineUploader.extraWatchArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Additional CLI arguments appended to watch mode."
+        },
+        "contextEngineUploader.bundleSizeLimitMB": {
+          "type": "number",
+          "default": 100,
+          "description": "Maximum upload bundle size enforced by the Context Engine server (MB)."
+        }
+      }
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/m1rl0k/Context-Engine"
+  }
+}
