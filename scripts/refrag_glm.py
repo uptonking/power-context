@@ -38,6 +38,11 @@ class GLMRefragClient:
         temperature = float(gen_kwargs.get("temperature", 0.2))
         top_p = float(gen_kwargs.get("top_p", 0.95))
         stop = gen_kwargs.get("stop")
+        timeout = gen_kwargs.pop("timeout", None)
+        try:
+            timeout_val = float(timeout) if timeout is not None else None
+        except Exception:
+            timeout_val = None
 
         try:
             response = self.client.chat.completions.create(
@@ -47,6 +52,7 @@ class GLMRefragClient:
                 temperature=temperature,
                 top_p=top_p,
                 stop=stop if stop else None,
+                timeout=timeout_val,
             )
             msg = response.choices[0].message
             # GLM-4.6 uses reasoning_content for thinking models

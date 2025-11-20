@@ -1,4 +1,5 @@
 import re
+import difflib
 
 #!/usr/bin/env python3
 """
@@ -54,6 +55,11 @@ from urllib import request
 from urllib.parse import urlparse
 from urllib.error import HTTPError, URLError
 from typing import Dict, Any, List, Optional, Tuple
+
+try:
+    from scripts.mcp_router import call_tool_http  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - local execution fallback
+    from mcp_router import call_tool_http  # type: ignore
 
 # Configuration from environment
 MCP_URL = os.environ.get("MCP_INDEXER_URL", "http://localhost:8003/mcp")
@@ -130,6 +136,11 @@ def get_session_id(timeout: int = 10) -> str:
             session_id = resp.headers.get("mcp-session-id")
             if not session_id:
                 raise RuntimeError("Server did not return session ID")
+            # Read the initialization response to ensure session is fully established
+            init_response = resp.read().decode('utf-8')
+            # Wait a moment for session to be fully processed
+            import time
+            time.sleep(0.5)
             _session_id = session_id
             return session_id
     except Exception as e:
@@ -138,8 +149,6 @@ def get_session_id(timeout: int = 10) -> str:
 
 def call_mcp_tool(tool_name: str, params: Dict[str, Any], timeout: int = 30) -> Dict[str, Any]:
     """Call MCP tool via HTTP JSON-RPC with session management."""
-    session_id = get_session_id()
-
     payload = {
         "jsonrpc": "2.0",
         "id": 1,
@@ -147,23 +156,12 @@ def call_mcp_tool(tool_name: str, params: Dict[str, Any], timeout: int = 30) -> 
         "params": {"name": tool_name, "arguments": params}
     }
 
+    # Debug output
+    sys.stderr.write(f"[DEBUG] Sending payload: {json.dumps(payload, indent=2)}\n")
+    sys.stderr.flush()
+
     try:
-        req = request.Request(
-            MCP_URL,
-            data=json.dumps(payload).encode(),
-            headers={
-                "Content-Type": "application/json",
-                "Accept": "application/json, text/event-stream",
-                "mcp-session-id": session_id
-            }
-        )
-        with request.urlopen(req, timeout=timeout) as resp:
-            response_text = resp.read().decode('utf-8')
-            return parse_sse_response(response_text)
-    except HTTPError as e:
-        return {"error": f"HTTP {e.code}: {e.reason}"}
-    except URLError as e:
-        return {"error": f"Connection failed: {e.reason}"}
+        return call_tool_http(MCP_URL, tool_name, params, timeout=float(timeout))
     except Exception as e:
         return {"error": f"Request failed: {str(e)}"}
 
@@ -281,7 +279,17 @@ def _ensure_two_paragraph_questions(text: str) -> str:
     # Collapse triple+ newlines to double
     while "\n\n\n" in t:
         t = t.replace("\n\n\n", "\n\n")
-    paras = [p.strip() for p in t.split("\n\n") if p.strip()]
+    raw_paras = [p.strip() for p in t.split("\n\n") if p.strip()]
+
+    # Deduplicate paragraphs (case/whitespace insensitive, tolerance for near-duplicates)
+    paras: list[str] = []
+    dedup_keys: list[str] = []
+    for p in raw_paras:
+        key = re.sub(r"\s+", " ", p).strip().lower()
+        if any(difflib.SequenceMatcher(None, key, existing).ratio() >= 0.99 for existing in dedup_keys):
+            continue
+        dedup_keys.append(key)
+        paras.append(p)
 
     def normalize_paragraph(s: str) -> str:
         """Ensure proper punctuation - keep questions as questions, commands as commands."""
@@ -304,9 +312,10 @@ def _ensure_two_paragraph_questions(text: str) -> str:
             return s[:-1].rstrip() + "."
         return s + "."
 
+    max_paragraphs = 3
     if len(paras) >= 2:
-        p1, p2 = normalize_paragraph(paras[0]), normalize_paragraph(paras[1])
-        return p1 + "\n\n" + p2
+        selected = [normalize_paragraph(p) for p in paras[:max_paragraphs]]
+        return "\n\n".join(selected)
 
     # Single paragraph: try to split by sentence boundary
     p = paras[0] if paras else t
@@ -319,7 +328,7 @@ def _ensure_two_paragraph_questions(text: str) -> str:
     else:
         p1 = p.strip()
         p2 = (
-            "Additionally, clarify algorithmic steps, inputs/outputs, configuration parameters, performance considerations, error handling behavior, tests, and edge cases relevant to the referenced components"
+            "Detail the exact systems involved (e.g., files, classes, state machines), how data flows between them, and any validation before emitting updates."
         )
     return normalize_paragraph(p1) + "\n\n" + normalize_paragraph(p2)
 
@@ -368,6 +377,50 @@ def build_refined_query(original_query: str, allowed_paths: Set[str], allowed_sy
         if s and s not in terms:
             terms.append(s)
     return (original_query or "").strip() + (" " + " ".join(terms) if terms else "")
+
+
+def _simple_tokenize(text: str) -> List[str]:
+    tokens = re.findall(r"[A-Za-z0-9_]+", text or "")
+    return [t.lower() for t in tokens if t]
+
+
+def _token_overlap_ratio(a: str, b: str) -> float:
+    a_tokens = set(_simple_tokenize(a))
+    b_tokens = set(_simple_tokenize(b))
+    if not a_tokens or not b_tokens:
+        return 0.0
+    inter = len(a_tokens & b_tokens)
+    union = len(a_tokens | b_tokens)
+    if not union:
+        return 0.0
+    return inter / union
+
+
+def _estimate_query_result_relevance(query: str, results: List[Dict[str, Any]]) -> float:
+    q_tokens = set(_simple_tokenize(query))
+    if not q_tokens or not results:
+        return 0.0
+    scores: List[float] = []
+    for hit in results[:5]:
+        parts: List[str] = []
+        for key in ("path", "symbol", "snippet"):
+            val = hit.get(key)
+            if isinstance(val, str):
+                parts.append(val)
+        if not parts:
+            continue
+        r_tokens = set()
+        for part in parts:
+            r_tokens.update(_simple_tokenize(part))
+        if not r_tokens:
+            continue
+        inter = len(q_tokens & r_tokens)
+        union = len(q_tokens | r_tokens)
+        if union:
+            scores.append(inter / union)
+    if not scores:
+        return 0.0
+    return sum(scores) / len(scores)
 
 
 def sanitize_citations(text: str, allowed_paths: Set[str]) -> str:
@@ -482,6 +535,19 @@ def enhance_prompt(query: str, **filters) -> str:
     filters = _adaptive_context_sizing(query, filters)
 
     context_text, context_note = fetch_context(query, **filters)
+
+    require_ctx_flag = os.environ.get("CTX_REQUIRE_CONTEXT", "").strip().lower()
+    if require_ctx_flag in {"1", "true", "yes", "on"}:
+        has_real_context = bool((context_text or "").strip()) and not (
+            context_note and (
+                "failed" in context_note.lower()
+                or "no relevant" in context_note.lower()
+                or "no data" in context_note.lower()
+            )
+        )
+        if not has_real_context:
+            return (query or "").strip()
+
     rewrite_opts = filters.get("rewrite_options") or {}
     rewritten = rewrite_prompt(
         query,
@@ -625,6 +691,38 @@ def _needs_polish(text: str) -> bool:
     return False
 
 
+def _dedup_paragraphs(text: str, max_paragraphs: int = 3) -> str:
+    """Deterministic paragraph-level deduplication and truncation.
+
+    - Split on double-newline boundaries
+    - Drop duplicate paragraphs beyond the first occurrence (case/whitespace insensitive)
+    - Cap total paragraphs to max_paragraphs
+    """
+    if not text:
+        return ""
+
+    # Normalize newlines and split into paragraphs
+    t = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    raw_paras = [p.strip() for p in t.split("\n\n") if p.strip()]
+    if not raw_paras:
+        return text.strip()
+
+    seen_keys: set[str] = set()
+    out: list[str] = []
+    for p in raw_paras:
+        key = re.sub(r"\s+", " ", p).strip().lower()
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        out.append(p)
+        if len(out) >= max_paragraphs:
+            break
+
+    if not out:
+        return text.strip()
+    return "\n\n".join(out)
+
+
 def enhance_unicorn(query: str, **filters) -> str:
     """Multi-pass staged enhancement for higher quality with optional plan generation.
 
@@ -660,6 +758,20 @@ def enhance_unicorn(query: str, **filters) -> str:
     # Build a grounded follow-up query; keep it simple and rely on snippets
     allowed_paths1, _ = extract_allowed_citations(ctx1)
     refined_query = draft
+
+    overlap = _token_overlap_ratio(query, draft)
+    sys.stderr.write(f"[DEBUG] Unicorn draft similarity={overlap:.3f}\n")
+    sys.stderr.flush()
+    gate_flag = os.environ.get("CTX_DRAFT_SIM_GATE", "").strip().lower()
+    if gate_flag in {"1", "true", "yes", "on"}:
+        try:
+            min_sim = float(os.environ.get("CTX_MIN_DRAFT_SIM", "0.4"))
+        except Exception:
+            min_sim = 0.4
+        if overlap < min_sim:
+            sys.stderr.write(f"[DEBUG] Draft similarity below threshold {min_sim:.3f}; reusing original query for pass2.\n")
+            sys.stderr.flush()
+            refined_query = query
 
     # ---- Pass 2: refine (even richer snippets, focused results)
     f2 = dict(filters)
@@ -724,13 +836,15 @@ def fetch_context(query: str, **filters) -> Tuple[str, str]:
     Falls back to context_search (with memories) if repo_search returns no hits.
     """
     with_snippets = bool(filters.get("with_snippets", False))
+    # Resolve collection: explicit filter wins, then env COLLECTION_NAME, then default "codebase"
+    collection_name = filters.get("collection") or os.environ.get("COLLECTION_NAME", "codebase")
+
     params = {
         "query": query,
         "limit": filters.get("limit", DEFAULT_LIMIT),
         "include_snippet": with_snippets,
         "context_lines": filters.get("context_lines", DEFAULT_CONTEXT_LINES),
-        "per_path": filters.get("per_path", DEFAULT_PER_PATH),
-        "collection": "codebase",  # Use the correct collection name
+        "collection": collection_name,
     }
     for key in ["language", "under", "path_glob", "not_glob", "kind", "symbol", "ext"]:
         if filters.get(key):
@@ -750,8 +864,20 @@ def fetch_context(query: str, **filters) -> Tuple[str, str]:
         return "", "Context retrieval returned no data."
 
     hits = data.get("results") or []
-    sys.stderr.write(f"[DEBUG] repo_search returned {len(hits)} hits\n")
+    relevance = _estimate_query_result_relevance(query, hits)
+    sys.stderr.write(f"[DEBUG] repo_search returned {len(hits)} hits (relevance={relevance:.3f})\n")
     sys.stderr.flush()
+
+    gate_flag = os.environ.get("CTX_RELEVANCE_GATE", "").strip().lower()
+    if hits and gate_flag in {"1", "true", "yes", "on"}:
+        try:
+            min_rel = float(os.environ.get("CTX_MIN_RELEVANCE", "0.15"))
+        except Exception:
+            min_rel = 0.15
+        if relevance < min_rel:
+            sys.stderr.write(f"[DEBUG] Relevance below threshold {min_rel:.3f}; treating as no relevant context.\n")
+            sys.stderr.flush()
+            return "", "No relevant context found for the prompt (low retrieval relevance)."
 
     if not hits:
         # Memory blending: try context_search with memories as fallback
@@ -761,7 +887,7 @@ def fetch_context(query: str, **filters) -> Tuple[str, str]:
             "include_memories": True,
             "include_snippet": with_snippets,
             "context_lines": filters.get("context_lines", DEFAULT_CONTEXT_LINES),
-            "collection": "codebase",  # Use the correct collection name
+            "collection": collection_name,
         }
         memory_result = call_mcp_tool("context_search", memory_params)
         if "error" not in memory_result:
@@ -776,7 +902,7 @@ def fetch_context(query: str, **filters) -> Tuple[str, str]:
 
 
 def rewrite_prompt(original_prompt: str, context: str, note: str, max_tokens: Optional[int], citation_policy: str = "paths", stream: bool = True) -> str:
-    """Use the local decoder (llama.cpp) to rewrite the prompt with repository context.
+    """Use the configured decoder (GLM or llama.cpp) to rewrite the prompt with repository context.
 
     Returns ONLY the improved prompt text. Raises exception if decoder fails.
     If stream=True (default), prints tokens as they arrive for instant feedback.
@@ -872,78 +998,136 @@ def rewrite_prompt(original_prompt: str, context: str, note: str, max_tokens: Op
     if prefs.get("streaming") is not None:
         stream = prefs.get("streaming")
 
-    meta_prompt = (
-        "<|start_of_role|>system<|end_of_role|>" + system_msg + "<|end_of_text|>\n"
-        "<|start_of_role|>user<|end_of_role|>" + user_msg + "<|end_of_text|>\n"
-        "<|start_of_role|>assistant<|end_of_role|>"
-    )
+    # Check which decoder runtime to use
+    runtime_kind = str(os.environ.get("REFRAG_RUNTIME", "llamacpp")).strip().lower()
 
-    decoder_url = DECODER_URL
-    # Safety: only allow local decoder hosts
-    parsed = urlparse(decoder_url)
-    if parsed.hostname not in {"localhost", "127.0.0.1", "host.docker.internal"}:
-        raise ValueError(f"Unsafe decoder host: {parsed.hostname}")
-    payload = {
-        "prompt": meta_prompt,
-        "n_predict": int(max_tokens or DEFAULT_REWRITE_TOKENS),
-        "temperature": 0.45,
-        "stream": stream,
-    }
+    if runtime_kind == "glm":
+        from refrag_glm import GLMRefragClient  # type: ignore
+        client = GLMRefragClient()
 
-    req = request.Request(
-        decoder_url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-    )
+        # GLM uses OpenAI-style chat completions, convert context to user prompt format
+        # Note: For GLM, we need to convert the meta_prompt format to simple user message
+        user_msg = (
+            f"Context refs:\n{effective_context}\n\n"
+            f"Original prompt: {(original_prompt or '').strip()}\n\n"
+            "Rewrite this as a more specific, detailed prompt using at least two short paragraphs separated by a blank line. "
+        )
 
-    enhanced = ""
-    if stream:
-        # Streaming mode: print tokens as they arrive for instant feedback
-        with request.urlopen(req, timeout=DECODER_TIMEOUT) as resp:
-            for line in resp:
-                line_str = line.decode("utf-8", errors="ignore").strip()
-                if not line_str or line_str.startswith(":"):
-                    continue
-                if line_str.startswith("data: "):
-                    line_str = line_str[6:]
-                try:
-                    chunk = json.loads(line_str)
-                    token = chunk.get("content", "")
-                    if token:
-                        sys.stdout.write(token)
-                        sys.stdout.flush()
-                        enhanced += token
-                    if chunk.get("stop", False):
-                        break
-                except json.JSONDecodeError as e:
-                    # Warn once per malformed line but keep streaming the final output only
-                    sys.stderr.write(f"[WARN] decoder stream JSON decode failed: {str(e)}\n")
-                    sys.stderr.flush()
-                    continue
-        sys.stdout.write("\n")
-        sys.stdout.flush()
-    else:
-        # Non-streaming mode: wait for full response
-        with request.urlopen(req, timeout=DECODER_TIMEOUT) as resp:
-            raw = resp.read().decode("utf-8", errors="ignore")
-            data = json.loads(raw)
-
-            # Extract content from llama.cpp response
-            enhanced = (
-                (data.get("content") if isinstance(data, dict) else None)
-                or ((data.get("choices") or [{}])[0].get("content") if isinstance(data, dict) else None)
-                or ((data.get("choices") or [{}])[0].get("text") if isinstance(data, dict) else None)
-                or (data.get("generated_text") if isinstance(data, dict) else None)
-                or (data.get("text") if isinstance(data, dict) else None)
+        if has_code_context:
+            user_msg += (
+                "Use the context above to make the rewrite concrete and specific. "
+                "For questions: make them more specific and multi-faceted (each paragraph should be a question ending with '?'). "
+                "For commands/instructions: make them more detailed and concrete (specify exact functions, parameters, edge cases to handle). "
             )
+        else:
+            user_msg += (
+                "Since no code context is available, keep the rewrite general and exploratory. "
+                "Do NOT invent specific file paths, line numbers, or function names. "
+                "For questions: expand into related conceptual questions. For commands/instructions: provide general guidance about the task. "
+            )
+
+        # GLM API call
+        response = client.client.chat.completions.create(
+            model=os.environ.get("GLM_MODEL", "glm-4.6"),
+            messages=[
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_msg}
+            ],
+            max_tokens=int(max_tokens or DEFAULT_REWRITE_TOKENS),
+            temperature=0.45,
+            stream=stream
+        )
+
+        enhanced = ""
+        if stream:
+            # Streaming mode for GLM
+            for chunk in response:
+                if chunk.choices[0].delta.content:
+                    token = chunk.choices[0].delta.content
+                    sys.stdout.write(token)
+                    sys.stdout.flush()
+                    enhanced += token
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+        else:
+            # Non-streaming mode for GLM
+            enhanced = response.choices[0].message.content
+
+    else:
+        # Use llama.cpp decoder (original logic)
+        meta_prompt = (
+            "<|start_of_role|>system<|end_of_role|>" + system_msg + "<|end_of_text|>\n"
+            "<|start_of_role|>user<|end_of_role|>" + user_msg + "<|end_of_text|>\n"
+            "<|start_of_role|>assistant<|end_of_role|>"
+        )
+
+        decoder_url = DECODER_URL
+        # Safety: only allow local decoder hosts
+        parsed = urlparse(decoder_url)
+        if parsed.hostname not in {"localhost", "127.0.0.1", "host.docker.internal"}:
+            raise ValueError(f"Unsafe decoder host: {parsed.hostname}")
+        payload = {
+            "prompt": meta_prompt,
+            "n_predict": int(max_tokens or DEFAULT_REWRITE_TOKENS),
+            "temperature": 0.45,
+            "stream": stream,
+        }
+
+        req = request.Request(
+            decoder_url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+
+        enhanced = ""
+        if stream:
+            # Streaming mode: print tokens as they arrive for instant feedback
+            with request.urlopen(req, timeout=DECODER_TIMEOUT) as resp:
+                for line in resp:
+                    line_str = line.decode("utf-8", errors="ignore").strip()
+                    if not line_str or line_str.startswith(":"):
+                        continue
+                    if line_str.startswith("data: "):
+                        line_str = line_str[6:]
+                    try:
+                        chunk = json.loads(line_str)
+                        token = chunk.get("content", "")
+                        if token:
+                            sys.stdout.write(token)
+                            sys.stdout.flush()
+                            enhanced += token
+                        if chunk.get("stop", False):
+                            break
+                    except json.JSONDecodeError as e:
+                        # Warn once per malformed line but keep streaming the final output only
+                        sys.stderr.write(f"[WARN] decoder stream JSON decode failed: {str(e)}\n")
+                        sys.stderr.flush()
+                        continue
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+        else:
+            # Non-streaming mode: wait for full response
+            with request.urlopen(req, timeout=DECODER_TIMEOUT) as resp:
+                raw = resp.read().decode("utf-8", errors="ignore")
+                data = json.loads(raw)
+
+                # Extract content from llama.cpp response
+                enhanced = (
+                    (data.get("content") if isinstance(data, dict) else None)
+                    or ((data.get("choices") or [{}])[0].get("content") if isinstance(data, dict) else None)
+                    or ((data.get("choices") or [{}])[0].get("text") if isinstance(data, dict) else None)
+                    or (data.get("generated_text") if isinstance(data, dict) else None)
+                    or (data.get("text") if isinstance(data, dict) else None)
+                )
 
     enhanced = (enhanced or "").replace("```", "").replace("`", "").strip()
 
     if not enhanced:
         raise ValueError("Decoder returned empty response")
 
-    # Enforce at least two question paragraphs
+    # Enforce at least two question paragraphs, then deduplicate and cap paragraphs
     enhanced = _ensure_two_paragraph_questions(enhanced)
+    enhanced = _dedup_paragraphs(enhanced, max_paragraphs=3)
     return enhanced
 
 
@@ -1011,6 +1195,7 @@ Examples:
     parser.add_argument("--kind", help="Filter by symbol kind (e.g., function, class)")
     parser.add_argument("--symbol", help="Filter by symbol name")
     parser.add_argument("--ext", help="Filter by file extension")
+    parser.add_argument("--collection", help="Override collection name (default: env COLLECTION_NAME)")
 
     # Output control
     parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT,
@@ -1039,6 +1224,7 @@ Examples:
         "kind": args.kind,
         "symbol": args.symbol,
         "ext": args.ext,
+        "collection": args.collection,
         "per_path": args.per_path,
         "with_snippets": args.detail,
         "rewrite_options": {
@@ -1066,8 +1252,24 @@ Examples:
             output = enhance_unicorn(args.query, **filters)
         else:
             context_text, context_note = fetch_context(args.query, **filters)
-            rewritten = rewrite_prompt(args.query, context_text, context_note, max_tokens=args.rewrite_max_tokens)
-            output = rewritten.strip()
+
+            require_ctx_flag = os.environ.get("CTX_REQUIRE_CONTEXT", "").strip().lower()
+            if require_ctx_flag in {"1", "true", "yes", "on"}:
+                has_real_context = bool((context_text or "").strip()) and not (
+                    context_note and (
+                        "failed" in context_note.lower()
+                        or "no relevant" in context_note.lower()
+                        or "no data" in context_note.lower()
+                    )
+                )
+                if not has_real_context:
+                    output = (args.query or "").strip()
+                else:
+                    rewritten = rewrite_prompt(args.query, context_text, context_note, max_tokens=args.rewrite_max_tokens)
+                    output = rewritten.strip()
+            else:
+                rewritten = rewrite_prompt(args.query, context_text, context_note, max_tokens=args.rewrite_max_tokens)
+                output = rewritten.strip()
 
         if args.cmd:
             subprocess.run(args.cmd, input=output.encode("utf-8"), shell=True, check=False)

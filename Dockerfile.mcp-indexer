@@ -10,9 +10,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Python deps: include FastMCP with Streamable HTTP (RMCP) support
-RUN pip install --no-cache-dir --upgrade qdrant-client fastembed watchdog onnxruntime tokenizers \
-    tree_sitter tree_sitter_languages mcp fastmcp
+# Python deps: reuse shared requirements (includes FastMCP + OpenAI SDK)
+COPY requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir --upgrade -r /tmp/requirements.txt
 
 # Bake scripts into the image so entrypoints don't rely on /work
 COPY scripts /app/scripts
