@@ -37,12 +37,17 @@ This gets you from zero to “search works” in under five minutes.
 - make (optional but recommended)
 - Node/npm if you want to use mcp-remote (optional)
 
-2) One command (recommended)
+2) command (recommended)
 ```bash
 # Provisions tokenizer.json, downloads a tiny llama.cpp model, reindexes, and brings all services up
 INDEX_MICRO_CHUNKS=1 MAX_MICRO_CHUNKS_PER_FILE=200 make reset-dev-dual
 ```
-- Default ports: Memory MCP :8000, Indexer MCP :8001, Qdrant :6333, llama.cpp :8080
+```bash
+# Provisions the context-engine for rapid development, 
+HOST_INDEX_PATH=. COLLECTION_NAME=codebase docker compose run --rm indexer --root /work --recreate --no-skip-unchanged
+```
+
+- Default ports: Memory MCP :8000, Indexer MCP :8001, 8003, Qdrant :6333, llama.cpp :8080
 
 **Seamless Setup Note:**
 - The stack uses a **single unified `codebase` collection** by default
