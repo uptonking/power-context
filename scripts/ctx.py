@@ -1,7 +1,6 @@
+#!/usr/bin/env python3
 import re
 import difflib
-
-#!/usr/bin/env python3
 """
 Context-aware prompt enhancer CLI.
 
@@ -156,9 +155,11 @@ def call_mcp_tool(tool_name: str, params: Dict[str, Any], timeout: int = 30) -> 
         "params": {"name": tool_name, "arguments": params}
     }
 
-    # Debug output
-    sys.stderr.write(f"[DEBUG] Sending payload: {json.dumps(payload, indent=2)}\n")
-    sys.stderr.flush()
+    # Debug output (opt-in to avoid leaking queries in normal use)
+    debug_flag = os.environ.get("CTX_DEBUG", "").strip().lower()
+    if debug_flag in {"1", "true", "yes", "on"}:
+        sys.stderr.write(f"[DEBUG] Sending payload: {json.dumps(payload, indent=2)}\n")
+        sys.stderr.flush()
 
     try:
         return call_tool_http(MCP_URL, tool_name, params, timeout=float(timeout))
