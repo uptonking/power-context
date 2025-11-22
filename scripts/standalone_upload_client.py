@@ -19,7 +19,7 @@ import tarfile
 import tempfile
 import logging
 import argparse
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime
 import requests
@@ -204,15 +204,34 @@ class RemoteUploadClient:
 
     def _translate_to_container_path(self, host_path: str) -> str:
         """Translate host path to container path for API communication."""
-        # Use environment variable for path mapping if available
-        host_root = os.environ.get("HOST_ROOT", "/home/coder/project/Context-Engine/dev-workspace")
-        container_root = os.environ.get("CONTAINER_ROOT", "/work")
+        host_root = (os.environ.get("HOST_ROOT", "") or "/home/coder/project/Context-Engine/dev-workspace").strip()
+        container_root = (os.environ.get("CONTAINER_ROOT", "/work") or "/work").strip()
 
-        if host_path.startswith(host_root):
-            return host_path.replace(host_root, container_root)
-        else:
-            # Fallback: if path doesn't match expected pattern, use as-is
-            return host_path
+        host_path_obj = Path(host_path)
+        if host_root:
+            try:
+                host_root_obj = Path(host_root)
+                relative = host_path_obj.relative_to(host_root_obj)
+                container = PurePosixPath(container_root)
+                if relative.parts:
+                    container = container.joinpath(*relative.parts)
+                return str(container)
+            except ValueError:
+                pass
+            except Exception:
+                pass
+
+        # Fallback: strip drive/anchor and map to /work/<repo-name>
+        try:
+            container = PurePosixPath(container_root)
+            usable_parts = [part for part in host_path_obj.parts if part not in (host_path_obj.anchor, host_path_obj.drive)]
+            if usable_parts:
+                repo_name = usable_parts[-1]
+                return str(container.joinpath(repo_name))
+        except Exception:
+            pass
+
+        return host_path.replace('\\', '/').replace(':', '')
 
     def __init__(self, upload_endpoint: str, workspace_path: str, collection_name: str,
                  max_retries: int = 3, timeout: int = 30, metadata_path: Optional[str] = None):
