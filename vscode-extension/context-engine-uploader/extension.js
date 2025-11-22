@@ -392,6 +392,16 @@ function buildChildEnv(options) {
   if (options.containerRoot) {
     env.CONTAINER_ROOT = options.containerRoot;
   }
+   try {
+     const libsPath = path.join(options.workingDirectory, 'python_libs');
+     if (fs.existsSync(libsPath)) {
+       const existing = process.env.PYTHONPATH || '';
+       env.PYTHONPATH = existing ? `${libsPath}${path.delimiter}${existing}` : libsPath;
+       log(`Detected bundled python_libs at ${libsPath}; setting PYTHONPATH for child process.`);
+     }
+   } catch (error) {
+     log(`Failed to configure PYTHONPATH for bundled deps: ${error instanceof Error ? error.message : String(error)}`);
+  }
   return env;
 }
 function deactivate() {

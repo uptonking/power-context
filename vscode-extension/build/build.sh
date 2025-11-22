@@ -7,6 +7,8 @@ OUT_DIR="$SCRIPT_DIR/../out"
 SRC_SCRIPT="$SCRIPT_DIR/../../scripts/standalone_upload_client.py"
 CLIENT="standalone_upload_client.py"
 STAGE_DIR="$OUT_DIR/extension-stage"
+BUNDLE_DEPS="${1:-}"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 cleanup() {
     rm -rf "$STAGE_DIR"
@@ -31,6 +33,12 @@ cp -a "$EXT_DIR/." "$STAGE_DIR/"
 # Inject the upload client into the staged extension for packaging
 cp "$OUT_DIR/$CLIENT" "$STAGE_DIR/$CLIENT"
 chmod +x "$STAGE_DIR/$CLIENT"
+
+# Optional: bundle Python deps into the staged extension when requested
+if [[ "$BUNDLE_DEPS" == "--bundle-deps" ]]; then
+    echo "Bundling Python dependencies into staged extension using $PYTHON_BIN..."
+    "$PYTHON_BIN" -m pip install -t "$STAGE_DIR/python_libs" requests urllib3 charset_normalizer
+fi
 
 pushd "$STAGE_DIR" >/dev/null
 echo "Packaging extension..."

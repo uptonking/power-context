@@ -2,6 +2,11 @@
 setlocal EnableExtensions
 pushd "%~dp0"
 
+set "BUNDLE_DEPS=0"
+set "PYTHON_BIN=%PYTHON_BIN%"
+if "%PYTHON_BIN%"=="" set "PYTHON_BIN=python"
+if /I "%1"=="bundle-deps" set "BUNDLE_DEPS=1"
+
 for %%I in ("..\context-engine-uploader") do set "EXT_DIR=%%~fI"
 for %%I in ("..\out") do set "OUT_DIR=%%~fI"
 for %%I in ("..\..\scripts\standalone_upload_client.py") do set "SRC_SCRIPT=%%~fI"
@@ -48,6 +53,17 @@ if errorlevel 1 (
     echo Failed to place upload client into staging directory.
     set "BUILD_RESULT=1"
     goto cleanup
+)
+
+REM Optional: bundle Python dependencies into the staged extension when requested
+if "%BUNDLE_DEPS%"=="1" (
+    echo Bundling Python dependencies into staged extension using %PYTHON_BIN%...
+    "%PYTHON_BIN%" -m pip install -t "%STAGE_DIR%\python_libs" requests urllib3 charset_normalizer
+    if errorlevel 1 (
+        echo Failed to install Python dependencies into staged extension.
+        set "BUILD_RESULT=1"
+        goto cleanup
+    )
 )
 
 pushd "%STAGE_DIR%"
