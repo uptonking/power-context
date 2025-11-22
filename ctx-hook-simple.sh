@@ -47,6 +47,7 @@ if [ -f "$CONFIG_FILE" ]; then
     CTX_REQUIRE_CONTEXT=$(grep -o '"require_context"[[:space:]]*:[[:space:]]*\(true\|false\)' "$CONFIG_FILE" | sed 's/.*"require_context"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/')
     CTX_RELEVANCE_GATE=$(grep -o '"relevance_gate_enabled"[[:space:]]*:[[:space:]]*\(true\|false\)' "$CONFIG_FILE" | sed 's/.*"relevance_gate_enabled"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/')
     CTX_MIN_RELEVANCE=$(grep -o '"min_relevance"[[:space:]]*:[[:space:]]*[0-9.][0-9.]*' "$CONFIG_FILE" | sed 's/.*"min_relevance"[[:space:]]*:[[:space:]]*\([0-9.][0-9.]*\).*/\1/')
+    CTX_REWRITE_MAX_TOKENS=$(grep -o '"rewrite_max_tokens"[[:space:]]*:[[:space:]]*[0-9][0-9]*' "$CONFIG_FILE" | sed 's/.*"rewrite_max_tokens"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/')
 fi
 
 # Set defaults if not found in config
@@ -59,11 +60,12 @@ CTX_DEFAULT_MODE=${CTX_DEFAULT_MODE:-"default"}
 CTX_REQUIRE_CONTEXT=${CTX_REQUIRE_CONTEXT:-true}
 CTX_RELEVANCE_GATE=${CTX_RELEVANCE_GATE:-false}
 CTX_MIN_RELEVANCE=${CTX_MIN_RELEVANCE:-0.1}
+CTX_REWRITE_MAX_TOKENS=${CTX_REWRITE_MAX_TOKENS:-320}
 
 # Export GLM/context environment variables from config
-export REFRAG_RUNTIME GLM_API_KEY GLM_API_BASE GLM_MODEL CTX_REQUIRE_CONTEXT CTX_RELEVANCE_GATE CTX_MIN_RELEVANCE
+export REFRAG_RUNTIME GLM_API_KEY GLM_API_BASE GLM_MODEL CTX_REQUIRE_CONTEXT CTX_RELEVANCE_GATE CTX_MIN_RELEVANCE CTX_REWRITE_MAX_TOKENS
 
-# Build ctx command with optional unicorn flag
+# Build ctx command with optional mode flag
 CTX_CMD=(python3 scripts/ctx.py)
 case "${CTX_DEFAULT_MODE,,}" in
 	unicorn)
@@ -75,8 +77,8 @@ case "${CTX_DEFAULT_MODE,,}" in
 esac
 CTX_CMD+=("$USER_MESSAGE" --collection "$CTX_COLLECTION")
 
-# Run ctx with collection
-ENHANCED=$(timeout 30s "${CTX_CMD[@]}" 2>/dev/null || echo "$USER_MESSAGE")
+# Run ctx with collection (extended timeout for multi-pass unicorn mode)
+ENHANCED=$(timeout 60 "${CTX_CMD[@]}" 2>/dev/null || echo "$USER_MESSAGE")
 
 # Replace user message with enhanced version using jq
 echo "$INPUT" | jq --arg enhanced "$ENHANCED" '.user_message = $enhanced'

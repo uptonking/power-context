@@ -736,6 +736,11 @@ def enhance_unicorn(query: str, **filters) -> str:
     """
     # ---- Pass 1: draft (rich snippets for grounding)
     f1 = dict(filters)
+    rewrite_opts = f1.get("rewrite_options") or {}
+    try:
+        max_budget = int(rewrite_opts.get("max_tokens", DEFAULT_REWRITE_TOKENS))
+    except Exception:
+        max_budget = DEFAULT_REWRITE_TOKENS
     f1.update({
         "with_snippets": True,
         "limit": max(1, min(int(f1.get("limit", DEFAULT_LIMIT) or 3), 3)),
@@ -753,11 +758,18 @@ def enhance_unicorn(query: str, **filters) -> str:
         return enhance_prompt(query, **filters)
 
     # Pass 1: silent (no streaming)
-    draft = rewrite_prompt(query, ctx1, note1, max_tokens=min(180, int((filters.get("rewrite_options") or {}).get("max_tokens", DEFAULT_REWRITE_TOKENS))), citation_policy="snippets", stream=False)
+    draft = rewrite_prompt(
+        query,
+        ctx1,
+        note1,
+        max_tokens=min(180, max_budget),
+        citation_policy="snippets",
+        stream=False,
+    )
 
-    # Build a grounded follow-up query; keep it simple and rely on snippets
-    allowed_paths1, _ = extract_allowed_citations(ctx1)
-    refined_query = draft
+    # Build a grounded follow-up query from original query + allowed paths/symbols
+    allowed_paths1, allowed_symbols1 = extract_allowed_citations(ctx1)
+    refined_query = build_refined_query(query, allowed_paths1, allowed_symbols1)
 
     overlap = _token_overlap_ratio(query, draft)
     sys.stderr.write(f"[DEBUG] Unicorn draft similarity={overlap:.3f}\n")
@@ -791,11 +803,19 @@ def enhance_unicorn(query: str, **filters) -> str:
         ctx2 = ctx1
         note2 = note1
 
-    # Pass 2: silent (no streaming)
-    final = rewrite_prompt(draft, ctx2, note2, max_tokens=min(240, int((filters.get("rewrite_options") or {}).get("max_tokens", DEFAULT_REWRITE_TOKENS))), citation_policy="snippets", stream=False)
+    # Pass 2: silent (no streaming). Use paths policy for clearer file/line anchoring.
+    final = rewrite_prompt(
+        draft,
+        ctx2,
+        note2,
+        max_tokens=min(300, max_budget),
+        citation_policy="paths",
+        stream=False,
+    )
 
-    # ---- Pass 3: polish if clearly needed
-    if _needs_polish(final):
+    # ---- Pass 3: polish if clearly needed (optional via CTX_UNICORN_POLISH)
+    polish_flag = os.environ.get("CTX_UNICORN_POLISH", "1").strip().lower()
+    if polish_flag in {"1", "true", "yes", "on"} and _needs_polish(final):
         # Polish pass: silent (no streaming yet)
         final = rewrite_prompt(final, ctx2, note2, max_tokens=140, citation_policy="snippets", stream=False)
 
@@ -1120,7 +1140,12 @@ def rewrite_prompt(original_prompt: str, context: str, note: str, max_tokens: Op
                     or (data.get("text") if isinstance(data, dict) else None)
                 )
 
-    enhanced = (enhanced or "").replace("```", "").replace("`", "").strip()
+    # Normalize and strip formatting / template artifacts from decoder output
+    enhanced = (enhanced or "")
+    enhanced = enhanced.replace("```", "").replace("`", "")
+    # Remove stray chat-template tags like <|user|>, <|assistant|>, etc.
+    enhanced = re.sub(r"<\|[^|>]+?\|>", "", enhanced)
+    enhanced = enhanced.strip()
 
     if not enhanced:
         raise ValueError("Decoder returned empty response")
