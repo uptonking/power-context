@@ -10,12 +10,6 @@
   "categories": [
     "Other"
   ],
-  "activationEvents": [
-    "onStartupFinished",
-    "onCommand:contextEngineUploader.start",
-    "onCommand:contextEngineUploader.stop",
-    "onCommand:contextEngineUploader.restart"
-  ],
   "main": "./extension.js",
   "icon": "assets/icon.png",
   "contributes": {
@@ -35,6 +29,10 @@
       {
         "command": "contextEngineUploader.indexCodebase",
         "title": "Context Engine Uploader: Index Codebase"
+      },
+      {
+        "command": "contextEngineUploader.writeMcpConfig",
+        "title": "Context Engine Uploader: Write MCP Config (.mcp.json)"
       }
     ],
     "configuration": {
@@ -49,7 +47,7 @@
         "contextEngineUploader.pythonPath": {
           "type": "string",
           "default": "python3",
-          "description": "Python executable used to run scripts.remote_upload_client."
+          "description": "Python executable used to run scripts.remote_upload_client. E.G. 'python' or 'python3'"
         },
         "contextEngineUploader.scriptWorkingDirectory": {
           "type": "string",
@@ -102,6 +100,36 @@
           "type": "number",
           "default": 100,
           "description": "Maximum upload bundle size enforced by the Context Engine server (MB)."
+        },
+        "contextEngineUploader.mcpConfigEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "[Deprecated] Legacy toggle for Claude MCP config writing. Use mcpClaudeEnabled instead."
+        },
+        "contextEngineUploader.mcpClaudeEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable writing the project-local .mcp.json used by Claude Code MCP clients."
+        },
+        "contextEngineUploader.mcpWindsurfEnabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable writing Windsurf's global MCP config (requires Windsurf or compatible clients)."
+        },
+        "contextEngineUploader.mcpIndexerUrl": {
+          "type": "string",
+          "default": "http://localhost:8001/sse",
+          "description": "Claude Code MCP server URL for the Qdrant indexer. Used when writing the project-local .mcp.json via 'Write MCP Config'."
+        },
+        "contextEngineUploader.mcpMemoryUrl": {
+          "type": "string",
+          "default": "http://localhost:8000/sse",
+          "description": "Claude Code MCP server URL for the memory/search MCP server. Used when writing the project-local .mcp.json via 'Write MCP Config'."
+        },
+        "contextEngineUploader.windsurfMcpPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional override for Windsurf's mcp_config.json path. Defaults to %USERPROFILE%/.codeium/windsurf/mcp_config.json."
         }
       }
     }

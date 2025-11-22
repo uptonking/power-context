@@ -18,11 +18,13 @@ Configuration
 - `Target Path` is auto-filled from the workspace but can be overridden if you need to upload a different folder.
 - **Python dependencies:** the extension runs the standalone upload client via your configured `pythonPath`. Ensure the interpreter has `requests`, `urllib3`, and `charset_normalizer` installed. Run `python3 -m pip install requests urllib3 charset_normalizer` (or replace `python3` with your configured path) before starting the uploader.
 - **Path mapping:** `Host Root` + `Container Root` control how local paths are rewritten before reaching the remote service. By default the host root mirrors your `Target Path` and the container root is `/work`, which keeps Windows paths working without extra config.
+ - **Claude Code MCP config:** `MCP Indexer Url` and `MCP Memory Url` control the URLs written into the project-local `.mcp.json` when you run the `Write MCP Config` command. This is only for configuring Claude Code MCP clients; other MCP integrations can be added separately later.
 
 Commands
 --------
 - Command Palette → “Context Engine Uploader” to access Start/Stop/Restart/Index Codebase.
 - Status-bar button (`Index Codebase`) mirrors the same behavior and displays progress.
+ - `Context Engine Uploader: Write MCP Config (.mcp.json)` writes or updates a project-local `.mcp.json` with MCP server entries for the Qdrant indexer and memory/search endpoints, using the configured MCP URLs.
 
 Logs
 ----

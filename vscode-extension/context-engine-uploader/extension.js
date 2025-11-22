@@ -2,6 +2,7 @@ const vscode = require('vscode');
 const { spawn, spawnSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 let outputChannel;
 let watchProcess;
 let forceProcess;
@@ -33,6 +34,9 @@ function activate(context) {
     vscode.window.showInformationMessage('Context Engine indexing started.');
     runSequence('force').catch(error => log(`Index failed: ${error instanceof Error ? error.message : String(error)}`));
   });
+  const mcpConfigDisposable = vscode.commands.registerCommand('contextEngineUploader.writeMcpConfig', () => {
+    writeMcpConfig().catch(error => log(`MCP config write failed: ${error instanceof Error ? error.message : String(error)}`));
+  });
   const configDisposable = vscode.workspace.onDidChangeConfiguration(event => {
     if (event.affectsConfiguration('contextEngineUploader') && watchProcess) {
       runSequence('auto').catch(error => log(`Auto-restart failed: ${error instanceof Error ? error.message : String(error)}`));
@@ -40,11 +44,22 @@ function activate(context) {
     if (event.affectsConfiguration('contextEngineUploader.targetPath')) {
       updateStatusBarTooltip();
     }
+    if (
+      event.affectsConfiguration('contextEngineUploader.mcpIndexerUrl') ||
+      event.affectsConfiguration('contextEngineUploader.mcpMemoryUrl') ||
+      event.affectsConfiguration('contextEngineUploader.mcpConfigEnabled') ||
+      event.affectsConfiguration('contextEngineUploader.mcpClaudeEnabled') ||
+      event.affectsConfiguration('contextEngineUploader.mcpWindsurfEnabled') ||
+      event.affectsConfiguration('contextEngineUploader.windsurfMcpPath')
+    ) {
+      // Best-effort auto-update of project-local .mcp.json when MCP settings change
+      writeMcpConfig().catch(error => log(`Auto MCP config write failed: ${error instanceof Error ? error.message : String(error)}`));
+    }
   });
   const workspaceDisposable = vscode.workspace.onDidChangeWorkspaceFolders(() => {
     ensureTargetPathConfigured();
   });
-  context.subscriptions.push(startDisposable, stopDisposable, restartDisposable, indexDisposable, configDisposable, workspaceDisposable);
+  context.subscriptions.push(startDisposable, stopDisposable, restartDisposable, indexDisposable, mcpConfigDisposable, configDisposable, workspaceDisposable);
   const config = vscode.workspace.getConfiguration('contextEngineUploader');
   ensureTargetPathConfigured();
   if (config.get('runOnStartup')) {
@@ -392,17 +407,49 @@ function buildChildEnv(options) {
   if (options.containerRoot) {
     env.CONTAINER_ROOT = options.containerRoot;
   }
-   try {
-     const libsPath = path.join(options.workingDirectory, 'python_libs');
-     if (fs.existsSync(libsPath)) {
-       const existing = process.env.PYTHONPATH || '';
-       env.PYTHONPATH = existing ? `${libsPath}${path.delimiter}${existing}` : libsPath;
-       log(`Detected bundled python_libs at ${libsPath}; setting PYTHONPATH for child process.`);
-     }
-   } catch (error) {
-     log(`Failed to configure PYTHONPATH for bundled deps: ${error instanceof Error ? error.message : String(error)}`);
+  try {
+    const libsPath = path.join(options.workingDirectory, 'python_libs');
+    if (fs.existsSync(libsPath)) {
+      const existing = process.env.PYTHONPATH || '';
+      env.PYTHONPATH = existing ? `${libsPath}${path.delimiter}${existing}` : libsPath;
+      log(`Detected bundled python_libs at ${libsPath}; setting PYTHONPATH for child process.`);
+    }
+  } catch (error) {
+    log(`Failed to configure PYTHONPATH for bundled deps: ${error instanceof Error ? error.message : String(error)}`);
   }
   return env;
+}
+async function writeMcpConfig() {
+  const settings = vscode.workspace.getConfiguration('contextEngineUploader');
+  const claudeSetting = settings.get('mcpClaudeEnabled');
+  const legacySetting = settings.get('mcpConfigEnabled');
+  const claudeEnabled = typeof claudeSetting === 'boolean' ? claudeSetting : legacySetting;
+  const windsurfEnabled = settings.get('mcpWindsurfEnabled', false);
+  if (!claudeEnabled && !windsurfEnabled) {
+    vscode.window.showInformationMessage('Context Engine Uploader: MCP config writing is disabled in settings.');
+    return;
+  }
+  const indexerUrl = (settings.get('mcpIndexerUrl') || 'http://localhost:8001/sse').trim();
+  const memoryUrl = (settings.get('mcpMemoryUrl') || 'http://localhost:8000/sse').trim();
+  let wroteAny = false;
+  if (claudeEnabled) {
+    const root = getWorkspaceFolderPath();
+    if (!root) {
+      vscode.window.showErrorMessage('Context Engine Uploader: open a folder before writing .mcp.json.');
+    } else {
+      const result = await writeClaudeMcpServers(root, indexerUrl, memoryUrl);
+      wroteAny = wroteAny || result;
+    }
+  }
+  if (windsurfEnabled) {
+    const customPath = (settings.get('windsurfMcpPath') || '').trim();
+    const windsPath = customPath || getDefaultWindsurfMcpPath();
+    const result = await writeWindsurfMcpServers(windsPath, indexerUrl, memoryUrl);
+    wroteAny = wroteAny || result;
+  }
+  if (!wroteAny) {
+    log('Context Engine Uploader: MCP config write skipped (no targets succeeded).');
+  }
 }
 function deactivate() {
   return stopProcesses();
@@ -411,3 +458,113 @@ module.exports = {
   activate,
   deactivate
 };
+
+function getDefaultWindsurfMcpPath() {
+  return path.join(os.homedir(), '.codeium', 'windsurf', 'mcp_config.json');
+}
+
+async function writeClaudeMcpServers(root, indexerUrl, memoryUrl) {
+  const configPath = path.join(root, '.mcp.json');
+  let config = { mcpServers: {} };
+  if (fs.existsSync(configPath)) {
+    try {
+      const raw = fs.readFileSync(configPath, 'utf8');
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') {
+        config = parsed;
+      }
+    } catch (error) {
+      vscode.window.showErrorMessage('Context Engine Uploader: existing .mcp.json is invalid JSON; not modified.');
+      log(`Failed to parse .mcp.json: ${error instanceof Error ? error.message : String(error)}`);
+      return false;
+    }
+  }
+  if (!config.mcpServers || typeof config.mcpServers !== 'object') {
+    config.mcpServers = {};
+  }
+  log(`Preparing to write .mcp.json at ${configPath} with indexerUrl=${indexerUrl || '""'} memoryUrl=${memoryUrl || '""'}`);
+  const isWindows = process.platform === 'win32';
+  const makeServer = url => {
+    if (isWindows) {
+      return {
+        command: 'cmd',
+        args: ['/c', 'npx', 'mcp-remote', url, '--transport', 'sse-only'],
+        env: {}
+      };
+    }
+    return {
+      command: 'npx',
+      args: ['mcp-remote', url, '--transport', 'sse-only'],
+      env: {}
+    };
+  };
+  const servers = config.mcpServers;
+  if (indexerUrl) {
+    servers['qdrant-indexer'] = makeServer(indexerUrl);
+  }
+  if (memoryUrl) {
+    servers.memory = makeServer(memoryUrl);
+  }
+  try {
+    const json = JSON.stringify(config, null, 2) + '\n';
+    fs.writeFileSync(configPath, json, 'utf8');
+    vscode.window.showInformationMessage('Context Engine Uploader: .mcp.json updated for Context Engine MCP servers.');
+    log(`Wrote .mcp.json at ${configPath}`);
+    return true;
+  } catch (error) {
+    vscode.window.showErrorMessage('Context Engine Uploader: failed to write .mcp.json.');
+    log(`Failed to write .mcp.json: ${error instanceof Error ? error.message : String(error)}`);
+    return false;
+  }
+}
+
+async function writeWindsurfMcpServers(configPath, indexerUrl, memoryUrl) {
+  try {
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+  } catch (error) {
+    log(`Failed to ensure Windsurf MCP directory: ${error instanceof Error ? error.message : String(error)}`);
+    vscode.window.showErrorMessage('Context Engine Uploader: failed to prepare Windsurf MCP directory.');
+    return false;
+  }
+  let config = { mcpServers: {} };
+  if (fs.existsSync(configPath)) {
+    try {
+      const raw = fs.readFileSync(configPath, 'utf8');
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') {
+        config = parsed;
+      }
+    } catch (error) {
+      vscode.window.showErrorMessage('Context Engine Uploader: existing Windsurf mcp_config.json is invalid JSON; not modified.');
+      log(`Failed to parse Windsurf mcp_config.json: ${error instanceof Error ? error.message : String(error)}`);
+      return false;
+    }
+  }
+  if (!config.mcpServers || typeof config.mcpServers !== 'object') {
+    config.mcpServers = {};
+  }
+  log(`Preparing to write Windsurf mcp_config.json at ${configPath} with indexerUrl=${indexerUrl || '""'} memoryUrl=${memoryUrl || '""'}`);
+  const makeServer = url => ({
+    command: 'npx',
+    args: ['mcp-remote', url, '--transport', 'sse-only'],
+    env: {}
+  });
+  const servers = config.mcpServers;
+  if (indexerUrl) {
+    servers['qdrant-indexer'] = makeServer(indexerUrl);
+  }
+  if (memoryUrl) {
+    servers.memory = makeServer(memoryUrl);
+  }
+  try {
+    const json = JSON.stringify(config, null, 2) + '\n';
+    fs.writeFileSync(configPath, json, 'utf8');
+    vscode.window.showInformationMessage(`Context Engine Uploader: Windsurf MCP config updated at ${configPath}.`);
+    log(`Wrote Windsurf mcp_config.json at ${configPath}`);
+    return true;
+  } catch (error) {
+    vscode.window.showErrorMessage('Context Engine Uploader: failed to write Windsurf mcp_config.json.');
+    log(`Failed to write Windsurf mcp_config.json: ${error instanceof Error ? error.message : String(error)}`);
+    return false;
+  }
+}
