@@ -10,6 +10,9 @@
   "categories": [
     "Other"
   ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./extension.js",
   "icon": "assets/icon.png",
   "contributes": {
@@ -101,11 +104,6 @@
           "default": 100,
           "description": "Maximum upload bundle size enforced by the Context Engine server (MB)."
         },
-        "contextEngineUploader.mcpConfigEnabled": {
-          "type": "boolean",
-          "default": true,
-          "description": "[Deprecated] Legacy toggle for Claude MCP config writing. Use mcpClaudeEnabled instead."
-        },
         "contextEngineUploader.mcpClaudeEnabled": {
           "type": "boolean",
           "default": true,
@@ -130,6 +128,11 @@
           "type": "string",
           "default": "",
           "description": "Optional override for Windsurf's mcp_config.json path. Defaults to %USERPROFILE%/.codeium/windsurf/mcp_config.json."
+        },
+        "contextEngineUploader.claudeHookEnabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable writing the workspace .claude/settings.local.json hooks section for the Context Engine Claude Code hook."
         }
       }
     }

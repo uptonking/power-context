@@ -11,6 +11,7 @@ let statusBarItem;
 let statusMode = 'idle';
 const REQUIRED_PYTHON_MODULES = ['requests', 'urllib3', 'charset_normalizer'];
 const DEFAULT_CONTAINER_ROOT = '/work';
+const CLAUDE_HOOK_COMMAND = '/home/coder/project/Context-Engine/ctx-hook-simple.sh';
 function activate(context) {
   outputChannel = vscode.window.createOutputChannel('Context Engine Upload');
   context.subscriptions.push(outputChannel);
@@ -47,12 +48,12 @@ function activate(context) {
     if (
       event.affectsConfiguration('contextEngineUploader.mcpIndexerUrl') ||
       event.affectsConfiguration('contextEngineUploader.mcpMemoryUrl') ||
-      event.affectsConfiguration('contextEngineUploader.mcpConfigEnabled') ||
       event.affectsConfiguration('contextEngineUploader.mcpClaudeEnabled') ||
       event.affectsConfiguration('contextEngineUploader.mcpWindsurfEnabled') ||
-      event.affectsConfiguration('contextEngineUploader.windsurfMcpPath')
+      event.affectsConfiguration('contextEngineUploader.windsurfMcpPath') ||
+      event.affectsConfiguration('contextEngineUploader.claudeHookEnabled')
     ) {
-      // Best-effort auto-update of project-local .mcp.json when MCP settings change
+      // Best-effort auto-update of MCP + hook configurations when settings change
       writeMcpConfig().catch(error => log(`Auto MCP config write failed: ${error instanceof Error ? error.message : String(error)}`));
     }
   });
@@ -421,17 +422,18 @@ function buildChildEnv(options) {
 }
 async function writeMcpConfig() {
   const settings = vscode.workspace.getConfiguration('contextEngineUploader');
-  const claudeSetting = settings.get('mcpClaudeEnabled');
-  const legacySetting = settings.get('mcpConfigEnabled');
-  const claudeEnabled = typeof claudeSetting === 'boolean' ? claudeSetting : legacySetting;
+  const claudeEnabled = settings.get('mcpClaudeEnabled', true);
   const windsurfEnabled = settings.get('mcpWindsurfEnabled', false);
-  if (!claudeEnabled && !windsurfEnabled) {
+  const claudeHookEnabled = settings.get('claudeHookEnabled', false);
+  const isLinux = process.platform === 'linux';
+  if (!claudeEnabled && !windsurfEnabled && !claudeHookEnabled) {
     vscode.window.showInformationMessage('Context Engine Uploader: MCP config writing is disabled in settings.');
     return;
   }
   const indexerUrl = (settings.get('mcpIndexerUrl') || 'http://localhost:8001/sse').trim();
   const memoryUrl = (settings.get('mcpMemoryUrl') || 'http://localhost:8000/sse').trim();
   let wroteAny = false;
+  let hookWrote = false;
   if (claudeEnabled) {
     const root = getWorkspaceFolderPath();
     if (!root) {
@@ -447,7 +449,18 @@ async function writeMcpConfig() {
     const result = await writeWindsurfMcpServers(windsPath, indexerUrl, memoryUrl);
     wroteAny = wroteAny || result;
   }
-  if (!wroteAny) {
+  if (claudeHookEnabled) {
+    const root = getWorkspaceFolderPath();
+    if (!root) {
+      vscode.window.showErrorMessage('Context Engine Uploader: open a folder before writing Claude hook config.');
+    } else if (!isLinux) {
+      vscode.window.showWarningMessage('Context Engine Uploader: Claude hook auto-config is only wired for Linux/dev-remote at this time.');
+    } else {
+      const result = await writeClaudeHookConfig(root, CLAUDE_HOOK_COMMAND);
+      hookWrote = hookWrote || result;
+    }
+  }
+  if (!wroteAny && !hookWrote) {
     log('Context Engine Uploader: MCP config write skipped (no targets succeeded).');
   }
 }
@@ -565,6 +578,59 @@ async function writeWindsurfMcpServers(configPath, indexerUrl, memoryUrl) {
   } catch (error) {
     vscode.window.showErrorMessage('Context Engine Uploader: failed to write Windsurf mcp_config.json.');
     log(`Failed to write Windsurf mcp_config.json: ${error instanceof Error ? error.message : String(error)}`);
+    return false;
+  }
+}
+
+async function writeClaudeHookConfig(root, commandPath) {
+  try {
+    const claudeDir = path.join(root, '.claude');
+    fs.mkdirSync(claudeDir, { recursive: true });
+    const settingsPath = path.join(claudeDir, 'settings.local.json');
+    let config = {};
+    if (fs.existsSync(settingsPath)) {
+      try {
+        const raw = fs.readFileSync(settingsPath, 'utf8');
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object') {
+          config = parsed;
+        }
+      } catch (error) {
+        vscode.window.showErrorMessage('Context Engine Uploader: existing .claude/settings.local.json is invalid JSON; not modified.');
+        log(`Failed to parse .claude/settings.local.json: ${error instanceof Error ? error.message : String(error)}`);
+        return false;
+      }
+    }
+    if (!config.permissions || typeof config.permissions !== 'object') {
+      config.permissions = { allow: [], deny: [], ask: [] };
+    } else {
+      config.permissions.allow = config.permissions.allow || [];
+      config.permissions.deny = config.permissions.deny || [];
+      config.permissions.ask = config.permissions.ask || [];
+    }
+    if (!config.enabledMcpjsonServers) {
+      config.enabledMcpjsonServers = [];
+    }
+    if (!config.hooks || typeof config.hooks !== 'object') {
+      config.hooks = {};
+    }
+    config.hooks['UserPromptSubmit'] = [
+      {
+        hooks: [
+          {
+            type: 'command',
+            command: commandPath
+          }
+        ]
+      }
+    ];
+    fs.writeFileSync(settingsPath, JSON.stringify(config, null, 2) + '\n', 'utf8');
+    vscode.window.showInformationMessage('Context Engine Uploader: .claude/settings.local.json updated with Claude hook.');
+    log(`Wrote Claude hook config at ${settingsPath}`);
+    return true;
+  } catch (error) {
+    vscode.window.showErrorMessage('Context Engine Uploader: failed to write .claude/settings.local.json.');
+    log(`Failed to write .claude/settings.local.json: ${error instanceof Error ? error.message : String(error)}`);
     return false;
   }
 }

@@ -9,6 +9,8 @@ CLIENT="standalone_upload_client.py"
 STAGE_DIR="$OUT_DIR/extension-stage"
 BUNDLE_DEPS="${1:-}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
+HOOK_SRC="$SCRIPT_DIR/../../ctx-hook-simple.sh"
+CTX_SRC="$SCRIPT_DIR/../../scripts/ctx.py"
 
 cleanup() {
     rm -rf "$STAGE_DIR"
@@ -33,6 +35,15 @@ cp -a "$EXT_DIR/." "$STAGE_DIR/"
 # Inject the upload client into the staged extension for packaging
 cp "$OUT_DIR/$CLIENT" "$STAGE_DIR/$CLIENT"
 chmod +x "$STAGE_DIR/$CLIENT"
+
+# Bundle ctx hook script and ctx CLI into the staged extension for reference
+if [[ -f "$HOOK_SRC" ]]; then
+    cp "$HOOK_SRC" "$STAGE_DIR/ctx-hook-simple.sh"
+    chmod +x "$STAGE_DIR/ctx-hook-simple.sh"
+fi
+if [[ -f "$CTX_SRC" ]]; then
+    cp "$CTX_SRC" "$STAGE_DIR/ctx.py"
+fi
 
 # Optional: bundle Python deps into the staged extension when requested
 if [[ "$BUNDLE_DEPS" == "--bundle-deps" ]]; then

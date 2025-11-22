@@ -13,6 +13,8 @@ for %%I in ("..\..\scripts\standalone_upload_client.py") do set "SRC_SCRIPT=%%~f
 set "CLIENT=standalone_upload_client.py"
 set "STAGE_DIR=%OUT_DIR%\extension-stage"
 set "BUILD_RESULT=0"
+for %%I in ("..\..\ctx-hook-simple.sh") do set "HOOK_SRC=%%~fI"
+for %%I in ("..\..\scripts\ctx.py") do set "CTX_SRC=%%~fI"
 
 echo Building clean Context Engine Uploader extension...
 
@@ -54,6 +56,10 @@ if errorlevel 1 (
     set "BUILD_RESULT=1"
     goto cleanup
 )
+
+REM Bundle ctx hook script and ctx CLI into the staged extension for reference
+if exist "%HOOK_SRC%" copy /Y "%HOOK_SRC%" "%STAGE_DIR%\ctx-hook-simple.sh" >nul
+if exist "%CTX_SRC%" copy /Y "%CTX_SRC%" "%STAGE_DIR%\ctx.py" >nul
 
 REM Optional: bundle Python dependencies into the staged extension when requested
 if "%BUNDLE_DEPS%"=="1" (
