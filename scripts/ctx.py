@@ -1,7 +1,6 @@
+#!/usr/bin/env python3
 import re
 import difflib
-
-#!/usr/bin/env python3
 """
 Context-aware prompt enhancer CLI.
 
@@ -55,6 +54,31 @@ from urllib import request
 from urllib.parse import urlparse
 from urllib.error import HTTPError, URLError
 from typing import Dict, Any, List, Optional, Tuple
+from pathlib import Path
+
+# Load .env file if it exists (for local CLI usage)
+def _load_env_file():
+    """Load .env file from project root if it exists."""
+    # Find project root (where .env should be)
+    script_dir = Path(__file__).resolve().parent
+    project_root = script_dir.parent
+    env_file = project_root / ".env"
+
+    if env_file.exists():
+        with open(env_file) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" in line:
+                    key, value = line.split("=", 1)
+                    key = key.strip()
+                    value = value.strip().strip('"').strip("'")
+                    # Only set if not already in environment
+                    if key and key not in os.environ:
+                        os.environ[key] = value
+
+_load_env_file()
 
 try:
     from scripts.mcp_router import call_tool_http  # type: ignore
@@ -156,13 +180,18 @@ def call_mcp_tool(tool_name: str, params: Dict[str, Any], timeout: int = 30) -> 
         "params": {"name": tool_name, "arguments": params}
     }
 
-    # Debug output
-    sys.stderr.write(f"[DEBUG] Sending payload: {json.dumps(payload, indent=2)}\n")
-    sys.stderr.flush()
+    # Debug output (opt-in to avoid leaking queries in normal use)
+    debug_flag = os.environ.get("CTX_DEBUG", "").strip().lower()
+    if debug_flag in {"1", "true", "yes", "on"}:
+        sys.stderr.write(f"[DEBUG] Calling MCP tool '{tool_name}' at {MCP_URL}\n")
+        sys.stderr.write(f"[DEBUG] Sending payload: {json.dumps(payload, indent=2)}\n")
+        sys.stderr.flush()
 
     try:
         return call_tool_http(MCP_URL, tool_name, params, timeout=float(timeout))
     except Exception as e:
+        sys.stderr.write(f"[ERROR] MCP call to '{tool_name}' at {MCP_URL} failed: {type(e).__name__}: {e}\n")
+        sys.stderr.flush()
         return {"error": f"Request failed: {str(e)}"}
 
 
@@ -618,7 +647,9 @@ def _generate_plan(enhanced_prompt: str, context: str, note: str) -> str:
             headers={"Content-Type": "application/json"},
         )
 
-        with request.urlopen(req, timeout=DECODER_TIMEOUT) as resp:
+        # Use shorter timeout for plan generation (60 seconds instead of 300)
+        plan_timeout = min(60, DECODER_TIMEOUT)
+        with request.urlopen(req, timeout=plan_timeout) as resp:
             raw = resp.read().decode("utf-8", errors="ignore")
             data = json.loads(raw)
 
@@ -640,8 +671,10 @@ def _generate_plan(enhanced_prompt: str, context: str, note: str) -> str:
                 plan = "EXECUTION PLAN:\n" + plan
             return plan
 
-    except Exception:
+    except Exception as e:
         # Plan generation failed - not critical, just skip it
+        sys.stderr.write(f"[DEBUG] Plan generation failed: {type(e).__name__}: {e}\n")
+        sys.stderr.flush()
         return ""
 
 
@@ -1100,45 +1133,50 @@ def rewrite_prompt(original_prompt: str, context: str, note: str, max_tokens: Op
         )
 
         enhanced = ""
-        if stream:
-            # Streaming mode: print tokens as they arrive for instant feedback
-            with request.urlopen(req, timeout=DECODER_TIMEOUT) as resp:
-                for line in resp:
-                    line_str = line.decode("utf-8", errors="ignore").strip()
-                    if not line_str or line_str.startswith(":"):
-                        continue
-                    if line_str.startswith("data: "):
-                        line_str = line_str[6:]
-                    try:
-                        chunk = json.loads(line_str)
-                        token = chunk.get("content", "")
-                        if token:
-                            sys.stdout.write(token)
-                            sys.stdout.flush()
-                            enhanced += token
-                        if chunk.get("stop", False):
-                            break
-                    except json.JSONDecodeError as e:
-                        # Warn once per malformed line but keep streaming the final output only
-                        sys.stderr.write(f"[WARN] decoder stream JSON decode failed: {str(e)}\n")
-                        sys.stderr.flush()
-                        continue
-            sys.stdout.write("\n")
-            sys.stdout.flush()
-        else:
-            # Non-streaming mode: wait for full response
-            with request.urlopen(req, timeout=DECODER_TIMEOUT) as resp:
-                raw = resp.read().decode("utf-8", errors="ignore")
-                data = json.loads(raw)
+        try:
+            if stream:
+                # Streaming mode: print tokens as they arrive for instant feedback
+                with request.urlopen(req, timeout=DECODER_TIMEOUT) as resp:
+                    for line in resp:
+                        line_str = line.decode("utf-8", errors="ignore").strip()
+                        if not line_str or line_str.startswith(":"):
+                            continue
+                        if line_str.startswith("data: "):
+                            line_str = line_str[6:]
+                        try:
+                            chunk = json.loads(line_str)
+                            token = chunk.get("content", "")
+                            if token:
+                                sys.stdout.write(token)
+                                sys.stdout.flush()
+                                enhanced += token
+                            if chunk.get("stop", False):
+                                break
+                        except json.JSONDecodeError as e:
+                            # Warn once per malformed line but keep streaming the final output only
+                            sys.stderr.write(f"[WARN] decoder stream JSON decode failed: {str(e)}\n")
+                            sys.stderr.flush()
+                            continue
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+            else:
+                # Non-streaming mode: wait for full response
+                with request.urlopen(req, timeout=DECODER_TIMEOUT) as resp:
+                    raw = resp.read().decode("utf-8", errors="ignore")
+                    data = json.loads(raw)
 
-                # Extract content from llama.cpp response
-                enhanced = (
-                    (data.get("content") if isinstance(data, dict) else None)
-                    or ((data.get("choices") or [{}])[0].get("content") if isinstance(data, dict) else None)
-                    or ((data.get("choices") or [{}])[0].get("text") if isinstance(data, dict) else None)
-                    or (data.get("generated_text") if isinstance(data, dict) else None)
-                    or (data.get("text") if isinstance(data, dict) else None)
-                )
+                    # Extract content from llama.cpp response
+                    enhanced = (
+                        (data.get("content") if isinstance(data, dict) else None)
+                        or ((data.get("choices") or [{}])[0].get("content") if isinstance(data, dict) else None)
+                        or ((data.get("choices") or [{}])[0].get("text") if isinstance(data, dict) else None)
+                        or (data.get("generated_text") if isinstance(data, dict) else None)
+                        or (data.get("text") if isinstance(data, dict) else None)
+                    )
+        except Exception as e:
+            sys.stderr.write(f"[ERROR] Decoder call to {decoder_url} failed: {type(e).__name__}: {e}\n")
+            sys.stderr.flush()
+            raise
 
     # Normalize and strip formatting / template artifacts from decoder output
     enhanced = (enhanced or "")

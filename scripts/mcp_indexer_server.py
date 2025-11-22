@@ -3531,35 +3531,25 @@ async def context_search(
 
             model_name = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
             model = _get_embedding_model(model_name)
-            prev_coll = os.environ.get("COLLECTION_NAME")
-            try:
-                os.environ["COLLECTION_NAME"] = coll
-                items2 = run_hybrid_search(
-                    queries=queries,
-                    limit=int(code_limit),
-                    per_path=int(per_path_val),
-                    language=language or None,
-                    under=under or None,
-                    kind=kind or None,
-                    symbol=symbol or None,
-                    ext=ext or None,
-                    not_filter=not_ or None,
-                    case=case or None,
-                    path_regex=path_regex or None,
-                    path_glob=path_glob or None,
-                    not_glob=not_glob or None,
-                    expand=str(os.environ.get("HYBRID_EXPAND", "0")).strip().lower()
-                    in {"1", "true", "yes", "on"},
-                    model=model,
-                )
-            finally:
-                if prev_coll is None:
-                    try:
-                        del os.environ["COLLECTION_NAME"]
-                    except Exception:
-                        pass
-                else:
-                    os.environ["COLLECTION_NAME"] = prev_coll
+            items2 = run_hybrid_search(
+                queries=queries,
+                limit=int(code_limit),
+                per_path=int(per_path_val),
+                language=language or None,
+                under=under or None,
+                kind=kind or None,
+                symbol=symbol or None,
+                ext=ext or None,
+                not_filter=not_ or None,
+                case=case or None,
+                path_regex=path_regex or None,
+                path_glob=path_glob or None,
+                not_glob=not_glob or None,
+                expand=str(os.environ.get("HYBRID_EXPAND", "0")).strip().lower()
+                in {"1", "true", "yes", "on"},
+                model=model,
+                collection=coll,
+            )
             if isinstance(items2, list):
                 for obj in items2:
                     if isinstance(obj, dict):
