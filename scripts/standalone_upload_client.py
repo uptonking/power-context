@@ -477,6 +477,7 @@ class RemoteUploadClient:
                     operations.append(operation)
                     file_hashes[rel_path] = f"sha1:{file_hash}"
                     total_size += stat.st_size
+                    set_cached_file_hash(str(path.resolve()), file_hash, self.repo_name)
 
                 except Exception as e:
                     print(f"[bundle_create] Error processing created file {path}: {e}")
@@ -516,6 +517,7 @@ class RemoteUploadClient:
                     operations.append(operation)
                     file_hashes[rel_path] = f"sha1:{file_hash}"
                     total_size += stat.st_size
+                    set_cached_file_hash(str(path.resolve()), file_hash, self.repo_name)
 
                 except Exception as e:
                     print(f"[bundle_create] Error processing updated file {path}: {e}")
@@ -550,13 +552,14 @@ class RemoteUploadClient:
                         "source_absolute_path": str(source_path.resolve()),
                         "size_bytes": stat.st_size,
                         "content_hash": content_hash,
-                        "file_hash": f"sha1:{idx.hash_id(content.decode('utf-8', errors='ignore'), dest_rel_path, 1, len(content.splitlines()))}",
+                        "file_hash": f"sha1:{hash_id(content.decode('utf-8', errors='ignore'), dest_rel_path, 1, len(content.splitlines()))}",
                         "modified_time": datetime.fromtimestamp(stat.st_mtime).isoformat(),
                         "language": language
                     }
                     operations.append(operation)
                     file_hashes[dest_rel_path] = f"sha1:{file_hash}"
                     total_size += stat.st_size
+                    set_cached_file_hash(str(dest_path.resolve()), file_hash, self.repo_name)
 
                 except Exception as e:
                     print(f"[bundle_create] Error processing moved file {source_path} -> {dest_path}: {e}")
@@ -576,7 +579,7 @@ class RemoteUploadClient:
                         "previous_hash": f"sha1:{previous_hash}" if previous_hash else None,
                         "file_hash": None,
                         "modified_time": datetime.now().isoformat(),
-                        "language": idx.CODE_EXTS.get(path.suffix.lower(), "unknown")
+                        "language": CODE_EXTS.get(path.suffix.lower(), "unknown")
                     }
                     operations.append(operation)
 
@@ -890,24 +893,41 @@ class RemoteUploadClient:
             logger.info(f"[watch] File monitoring stopped by user")
 
     def get_all_code_files(self) -> List[Path]:
-        """Get all code files in the workspace."""
-        all_files = []
+        """Get all code files in the workspace, excluding heavy/third-party dirs."""
+        files: List[Path] = []
         try:
             workspace_path = Path(self.workspace_path)
-            for ext in CODE_EXTS:
-                all_files.extend(workspace_path.rglob(f"*{ext}"))
+            if not workspace_path.exists():
+                return files
 
-            # Filter out directories and hidden files
-            all_files = [
-                f for f in all_files
-                if f.is_file()
-                and not any(part.startswith('.') for part in f.parts)
-                and '.context-engine' not in str(f)
-            ]
+            # Single walk with early pruning and set-based matching to reduce IO
+            ext_suffixes = {str(ext).lower() for ext in CODE_EXTS if str(ext).startswith('.')}
+            name_matches = {str(ext) for ext in CODE_EXTS if not str(ext).startswith('.')}
+            EXCLUDED_DIRS = {
+                "node_modules", "vendor", "dist", "build", "target", "out", "dev-workspace",
+                ".git", ".hg", ".svn", ".vscode", ".idea", ".venv", "venv", "__pycache__",
+                ".pytest_cache", ".mypy_cache", ".cache", ".context-engine", ".context-engine-uploader", ".codebase"
+            }
+
+            seen = set()
+            for root, dirnames, filenames in os.walk(workspace_path):
+                # Prune heavy/hidden directories before descending
+                dirnames[:] = [d for d in dirnames if d not in EXCLUDED_DIRS and not d.startswith('.')]
+
+                for filename in filenames:
+                    if filename.startswith('.'):
+                        continue
+                    candidate = Path(root) / filename
+                    suffix = candidate.suffix.lower()
+                    if filename in name_matches or suffix in ext_suffixes:
+                        resolved = candidate.resolve()
+                        if resolved not in seen:
+                            seen.add(resolved)
+                            files.append(candidate)
         except Exception as e:
             logger.error(f"[watch] Error scanning files: {e}")
 
-        return all_files
+        return files
 
     def process_and_upload_changes(self, changed_paths: List[Path]) -> bool:
         """
@@ -1226,16 +1246,9 @@ Examples:
             logger.info("Scanning repository for files...")
             workspace_path = Path(config['workspace_path'])
 
-            # Find all files in the repository
-            all_files = []
-            for file_path in workspace_path.rglob('*'):
-                if file_path.is_file() and not file_path.name.startswith('.'):
-                    rel_path = file_path.relative_to(workspace_path)
-                    # Skip .codebase directory and other metadata
-                    if not str(rel_path).startswith('.codebase'):
-                        all_files.append(file_path)
-
-            logger.info(f"Found {len(all_files)} files to upload")
+            # Find code files in the repository (exclude hidden and heavy dirs)
+            all_files = client.get_all_code_files()
+            logger.info(f"Found {len(all_files)} code files to upload")
 
             if not all_files:
                 logger.warning("No files found to upload")
