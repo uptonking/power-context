@@ -53,7 +53,6 @@ import subprocess
 from urllib import request
 from urllib.parse import urlparse
 from urllib.error import HTTPError, URLError
-import socket
 from typing import Dict, Any, List, Optional, Tuple
 from pathlib import Path
 
@@ -84,7 +83,55 @@ _load_env_file()
 try:
     from scripts.mcp_router import call_tool_http  # type: ignore
 except ModuleNotFoundError:  # pragma: no cover - local execution fallback
-    from mcp_router import call_tool_http  # type: ignore
+    try:
+        from mcp_router import call_tool_http  # type: ignore
+    except ModuleNotFoundError:
+        # Lightweight HTTP-only fallback to avoid bundling the full router
+        def call_tool_http(base_url: str, tool_name: str, args: Dict[str, Any], timeout: float = 120.0) -> Dict[str, Any]:
+            headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+            # Best-effort handshake to obtain mcp-session-id
+            init_payload = {
+                "jsonrpc": "2.0",
+                "id": 0,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "ctx-cli-lite", "version": "1.0.0"}
+                }
+            }
+            try:
+                req = request.Request(base_url, data=json.dumps(init_payload).encode("utf-8"), headers=headers)
+                with request.urlopen(req, timeout=min(timeout, 10.0)) as resp:
+                    sid = resp.headers.get("mcp-session-id") or resp.headers.get("Mcp-Session-Id")
+                    if sid:
+                        headers["mcp-session-id"] = sid
+                    # Drain body to keep connection healthy (ignore content)
+                    try:
+                        resp.read()
+                    except Exception:
+                        pass
+            except Exception:
+                pass  # fall through; server may still accept calls without handshake
+
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": tool_name, "arguments": args},
+            }
+            req = request.Request(base_url, data=json.dumps(payload).encode("utf-8"), headers=headers)
+            with request.urlopen(req, timeout=timeout) as resp:
+                raw = resp.read().decode("utf-8", errors="ignore").strip()
+            if raw.startswith("data:"):
+                try:
+                    raw = raw.split("data:", 1)[1].strip()
+                except Exception:
+                    pass
+            try:
+                return json.loads(raw)
+            except Exception:
+                return {"result": {"content": [{"type": "text", "text": raw}]}}
 
 # Configuration from environment
 MCP_URL = os.environ.get("MCP_INDEXER_URL", "http://localhost:8003/mcp")
@@ -98,48 +145,18 @@ CTX_CONFIG_FILE = os.path.expanduser("~/.ctx_config.json")
 
 # Local decoder configuration (llama.cpp server)
 def resolve_decoder_url() -> str:
-    """Resolve decoder endpoint, honoring overrides and Ollama/GLM options.
-
-    Rules:
-    - DECODER_URL wins
-    - Otherwise, if OLLAMA_HOST is set, default to its /api/chat endpoint
-    - Otherwise, fall back to llama.cpp URL (GPU override if requested)
-    - Only append /completion for llama.cpp-style endpoints; leave Ollama/OpenAI paths untouched
-    """
+    """Resolve decoder endpoint, honoring USE_GPU_DECODER + overrides."""
     override = os.environ.get("DECODER_URL", "").strip()
     if override:
         base = override
     else:
-        ollama_host = os.environ.get("OLLAMA_HOST", "").strip()
-        if ollama_host:
-            base = ollama_host.rstrip("/")
-            if "/api/" not in base:
-                base = base + "/api/chat"
+        use_gpu = str(os.environ.get("USE_GPU_DECODER", "0")).strip().lower()
+        if use_gpu in {"1", "true", "yes", "on"}:
+            host = "host.docker.internal" if os.path.exists("/.dockerenv") else "localhost"
+            base = f"http://{host}:8081"
         else:
-            use_gpu = str(os.environ.get("USE_GPU_DECODER", "0")).strip().lower()
-            if use_gpu in {"1", "true", "yes", "on"}:
-                host = "host.docker.internal" if os.path.exists("/.dockerenv") else "localhost"
-                base = f"http://{host}:8081"
-            else:
-                base = os.environ.get("LLAMACPP_URL", "http://localhost:8080").strip()
-
-    base = base or "http://localhost:11434/api/chat"
-    parsed_base = urlparse(base)
-    if parsed_base.hostname == "host.docker.internal" and not os.path.exists("/.dockerenv"):
-        try:
-            socket.gethostbyname(parsed_base.hostname)
-        except socket.gaierror:
-            base = base.replace("host.docker.internal", "localhost")
-            sys.stderr.write("[DEBUG] decoder host.docker.internal not reachable; falling back to localhost\n")
-            sys.stderr.flush()
-    lowered = base.lower()
-    if (
-        "ollama" in lowered
-        or "/api/chat" in lowered
-        or "/api/generate" in lowered
-        or "/v1/chat/completions" in lowered
-    ):
-        return base
+            base = os.environ.get("LLAMACPP_URL", "http://localhost:8080").strip()
+    base = base or "http://localhost:8080"
     if base.endswith("/completion"):
         return base
     return base.rstrip("/") + "/completion"
@@ -1138,7 +1155,7 @@ def rewrite_prompt(original_prompt: str, context: str, note: str, max_tokens: Op
             enhanced = response.choices[0].message.content
 
     else:
-        # Use local decoder (llama.cpp by default; Ollama supported when DECODER_URL points to /api/chat)
+        # Use llama.cpp decoder (original logic)
         meta_prompt = (
             "<|start_of_role|>system<|end_of_role|>" + system_msg + "<|end_of_text|>\n"
             "<|start_of_role|>user<|end_of_role|>" + user_msg + "<|end_of_text|>\n"
@@ -1150,146 +1167,62 @@ def rewrite_prompt(original_prompt: str, context: str, note: str, max_tokens: Op
         parsed = urlparse(decoder_url)
         if parsed.hostname not in {"localhost", "127.0.0.1", "host.docker.internal"}:
             raise ValueError(f"Unsafe decoder host: {parsed.hostname}")
+        payload = {
+            "prompt": meta_prompt,
+            "n_predict": int(max_tokens or DEFAULT_REWRITE_TOKENS),
+            "temperature": 0.45,
+            "stream": stream,
+        }
 
-        lowered_url = decoder_url.lower()
-        is_ollama = (
-            "ollama" in lowered_url
-            or "/api/chat" in lowered_url
-            or "/api/generate" in lowered_url
-            or "/v1/chat/completions" in lowered_url
+        req = request.Request(
+            decoder_url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
         )
 
         enhanced = ""
         try:
-            if is_ollama:
-                model = (
-                    os.environ.get("DECODER_MODEL", "").strip()
-                    or os.environ.get("OLLAMA_MODEL", "").strip()
-                    or "llama3"
-                )
-                payload = {
-                    "model": model,
-                    "stream": stream,
-                    "options": {"temperature": 0.45},
-                }
-                if max_tokens:
-                    payload["options"]["num_predict"] = int(max_tokens)
-                if "/api/chat" in lowered_url or "/v1/chat/completions" in lowered_url:
-                    payload["messages"] = [
-                        {"role": "system", "content": system_msg},
-                        {"role": "user", "content": user_msg},
-                    ]
-                else:
-                    payload["prompt"] = f"{system_msg}\n\n{user_msg}"
-
-                req = request.Request(
-                    decoder_url,
-                    data=json.dumps(payload).encode("utf-8"),
-                    headers={"Content-Type": "application/json"},
-                )
-
-                if stream:
-                    with request.urlopen(req, timeout=DECODER_TIMEOUT) as resp:
-                        for line in resp:
-                            line_str = line.decode("utf-8", errors="ignore").strip()
-                            if not line_str or line_str.startswith(":"):
-                                continue
-                            if line_str.startswith("data: "):
-                                line_str = line_str[6:]
-                            try:
-                                chunk = json.loads(line_str)
-                            except json.JSONDecodeError:
-                                continue
-                            token = ""
-                            if isinstance(chunk, dict):
-                                token = (
-                                    (chunk.get("message") or {}).get("content", "")
-                                    or chunk.get("response", "")
-                                )
+            if stream:
+                # Streaming mode: print tokens as they arrive for instant feedback
+                with request.urlopen(req, timeout=DECODER_TIMEOUT) as resp:
+                    for line in resp:
+                        line_str = line.decode("utf-8", errors="ignore").strip()
+                        if not line_str or line_str.startswith(":"):
+                            continue
+                        if line_str.startswith("data: "):
+                            line_str = line_str[6:]
+                        try:
+                            chunk = json.loads(line_str)
+                            token = chunk.get("content", "")
                             if token:
                                 sys.stdout.write(token)
                                 sys.stdout.flush()
                                 enhanced += token
-                            if chunk.get("done") or chunk.get("stop"):
+                            if chunk.get("stop", False):
                                 break
-                    sys.stdout.write("\n")
-                    sys.stdout.flush()
-                else:
-                    with request.urlopen(req, timeout=DECODER_TIMEOUT) as resp:
-                        raw = resp.read().decode("utf-8", errors="ignore")
-                        data = json.loads(raw or "{}")
-                        if isinstance(data, dict):
-                            enhanced = (
-                                (data.get("message") or {}).get("content")
-                                or data.get("response")
-                                or ((data.get("choices") or [{}])[0].get("message") or {}).get("content")
-                            )
-                        else:
-                            enhanced = None
+                        except json.JSONDecodeError as e:
+                            # Warn once per malformed line but keep streaming the final output only
+                            sys.stderr.write(f"[WARN] decoder stream JSON decode failed: {str(e)}\n")
+                            sys.stderr.flush()
+                            continue
+                sys.stdout.write("\n")
+                sys.stdout.flush()
             else:
-                payload = {
-                    "prompt": meta_prompt,
-                    "n_predict": int(max_tokens or DEFAULT_REWRITE_TOKENS),
-                    "temperature": 0.45,
-                    "stream": stream,
-                }
+                # Non-streaming mode: wait for full response
+                with request.urlopen(req, timeout=DECODER_TIMEOUT) as resp:
+                    raw = resp.read().decode("utf-8", errors="ignore")
+                    data = json.loads(raw)
 
-                req = request.Request(
-                    decoder_url,
-                    data=json.dumps(payload).encode("utf-8"),
-                    headers={"Content-Type": "application/json"},
-                )
-
-                if stream:
-                    # Streaming mode: print tokens as they arrive for instant feedback
-                    with request.urlopen(req, timeout=DECODER_TIMEOUT) as resp:
-                        for line in resp:
-                            line_str = line.decode("utf-8", errors="ignore").strip()
-                            if not line_str or line_str.startswith(":"):
-                                continue
-                            if line_str.startswith("data: "):
-                                line_str = line_str[6:]
-                            try:
-                                chunk = json.loads(line_str)
-                                token = chunk.get("content", "")
-                                if token:
-                                    sys.stdout.write(token)
-                                    sys.stdout.flush()
-                                    enhanced += token
-                                if chunk.get("stop", False):
-                                    break
-                            except json.JSONDecodeError as e:
-                                # Warn once per malformed line but keep streaming the final output only
-                                sys.stderr.write(f"[WARN] decoder stream JSON decode failed: {str(e)}\n")
-                                sys.stderr.flush()
-                                continue
-                    sys.stdout.write("\n")
-                    sys.stdout.flush()
-                else:
-                    # Non-streaming mode: wait for full response
-                    with request.urlopen(req, timeout=DECODER_TIMEOUT) as resp:
-                        raw = resp.read().decode("utf-8", errors="ignore")
-                        data = json.loads(raw)
-
-                        # Extract content from llama.cpp response
-                        enhanced = (
-                            (data.get("content") if isinstance(data, dict) else None)
-                            or ((data.get("choices") or [{}])[0].get("content") if isinstance(data, dict) else None)
-                            or ((data.get("choices") or [{}])[0].get("text") if isinstance(data, dict) else None)
-                            or (data.get("generated_text") if isinstance(data, dict) else None)
-                            or (data.get("text") if isinstance(data, dict) else None)
-                        )
+                    # Extract content from llama.cpp response
+                    enhanced = (
+                        (data.get("content") if isinstance(data, dict) else None)
+                        or ((data.get("choices") or [{}])[0].get("content") if isinstance(data, dict) else None)
+                        or ((data.get("choices") or [{}])[0].get("text") if isinstance(data, dict) else None)
+                        or (data.get("generated_text") if isinstance(data, dict) else None)
+                        or (data.get("text") if isinstance(data, dict) else None)
+                    )
         except Exception as e:
-            body_detail = ""
-            if isinstance(e, HTTPError):
-                try:
-                    body_detail = e.read().decode("utf-8", errors="ignore").strip()
-                except Exception:
-                    body_detail = ""
-            msg = f"[ERROR] Decoder call to {decoder_url} failed: {type(e).__name__}: {e}"
-            if body_detail:
-                msg += f" | body: {body_detail}"
-            sys.stderr.write(msg + "\n")
+            sys.stderr.write(f"[ERROR] Decoder call to {decoder_url} failed: {type(e).__name__}: {e}\n")
             sys.stderr.flush()
             raise
 
