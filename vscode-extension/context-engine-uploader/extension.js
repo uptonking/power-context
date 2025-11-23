@@ -7,6 +7,7 @@ let watchProcess;
 let forceProcess;
 let extensionRoot;
 let statusBarItem;
+let promptStatusBarItem;
 let logsTerminal;
 let logTailActive = false;
 let statusMode = 'idle';
@@ -35,6 +36,12 @@ function activate(context) {
   statusBarItem.show();
   setStatusBarState('idle');
   updateStatusBarTooltip();
+  promptStatusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 90);
+  promptStatusBarItem.command = 'contextEngineUploader.promptEnhance';
+  promptStatusBarItem.text = '$(sparkle) Prompt+';
+  promptStatusBarItem.tooltip = 'Enhance selection with Unicorn Mode via ctx.py';
+  context.subscriptions.push(promptStatusBarItem);
+  promptStatusBarItem.show();
 
   // Ensure an output channel is visible early for user feedback
   if (outputChannel) { outputChannel.show(true); }
@@ -63,6 +70,12 @@ function activate(context) {
   const showLogsDisposable = vscode.commands.registerCommand('contextEngineUploader.showUploadServiceLogs', () => {
     try { openUploadServiceLogsTerminal(); } catch (e) { log(`Show logs failed: ${e && e.message ? e.message : String(e)}`); }
   });
+  const promptEnhanceDisposable = vscode.commands.registerCommand('contextEngineUploader.promptEnhance', () => {
+    enhanceSelectionWithUnicorn().catch(error => {
+      log(`Prompt+ failed: ${error instanceof Error ? error.message : String(error)}`);
+      vscode.window.showErrorMessage('Prompt+ failed. See Context Engine Upload output.');
+    });
+  });
   const configDisposable = vscode.workspace.onDidChangeConfiguration(event => {
     if (event.affectsConfiguration('contextEngineUploader') && watchProcess) {
       runSequence('auto').catch(error => log(`Auto-restart failed: ${error instanceof Error ? error.message : String(error)}`));
@@ -80,7 +93,7 @@ function activate(context) {
       logTailActive = false;
     }
   });
-  context.subscriptions.push(startDisposable, stopDisposable, restartDisposable, indexDisposable, showLogsDisposable, configDisposable, workspaceDisposable, terminalCloseDisposable);
+  context.subscriptions.push(startDisposable, stopDisposable, restartDisposable, indexDisposable, showLogsDisposable, promptEnhanceDisposable, configDisposable, workspaceDisposable, terminalCloseDisposable);
   const config = vscode.workspace.getConfiguration('contextEngineUploader');
   ensureTargetPathConfigured();
   if (config.get('runOnStartup')) {
@@ -527,6 +540,147 @@ function openUploadServiceLogsTerminal() {
   } catch (e) {
     log(`Unable to open logs terminal: ${e && e.message ? e.message : String(e)}`);
   }
+}
+
+function getConfiguredPythonPath() {
+  try {
+    const cfg = vscode.workspace.getConfiguration('contextEngineUploader');
+    const configured = (cfg.get('pythonPath') || 'python3').trim();
+    if (pythonOverridePath && fs.existsSync(pythonOverridePath)) {
+      return pythonOverridePath;
+    }
+    return configured || 'python3';
+  } catch (_) {
+    if (pythonOverridePath && fs.existsSync(pythonOverridePath)) {
+      return pythonOverridePath;
+    }
+    return 'python3';
+  }
+}
+
+function getConfiguredDecoderUrl() {
+  try {
+    const cfg = vscode.workspace.getConfiguration('contextEngineUploader');
+    const configured = (cfg.get('decoderUrl') || '').trim();
+    return configured || 'http://localhost:8081';
+  } catch (_) {
+    return 'http://localhost:8081';
+  }
+}
+
+function resolveCtxScriptPath() {
+  const candidates = [];
+  candidates.push(path.join(extensionRoot, 'scripts', 'ctx.py'));
+  candidates.push(path.join(extensionRoot, 'ctx.py'));
+  const wsFolder = getWorkspaceFolderPath();
+  if (wsFolder) {
+    candidates.push(path.join(wsFolder, 'scripts', 'ctx.py'));
+    candidates.push(path.join(wsFolder, 'ctx.py'));
+  }
+  candidates.push(path.resolve(extensionRoot, '..', '..', 'scripts', 'ctx.py'));
+
+  for (const candidate of candidates) {
+    if (candidate && fs.existsSync(candidate)) {
+      return path.resolve(candidate);
+    }
+  }
+
+  vscode.window.showErrorMessage('Context Engine Uploader: ctx.py not found (expected scripts/ctx.py).');
+  return undefined;
+}
+
+async function enhanceSelectionWithUnicorn() {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor) {
+    vscode.window.showWarningMessage('Open a file and select text to enhance with Prompt+.');
+    return;
+  }
+  const selection = editor.selections && editor.selections.length ? editor.selections[0] : editor.selection;
+  const text = selection && !selection.isEmpty ? editor.document.getText(selection) : '';
+  if (!text || !text.trim()) {
+    vscode.window.showWarningMessage('Select text to enhance with Prompt+.');
+    return;
+  }
+
+  const ctxScript = resolveCtxScriptPath();
+  if (!ctxScript) {
+    return;
+  }
+
+  const pythonPath = getConfiguredPythonPath();
+  const projectRoot = path.dirname(path.dirname(ctxScript));
+  const env = { ...process.env };
+  env.PYTHONUNBUFFERED = '1';
+  const decoderUrl = getConfiguredDecoderUrl();
+  if (decoderUrl) {
+    env.DECODER_URL = decoderUrl;
+  }
+  try {
+    const cfg = vscode.workspace.getConfiguration('contextEngineUploader');
+    const useGlmDecoder = cfg.get('useGlmDecoder', false);
+    if (useGlmDecoder) {
+      env.REFRAG_RUNTIME = 'glm';
+    }
+    const useGpuDecoder = cfg.get('useGpuDecoder', false);
+    if (useGpuDecoder) {
+      env.USE_GPU_DECODER = '1';
+    }
+  } catch (_) {
+    // ignore config read failures; fall back to defaults
+  }
+  const existingPyPath = env.PYTHONPATH || '';
+  env.PYTHONPATH = existingPyPath ? `${projectRoot}${path.delimiter}${existingPyPath}` : projectRoot;
+
+  log(`Running Prompt+ via ctx.py at ${ctxScript}`);
+
+  return new Promise((resolve) => {
+    const args = [ctxScript, '--unicorn', text];
+    const child = spawn(pythonPath, args, { cwd: projectRoot, env });
+    let stdout = '';
+    let stderr = '';
+
+    if (child.stdout) {
+      child.stdout.on('data', data => {
+        stdout += data.toString();
+      });
+    }
+    if (child.stderr) {
+      child.stderr.on('data', data => {
+        const chunk = data.toString();
+        stderr += chunk;
+        if (outputChannel) {
+          outputChannel.append(`[prompt+] ${chunk}`);
+        }
+      });
+    }
+
+    child.on('error', error => {
+      log(`Prompt+ spawn failed: ${error instanceof Error ? error.message : String(error)}`);
+      vscode.window.showErrorMessage('Prompt+ failed to start. Check Python path.');
+      resolve();
+    });
+
+    child.on('close', code => {
+      if (code !== 0) {
+        log(`Prompt+ exited with code ${code}${stderr ? `: ${stderr.trim()}` : ''}`);
+        vscode.window.showErrorMessage('Prompt+ failed. See output for details.');
+        return resolve();
+      }
+      const enhanced = (stdout || '').trim();
+      if (!enhanced) {
+        vscode.window.showWarningMessage('Prompt+ returned no output.');
+        return resolve();
+      }
+      editor.edit(editBuilder => editBuilder.replace(selection, enhanced)).then(ok => {
+        if (ok) {
+          vscode.window.showInformationMessage('Prompt+ applied (Unicorn Mode).');
+        } else {
+          vscode.window.showErrorMessage('Prompt+ could not update the selection.');
+        }
+        resolve();
+      });
+    });
+  });
 }
 
 function ensureIndexedWatcher(targetPath) {
