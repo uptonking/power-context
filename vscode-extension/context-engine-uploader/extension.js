@@ -348,29 +348,57 @@ function terminateProcess(proc, label) {
   }
   return new Promise(resolve => {
     let finished = false;
-    const finalize = () => {
-      if (finished) {
-        return;
-      }
+    let termTimer;
+    let killTimer;
+    const cleanup = () => {
+      if (termTimer) clearTimeout(termTimer);
+      if (killTimer) clearTimeout(killTimer);
+    };
+    const finalize = (reason) => {
+      if (finished) return;
       finished = true;
+      cleanup();
       if (proc === forceProcess) {
         forceProcess = undefined;
       }
       if (proc === watchProcess) {
         watchProcess = undefined;
       }
-      log(`${label} process stopped.`);
+      log(`${label} process stopped${reason ? ` (${reason})` : ''}.`);
       resolve();
     };
-    proc.once('exit', finalize);
-    proc.once('close', finalize);
+
+    // Resolve only after the child actually exits (or after forced kill path)
+    const onExit = (code, signal) => {
+      finalize(`exit code=${code} signal=${signal || ''}`.trim());
+    };
+    proc.once('exit', onExit);
+    proc.once('close', onExit);
+
     try {
-      proc.kill();
+      proc.kill(); // default SIGTERM
     } catch (error) {
-      finalize();
+      finalize('kill() threw');
       return;
     }
-    setTimeout(finalize, 2000);
+
+    const waitSigtermMs = 4000;
+    const waitSigkillMs = 2000;
+
+    // If process doesn't exit after SIGTERM, escalate to SIGKILL and then force-resolve
+    termTimer = setTimeout(() => {
+      try {
+        if (proc && !proc.killed) {
+          proc.kill('SIGKILL');
+          log(`${label} process did not exit after ${waitSigtermMs}ms; sent SIGKILL.`);
+        }
+      } catch (_) {
+        // ignore
+      }
+      killTimer = setTimeout(() => {
+        finalize(`forced after ${waitSigtermMs + waitSigkillMs}ms`);
+      }, waitSigkillMs);
+    }, waitSigtermMs);
   });
 }
 function log(message) {
