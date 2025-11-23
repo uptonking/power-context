@@ -218,6 +218,37 @@ services:
     entrypoint: ["python", "/app/scripts/watch_index.py"]
 
 
+  upload_service:
+    build:
+      context: .
+      dockerfile: Dockerfile.upload-service
+    container_name: upload-service
+    depends_on:
+      - qdrant
+    env_file:
+      - .env
+    environment:
+      - UPLOAD_SERVICE_HOST=0.0.0.0
+      - UPLOAD_SERVICE_PORT=8002
+      - QDRANT_URL=${QDRANT_URL}
+      - WORK_DIR=/work
+      - COLLECTION_NAME=${COLLECTION_NAME:-codebase}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL}
+      - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER}
+    ports:
+      - "8004:8002"
+    volumes:
+      - ${HOST_INDEX_PATH:-.}:/work:rw
+      - ${HOST_INDEX_PATH:-.}/.codebase:/work/.codebase:rw
+    user: "0:0"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
   init_payload:
     build:
       context: .
