@@ -1,5 +1,5 @@
 const vscode = require('vscode');
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 let outputChannel;
@@ -8,6 +8,8 @@ let forceProcess;
 let extensionRoot;
 let statusBarItem;
 let statusMode = 'idle';
+const REQUIRED_PYTHON_MODULES = ['requests', 'urllib3', 'charset_normalizer'];
+const DEFAULT_CONTAINER_ROOT = '/work';
 function activate(context) {
   outputChannel = vscode.window.createOutputChannel('Context Engine Upload');
   context.subscriptions.push(outputChannel);
@@ -54,6 +56,11 @@ async function runSequence(mode = 'auto') {
   if (!options) {
     return;
   }
+  const depsSatisfied = await ensurePythonDependencies(options.pythonPath);
+  if (!depsSatisfied) {
+    setStatusBarState('idle');
+    return;
+  }
   await stopProcesses();
   const needsForce = mode === 'force' || needsForceSync(options.targetPath);
   if (needsForce) {
@@ -76,19 +83,34 @@ function resolveOptions() {
   const interval = config.get('intervalSeconds') || 5;
   const extraForceArgs = config.get('extraForceArgs') || [];
   const extraWatchArgs = config.get('extraWatchArgs') || [];
-  let workingDirectory = (config.get('scriptWorkingDirectory') || '').trim();
-  if (!workingDirectory) {
-    workingDirectory = extensionRoot;
+  const hostRootOverride = (config.get('hostRoot') || '').trim();
+  const containerRoot = (config.get('containerRoot') || DEFAULT_CONTAINER_ROOT).trim() || DEFAULT_CONTAINER_ROOT;
+  const configuredScriptDir = (config.get('scriptWorkingDirectory') || '').trim();
+  const candidates = [];
+  if (configuredScriptDir) {
+    candidates.push(configuredScriptDir);
   }
-  if (!workingDirectory) {
+  candidates.push(extensionRoot);
+  candidates.push(path.join(extensionRoot, '..', 'out'));
+  let workingDirectory;
+  let scriptPath;
+  for (const candidate of candidates) {
+    if (!candidate) {
+      continue;
+    }
+    const resolved = path.resolve(candidate);
+    const testPath = path.join(resolved, 'standalone_upload_client.py');
+    if (fs.existsSync(testPath)) {
+      workingDirectory = resolved;
+      scriptPath = testPath;
+      break;
+    }
+  }
+  if (!workingDirectory || !scriptPath) {
     vscode.window.showErrorMessage('Context Engine Uploader: extension path unavailable.');
     return undefined;
   }
-  const scriptPath = path.join(workingDirectory, 'standalone_upload_client.py');
-  if (!fs.existsSync(scriptPath)) {
-    vscode.window.showErrorMessage('Context Engine Uploader: standalone_upload_client.py not found. Reinstall extension or set scriptWorkingDirectory.');
-    return undefined;
-  }
+  const scriptSource = workingDirectory === extensionRoot ? 'packaged' : (workingDirectory.includes('\\out') || workingDirectory.endsWith('/out') ? 'staged out' : 'custom');
   if (!endpoint) {
     vscode.window.showErrorMessage('Context Engine Uploader: set contextEngineUploader.endpoint.');
     return undefined;
@@ -96,6 +118,14 @@ function resolveOptions() {
   if (!targetPath) {
     return undefined;
   }
+  const resolvedTarget = path.resolve(targetPath);
+  let derivedHostRoot = path.dirname(resolvedTarget);
+  if (!derivedHostRoot || derivedHostRoot === resolvedTarget) {
+    derivedHostRoot = resolvedTarget;
+  }
+  const hostRoot = hostRootOverride || derivedHostRoot;
+  log(`Using ${scriptSource} standalone_upload_client.py at ${scriptPath}`);
+  log(`Uploader path mapping hostRoot=${hostRoot || 'n/a'} -> containerRoot=${containerRoot}`);
   return {
     pythonPath,
     workingDirectory,
@@ -104,7 +134,9 @@ function resolveOptions() {
     endpoint,
     interval,
     extraForceArgs,
-    extraWatchArgs
+    extraWatchArgs,
+    hostRoot,
+    containerRoot
   };
 }
 function getTargetPath(config) {
@@ -176,6 +208,37 @@ function needsForceSync(targetPath) {
     return true;
   }
 }
+async function ensurePythonDependencies(pythonPath) {
+  const missing = [];
+  let pythonError;
+  for (const moduleName of REQUIRED_PYTHON_MODULES) {
+    const check = spawnSync(pythonPath, ['-c', `import ${moduleName}`], { encoding: 'utf8' });
+    if (check.error) {
+      pythonError = check.error;
+      break;
+    }
+    if (check.status !== 0) {
+      missing.push(moduleName);
+    }
+  }
+  if (pythonError) {
+    const message = `Context Engine Uploader: failed to run ${pythonPath}. Update contextEngineUploader.pythonPath.`;
+    vscode.window.showErrorMessage(message);
+    log(`Dependency check failed: ${pythonError.message || pythonError}`);
+    return false;
+  }
+  if (missing.length) {
+    const installCommand = `${pythonPath} -m pip install ${REQUIRED_PYTHON_MODULES.join(' ')}`;
+    log(`Missing Python modules: ${missing.join(', ')}. Run: ${installCommand}`);
+    const action = await vscode.window.showErrorMessage(`Context Engine Uploader: missing Python modules (${missing.join(', ')}).`, 'Copy install command');
+    if (action === 'Copy install command') {
+      await vscode.env.clipboard.writeText(installCommand);
+      vscode.window.showInformationMessage('Pip install command copied to clipboard.');
+    }
+    return false;
+  }
+  return true;
+}
 function setStatusBarState(mode) {
   if (!statusBarItem) {
     return;
@@ -195,7 +258,7 @@ function setStatusBarState(mode) {
 function runOnce(options) {
   return new Promise(resolve => {
     const args = buildArgs(options, 'force');
-    const child = spawn(options.pythonPath, args, { cwd: options.workingDirectory });
+    const child = spawn(options.pythonPath, args, { cwd: options.workingDirectory, env: buildChildEnv(options) });
     forceProcess = child;
     attachOutput(child, 'force');
     let finished = false;
@@ -219,7 +282,7 @@ function runOnce(options) {
 }
 function startWatch(options) {
   const args = buildArgs(options, 'watch');
-  const child = spawn(options.pythonPath, args, { cwd: options.workingDirectory });
+  const child = spawn(options.pythonPath, args, { cwd: options.workingDirectory, env: buildChildEnv(options) });
   watchProcess = child;
   attachOutput(child, 'watch');
   setStatusBarState('watch');
@@ -316,6 +379,30 @@ function log(message) {
   }
   const timestamp = new Date().toISOString();
   outputChannel.appendLine(`[${timestamp}] ${message}`);
+}
+function buildChildEnv(options) {
+  const env = {
+    ...process.env,
+    WORKSPACE_PATH: options.targetPath,
+    WATCH_ROOT: options.targetPath
+  };
+  if (options.hostRoot) {
+    env.HOST_ROOT = options.hostRoot;
+  }
+  if (options.containerRoot) {
+    env.CONTAINER_ROOT = options.containerRoot;
+  }
+   try {
+     const libsPath = path.join(options.workingDirectory, 'python_libs');
+     if (fs.existsSync(libsPath)) {
+       const existing = process.env.PYTHONPATH || '';
+       env.PYTHONPATH = existing ? `${libsPath}${path.delimiter}${existing}` : libsPath;
+       log(`Detected bundled python_libs at ${libsPath}; setting PYTHONPATH for child process.`);
+     }
+   } catch (error) {
+     log(`Failed to configure PYTHONPATH for bundled deps: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return env;
 }
 function deactivate() {
   return stopProcesses();

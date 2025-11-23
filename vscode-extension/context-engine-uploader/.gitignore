@@ -1,0 +1,7 @@
+# Temporary build files
+standalone_upload_client.py
+*.vsix
+
+# OS generated files
+.DS_Store
+Thumbs.db

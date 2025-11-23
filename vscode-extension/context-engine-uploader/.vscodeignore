@@ -1,0 +1,10 @@
+# VSCode extension - exclude files from packaging
+.vscode/**
+build/**
+out/**
+*.vsix
+.gitignore
+build.sh
+build.bat
+Dockerfile
+README.md

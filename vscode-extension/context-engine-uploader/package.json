@@ -1,7 +1,7 @@
 {
   "name": "context-engine-uploader",
   "displayName": "Context Engine Uploader",
-  "description": "Runs the Context-Engine remote upload client with a force sync on startup followed by watch mode.",
+  "description": "Runs the Context-Engine remote upload client with a force sync on startup followed by watch mode. Requires Python with pip install requests urllib3 charset_normalizer.",
   "version": "0.1.1",
   "publisher": "context-engine",
   "engines": {
@@ -87,6 +87,16 @@
           },
           "default": [],
           "description": "Additional CLI arguments appended to watch mode."
+        },
+        "contextEngineUploader.hostRoot": {
+          "type": "string",
+          "default": "",
+          "description": "Host path prefix that should be rewritten to the container root before uploads. Defaults to targetPath."
+        },
+        "contextEngineUploader.containerRoot": {
+          "type": "string",
+          "default": "/work",
+          "description": "Container path that mirrors the host root on the upload server."
         },
         "contextEngineUploader.bundleSizeLimitMB": {
           "type": "number",
