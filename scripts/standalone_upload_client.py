@@ -736,11 +736,13 @@ class RemoteUploadClient:
         """Get server status with simplified error handling."""
         try:
             container_workspace_path = self._translate_to_container_path(self.workspace_path)
-
+            connect_timeout = min(self.timeout, 10)
+            # Allow slower responses (e.g., cold starts/large collections) before bailing
+            read_timeout = max(self.timeout, 30)
             response = self.session.get(
                 f"{self.upload_endpoint}/api/v1/delta/status",
                 params={'workspace_path': container_workspace_path},
-                timeout=min(self.timeout, 10)
+                timeout=(connect_timeout, read_timeout)
             )
 
             if response.status_code == 200:
