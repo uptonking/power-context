@@ -550,7 +550,7 @@ class RemoteUploadClient:
                         "source_absolute_path": str(source_path.resolve()),
                         "size_bytes": stat.st_size,
                         "content_hash": content_hash,
-                        "file_hash": f"sha1:{idx.hash_id(content.decode('utf-8', errors='ignore'), dest_rel_path, 1, len(content.splitlines()))}",
+                        "file_hash": f"sha1:{hash_id(content.decode('utf-8', errors='ignore'), dest_rel_path, 1, len(content.splitlines()))}",
                         "modified_time": datetime.fromtimestamp(stat.st_mtime).isoformat(),
                         "language": language
                     }
@@ -890,24 +890,29 @@ class RemoteUploadClient:
             logger.info(f"[watch] File monitoring stopped by user")
 
     def get_all_code_files(self) -> List[Path]:
-        """Get all code files in the workspace."""
-        all_files = []
+        """Get all code files in the workspace, excluding heavy/third-party dirs."""
+        files: List[Path] = []
         try:
             workspace_path = Path(self.workspace_path)
+            # Gather files by extension mapping
             for ext in CODE_EXTS:
-                all_files.extend(workspace_path.rglob(f"*{ext}"))
+                pattern = f"*{ext}" if str(ext).startswith('.') else str(ext)
+                files.extend(workspace_path.rglob(pattern))
 
-            # Filter out directories and hidden files
-            all_files = [
-                f for f in all_files
-                if f.is_file()
-                and not any(part.startswith('.') for part in f.parts)
-                and '.context-engine' not in str(f)
-            ]
+            # Exclude hidden and heavy directories
+            EXCLUDED_DIRS = {
+                "node_modules", "vendor", "dist", "build", "target", "out",
+                ".git", ".hg", ".svn", ".vscode", ".idea", ".venv", "venv", "__pycache__",
+                ".pytest_cache", ".mypy_cache", ".cache", ".context-engine", ".context-engine-uploader", ".codebase"
+            }
+            def is_excluded(p: Path) -> bool:
+                return any(part in EXCLUDED_DIRS or str(part).startswith('.') for part in p.parts)
+
+            files = [f for f in files if f.is_file() and not is_excluded(f)]
         except Exception as e:
             logger.error(f"[watch] Error scanning files: {e}")
 
-        return all_files
+        return files
 
     def process_and_upload_changes(self, changed_paths: List[Path]) -> bool:
         """
@@ -1226,16 +1231,9 @@ Examples:
             logger.info("Scanning repository for files...")
             workspace_path = Path(config['workspace_path'])
 
-            # Find all files in the repository
-            all_files = []
-            for file_path in workspace_path.rglob('*'):
-                if file_path.is_file() and not file_path.name.startswith('.'):
-                    rel_path = file_path.relative_to(workspace_path)
-                    # Skip .codebase directory and other metadata
-                    if not str(rel_path).startswith('.codebase'):
-                        all_files.append(file_path)
-
-            logger.info(f"Found {len(all_files)} files to upload")
+            # Find code files in the repository (exclude hidden and heavy dirs)
+            all_files = client.get_all_code_files()
+            logger.info(f"Found {len(all_files)} code files to upload")
 
             if not all_files:
                 logger.warning("No files found to upload")

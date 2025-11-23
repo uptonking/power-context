@@ -362,8 +362,10 @@ async def upload_delta_bundle(
 ):
     """Upload and process delta bundle."""
     start_time = datetime.now()
+    client_host = request.client.host if hasattr(request, 'client') and request.client else 'unknown'
 
     try:
+        logger.info(f"[upload_service] Begin processing upload for workspace={workspace_path} from {client_host}")
         # Validate workspace path
         workspace = Path(workspace_path)
         if not workspace.is_absolute():
@@ -460,6 +462,7 @@ async def upload_delta_bundle(
 
             # Calculate processing time
             processing_time = (datetime.now() - start_time).total_seconds() * 1000
+            logger.info(f"[upload_service] Completed bundle {bundle_id} seq={sequence_number} ops={operations_count} in {int(processing_time)}ms")
 
             return UploadResponse(
                 success=True,

@@ -7,19 +7,36 @@ let watchProcess;
 let forceProcess;
 let extensionRoot;
 let statusBarItem;
+let logsTerminal;
 let statusMode = 'idle';
+let workspaceWatcher;
+let watchedTargetPath;
+let indexedWatchDisposables = [];
+let globalStoragePath;
+let pythonOverridePath;
 const REQUIRED_PYTHON_MODULES = ['requests', 'urllib3', 'charset_normalizer'];
 const DEFAULT_CONTAINER_ROOT = '/work';
 function activate(context) {
   outputChannel = vscode.window.createOutputChannel('Context Engine Upload');
   context.subscriptions.push(outputChannel);
   extensionRoot = context.extensionPath;
+  globalStoragePath = context.globalStorageUri && context.globalStorageUri.fsPath ? context.globalStorageUri.fsPath : undefined;
+  try {
+    const venvPy = resolvePrivateVenvPython();
+    if (venvPy) {
+      pythonOverridePath = venvPy;
+      log(`Detected existing private venv interpreter: ${venvPy}`);
+    }
+  } catch (_) {}
   statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
   statusBarItem.command = 'contextEngineUploader.indexCodebase';
   context.subscriptions.push(statusBarItem);
   statusBarItem.show();
   setStatusBarState('idle');
   updateStatusBarTooltip();
+
+  // Ensure an output channel is visible early for user feedback
+  if (outputChannel) { outputChannel.show(true); }
   const startDisposable = vscode.commands.registerCommand('contextEngineUploader.start', () => {
     runSequence('auto').catch(error => log(`Start failed: ${error instanceof Error ? error.message : String(error)}`));
   });
@@ -31,7 +48,19 @@ function activate(context) {
   });
   const indexDisposable = vscode.commands.registerCommand('contextEngineUploader.indexCodebase', () => {
     vscode.window.showInformationMessage('Context Engine indexing started.');
+    if (outputChannel) { outputChannel.show(true); }
+    try {
+      const cfg = vscode.workspace.getConfiguration('contextEngineUploader');
+      if (cfg.get('autoTailUploadLogs', true)) {
+        openUploadServiceLogsTerminal();
+      }
+    } catch (e) {
+      log(`Auto-tail logs failed: ${e && e.message ? e.message : String(e)}`);
+    }
     runSequence('force').catch(error => log(`Index failed: ${error instanceof Error ? error.message : String(error)}`));
+  });
+  const showLogsDisposable = vscode.commands.registerCommand('contextEngineUploader.showUploadServiceLogs', () => {
+    try { openUploadServiceLogsTerminal(); } catch (e) { log(`Show logs failed: ${e && e.message ? e.message : String(e)}`); }
   });
   const configDisposable = vscode.workspace.onDidChangeConfiguration(event => {
     if (event.affectsConfiguration('contextEngineUploader') && watchProcess) {
@@ -44,7 +73,7 @@ function activate(context) {
   const workspaceDisposable = vscode.workspace.onDidChangeWorkspaceFolders(() => {
     ensureTargetPathConfigured();
   });
-  context.subscriptions.push(startDisposable, stopDisposable, restartDisposable, indexDisposable, configDisposable, workspaceDisposable);
+  context.subscriptions.push(startDisposable, stopDisposable, restartDisposable, indexDisposable, showLogsDisposable, configDisposable, workspaceDisposable);
   const config = vscode.workspace.getConfiguration('contextEngineUploader');
   ensureTargetPathConfigured();
   if (config.get('runOnStartup')) {
@@ -61,13 +90,20 @@ async function runSequence(mode = 'auto') {
     setStatusBarState('idle');
     return;
   }
+  // Re-resolve options in case ensurePythonDependencies switched to a private venv interpreter
+  const reoptions = resolveOptions();
+  if (reoptions) {
+    Object.assign(options, reoptions);
+  }
   await stopProcesses();
   const needsForce = mode === 'force' || needsForceSync(options.targetPath);
   if (needsForce) {
     setStatusBarState('indexing');
+    if (outputChannel) { outputChannel.show(true); }
     const code = await runOnce(options);
     if (code === 0) {
-      startWatch(options);
+      setStatusBarState('indexed');
+      ensureIndexedWatcher(options.targetPath);
     } else {
       setStatusBarState('idle');
     }
@@ -77,7 +113,10 @@ async function runSequence(mode = 'auto') {
 }
 function resolveOptions() {
   const config = vscode.workspace.getConfiguration('contextEngineUploader');
-  const pythonPath = (config.get('pythonPath') || 'python3').trim();
+  let pythonPath = (config.get('pythonPath') || 'python3').trim();
+  if (pythonOverridePath && fs.existsSync(pythonOverridePath)) {
+    pythonPath = pythonOverridePath;
+  }
   const endpoint = (config.get('endpoint') || '').trim();
   const targetPath = getTargetPath(config);
   const interval = config.get('intervalSeconds') || 5;
@@ -90,7 +129,12 @@ function resolveOptions() {
   if (configuredScriptDir) {
     candidates.push(configuredScriptDir);
   }
+  // Prefer packaged script; also try workspace ./scripts fallback for dev
   candidates.push(extensionRoot);
+  const wsRoot = getWorkspaceFolderPath();
+  if (wsRoot) {
+    candidates.push(path.join(wsRoot, 'scripts'));
+  }
   candidates.push(path.join(extensionRoot, '..', 'out'));
   let workingDirectory;
   let scriptPath;
@@ -209,6 +253,32 @@ function needsForceSync(targetPath) {
   }
 }
 async function ensurePythonDependencies(pythonPath) {
+  // Probe current interpreter; if modules missing, offer to create a private venv and install deps
+  const ok = await checkPythonDeps(pythonPath);
+  if (ok) return true;
+  const choice = await vscode.window.showErrorMessage(
+    'Context Engine Uploader: missing Python modules. Create isolated environment and auto-install?',
+    'Auto-install to private venv',
+    'Cancel'
+  );
+  if (choice !== 'Auto-install to private venv') {
+    return false;
+  }
+  const created = await ensurePrivateVenv();
+  if (!created) return false;
+  const venvPython = resolvePrivateVenvPython();
+  if (!venvPython) {
+    vscode.window.showErrorMessage('Context Engine Uploader: failed to locate private venv python.');
+    return false;
+  }
+  const installed = await installDepsInto(venvPython);
+  if (!installed) return false;
+  pythonOverridePath = venvPython;
+  log(`Using private venv interpreter: ${pythonOverridePath}`);
+  return await checkPythonDeps(pythonOverridePath);
+}
+
+async function checkPythonDeps(pythonPath) {
   const missing = [];
   let pythonError;
   for (const moduleName of REQUIRED_PYTHON_MODULES) {
@@ -228,16 +298,102 @@ async function ensurePythonDependencies(pythonPath) {
     return false;
   }
   if (missing.length) {
-    const installCommand = `${pythonPath} -m pip install ${REQUIRED_PYTHON_MODULES.join(' ')}`;
-    log(`Missing Python modules: ${missing.join(', ')}. Run: ${installCommand}`);
-    const action = await vscode.window.showErrorMessage(`Context Engine Uploader: missing Python modules (${missing.join(', ')}).`, 'Copy install command');
-    if (action === 'Copy install command') {
-      await vscode.env.clipboard.writeText(installCommand);
-      vscode.window.showInformationMessage('Pip install command copied to clipboard.');
-    }
+    log(`Missing Python modules for ${pythonPath}: ${missing.join(', ')}`);
     return false;
   }
   return true;
+}
+
+function venvRootDir() {
+  // Prefer workspace storage; fallback to extension storage
+  try {
+    const ws = getWorkspaceFolderPath();
+    const base = ws && fs.existsSync(ws) ? path.join(ws, '.vscode', '.context-engine-uploader')
+      : (globalStoragePath || path.join(extensionRoot, '.storage'));
+    if (!fs.existsSync(base)) fs.mkdirSync(base, { recursive: true });
+    return base;
+  } catch (e) {
+    return extensionRoot;
+  }
+}
+
+function privateVenvPath() {
+  return path.join(venvRootDir(), 'py-venv');
+}
+
+function resolvePrivateVenvPython() {
+  const venvPath = privateVenvPath();
+  const bin = process.platform === 'win32' ? path.join(venvPath, 'Scripts', 'python.exe') : path.join(venvPath, 'bin', 'python');
+  return fs.existsSync(bin) ? bin : undefined;
+}
+
+async function ensurePrivateVenv() {
+  try {
+    const python = resolvePrivateVenvPython();
+    if (python) {
+      log('Private venv already exists.');
+      return true;
+    }
+    const venvPath = privateVenvPath();
+    const basePy = await detectSystemPython();
+    if (!basePy) {
+      vscode.window.showErrorMessage('Context Engine Uploader: no Python interpreter found to bootstrap venv.');
+      return false;
+    }
+    log(`Creating private venv at ${venvPath} using ${basePy}`);
+    const res = spawnSync(basePy, ['-m', 'venv', venvPath], { encoding: 'utf8' });
+    if (res.status !== 0) {
+      log(`venv creation failed: ${res.stderr || res.stdout}`);
+      vscode.window.showErrorMessage('Context Engine Uploader: failed to create private venv.');
+      return false;
+    }
+    return true;
+  } catch (e) {
+    log(`ensurePrivateVenv error: ${e && e.message ? e.message : String(e)}`);
+    return false;
+  }
+}
+
+async function installDepsInto(pythonBin) {
+  try {
+    log(`Installing Python deps into private venv via ${pythonBin}`);
+    const args = ['-m', 'pip', 'install', ...REQUIRED_PYTHON_MODULES];
+    const res = spawnSync(pythonBin, args, { encoding: 'utf8' });
+    if (res.status !== 0) {
+      log(`pip install failed: ${res.stderr || res.stdout}`);
+      vscode.window.showErrorMessage('Context Engine Uploader: pip install failed. See Output for details.');
+      return false;
+    }
+    return true;
+  } catch (e) {
+    log(`installDepsInto error: ${e && e.message ? e.message : String(e)}`);
+    return false;
+  }
+}
+
+async function detectSystemPython() {
+  // Try configured pythonPath, then common names
+  const candidates = [];
+  try {
+    const cfg = vscode.workspace.getConfiguration('contextEngineUploader');
+    const configured = (cfg.get('pythonPath') || '').trim();
+    if (configured) candidates.push(configured);
+  } catch {}
+  if (process.platform === 'win32') {
+    candidates.push('py', 'python3', 'python');
+  } else {
+    candidates.push('python3', 'python');
+    // Add common Homebrew path on Apple Silicon
+    candidates.push('/opt/homebrew/bin/python3');
+  }
+  for (const cmd of candidates) {
+    const probe = spawnSync(cmd, ['-c', 'import sys; print(sys.executable)'], { encoding: 'utf8' });
+    if (!probe.error && probe.status === 0) {
+      const p = (probe.stdout || '').trim();
+      if (p) return p;
+    }
+  }
+  return undefined;
 }
 function setStatusBarState(mode) {
   if (!statusBarItem) {
@@ -247,6 +403,9 @@ function setStatusBarState(mode) {
   if (mode === 'indexing') {
     statusBarItem.text = '$(sync~spin) Indexing...';
     statusBarItem.color = undefined;
+  } else if (mode === 'indexed') {
+    statusBarItem.text = '$(check) Indexed';
+    statusBarItem.color = new vscode.ThemeColor('charts.green');
   } else if (mode === 'watch') {
     statusBarItem.text = '$(sync) Watching';
     statusBarItem.color = new vscode.ThemeColor('charts.purple');
@@ -281,10 +440,12 @@ function runOnce(options) {
   });
 }
 function startWatch(options) {
+  disposeIndexedWatcher();
   const args = buildArgs(options, 'watch');
   const child = spawn(options.pythonPath, args, { cwd: options.workingDirectory, env: buildChildEnv(options) });
   watchProcess = child;
   attachOutput(child, 'watch');
+  if (outputChannel) { outputChannel.show(true); }
   setStatusBarState('watch');
   child.on('close', code => {
     log(`Watch exited with code ${code}`);
@@ -336,6 +497,69 @@ function attachOutput(child, label) {
     });
   }
 }
+function openUploadServiceLogsTerminal() {
+  try {
+    const cfg = vscode.workspace.getConfiguration('contextEngineUploader');
+    const wsPath = getWorkspaceFolderPath() || (cfg.get('targetPath') || '');
+    const cwd = (wsPath && typeof wsPath === 'string' && fs.existsSync(wsPath)) ? wsPath : undefined;
+    if (!logsTerminal || logsTerminal.exitStatus) {
+      logsTerminal = vscode.window.createTerminal({ name: 'Context Engine Upload Logs', cwd: cwd ? vscode.Uri.file(cwd) : undefined });
+    }
+    logsTerminal.show(true);
+    logsTerminal.sendText('docker compose logs -f upload_service', true);
+  } catch (e) {
+    log(`Unable to open logs terminal: ${e && e.message ? e.message : String(e)}`);
+  }
+}
+
+function ensureIndexedWatcher(targetPath) {
+  try {
+    disposeIndexedWatcher();
+    watchedTargetPath = targetPath;
+    let pattern;
+    if (targetPath && fs.existsSync(targetPath)) {
+      pattern = new vscode.RelativePattern(targetPath, '**/*');
+    } else {
+      const folder = getWorkspaceFolderPath();
+      if (folder && fs.existsSync(folder)) {
+        pattern = new vscode.RelativePattern(folder, '**/*');
+      } else {
+        pattern = '**/*';
+      }
+    }
+    workspaceWatcher = vscode.workspace.createFileSystemWatcher(pattern, false, false, false);
+    const flipToIdle = () => {
+      if (statusMode === 'indexed') {
+        setStatusBarState('idle');
+      }
+    };
+    indexedWatchDisposables.push(workspaceWatcher);
+    indexedWatchDisposables.push(workspaceWatcher.onDidCreate(flipToIdle));
+    indexedWatchDisposables.push(workspaceWatcher.onDidChange(flipToIdle));
+    indexedWatchDisposables.push(workspaceWatcher.onDidDelete(flipToIdle));
+    indexedWatchDisposables.push(vscode.workspace.onDidChangeTextDocument(() => flipToIdle()));
+    log('Indexed watcher armed; any file change will return status bar to "Index Codebase".');
+  } catch (e) {
+    log(`Failed to arm indexed watcher: ${e && e.message ? e.message : String(e)}`);
+  }
+}
+
+function disposeIndexedWatcher() {
+  try {
+    for (const d of indexedWatchDisposables) {
+      try { if (d && typeof d.dispose === 'function') d.dispose(); } catch (_) {}
+    }
+    indexedWatchDisposables = [];
+    if (workspaceWatcher && typeof workspaceWatcher.dispose === 'function') {
+      workspaceWatcher.dispose();
+    }
+    workspaceWatcher = undefined;
+    watchedTargetPath = undefined;
+  } catch (e) {
+    // ignore
+  }
+}
+
 async function stopProcesses() {
   await Promise.all([terminateProcess(forceProcess, 'force'), terminateProcess(watchProcess, 'watch')]);
   if (!forceProcess && !watchProcess && statusMode !== 'indexing') {
@@ -433,6 +657,7 @@ function buildChildEnv(options) {
   return env;
 }
 function deactivate() {
+  disposeIndexedWatcher();
   return stopProcesses();
 }
 module.exports = {
