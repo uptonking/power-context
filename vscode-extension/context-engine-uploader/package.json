@@ -67,7 +67,7 @@
         },
         "contextEngineUploader.endpoint": {
           "type": "string",
-          "default": "http://mcp.speramus.id:8004",
+          "default": "http://localhost:8004",
           "description": "Endpoint URL for the remote upload client."
         },
         "contextEngineUploader.intervalSeconds": {

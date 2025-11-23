@@ -576,7 +576,7 @@ class RemoteUploadClient:
                         "previous_hash": f"sha1:{previous_hash}" if previous_hash else None,
                         "file_hash": None,
                         "modified_time": datetime.now().isoformat(),
-                        "language": idx.CODE_EXTS.get(path.suffix.lower(), "unknown")
+                        "language": CODE_EXTS.get(path.suffix.lower(), "unknown")
                     }
                     operations.append(operation)
 
