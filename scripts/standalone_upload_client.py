@@ -477,6 +477,7 @@ class RemoteUploadClient:
                     operations.append(operation)
                     file_hashes[rel_path] = f"sha1:{file_hash}"
                     total_size += stat.st_size
+                    set_cached_file_hash(str(path.resolve()), file_hash, self.repo_name)
 
                 except Exception as e:
                     print(f"[bundle_create] Error processing created file {path}: {e}")
@@ -516,6 +517,7 @@ class RemoteUploadClient:
                     operations.append(operation)
                     file_hashes[rel_path] = f"sha1:{file_hash}"
                     total_size += stat.st_size
+                    set_cached_file_hash(str(path.resolve()), file_hash, self.repo_name)
 
                 except Exception as e:
                     print(f"[bundle_create] Error processing updated file {path}: {e}")
@@ -557,6 +559,7 @@ class RemoteUploadClient:
                     operations.append(operation)
                     file_hashes[dest_rel_path] = f"sha1:{file_hash}"
                     total_size += stat.st_size
+                    set_cached_file_hash(str(dest_path.resolve()), file_hash, self.repo_name)
 
                 except Exception as e:
                     print(f"[bundle_create] Error processing moved file {source_path} -> {dest_path}: {e}")
@@ -894,21 +897,33 @@ class RemoteUploadClient:
         files: List[Path] = []
         try:
             workspace_path = Path(self.workspace_path)
-            # Gather files by extension mapping
-            for ext in CODE_EXTS:
-                pattern = f"*{ext}" if str(ext).startswith('.') else str(ext)
-                files.extend(workspace_path.rglob(pattern))
+            if not workspace_path.exists():
+                return files
 
-            # Exclude hidden and heavy directories
+            # Single walk with early pruning and set-based matching to reduce IO
+            ext_suffixes = {str(ext).lower() for ext in CODE_EXTS if str(ext).startswith('.')}
+            name_matches = {str(ext) for ext in CODE_EXTS if not str(ext).startswith('.')}
             EXCLUDED_DIRS = {
-                "node_modules", "vendor", "dist", "build", "target", "out",
+                "node_modules", "vendor", "dist", "build", "target", "out", "dev-workspace",
                 ".git", ".hg", ".svn", ".vscode", ".idea", ".venv", "venv", "__pycache__",
                 ".pytest_cache", ".mypy_cache", ".cache", ".context-engine", ".context-engine-uploader", ".codebase"
             }
-            def is_excluded(p: Path) -> bool:
-                return any(part in EXCLUDED_DIRS or str(part).startswith('.') for part in p.parts)
 
-            files = [f for f in files if f.is_file() and not is_excluded(f)]
+            seen = set()
+            for root, dirnames, filenames in os.walk(workspace_path):
+                # Prune heavy/hidden directories before descending
+                dirnames[:] = [d for d in dirnames if d not in EXCLUDED_DIRS and not d.startswith('.')]
+
+                for filename in filenames:
+                    if filename.startswith('.'):
+                        continue
+                    candidate = Path(root) / filename
+                    suffix = candidate.suffix.lower()
+                    if filename in name_matches or suffix in ext_suffixes:
+                        resolved = candidate.resolve()
+                        if resolved not in seen:
+                            seen.add(resolved)
+                            files.append(candidate)
         except Exception as e:
             logger.error(f"[watch] Error scanning files: {e}")
 

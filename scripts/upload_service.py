@@ -372,14 +372,13 @@ async def upload_delta_bundle(
             workspace = Path(WORK_DIR) / workspace
 
         workspace_path = str(workspace.resolve())
+        repo_name = _extract_repo_name_from_path(workspace_path) if _extract_repo_name_from_path else None
+        if not repo_name:
+            repo_name = Path(workspace_path).name
 
         # Get collection name
         if not collection_name:
             if get_collection_name:
-                repo_name = _extract_repo_name_from_path(workspace_path) if _extract_repo_name_from_path else None
-                # Fallback to directory name if repo detection fails
-                if not repo_name:
-                    repo_name = Path(workspace_path).name
                 collection_name = get_collection_name(repo_name)
             else:
                 collection_name = DEFAULT_COLLECTION
@@ -410,9 +409,32 @@ async def upload_delta_bundle(
         with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as temp_file:
             bundle_path = Path(temp_file.name)
 
-            # Stream upload to file
-            content = await bundle.read()
-            bundle_path.write_bytes(content)
+            max_bytes = MAX_BUNDLE_SIZE_MB * 1024 * 1024
+            if bundle.size and bundle.size > max_bytes:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"Bundle too large. Max size: {MAX_BUNDLE_SIZE_MB}MB"
+                )
+
+            # Stream upload to file while enforcing size
+            total = 0
+            chunk_size = 1024 * 1024
+            while True:
+                chunk = await bundle.read(chunk_size)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    try:
+                        temp_file.close()
+                        bundle_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"Bundle too large. Max size: {MAX_BUNDLE_SIZE_MB}MB"
+                    )
+                temp_file.write(chunk)
 
         try:
             # Validate bundle format

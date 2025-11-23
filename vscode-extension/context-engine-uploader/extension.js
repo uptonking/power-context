@@ -8,6 +8,7 @@ let forceProcess;
 let extensionRoot;
 let statusBarItem;
 let logsTerminal;
+let logTailActive = false;
 let statusMode = 'idle';
 let workspaceWatcher;
 let watchedTargetPath;
@@ -73,7 +74,13 @@ function activate(context) {
   const workspaceDisposable = vscode.workspace.onDidChangeWorkspaceFolders(() => {
     ensureTargetPathConfigured();
   });
-  context.subscriptions.push(startDisposable, stopDisposable, restartDisposable, indexDisposable, showLogsDisposable, configDisposable, workspaceDisposable);
+  const terminalCloseDisposable = vscode.window.onDidCloseTerminal(term => {
+    if (term === logsTerminal) {
+      logsTerminal = undefined;
+      logTailActive = false;
+    }
+  });
+  context.subscriptions.push(startDisposable, stopDisposable, restartDisposable, indexDisposable, showLogsDisposable, configDisposable, workspaceDisposable, terminalCloseDisposable);
   const config = vscode.workspace.getConfiguration('contextEngineUploader');
   ensureTargetPathConfigured();
   if (config.get('runOnStartup')) {
@@ -104,6 +111,9 @@ async function runSequence(mode = 'auto') {
     if (code === 0) {
       setStatusBarState('indexed');
       ensureIndexedWatcher(options.targetPath);
+      if (options.startWatchAfterForce) {
+        startWatch(options);
+      }
     } else {
       setStatusBarState('idle');
     }
@@ -124,6 +134,7 @@ function resolveOptions() {
   const extraWatchArgs = config.get('extraWatchArgs') || [];
   const hostRootOverride = (config.get('hostRoot') || '').trim();
   const containerRoot = (config.get('containerRoot') || DEFAULT_CONTAINER_ROOT).trim() || DEFAULT_CONTAINER_ROOT;
+  const startWatchAfterForce = config.get('startWatchAfterForce', true);
   const configuredScriptDir = (config.get('scriptWorkingDirectory') || '').trim();
   const candidates = [];
   if (configuredScriptDir) {
@@ -180,7 +191,8 @@ function resolveOptions() {
     extraForceArgs,
     extraWatchArgs,
     hostRoot,
-    containerRoot
+    containerRoot,
+    startWatchAfterForce
   };
 }
 function getTargetPath(config) {
@@ -195,10 +207,8 @@ function getTargetPath(config) {
     updateStatusBarTooltip();
     return undefined;
   }
-  targetPath = folderPath;
-  saveTargetPath(config, targetPath);
-  updateStatusBarTooltip(targetPath);
-  return targetPath;
+  updateStatusBarTooltip(folderPath);
+  return folderPath;
 }
 function saveTargetPath(config, targetPath) {
   const hasWorkspace = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length;
@@ -226,7 +236,6 @@ function ensureTargetPathConfigured() {
     updateStatusBarTooltip();
     return;
   }
-  saveTargetPath(config, folderPath);
   updateStatusBarTooltip(folderPath);
 }
 function updateStatusBarTooltip(targetPath) {
@@ -407,7 +416,7 @@ function setStatusBarState(mode) {
     statusBarItem.text = '$(check) Indexed';
     statusBarItem.color = new vscode.ThemeColor('charts.green');
   } else if (mode === 'watch') {
-    statusBarItem.text = '$(sync) Watching';
+    statusBarItem.text = '$(sync) Watching (Click Force Index)';
     statusBarItem.color = new vscode.ThemeColor('charts.purple');
   } else {
     statusBarItem.text = '$(sync) Index Codebase';
@@ -502,11 +511,19 @@ function openUploadServiceLogsTerminal() {
     const cfg = vscode.workspace.getConfiguration('contextEngineUploader');
     const wsPath = getWorkspaceFolderPath() || (cfg.get('targetPath') || '');
     const cwd = (wsPath && typeof wsPath === 'string' && fs.existsSync(wsPath)) ? wsPath : undefined;
-    if (!logsTerminal || logsTerminal.exitStatus) {
+    if (logsTerminal && logsTerminal.exitStatus) {
+      logsTerminal = undefined;
+      logTailActive = false;
+    }
+    if (!logsTerminal) {
       logsTerminal = vscode.window.createTerminal({ name: 'Context Engine Upload Logs', cwd: cwd ? vscode.Uri.file(cwd) : undefined });
+      logTailActive = false;
     }
     logsTerminal.show(true);
-    logsTerminal.sendText('docker compose logs -f upload_service', true);
+    if (!logTailActive) {
+      logsTerminal.sendText('docker compose logs -f upload_service', true);
+      logTailActive = true;
+    }
   } catch (e) {
     log(`Unable to open logs terminal: ${e && e.message ? e.message : String(e)}`);
   }
