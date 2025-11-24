@@ -281,6 +281,12 @@ def get_workspace_state(
         if is_multi_repo_mode() and repo_name:
             state_dir = _get_repo_state_dir(repo_name)
             state_dir.mkdir(parents=True, exist_ok=True)
+            # Ensure repo state dir is group-writable so root upload service and
+            # non-root watcher/indexer processes can both write state/cache files.
+            try:
+                os.chmod(state_dir, 0o775)
+            except Exception:
+                pass
             state_path = state_dir / STATE_FILENAME
             lock_scope_path = state_dir
         else:
@@ -481,11 +487,31 @@ def _generate_collection_name_from_repo(repo_name: str) -> str:
     short_hash = hash_obj.hexdigest()[:8]
     return f"{repo_name}-{short_hash}"
 
+def _normalize_repo_name_for_collection(repo_name: str) -> str:
+    """Normalize repo identifier to a stable base name for collection naming.
+
+    In multi-repo remote mode, repo_name may be a slug like "name-<16hex>" used
+    for folder collision avoidance. For Qdrant collections we always want the
+    base repo directory name, so strip a trailing 16-hex segment when present.
+    """
+    try:
+        m = re.match(r"^(.*)-([0-9a-f]{16})$", repo_name)
+        if m:
+            base = (m.group(1) or "").strip()
+            if base:
+                return base
+    except Exception:
+        pass
+    return repo_name
+
+
 def get_collection_name(repo_name: Optional[str] = None) -> str:
     """Get collection name for repository or workspace."""
+    normalized = _normalize_repo_name_for_collection(repo_name) if repo_name else None
+
     # In multi-repo mode, prioritize repo-specific collection names
-    if is_multi_repo_mode() and repo_name:
-        return _generate_collection_name_from_repo(repo_name)
+    if is_multi_repo_mode() and normalized:
+        return _generate_collection_name_from_repo(normalized)
 
     # Check environment for single-repo mode or fallback
     env_coll = os.environ.get("COLLECTION_NAME", "").strip()
@@ -493,8 +519,8 @@ def get_collection_name(repo_name: Optional[str] = None) -> str:
         return env_coll
 
     # Use repo name if provided (for single-repo mode with repo name)
-    if repo_name:
-        return _generate_collection_name_from_repo(repo_name)
+    if normalized:
+        return _generate_collection_name_from_repo(normalized)
 
     # Default fallback
     return "global-collection"

@@ -167,7 +167,7 @@ def validate_bundle_format(bundle_path: Path) -> Dict[str, Any]:
     except Exception as e:
         raise ValueError(f"Invalid bundle format: {str(e)}")
 
-async def process_delta_bundle(workspace_path: str, bundle_path: Path, manifest: Dict[str, Any]) -> Dict[str, int]:
+def process_delta_bundle(workspace_path: str, bundle_path: Path, manifest: Dict[str, Any]) -> Dict[str, int]:
     """Process delta bundle and return operation counts."""
     operations_count = {
         "created": 0,
@@ -305,6 +305,49 @@ async def process_delta_bundle(workspace_path: str, bundle_path: Path, manifest:
         raise
 
 
+async def _process_bundle_background(
+    workspace_path: str,
+    bundle_path: Path,
+    manifest: Dict[str, Any],
+    sequence_number: Optional[int],
+    bundle_id: Optional[str],
+) -> None:
+    try:
+        start_time = datetime.now()
+        operations_count = await asyncio.to_thread(
+            process_delta_bundle, workspace_path, bundle_path, manifest
+        )
+        if sequence_number is not None:
+            key = get_workspace_key(workspace_path)
+            _sequence_tracker[key] = sequence_number
+        if log_activity:
+            try:
+                repo = _extract_repo_name_from_path(workspace_path) if _extract_repo_name_from_path else None
+                log_activity(
+                    repo_name=repo,
+                    action="uploaded",
+                    file_path=bundle_id,
+                    details={
+                        "bundle_id": bundle_id,
+                        "operations": operations_count,
+                        "source": "delta_upload",
+                    },
+                )
+            except Exception as activity_err:
+                logger.debug(f"[upload_service] Failed to log activity for bundle {bundle_id}: {activity_err}")
+        processing_time = (datetime.now() - start_time).total_seconds() * 1000
+        logger.info(
+            f"[upload_service] Finished processing bundle {bundle_id} seq {sequence_number} in {int(processing_time)}ms"
+        )
+    except Exception as e:
+        logger.error(f"[upload_service] Error in background processing for bundle {bundle_id}: {e}")
+    finally:
+        try:
+            bundle_path.unlink()
+        except Exception:
+            pass
+
+
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
     """Health check endpoint."""
@@ -371,25 +414,28 @@ async def upload_delta_bundle(
 
         workspace_path = str(workspace.resolve())
 
-        # Get collection name
+        # Always derive repo_name from workspace_path for origin tracking
+        repo_name = _extract_repo_name_from_path(workspace_path) if _extract_repo_name_from_path else None
+        if not repo_name:
+            repo_name = Path(workspace_path).name
+
+        # Get collection name (respect client-supplied name when provided)
         if not collection_name:
-            if get_collection_name:
-                repo_name = _extract_repo_name_from_path(workspace_path) if _extract_repo_name_from_path else None
-                # Fallback to directory name if repo detection fails
-                if not repo_name:
-                    repo_name = Path(workspace_path).name
+            if get_collection_name and repo_name:
                 collection_name = get_collection_name(repo_name)
             else:
                 collection_name = DEFAULT_COLLECTION
 
-        # Persist origin metadata for remote lookups
+        # Persist origin metadata for remote lookups (including client source_path)
+        # Use slugged repo name (repo+16) for state so it matches ingest/watch_index usage
         try:
             if update_repo_origin and repo_name:
                 workspace_key = get_workspace_key(workspace_path)
-                container_workspace = str(Path(WORK_DIR) / f"{repo_name}-{workspace_key}")
+                slug_repo_name = f"{repo_name}-{workspace_key}"
+                container_workspace = str(Path(WORK_DIR) / slug_repo_name)
                 update_repo_origin(
                     workspace_path=container_workspace,
-                    repo_name=repo_name,
+                    repo_name=slug_repo_name,
                     container_path=container_workspace,
                     source_path=source_path or workspace_path,
                     collection_name=collection_name,
@@ -412,6 +458,8 @@ async def upload_delta_bundle(
             content = await bundle.read()
             bundle_path.write_bytes(content)
 
+        handed_off = False
+
         try:
             # Validate bundle format
             manifest = validate_bundle_format(bundle_path)
@@ -419,11 +467,14 @@ async def upload_delta_bundle(
             manifest_sequence = manifest.get("sequence_number")
 
             # Check sequence number
+            last_sequence = get_last_sequence(workspace_path)
             if sequence_number is None:
-                sequence_number = manifest_sequence
+                if manifest_sequence is not None:
+                    sequence_number = manifest_sequence
+                else:
+                    sequence_number = last_sequence + 1
 
             if not force and sequence_number is not None:
-                last_sequence = get_last_sequence(workspace_path)
                 if sequence_number != last_sequence + 1:
                     return UploadResponse(
                         success=False,
@@ -436,46 +487,33 @@ async def upload_delta_bundle(
                         }
                     )
 
-            # Process delta bundle
-            operations_count = await process_delta_bundle(workspace_path, bundle_path, manifest)
+            handed_off = True
 
-
-            # Update sequence tracking
-            if sequence_number is not None:
-                key = get_workspace_key(workspace_path)
-                _sequence_tracker[key] = sequence_number
-
-            # Log activity using cleaned workspace_state function
-            if log_activity:
-                log_activity(
-                    repo_name=_extract_repo_name_from_path(workspace_path) if _extract_repo_name_from_path else None,
-                    action="uploaded",
-                    file_path=bundle_id,
-                    details={
-                        "bundle_id": bundle_id,
-                        "operations": operations_count,
-                        "source": "delta_upload"
-                    }
+            asyncio.create_task(
+                _process_bundle_background(
+                    workspace_path=workspace_path,
+                    bundle_path=bundle_path,
+                    manifest=manifest,
+                    sequence_number=sequence_number,
+                    bundle_id=bundle_id,
                 )
-
-            # Calculate processing time
-            processing_time = (datetime.now() - start_time).total_seconds() * 1000
+            )
 
             return UploadResponse(
                 success=True,
                 bundle_id=bundle_id,
                 sequence_number=sequence_number,
-                processed_operations=operations_count,
-                processing_time_ms=int(processing_time),
+                processed_operations=None,
+                processing_time_ms=None,
                 next_sequence=sequence_number + 1 if sequence_number else None
             )
 
         finally:
-            # Clean up temporary file
-            try:
-                bundle_path.unlink()
-            except Exception:
-                pass
+            if not handed_off:
+                try:
+                    bundle_path.unlink()
+                except Exception:
+                    pass
 
     except HTTPException:
         raise

@@ -2201,6 +2201,13 @@ async def repo_search(
                             "components": (obj.get("components") or {})
                             | {"rerank_onnx": float(s)},
                         }
+                        # Preserve dual-path metadata when available so clients can prefer host paths
+                        _hostp = obj.get("host_path")
+                        _contp = obj.get("container_path")
+                        if _hostp:
+                            item["host_path"] = _hostp
+                        if _contp:
+                            item["container_path"] = _contp
                         tmp.append(item)
                     if tmp:
                         results = tmp
@@ -2324,6 +2331,13 @@ async def repo_search(
                 "why": obj.get("why", []),
                 "components": obj.get("components", {}),
             }
+            # Preserve dual-path metadata when available so clients can prefer host paths
+            _hostp = obj.get("host_path")
+            _contp = obj.get("container_path")
+            if _hostp:
+                item["host_path"] = _hostp
+            if _contp:
+                item["container_path"] = _contp
             # Pass-through optional relation hints
             if obj.get("relations"):
                 item["relations"] = obj.get("relations")
