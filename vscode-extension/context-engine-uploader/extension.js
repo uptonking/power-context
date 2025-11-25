@@ -888,6 +888,7 @@ function buildChildEnv(options) {
       // directories when scanning for files to upload.
       env.REMOTE_UPLOAD_MODE = 'development';
       env.DEV_REMOTE_MODE = '1';
+      log('Context Engine Uploader: devRemoteMode enabled (REMOTE_UPLOAD_MODE=development, DEV_REMOTE_MODE=1).');
     }
   } catch (error) {
     log(`Failed to read devRemoteMode setting: ${error instanceof Error ? error.message : String(error)}`);
@@ -1502,14 +1503,26 @@ async function writeClaudeHookConfig(root, commandPath) {
       userPromptHooks = [];
     }
 
-    let found = false;
+    const normalizeCommand = value => {
+      if (!value) return '';
+      const resolved = path.resolve(value);
+      return resolved.replace(/context-engine\.context-engine-uploader-[0-9.]+/, 'context-engine.context-engine-uploader');
+    };
+
+    const normalizedNewCommand = normalizeCommand(commandPath);
+    let updated = false;
+
     for (const entry of userPromptHooks) {
       if (!entry || !Array.isArray(entry.hooks)) {
         continue;
       }
       for (const existing of entry.hooks) {
-        if (existing && existing.type === 'command' && existing.command === commandPath) {
-          // Our hook is already present; optionally refresh env and toggle the collection hint flag
+        if (!existing || existing.type !== 'command') {
+          continue;
+        }
+        const normalizedExisting = normalizeCommand(existing.command);
+        if (normalizedExisting === normalizedNewCommand) {
+          existing.command = commandPath;
           if (!existing.env) {
             existing.env = {};
           }
@@ -1521,20 +1534,35 @@ async function writeClaudeHookConfig(root, commandPath) {
           } else if (surfaceHintEnabled) {
             existing.env.CTX_SURFACE_COLLECTION_HINT = '1';
           }
-          found = true;
-          break;
+          updated = true;
         }
-      }
-      if (found) {
-        break;
       }
     }
 
-    if (!found) {
+    if (!updated) {
       userPromptHooks.push({ hooks: [hook] });
     }
 
-    config.hooks['UserPromptSubmit'] = userPromptHooks;
+    // Deduplicate any accidental double entries for the same command
+    const seenCommands = new Set();
+    for (const entry of userPromptHooks) {
+      if (!entry || !Array.isArray(entry.hooks)) {
+        continue;
+      }
+      entry.hooks = entry.hooks.filter(existing => {
+        if (!existing || existing.type !== 'command') {
+          return true;
+        }
+        const normalized = normalizeCommand(existing.command);
+        if (seenCommands.has(normalized)) {
+          return false;
+        }
+        seenCommands.add(normalized);
+        return true;
+      });
+    }
+
+    config.hooks['UserPromptSubmit'] = userPromptHooks.filter(entry => Array.isArray(entry.hooks) && entry.hooks.length);
     fs.writeFileSync(settingsPath, JSON.stringify(config, null, 2) + '\n', 'utf8');
     vscode.window.showInformationMessage('Context Engine Uploader: .claude/settings.local.json updated with Claude hook.');
     log(`Wrote Claude hook config at ${settingsPath}`);
