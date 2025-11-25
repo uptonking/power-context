@@ -114,6 +114,7 @@ if [ -n "$CONFIG_FILE" ] && [ -f "$CONFIG_FILE" ]; then
     CTX_REQUIRE_CONTEXT=$(grep -o '"require_context"[[:space:]]*:[[:space:]]*\(true\|false\)' "$CONFIG_FILE" | sed 's/.*"require_context"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/')
     CTX_RELEVANCE_GATE=$(grep -o '"relevance_gate_enabled"[[:space:]]*:[[:space:]]*\(true\|false\)' "$CONFIG_FILE" | sed 's/.*"relevance_gate_enabled"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/')
     CTX_MIN_RELEVANCE=$(grep -o '"min_relevance"[[:space:]]*:[[:space:]]*[0-9.][0-9.]*' "$CONFIG_FILE" | sed 's/.*"min_relevance"[[:space:]]*:[[:space:]]*\([0-9.][0-9.]*\).*/\1/')
+    CTX_REWRITE_MAX_TOKENS=$(grep -o '"rewrite_max_tokens"[[:space:]]*:[[:space:]]*[0-9][0-9]*' "$CONFIG_FILE" | sed 's/.*"rewrite_max_tokens"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/')
 fi
 
 # Set defaults if not found in config
@@ -126,9 +127,10 @@ CTX_DEFAULT_MODE=${CTX_DEFAULT_MODE:-"default"}
 CTX_REQUIRE_CONTEXT=${CTX_REQUIRE_CONTEXT:-true}
 CTX_RELEVANCE_GATE=${CTX_RELEVANCE_GATE:-false}
 CTX_MIN_RELEVANCE=${CTX_MIN_RELEVANCE:-0.1}
+CTX_REWRITE_MAX_TOKENS=${CTX_REWRITE_MAX_TOKENS:-320}
 
 # Export GLM/context environment variables from config
-export REFRAG_RUNTIME GLM_API_KEY GLM_API_BASE GLM_MODEL CTX_REQUIRE_CONTEXT CTX_RELEVANCE_GATE CTX_MIN_RELEVANCE
+export REFRAG_RUNTIME GLM_API_KEY GLM_API_BASE GLM_MODEL CTX_REQUIRE_CONTEXT CTX_RELEVANCE_GATE CTX_MIN_RELEVANCE CTX_REWRITE_MAX_TOKENS
 
 # Easy bypass patterns - any of these will skip ctx enhancement
 BYPASS_REASON=""

@@ -53,52 +53,85 @@ import subprocess
 from urllib import request
 from urllib.parse import urlparse
 from urllib.error import HTTPError, URLError
-import socket
 from typing import Dict, Any, List, Optional, Tuple
 from pathlib import Path
 
 # Load .env file if it exists (for local CLI usage)
 def _load_env_file():
-	"""Load .env file from workspace (if provided) or project root if it exists."""
-	# Prefer an explicit workspace root (set by the hook) when available,
-	# otherwise fall back to the original project-root behavior based on this file.
-	script_dir = Path(__file__).resolve().parent
-	candidates = []
+    """Load .env file from project root if it exists."""
+    # Find project root (where .env should be)
+    script_dir = Path(__file__).resolve().parent
+    project_root = script_dir.parent
+    env_file = project_root / ".env"
 
-	workspace_dir = os.environ.get("CTX_WORKSPACE_DIR")
-	if workspace_dir:
-		try:
-			candidates.append(Path(workspace_dir) / ".env")
-		except Exception:
-			pass
-
-	# Original project-root-based .env (for CLI / repo-local usage)
-	candidates.append(script_dir.parent / ".env")
-
-	for env_file in candidates:
-		if not env_file.exists():
-			continue
-		with open(env_file) as f:
-			for line in f:
-				line = line.strip()
-				if not line or line.startswith("#"):
-					continue
-				if "=" in line:
-					key, value = line.split("=", 1)
-					key = key.strip()
-					value = value.strip().strip('"').strip("'")
-					# Only set if not already in environment
-					if key and key not in os.environ:
-						os.environ[key] = value
-		# Only load the first existing .env
-		break
+    if env_file.exists():
+        with open(env_file) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" in line:
+                    key, value = line.split("=", 1)
+                    key = key.strip()
+                    value = value.strip().strip('"').strip("'")
+                    # Only set if not already in environment
+                    if key and key not in os.environ:
+                        os.environ[key] = value
 
 _load_env_file()
 
 try:
     from scripts.mcp_router import call_tool_http  # type: ignore
 except ModuleNotFoundError:  # pragma: no cover - local execution fallback
-    from mcp_router import call_tool_http  # type: ignore
+    try:
+        from mcp_router import call_tool_http  # type: ignore
+    except ModuleNotFoundError:
+        # Lightweight HTTP-only fallback to avoid bundling the full router
+        def call_tool_http(base_url: str, tool_name: str, args: Dict[str, Any], timeout: float = 120.0) -> Dict[str, Any]:
+            headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+            # Best-effort handshake to obtain mcp-session-id
+            init_payload = {
+                "jsonrpc": "2.0",
+                "id": 0,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "ctx-cli-lite", "version": "1.0.0"}
+                }
+            }
+            try:
+                req = request.Request(base_url, data=json.dumps(init_payload).encode("utf-8"), headers=headers)
+                with request.urlopen(req, timeout=min(timeout, 10.0)) as resp:
+                    sid = resp.headers.get("mcp-session-id") or resp.headers.get("Mcp-Session-Id")
+                    if sid:
+                        headers["mcp-session-id"] = sid
+                    # Drain body to keep connection healthy (ignore content)
+                    try:
+                        resp.read()
+                    except Exception:
+                        pass
+            except Exception:
+                pass  # fall through; server may still accept calls without handshake
+
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": tool_name, "arguments": args},
+            }
+            req = request.Request(base_url, data=json.dumps(payload).encode("utf-8"), headers=headers)
+            with request.urlopen(req, timeout=timeout) as resp:
+                raw = resp.read().decode("utf-8", errors="ignore").strip()
+            if raw.startswith("data:"):
+                try:
+                    raw = raw.split("data:", 1)[1].strip()
+                except Exception:
+                    pass
+            try:
+                return json.loads(raw)
+            except Exception:
+                return {"result": {"content": [{"type": "text", "text": raw}]}}
 
 # Configuration from environment
 MCP_URL = os.environ.get("MCP_INDEXER_URL", "http://localhost:8003/mcp")
@@ -112,48 +145,18 @@ CTX_CONFIG_FILE = os.path.expanduser("~/.ctx_config.json")
 
 # Local decoder configuration (llama.cpp server)
 def resolve_decoder_url() -> str:
-    """Resolve decoder endpoint, honoring overrides and Ollama/GLM options.
-
-    Rules:
-    - DECODER_URL wins
-    - Otherwise, if OLLAMA_HOST is set, default to its /api/chat endpoint
-    - Otherwise, fall back to llama.cpp URL (GPU override if requested)
-    - Only append /completion for llama.cpp-style endpoints; leave Ollama/OpenAI paths untouched
-    """
+    """Resolve decoder endpoint, honoring USE_GPU_DECODER + overrides."""
     override = os.environ.get("DECODER_URL", "").strip()
     if override:
         base = override
     else:
-        ollama_host = os.environ.get("OLLAMA_HOST", "").strip()
-        if ollama_host:
-            base = ollama_host.rstrip("/")
-            if "/api/" not in base:
-                base = base + "/api/chat"
+        use_gpu = str(os.environ.get("USE_GPU_DECODER", "0")).strip().lower()
+        if use_gpu in {"1", "true", "yes", "on"}:
+            host = "host.docker.internal" if os.path.exists("/.dockerenv") else "localhost"
+            base = f"http://{host}:8081"
         else:
-            use_gpu = str(os.environ.get("USE_GPU_DECODER", "0")).strip().lower()
-            if use_gpu in {"1", "true", "yes", "on"}:
-                host = "host.docker.internal" if os.path.exists("/.dockerenv") else "localhost"
-                base = f"http://{host}:8081"
-            else:
-                base = os.environ.get("LLAMACPP_URL", "http://localhost:8080").strip()
-
-    base = base or "http://localhost:11434/api/chat"
-    parsed_base = urlparse(base)
-    if parsed_base.hostname == "host.docker.internal" and not os.path.exists("/.dockerenv"):
-        try:
-            socket.gethostbyname(parsed_base.hostname)
-        except socket.gaierror:
-            base = base.replace("host.docker.internal", "localhost")
-            sys.stderr.write("[DEBUG] decoder host.docker.internal not reachable; falling back to localhost\n")
-            sys.stderr.flush()
-    lowered = base.lower()
-    if (
-        "ollama" in lowered
-        or "/api/chat" in lowered
-        or "/api/generate" in lowered
-        or "/v1/chat/completions" in lowered
-    ):
-        return base
+            base = os.environ.get("LLAMACPP_URL", "http://localhost:8080").strip()
+    base = base or "http://localhost:8080"
     if base.endswith("/completion"):
         return base
     return base.rstrip("/") + "/completion"
@@ -306,8 +309,7 @@ def format_search_results(results: List[Dict[str, Any]], include_snippets: bool 
     """
     lines: List[str] = []
     for hit in results:
-        # Prefer client-facing host_path, fall back to container path
-        path = hit.get("host_path") or hit.get("path", "unknown")
+        path = hit.get("path", "unknown")
         start = hit.get("start_line", "?")
         end = hit.get("end_line", "?")
         language = hit.get("language") or ""
@@ -507,48 +509,17 @@ def sanitize_citations(text: str, allowed_paths: Set[str]) -> str:
         return text
     from os.path import basename
     allowed_set = set(allowed_paths or set())
-    basename_to_paths: Dict[str, Set[str]] = {}
-    for _p in allowed_set:
-        _b = basename(_p)
-        if _b:
-            basename_to_paths.setdefault(_b, set()).add(_p)
-
-    root = (os.environ.get("CTX_WORKSPACE_DIR") or "").strip()
-
-    def _to_display_path(full_path: str) -> str:
-        if not full_path:
-            return full_path
-        if not root:
-            return full_path
-        try:
-            root_norm = root.rstrip("/\\")
-            repo_name = os.path.basename(root_norm) if root_norm else ""
-            if full_path == root_norm:
-                return repo_name or "."
-            if full_path.startswith(root_norm + os.sep):
-                rel = os.path.relpath(full_path, root_norm)
-                if repo_name:
-                    return repo_name + os.sep + (rel or "")
-                return rel or "."
-        except Exception:
-            return full_path
-        return full_path
+    allowed_basenames = {basename(p) for p in allowed_set}
 
     def _repl(m):
         p = m.group(0)
-        if p in allowed_set:
-            return _to_display_path(p)
-        b = basename(p)
-        paths = basename_to_paths.get(b) if b else None
-        if paths:
-            if len(paths) == 1:
-                return _to_display_path(next(iter(paths)))
+        if p in allowed_set or basename(p) in allowed_basenames:
             return p
         return "the referenced file"
 
     cleaned = re.sub(r"/path/to/[^\s]+", "the referenced file", text)
     # Simple path-like matcher: segments with a slash and a dot-ext
-    cleaned = re.sub(r"(?<!\w)([./\w-]+/[./\w-]+\.[A-Za-z0-9_-]+|[A-Za-z0-9_.-]+\.[A-Za-z0-9_-]+)", _repl, cleaned)
+    cleaned = re.sub(r"(?<!\w)[./\w-]+/[./\w-]+\.[A-Za-z0-9_-]+", _repl, cleaned)
     return cleaned
 
 
@@ -998,26 +969,6 @@ def fetch_context(query: str, **filters) -> Tuple[str, str]:
     sys.stderr.write(f"[DEBUG] repo_search returned {len(hits)} hits (relevance={relevance:.3f})\n")
     sys.stderr.flush()
 
-    # Optional path-level debug: sample raw paths coming back from MCP
-    debug_paths_flag = os.environ.get("CTX_DEBUG_PATHS", "").strip().lower()
-    if debug_paths_flag in {"1", "true", "yes", "on"} and hits:
-        try:
-            sample = [
-                {
-                    "path": h.get("path"),
-                    "host_path": h.get("host_path"),
-                    "container_path": h.get("container_path"),
-                    "start_line": h.get("start_line"),
-                    "end_line": h.get("end_line"),
-                    "symbol": h.get("symbol"),
-                }
-                for h in hits[:5]
-            ]
-            sys.stderr.write("[DEBUG] repo_search sample paths:\n" + json.dumps(sample, indent=2) + "\n")
-            sys.stderr.flush()
-        except Exception:
-            pass
-
     gate_flag = os.environ.get("CTX_RELEVANCE_GATE", "").strip().lower()
     if hits and gate_flag in {"1", "true", "yes", "on"}:
         try:
@@ -1077,12 +1028,10 @@ def rewrite_prompt(original_prompt: str, context: str, note: str, max_tokens: Op
     else:
         policy_system = (
             "If context is provided, use it to make the prompt more concrete by citing specific file paths, line ranges, and symbols that appear in the Context refs. "
-            "When you cite a file, use its full path exactly as it appears in the Context refs, including all directories and prefixes (for example, '/home/.../ctx.py'), rather than shortening it to just a filename. "
             "Never invent references - only cite what appears verbatim in the Context refs. "
         )
         policy_user = (
             "If the context above contains relevant references, cite concrete file paths, line ranges, and symbols in your rewrite. "
-            "When mentioning a file, use the full path exactly as shown in the Context refs (including directories), not a shortened form like 'ctx.py'. "
         )
 
     # Detect if we have actual code context or just a diagnostic note
@@ -1206,7 +1155,7 @@ def rewrite_prompt(original_prompt: str, context: str, note: str, max_tokens: Op
             enhanced = response.choices[0].message.content
 
     else:
-        # Use local decoder (llama.cpp by default; Ollama supported when DECODER_URL points to /api/chat)
+        # Use llama.cpp decoder (original logic)
         meta_prompt = (
             "<|start_of_role|>system<|end_of_role|>" + system_msg + "<|end_of_text|>\n"
             "<|start_of_role|>user<|end_of_role|>" + user_msg + "<|end_of_text|>\n"
@@ -1218,146 +1167,62 @@ def rewrite_prompt(original_prompt: str, context: str, note: str, max_tokens: Op
         parsed = urlparse(decoder_url)
         if parsed.hostname not in {"localhost", "127.0.0.1", "host.docker.internal"}:
             raise ValueError(f"Unsafe decoder host: {parsed.hostname}")
+        payload = {
+            "prompt": meta_prompt,
+            "n_predict": int(max_tokens or DEFAULT_REWRITE_TOKENS),
+            "temperature": 0.45,
+            "stream": stream,
+        }
 
-        lowered_url = decoder_url.lower()
-        is_ollama = (
-            "ollama" in lowered_url
-            or "/api/chat" in lowered_url
-            or "/api/generate" in lowered_url
-            or "/v1/chat/completions" in lowered_url
+        req = request.Request(
+            decoder_url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
         )
 
         enhanced = ""
         try:
-            if is_ollama:
-                model = (
-                    os.environ.get("DECODER_MODEL", "").strip()
-                    or os.environ.get("OLLAMA_MODEL", "").strip()
-                    or "llama3"
-                )
-                payload = {
-                    "model": model,
-                    "stream": stream,
-                    "options": {"temperature": 0.45},
-                }
-                if max_tokens:
-                    payload["options"]["num_predict"] = int(max_tokens)
-                if "/api/chat" in lowered_url or "/v1/chat/completions" in lowered_url:
-                    payload["messages"] = [
-                        {"role": "system", "content": system_msg},
-                        {"role": "user", "content": user_msg},
-                    ]
-                else:
-                    payload["prompt"] = f"{system_msg}\n\n{user_msg}"
-
-                req = request.Request(
-                    decoder_url,
-                    data=json.dumps(payload).encode("utf-8"),
-                    headers={"Content-Type": "application/json"},
-                )
-
-                if stream:
-                    with request.urlopen(req, timeout=DECODER_TIMEOUT) as resp:
-                        for line in resp:
-                            line_str = line.decode("utf-8", errors="ignore").strip()
-                            if not line_str or line_str.startswith(":"):
-                                continue
-                            if line_str.startswith("data: "):
-                                line_str = line_str[6:]
-                            try:
-                                chunk = json.loads(line_str)
-                            except json.JSONDecodeError:
-                                continue
-                            token = ""
-                            if isinstance(chunk, dict):
-                                token = (
-                                    (chunk.get("message") or {}).get("content", "")
-                                    or chunk.get("response", "")
-                                )
+            if stream:
+                # Streaming mode: print tokens as they arrive for instant feedback
+                with request.urlopen(req, timeout=DECODER_TIMEOUT) as resp:
+                    for line in resp:
+                        line_str = line.decode("utf-8", errors="ignore").strip()
+                        if not line_str or line_str.startswith(":"):
+                            continue
+                        if line_str.startswith("data: "):
+                            line_str = line_str[6:]
+                        try:
+                            chunk = json.loads(line_str)
+                            token = chunk.get("content", "")
                             if token:
                                 sys.stdout.write(token)
                                 sys.stdout.flush()
                                 enhanced += token
-                            if chunk.get("done") or chunk.get("stop"):
+                            if chunk.get("stop", False):
                                 break
-                    sys.stdout.write("\n")
-                    sys.stdout.flush()
-                else:
-                    with request.urlopen(req, timeout=DECODER_TIMEOUT) as resp:
-                        raw = resp.read().decode("utf-8", errors="ignore")
-                        data = json.loads(raw or "{}")
-                        if isinstance(data, dict):
-                            enhanced = (
-                                (data.get("message") or {}).get("content")
-                                or data.get("response")
-                                or ((data.get("choices") or [{}])[0].get("message") or {}).get("content")
-                            )
-                        else:
-                            enhanced = None
+                        except json.JSONDecodeError as e:
+                            # Warn once per malformed line but keep streaming the final output only
+                            sys.stderr.write(f"[WARN] decoder stream JSON decode failed: {str(e)}\n")
+                            sys.stderr.flush()
+                            continue
+                sys.stdout.write("\n")
+                sys.stdout.flush()
             else:
-                payload = {
-                    "prompt": meta_prompt,
-                    "n_predict": int(max_tokens or DEFAULT_REWRITE_TOKENS),
-                    "temperature": 0.45,
-                    "stream": stream,
-                }
+                # Non-streaming mode: wait for full response
+                with request.urlopen(req, timeout=DECODER_TIMEOUT) as resp:
+                    raw = resp.read().decode("utf-8", errors="ignore")
+                    data = json.loads(raw)
 
-                req = request.Request(
-                    decoder_url,
-                    data=json.dumps(payload).encode("utf-8"),
-                    headers={"Content-Type": "application/json"},
-                )
-
-                if stream:
-                    # Streaming mode: print tokens as they arrive for instant feedback
-                    with request.urlopen(req, timeout=DECODER_TIMEOUT) as resp:
-                        for line in resp:
-                            line_str = line.decode("utf-8", errors="ignore").strip()
-                            if not line_str or line_str.startswith(":"):
-                                continue
-                            if line_str.startswith("data: "):
-                                line_str = line_str[6:]
-                            try:
-                                chunk = json.loads(line_str)
-                                token = chunk.get("content", "")
-                                if token:
-                                    sys.stdout.write(token)
-                                    sys.stdout.flush()
-                                    enhanced += token
-                                if chunk.get("stop", False):
-                                    break
-                            except json.JSONDecodeError as e:
-                                # Warn once per malformed line but keep streaming the final output only
-                                sys.stderr.write(f"[WARN] decoder stream JSON decode failed: {str(e)}\n")
-                                sys.stderr.flush()
-                                continue
-                    sys.stdout.write("\n")
-                    sys.stdout.flush()
-                else:
-                    # Non-streaming mode: wait for full response
-                    with request.urlopen(req, timeout=DECODER_TIMEOUT) as resp:
-                        raw = resp.read().decode("utf-8", errors="ignore")
-                        data = json.loads(raw)
-
-                        # Extract content from llama.cpp response
-                        enhanced = (
-                            (data.get("content") if isinstance(data, dict) else None)
-                            or ((data.get("choices") or [{}])[0].get("content") if isinstance(data, dict) else None)
-                            or ((data.get("choices") or [{}])[0].get("text") if isinstance(data, dict) else None)
-                            or (data.get("generated_text") if isinstance(data, dict) else None)
-                            or (data.get("text") if isinstance(data, dict) else None)
-                        )
+                    # Extract content from llama.cpp response
+                    enhanced = (
+                        (data.get("content") if isinstance(data, dict) else None)
+                        or ((data.get("choices") or [{}])[0].get("content") if isinstance(data, dict) else None)
+                        or ((data.get("choices") or [{}])[0].get("text") if isinstance(data, dict) else None)
+                        or (data.get("generated_text") if isinstance(data, dict) else None)
+                        or (data.get("text") if isinstance(data, dict) else None)
+                    )
         except Exception as e:
-            body_detail = ""
-            if isinstance(e, HTTPError):
-                try:
-                    body_detail = e.read().decode("utf-8", errors="ignore").strip()
-                except Exception:
-                    body_detail = ""
-            msg = f"[ERROR] Decoder call to {decoder_url} failed: {type(e).__name__}: {e}"
-            if body_detail:
-                msg += f" | body: {body_detail}"
-            sys.stderr.write(msg + "\n")
+            sys.stderr.write(f"[ERROR] Decoder call to {decoder_url} failed: {type(e).__name__}: {e}\n")
             sys.stderr.flush()
             raise
 
@@ -1499,10 +1364,6 @@ Examples:
         else:
             context_text, context_note = fetch_context(args.query, **filters)
 
-            # Derive allowed paths from the formatted context so we can validate/normalize
-            # any file-like mentions in the final rewrite.
-            allowed_paths, _ = extract_allowed_citations(context_text)
-
             require_ctx_flag = os.environ.get("CTX_REQUIRE_CONTEXT", "").strip().lower()
             if require_ctx_flag in {"1", "true", "yes", "on"}:
                 has_real_context = bool((context_text or "").strip()) and not (
@@ -1516,10 +1377,10 @@ Examples:
                     output = (args.query or "").strip()
                 else:
                     rewritten = rewrite_prompt(args.query, context_text, context_note, max_tokens=args.rewrite_max_tokens)
-                    output = sanitize_citations(rewritten.strip(), allowed_paths)
+                    output = rewritten.strip()
             else:
                 rewritten = rewrite_prompt(args.query, context_text, context_note, max_tokens=args.rewrite_max_tokens)
-                output = sanitize_citations(rewritten.strip(), allowed_paths)
+                output = rewritten.strip()
 
         if args.cmd:
             subprocess.run(args.cmd, input=output.encode("utf-8"), shell=True, check=False)

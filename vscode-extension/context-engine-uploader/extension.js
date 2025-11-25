@@ -8,7 +8,15 @@ let watchProcess;
 let forceProcess;
 let extensionRoot;
 let statusBarItem;
+let promptStatusBarItem;
+let logsTerminal;
+let logTailActive = false;
 let statusMode = 'idle';
+let workspaceWatcher;
+let watchedTargetPath;
+let indexedWatchDisposables = [];
+let globalStoragePath;
+let pythonOverridePath;
 const REQUIRED_PYTHON_MODULES = ['requests', 'urllib3', 'charset_normalizer'];
 const DEFAULT_CONTAINER_ROOT = '/work';
 // const CLAUDE_HOOK_COMMAND = '/home/coder/project/Context-Engine/ctx-hook-simple.sh';
@@ -16,12 +24,29 @@ function activate(context) {
   outputChannel = vscode.window.createOutputChannel('Context Engine Upload');
   context.subscriptions.push(outputChannel);
   extensionRoot = context.extensionPath;
+  globalStoragePath = context.globalStorageUri && context.globalStorageUri.fsPath ? context.globalStorageUri.fsPath : undefined;
+  try {
+    const venvPy = resolvePrivateVenvPython();
+    if (venvPy) {
+      pythonOverridePath = venvPy;
+      log(`Detected existing private venv interpreter: ${venvPy}`);
+    }
+  } catch (_) {}
   statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
   statusBarItem.command = 'contextEngineUploader.indexCodebase';
   context.subscriptions.push(statusBarItem);
   statusBarItem.show();
   setStatusBarState('idle');
   updateStatusBarTooltip();
+  promptStatusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 90);
+  promptStatusBarItem.command = 'contextEngineUploader.promptEnhance';
+  promptStatusBarItem.text = '$(sparkle) Prompt+';
+  promptStatusBarItem.tooltip = 'Enhance selection with Unicorn Mode via ctx.py';
+  context.subscriptions.push(promptStatusBarItem);
+  promptStatusBarItem.show();
+
+  // Ensure an output channel is visible early for user feedback
+  if (outputChannel) { outputChannel.show(true); }
   const startDisposable = vscode.commands.registerCommand('contextEngineUploader.start', () => {
     runSequence('auto').catch(error => log(`Start failed: ${error instanceof Error ? error.message : String(error)}`));
   });
@@ -33,6 +58,15 @@ function activate(context) {
   });
   const indexDisposable = vscode.commands.registerCommand('contextEngineUploader.indexCodebase', () => {
     vscode.window.showInformationMessage('Context Engine indexing started.');
+    if (outputChannel) { outputChannel.show(true); }
+    try {
+      const cfg = vscode.workspace.getConfiguration('contextEngineUploader');
+      if (cfg.get('autoTailUploadLogs', true)) {
+        openUploadServiceLogsTerminal();
+      }
+    } catch (e) {
+      log(`Auto-tail logs failed: ${e && e.message ? e.message : String(e)}`);
+    }
     runSequence('force').catch(error => log(`Index failed: ${error instanceof Error ? error.message : String(error)}`));
   });
   const ctxConfigDisposable = vscode.commands.registerCommand('contextEngineUploader.writeCtxConfig', () => {
@@ -40,6 +74,15 @@ function activate(context) {
   });
   const mcpConfigDisposable = vscode.commands.registerCommand('contextEngineUploader.writeMcpConfig', () => {
     writeMcpConfig().catch(error => log(`MCP config write failed: ${error instanceof Error ? error.message : String(error)}`));
+  });
+  const showLogsDisposable = vscode.commands.registerCommand('contextEngineUploader.showUploadServiceLogs', () => {
+    try { openUploadServiceLogsTerminal(); } catch (e) { log(`Show logs failed: ${e && e.message ? e.message : String(e)}`); }
+  });
+  const promptEnhanceDisposable = vscode.commands.registerCommand('contextEngineUploader.promptEnhance', () => {
+    enhanceSelectionWithUnicorn().catch(error => {
+      log(`Prompt+ failed: ${error instanceof Error ? error.message : String(error)}`);
+      vscode.window.showErrorMessage('Prompt+ failed. See Context Engine Upload output.');
+    });
   });
   const configDisposable = vscode.workspace.onDidChangeConfiguration(event => {
     if (event.affectsConfiguration('contextEngineUploader') && watchProcess) {
@@ -64,7 +107,25 @@ function activate(context) {
   const workspaceDisposable = vscode.workspace.onDidChangeWorkspaceFolders(() => {
     ensureTargetPathConfigured();
   });
-  context.subscriptions.push(startDisposable, stopDisposable, restartDisposable, indexDisposable, mcpConfigDisposable, ctxConfigDisposable, configDisposable, workspaceDisposable);
+  const terminalCloseDisposable = vscode.window.onDidCloseTerminal(term => {
+    if (term === logsTerminal) {
+      logsTerminal = undefined;
+      logTailActive = false;
+    }
+  });
+  context.subscriptions.push(
+    startDisposable,
+    stopDisposable,
+    restartDisposable,
+    indexDisposable,
+    showLogsDisposable,
+    promptEnhanceDisposable,
+    mcpConfigDisposable,
+    ctxConfigDisposable,
+    configDisposable,
+    workspaceDisposable,
+    terminalCloseDisposable
+  );
   const config = vscode.workspace.getConfiguration('contextEngineUploader');
   ensureTargetPathConfigured();
   if (config.get('runOnStartup')) {
@@ -86,13 +147,23 @@ async function runSequence(mode = 'auto') {
     setStatusBarState('idle');
     return;
   }
+  // Re-resolve options in case ensurePythonDependencies switched to a private venv interpreter
+  const reoptions = resolveOptions();
+  if (reoptions) {
+    Object.assign(options, reoptions);
+  }
   await stopProcesses();
   const needsForce = mode === 'force' || needsForceSync(options.targetPath);
   if (needsForce) {
     setStatusBarState('indexing');
+    if (outputChannel) { outputChannel.show(true); }
     const code = await runOnce(options);
     if (code === 0) {
-      startWatch(options);
+      setStatusBarState('indexed');
+      ensureIndexedWatcher(options.targetPath);
+      if (options.startWatchAfterForce) {
+        startWatch(options);
+      }
     } else {
       setStatusBarState('idle');
     }
@@ -102,7 +173,10 @@ async function runSequence(mode = 'auto') {
 }
 function resolveOptions() {
   const config = vscode.workspace.getConfiguration('contextEngineUploader');
-  const pythonPath = (config.get('pythonPath') || 'python3').trim();
+  let pythonPath = (config.get('pythonPath') || 'python3').trim();
+  if (pythonOverridePath && fs.existsSync(pythonOverridePath)) {
+    pythonPath = pythonOverridePath;
+  }
   const endpoint = (config.get('endpoint') || '').trim();
   const targetPath = getTargetPath(config);
   const interval = config.get('intervalSeconds') || 5;
@@ -110,12 +184,18 @@ function resolveOptions() {
   const extraWatchArgs = config.get('extraWatchArgs') || [];
   const hostRootOverride = (config.get('hostRoot') || '').trim();
   const containerRoot = (config.get('containerRoot') || DEFAULT_CONTAINER_ROOT).trim() || DEFAULT_CONTAINER_ROOT;
+  const startWatchAfterForce = config.get('startWatchAfterForce', true);
   const configuredScriptDir = (config.get('scriptWorkingDirectory') || '').trim();
   const candidates = [];
   if (configuredScriptDir) {
     candidates.push(configuredScriptDir);
   }
+  // Prefer packaged script; also try workspace ./scripts fallback for dev
   candidates.push(extensionRoot);
+  const wsRoot = getWorkspaceFolderPath();
+  if (wsRoot) {
+    candidates.push(path.join(wsRoot, 'scripts'));
+  }
   candidates.push(path.join(extensionRoot, '..', 'out'));
   let workingDirectory;
   let scriptPath;
@@ -161,7 +241,8 @@ function resolveOptions() {
     extraForceArgs,
     extraWatchArgs,
     hostRoot,
-    containerRoot
+    containerRoot,
+    startWatchAfterForce
   };
 }
 function getTargetPath(config) {
@@ -198,10 +279,8 @@ function getTargetPath(config) {
     updateStatusBarTooltip();
     return undefined;
   }
-  targetPath = folderPath;
-  saveTargetPath(config, targetPath);
-  updateStatusBarTooltip(targetPath);
-  return targetPath;
+  updateStatusBarTooltip(folderPath);
+  return folderPath;
 }
 function saveTargetPath(config, targetPath) {
   const hasWorkspace = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length;
@@ -229,7 +308,6 @@ function ensureTargetPathConfigured() {
     updateStatusBarTooltip();
     return;
   }
-  saveTargetPath(config, folderPath);
   updateStatusBarTooltip(folderPath);
 }
 function updateStatusBarTooltip(targetPath) {
@@ -256,10 +334,47 @@ function needsForceSync(targetPath) {
   }
 }
 async function ensurePythonDependencies(pythonPath) {
+  // Probe current interpreter; if modules missing, offer to create a private venv and install deps
+  const ok = await checkPythonDeps(pythonPath);
+  if (ok) return true;
+  const choice = await vscode.window.showErrorMessage(
+    'Context Engine Uploader: missing Python modules. Create isolated environment and auto-install?',
+    'Auto-install to private venv',
+    'Cancel'
+  );
+  if (choice !== 'Auto-install to private venv') {
+    return false;
+  }
+  const created = await ensurePrivateVenv();
+  if (!created) return false;
+  const venvPython = resolvePrivateVenvPython();
+  if (!venvPython) {
+    vscode.window.showErrorMessage('Context Engine Uploader: failed to locate private venv python.');
+    return false;
+  }
+  const installed = await installDepsInto(venvPython);
+  if (!installed) return false;
+  pythonOverridePath = venvPython;
+  log(`Using private venv interpreter: ${pythonOverridePath}`);
+  return await checkPythonDeps(pythonOverridePath);
+}
+
+async function checkPythonDeps(pythonPath) {
   const missing = [];
   let pythonError;
+  const env = { ...process.env };
+  try {
+    const libsPath = path.join(extensionRoot, 'python_libs');
+    if (fs.existsSync(libsPath)) {
+      const existing = env.PYTHONPATH || '';
+      env.PYTHONPATH = existing ? `${libsPath}${path.delimiter}${existing}` : libsPath;
+      log(`Using bundled python_libs at ${libsPath} for dependency check.`);
+    }
+  } catch (error) {
+    log(`Failed to configure PYTHONPATH for dependency check: ${error instanceof Error ? error.message : String(error)}`);
+  }
   for (const moduleName of REQUIRED_PYTHON_MODULES) {
-    const check = spawnSync(pythonPath, ['-c', `import ${moduleName}`], { encoding: 'utf8' });
+    const check = spawnSync(pythonPath, ['-c', `import ${moduleName}`], { encoding: 'utf8', env });
     if (check.error) {
       pythonError = check.error;
       break;
@@ -275,16 +390,102 @@ async function ensurePythonDependencies(pythonPath) {
     return false;
   }
   if (missing.length) {
-    const installCommand = `${pythonPath} -m pip install ${REQUIRED_PYTHON_MODULES.join(' ')}`;
-    log(`Missing Python modules: ${missing.join(', ')}. Run: ${installCommand}`);
-    const action = await vscode.window.showErrorMessage(`Context Engine Uploader: missing Python modules (${missing.join(', ')}).`, 'Copy install command');
-    if (action === 'Copy install command') {
-      await vscode.env.clipboard.writeText(installCommand);
-      vscode.window.showInformationMessage('Pip install command copied to clipboard.');
-    }
+    log(`Missing Python modules for ${pythonPath}: ${missing.join(', ')}`);
     return false;
   }
   return true;
+}
+
+function venvRootDir() {
+  // Prefer workspace storage; fallback to extension storage
+  try {
+    const ws = getWorkspaceFolderPath();
+    const base = ws && fs.existsSync(ws) ? path.join(ws, '.vscode', '.context-engine-uploader')
+      : (globalStoragePath || path.join(extensionRoot, '.storage'));
+    if (!fs.existsSync(base)) fs.mkdirSync(base, { recursive: true });
+    return base;
+  } catch (e) {
+    return extensionRoot;
+  }
+}
+
+function privateVenvPath() {
+  return path.join(venvRootDir(), 'py-venv');
+}
+
+function resolvePrivateVenvPython() {
+  const venvPath = privateVenvPath();
+  const bin = process.platform === 'win32' ? path.join(venvPath, 'Scripts', 'python.exe') : path.join(venvPath, 'bin', 'python');
+  return fs.existsSync(bin) ? bin : undefined;
+}
+
+async function ensurePrivateVenv() {
+  try {
+    const python = resolvePrivateVenvPython();
+    if (python) {
+      log('Private venv already exists.');
+      return true;
+    }
+    const venvPath = privateVenvPath();
+    const basePy = await detectSystemPython();
+    if (!basePy) {
+      vscode.window.showErrorMessage('Context Engine Uploader: no Python interpreter found to bootstrap venv.');
+      return false;
+    }
+    log(`Creating private venv at ${venvPath} using ${basePy}`);
+    const res = spawnSync(basePy, ['-m', 'venv', venvPath], { encoding: 'utf8' });
+    if (res.status !== 0) {
+      log(`venv creation failed: ${res.stderr || res.stdout}`);
+      vscode.window.showErrorMessage('Context Engine Uploader: failed to create private venv.');
+      return false;
+    }
+    return true;
+  } catch (e) {
+    log(`ensurePrivateVenv error: ${e && e.message ? e.message : String(e)}`);
+    return false;
+  }
+}
+
+async function installDepsInto(pythonBin) {
+  try {
+    log(`Installing Python deps into private venv via ${pythonBin}`);
+    const args = ['-m', 'pip', 'install', ...REQUIRED_PYTHON_MODULES];
+    const res = spawnSync(pythonBin, args, { encoding: 'utf8' });
+    if (res.status !== 0) {
+      log(`pip install failed: ${res.stderr || res.stdout}`);
+      vscode.window.showErrorMessage('Context Engine Uploader: pip install failed. See Output for details.');
+      return false;
+    }
+    return true;
+  } catch (e) {
+    log(`installDepsInto error: ${e && e.message ? e.message : String(e)}`);
+    return false;
+  }
+}
+
+async function detectSystemPython() {
+  // Try configured pythonPath, then common names
+  const candidates = [];
+  try {
+    const cfg = vscode.workspace.getConfiguration('contextEngineUploader');
+    const configured = (cfg.get('pythonPath') || '').trim();
+    if (configured) candidates.push(configured);
+  } catch {}
+  if (process.platform === 'win32') {
+    candidates.push('py', 'python3', 'python');
+  } else {
+    candidates.push('python3', 'python');
+    // Add common Homebrew path on Apple Silicon
+    candidates.push('/opt/homebrew/bin/python3');
+  }
+  for (const cmd of candidates) {
+    const probe = spawnSync(cmd, ['-c', 'import sys; print(sys.executable)'], { encoding: 'utf8' });
+    if (!probe.error && probe.status === 0) {
+      const p = (probe.stdout || '').trim();
+      if (p) return p;
+    }
+  }
+  return undefined;
 }
 function setStatusBarState(mode) {
   if (!statusBarItem) {
@@ -294,8 +495,11 @@ function setStatusBarState(mode) {
   if (mode === 'indexing') {
     statusBarItem.text = '$(sync~spin) Indexing...';
     statusBarItem.color = undefined;
+  } else if (mode === 'indexed') {
+    statusBarItem.text = '$(check) Indexed';
+    statusBarItem.color = new vscode.ThemeColor('charts.green');
   } else if (mode === 'watch') {
-    statusBarItem.text = '$(sync) Watching';
+    statusBarItem.text = '$(sync) Watching (Click Force Index)';
     statusBarItem.color = new vscode.ThemeColor('charts.purple');
   } else {
     statusBarItem.text = '$(sync) Index Codebase';
@@ -328,10 +532,12 @@ function runOnce(options) {
   });
 }
 function startWatch(options) {
+  disposeIndexedWatcher();
   const args = buildArgs(options, 'watch');
   const child = spawn(options.pythonPath, args, { cwd: options.workingDirectory, env: buildChildEnv(options) });
   watchProcess = child;
   attachOutput(child, 'watch');
+  if (outputChannel) { outputChannel.show(true); }
   setStatusBarState('watch');
   child.on('close', code => {
     log(`Watch exited with code ${code}`);
@@ -383,6 +589,218 @@ function attachOutput(child, label) {
     });
   }
 }
+function openUploadServiceLogsTerminal() {
+  try {
+    const cfg = vscode.workspace.getConfiguration('contextEngineUploader');
+    const wsPath = getWorkspaceFolderPath() || (cfg.get('targetPath') || '');
+    const cwd = (wsPath && typeof wsPath === 'string' && fs.existsSync(wsPath)) ? wsPath : undefined;
+    if (logsTerminal && logsTerminal.exitStatus) {
+      logsTerminal = undefined;
+      logTailActive = false;
+    }
+    if (!logsTerminal) {
+      logsTerminal = vscode.window.createTerminal({ name: 'Context Engine Upload Logs', cwd: cwd ? vscode.Uri.file(cwd) : undefined });
+      logTailActive = false;
+    }
+    logsTerminal.show(true);
+    if (!logTailActive) {
+      logsTerminal.sendText('docker compose logs -f upload_service', true);
+      logTailActive = true;
+    }
+  } catch (e) {
+    log(`Unable to open logs terminal: ${e && e.message ? e.message : String(e)}`);
+  }
+}
+
+function getConfiguredPythonPath() {
+  try {
+    const cfg = vscode.workspace.getConfiguration('contextEngineUploader');
+    const configured = (cfg.get('pythonPath') || 'python3').trim();
+    if (pythonOverridePath && fs.existsSync(pythonOverridePath)) {
+      return pythonOverridePath;
+    }
+    return configured || 'python3';
+  } catch (_) {
+    if (pythonOverridePath && fs.existsSync(pythonOverridePath)) {
+      return pythonOverridePath;
+    }
+    return 'python3';
+  }
+}
+
+function getConfiguredDecoderUrl() {
+  try {
+    const cfg = vscode.workspace.getConfiguration('contextEngineUploader');
+    const configured = (cfg.get('decoderUrl') || '').trim();
+    return configured || 'http://localhost:8081';
+  } catch (_) {
+    return 'http://localhost:8081';
+  }
+}
+
+function resolveCtxScriptPath() {
+  const candidates = [];
+  candidates.push(path.join(extensionRoot, 'scripts', 'ctx.py'));
+  candidates.push(path.join(extensionRoot, 'ctx.py'));
+  const wsFolder = getWorkspaceFolderPath();
+  if (wsFolder) {
+    candidates.push(path.join(wsFolder, 'scripts', 'ctx.py'));
+    candidates.push(path.join(wsFolder, 'ctx.py'));
+  }
+  candidates.push(path.resolve(extensionRoot, '..', '..', 'scripts', 'ctx.py'));
+
+  for (const candidate of candidates) {
+    if (candidate && fs.existsSync(candidate)) {
+      return path.resolve(candidate);
+    }
+  }
+
+  vscode.window.showErrorMessage('Context Engine Uploader: ctx.py not found (expected scripts/ctx.py).');
+  return undefined;
+}
+
+async function enhanceSelectionWithUnicorn() {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor) {
+    vscode.window.showWarningMessage('Open a file and select text to enhance with Prompt+.');
+    return;
+  }
+  const selection = editor.selections && editor.selections.length ? editor.selections[0] : editor.selection;
+  const text = selection && !selection.isEmpty ? editor.document.getText(selection) : '';
+  if (!text || !text.trim()) {
+    vscode.window.showWarningMessage('Select text to enhance with Prompt+.');
+    return;
+  }
+
+  const ctxScript = resolveCtxScriptPath();
+  if (!ctxScript) {
+    return;
+  }
+
+  const pythonPath = getConfiguredPythonPath();
+  const projectRoot = path.dirname(path.dirname(ctxScript));
+  const env = { ...process.env };
+  env.PYTHONUNBUFFERED = '1';
+  const decoderUrl = getConfiguredDecoderUrl();
+  if (decoderUrl) {
+    env.DECODER_URL = decoderUrl;
+  }
+  try {
+    const cfg = vscode.workspace.getConfiguration('contextEngineUploader');
+    const useGlmDecoder = cfg.get('useGlmDecoder', false);
+    if (useGlmDecoder) {
+      env.REFRAG_RUNTIME = 'glm';
+    }
+    const useGpuDecoder = cfg.get('useGpuDecoder', false);
+    if (useGpuDecoder) {
+      env.USE_GPU_DECODER = '1';
+    }
+  } catch (_) {
+    // ignore config read failures; fall back to defaults
+  }
+  const existingPyPath = env.PYTHONPATH || '';
+  env.PYTHONPATH = existingPyPath ? `${projectRoot}${path.delimiter}${existingPyPath}` : projectRoot;
+
+  log(`Running Prompt+ via ctx.py at ${ctxScript}`);
+
+  return new Promise((resolve) => {
+    const args = [ctxScript, '--unicorn', text];
+    const child = spawn(pythonPath, args, { cwd: projectRoot, env });
+    let stdout = '';
+    let stderr = '';
+
+    if (child.stdout) {
+      child.stdout.on('data', data => {
+        stdout += data.toString();
+      });
+    }
+    if (child.stderr) {
+      child.stderr.on('data', data => {
+        const chunk = data.toString();
+        stderr += chunk;
+        if (outputChannel) {
+          outputChannel.append(`[prompt+] ${chunk}`);
+        }
+      });
+    }
+
+    child.on('error', error => {
+      log(`Prompt+ spawn failed: ${error instanceof Error ? error.message : String(error)}`);
+      vscode.window.showErrorMessage('Prompt+ failed to start. Check Python path.');
+      resolve();
+    });
+
+    child.on('close', code => {
+      if (code !== 0) {
+        log(`Prompt+ exited with code ${code}${stderr ? `: ${stderr.trim()}` : ''}`);
+        vscode.window.showErrorMessage('Prompt+ failed. See output for details.');
+        return resolve();
+      }
+      const enhanced = (stdout || '').trim();
+      if (!enhanced) {
+        vscode.window.showWarningMessage('Prompt+ returned no output.');
+        return resolve();
+      }
+      editor.edit(editBuilder => editBuilder.replace(selection, enhanced)).then(ok => {
+        if (ok) {
+          vscode.window.showInformationMessage('Prompt+ applied (Unicorn Mode).');
+        } else {
+          vscode.window.showErrorMessage('Prompt+ could not update the selection.');
+        }
+        resolve();
+      });
+    });
+  });
+}
+
+function ensureIndexedWatcher(targetPath) {
+  try {
+    disposeIndexedWatcher();
+    watchedTargetPath = targetPath;
+    let pattern;
+    if (targetPath && fs.existsSync(targetPath)) {
+      pattern = new vscode.RelativePattern(targetPath, '**/*');
+    } else {
+      const folder = getWorkspaceFolderPath();
+      if (folder && fs.existsSync(folder)) {
+        pattern = new vscode.RelativePattern(folder, '**/*');
+      } else {
+        pattern = '**/*';
+      }
+    }
+    workspaceWatcher = vscode.workspace.createFileSystemWatcher(pattern, false, false, false);
+    const flipToIdle = () => {
+      if (statusMode === 'indexed') {
+        setStatusBarState('idle');
+      }
+    };
+    indexedWatchDisposables.push(workspaceWatcher);
+    indexedWatchDisposables.push(workspaceWatcher.onDidCreate(flipToIdle));
+    indexedWatchDisposables.push(workspaceWatcher.onDidChange(flipToIdle));
+    indexedWatchDisposables.push(workspaceWatcher.onDidDelete(flipToIdle));
+    indexedWatchDisposables.push(vscode.workspace.onDidChangeTextDocument(() => flipToIdle()));
+    log('Indexed watcher armed; any file change will return status bar to "Index Codebase".');
+  } catch (e) {
+    log(`Failed to arm indexed watcher: ${e && e.message ? e.message : String(e)}`);
+  }
+}
+
+function disposeIndexedWatcher() {
+  try {
+    for (const d of indexedWatchDisposables) {
+      try { if (d && typeof d.dispose === 'function') d.dispose(); } catch (_) {}
+    }
+    indexedWatchDisposables = [];
+    if (workspaceWatcher && typeof workspaceWatcher.dispose === 'function') {
+      workspaceWatcher.dispose();
+    }
+    workspaceWatcher = undefined;
+    watchedTargetPath = undefined;
+  } catch (e) {
+    // ignore
+  }
+}
+
 async function stopProcesses() {
   await Promise.all([terminateProcess(forceProcess, 'force'), terminateProcess(watchProcess, 'watch')]);
   if (!forceProcess && !watchProcess && statusMode !== 'indexing') {
@@ -395,29 +813,57 @@ function terminateProcess(proc, label) {
   }
   return new Promise(resolve => {
     let finished = false;
-    const finalize = () => {
-      if (finished) {
-        return;
-      }
+    let termTimer;
+    let killTimer;
+    const cleanup = () => {
+      if (termTimer) clearTimeout(termTimer);
+      if (killTimer) clearTimeout(killTimer);
+    };
+    const finalize = (reason) => {
+      if (finished) return;
       finished = true;
+      cleanup();
       if (proc === forceProcess) {
         forceProcess = undefined;
       }
       if (proc === watchProcess) {
         watchProcess = undefined;
       }
-      log(`${label} process stopped.`);
+      log(`${label} process stopped${reason ? ` (${reason})` : ''}.`);
       resolve();
     };
-    proc.once('exit', finalize);
-    proc.once('close', finalize);
+
+    // Resolve only after the child actually exits (or after forced kill path)
+    const onExit = (code, signal) => {
+      finalize(`exit code=${code} signal=${signal || ''}`.trim());
+    };
+    proc.once('exit', onExit);
+    proc.once('close', onExit);
+
     try {
-      proc.kill();
+      proc.kill(); // default SIGTERM
     } catch (error) {
-      finalize();
+      finalize('kill() threw');
       return;
     }
-    setTimeout(finalize, 2000);
+
+    const waitSigtermMs = 4000;
+    const waitSigkillMs = 2000;
+
+    // If process doesn't exit after SIGTERM, escalate to SIGKILL and then force-resolve
+    termTimer = setTimeout(() => {
+      try {
+        if (proc && !proc.killed) {
+          proc.kill('SIGKILL');
+          log(`${label} process did not exit after ${waitSigtermMs}ms; sent SIGKILL.`);
+        }
+      } catch (_) {
+        // ignore
+      }
+      killTimer = setTimeout(() => {
+        finalize(`forced after ${waitSigtermMs + waitSigkillMs}ms`);
+      }, waitSigkillMs);
+    }, waitSigtermMs);
   });
 }
 function log(message) {
@@ -845,6 +1291,7 @@ async function scaffoldCtxConfigFiles(workspaceDir, collectionName) {
   }
 }
 function deactivate() {
+  disposeIndexedWatcher();
   return stopProcesses();
 }
 module.exports = {

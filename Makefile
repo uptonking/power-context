@@ -203,14 +203,14 @@ quantize-reranker: ## Quantize reranker ONNX to INT8 (set RERANKER_ONNX_PATH, op
 
 reset-dev-dual: ## bring up BOTH legacy SSE and Streamable HTTP MCPs (dual-compat mode)
 	docker compose down || true
-	docker compose build --no-cache indexer mcp mcp_indexer mcp_http mcp_indexer_http watcher llamacpp
+	docker compose build --no-cache indexer mcp mcp_indexer mcp_http mcp_indexer_http watcher llamacpp upload_service
 	docker compose up -d qdrant
 	./scripts/wait-for-qdrant.sh
 	docker compose run --rm init_payload || true
 	$(MAKE) tokenizer
 	docker compose run --rm -e INDEX_MICRO_CHUNKS -e MAX_MICRO_CHUNKS_PER_FILE -e TOKENIZER_PATH -e TOKENIZER_URL indexer --root /work --recreate
 	$(MAKE) llama-model
-	docker compose up -d mcp mcp_indexer mcp_http mcp_indexer_http watcher llamacpp
+	docker compose up -d mcp mcp_indexer mcp_http mcp_indexer_http watcher llamacpp upload_service
 	docker compose up -d watcher
 	docker compose ps
 

@@ -405,8 +405,10 @@ async def upload_delta_bundle(
 ):
     """Upload and process delta bundle."""
     start_time = datetime.now()
+    client_host = request.client.host if hasattr(request, 'client') and request.client else 'unknown'
 
     try:
+        logger.info(f"[upload_service] Begin processing upload for workspace={workspace_path} from {client_host}")
         # Validate workspace path
         workspace = Path(workspace_path)
         if not workspace.is_absolute():
@@ -454,9 +456,32 @@ async def upload_delta_bundle(
         with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as temp_file:
             bundle_path = Path(temp_file.name)
 
-            # Stream upload to file
-            content = await bundle.read()
-            bundle_path.write_bytes(content)
+            max_bytes = MAX_BUNDLE_SIZE_MB * 1024 * 1024
+            if bundle.size and bundle.size > max_bytes:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"Bundle too large. Max size: {MAX_BUNDLE_SIZE_MB}MB"
+                )
+
+            # Stream upload to file while enforcing size
+            total = 0
+            chunk_size = 1024 * 1024
+            while True:
+                chunk = await bundle.read(chunk_size)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    try:
+                        temp_file.close()
+                        bundle_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"Bundle too large. Max size: {MAX_BUNDLE_SIZE_MB}MB"
+                    )
+                temp_file.write(chunk)
 
         handed_off = False
 

@@ -61,7 +61,13 @@ fi
 # Optional: bundle Python deps into the staged extension when requested
 if [[ "$BUNDLE_DEPS" == "--bundle-deps" ]]; then
     echo "Bundling Python dependencies into staged extension using $PYTHON_BIN..."
-    "$PYTHON_BIN" -m pip install -t "$STAGE_DIR/python_libs" requests urllib3 charset_normalizer
+    # On macOS, urllib3 v2 + system LibreSSL emits NotOpenSSLWarning; pin <2 there.
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+        echo "Detected macOS; pinning urllib3<2 to avoid LibreSSL/OpenSSL warning."
+        "$PYTHON_BIN" -m pip install -t "$STAGE_DIR/python_libs" "urllib3<2" requests charset_normalizer
+    else
+        "$PYTHON_BIN" -m pip install -t "$STAGE_DIR/python_libs" requests urllib3 charset_normalizer
+    fi
 fi
 
 pushd "$STAGE_DIR" >/dev/null

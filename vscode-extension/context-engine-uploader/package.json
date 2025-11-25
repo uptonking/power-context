@@ -2,7 +2,7 @@
   "name": "context-engine-uploader",
   "displayName": "Context Engine Uploader",
   "description": "Runs the Context-Engine remote upload client with a force sync on startup followed by watch mode. Requires Python with pip install requests urllib3 charset_normalizer.",
-  "version": "0.1.1",
+  "version": "0.1.25",
   "publisher": "context-engine",
   "engines": {
     "vscode": "^1.85.0"
@@ -11,7 +11,11 @@
     "Other"
   ],
   "activationEvents": [
-    "onStartupFinished"
+    "onStartupFinished",
+    "onCommand:contextEngineUploader.start",
+    "onCommand:contextEngineUploader.stop",
+    "onCommand:contextEngineUploader.restart",
+    "onCommand:contextEngineUploader.promptEnhance"
   ],
   "main": "./extension.js",
   "icon": "assets/icon.png",
@@ -40,6 +44,14 @@
       {
         "command": "contextEngineUploader.writeCtxConfig",
         "title": "Context Engine Uploader: Write CTX Config (ctx_config.json/.env)"
+      },
+      {
+        "command": "contextEngineUploader.showUploadServiceLogs",
+        "title": "Context Engine Uploader: Show Upload Service Logs"
+      },
+      {
+        "command": "contextEngineUploader.promptEnhance",
+        "title": "Context Engine Uploader: Prompt+ (Unicorn Mode)"
       }
     ],
     "configuration": {
@@ -59,7 +71,22 @@
         "contextEngineUploader.scriptWorkingDirectory": {
           "type": "string",
           "default": "",
-          "description": "Optional override for the folder that contains standalone_upload_client.py. Defaults to the extension install directory."
+          "description": "Optional override for the folder that contains standalone_upload_client.py. Defaults to the extension install directory or the workspace ./scripts folder."
+        },
+        "contextEngineUploader.decoderUrl": {
+          "type": "string",
+          "default": "http://localhost:8081",
+          "description": "Override DECODER_URL when running Prompt+ (ctx.py unicorn mode). Defaults to local llama.cpp on :8081 (appends /completion automatically)."
+        },
+        "contextEngineUploader.useGlmDecoder": {
+          "type": "boolean",
+          "default": false,
+          "description": "Use GLM decoder for Prompt+ (sets REFRAG_RUNTIME=glm). Leave off to use Ollama/llama.cpp style decoder."
+        },
+        "contextEngineUploader.useGpuDecoder": {
+          "type": "boolean",
+          "default": false,
+          "description": "Prefer GPU decoder for Prompt+ (sets USE_GPU_DECODER=1 so ctx.py targets the GPU llama.cpp sidecar on :8081)."
         },
         "contextEngineUploader.targetPath": {
           "type": "string",
@@ -102,6 +129,16 @@
           "type": "string",
           "default": "/work",
           "description": "Container path that mirrors the host root on the upload server."
+        },
+        "contextEngineUploader.autoTailUploadLogs": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically open a terminal and tail 'docker compose logs -f upload_service' when indexing starts."
+        },
+        "contextEngineUploader.startWatchAfterForce": {
+          "type": "boolean",
+          "default": true,
+          "description": "After a force index completes, automatically launch watch mode."
         },
         "contextEngineUploader.mcpClaudeEnabled": {
           "type": "boolean",
