@@ -294,6 +294,10 @@ CONFIG_FILE_PENALTY = _safe_float(os.environ.get("HYBRID_CONFIG_FILE_PENALTY", "
 IMPLEMENTATION_BOOST = _safe_float(os.environ.get("HYBRID_IMPLEMENTATION_BOOST", "0.2"), 0.2)
 DOCUMENTATION_PENALTY = _safe_float(os.environ.get("HYBRID_DOCUMENTATION_PENALTY", "0.1"), 0.1)
 
+# Modest boost for matches against pseudo/tags produced at index time.
+# Default 0.0 = disabled; set HYBRID_PSEUDO_BOOST>0 to experiment.
+PSEUDO_BOOST = _safe_float(os.environ.get("HYBRID_PSEUDO_BOOST", "0.0"), 0.0)
+
 # Penalize comment-heavy snippets so code (not comments) ranks higher
 COMMENT_PENALTY = _safe_float(os.environ.get("HYBRID_COMMENT_PENALTY", "0.2"), 0.2)
 COMMENT_RATIO_THRESHOLD = _safe_float(os.environ.get("HYBRID_COMMENT_RATIO_THRESHOLD", "0.6"), 0.6)
@@ -929,6 +933,13 @@ def lexical_score(phrases: List[str], md: Dict[str, Any], token_weights: Dict[st
     sym = str(md.get("symbol", "")).lower()
     symp = str(md.get("symbol_path", "")).lower()
     code = str(md.get("code", ""))[:2000].lower()
+    # Optional index-time pseudo/tags enrichment
+    pseudo = str(md.get("pseudo") or "").lower()
+    tags_val = md.get("tags") or []
+    if isinstance(tags_val, list):
+        tags_text = " ".join(str(x) for x in tags_val).lower()
+    else:
+        tags_text = str(tags_val).lower()
     s = 0.0
     for t in tokens:
         if not t:
@@ -940,6 +951,12 @@ def lexical_score(phrases: List[str], md: Dict[str, Any], token_weights: Dict[st
             contrib += 0.6
         if t in code:
             contrib += 1.0
+        # Pseudo/tags signals: gentle, optional boost
+        if PSEUDO_BOOST > 0.0:
+            if pseudo and t in pseudo:
+                contrib += PSEUDO_BOOST
+            if tags_text and t in tags_text:
+                contrib += 0.5 * PSEUDO_BOOST
         if contrib > 0 and token_weights and bm25_weight:
             w = float(token_weights.get(t, 1.0) or 1.0)
             contrib *= (1.0 + float(bm25_weight) * (w - 1.0))
@@ -2068,7 +2085,16 @@ def run_hybrid_search(
     # Lexical + boosts
     timestamps: List[int] = []
     for pid, rec in list(score_map.items()):
-        md = (rec["pt"].payload or {}).get("metadata") or {}
+        payload = rec["pt"].payload or {}
+        base_md = payload.get("metadata") or {}
+        # Merge top-level pseudo/tags into the view passed to lexical_score so
+        # HYBRID_PSEUDO_BOOST can see index-time GLM/llamacpp labels.
+        md = dict(base_md)
+        if "pseudo" in payload:
+            md["pseudo"] = payload["pseudo"]
+        if "tags" in payload:
+            md["tags"] = payload["tags"]
+
         lx = (_AD_LEX_TEXT_W * lexical_score(qlist, md, token_weights=_bm25_tok_w, bm25_weight=_BM25_W)) if _USE_ADAPT else (LEXICAL_WEIGHT * lexical_score(qlist, md, token_weights=_bm25_tok_w, bm25_weight=_BM25_W))
         rec["lx"] += lx
         rec["s"] += lx

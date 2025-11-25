@@ -37,10 +37,41 @@ from scripts.workspace_state import (
     set_cached_file_hash,
     get_collection_name,
     _extract_repo_name_from_path,
+    remove_cached_file,
 )
 
 # Import existing hash function
 import scripts.ingest_code as idx
+
+
+def _load_local_cache_file_hashes(workspace_path: str, repo_name: Optional[str]) -> Dict[str, str]:
+    """Best-effort read of the local cache.json file_hashes map.
+
+    This mirrors the layout used by workspace_state without introducing new
+    dependencies. It is used only to enumerate candidate paths; normal hash
+    lookups still go through get_cached_file_hash.
+    """
+    try:
+        base = Path(os.environ.get("WORKSPACE_PATH") or workspace_path).resolve()
+        multi_repo = os.environ.get("MULTI_REPO_MODE", "0").strip().lower() in {"1", "true", "yes", "on"}
+        if multi_repo and repo_name:
+            cache_path = base / ".codebase" / "repos" / repo_name / "cache.json"
+        else:
+            cache_path = base / ".codebase" / "cache.json"
+
+        if not cache_path.exists():
+            return {}
+
+        with open(cache_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return {}
+        file_hashes = data.get("file_hashes", {})
+        if not isinstance(file_hashes, dict):
+            return {}
+        return file_hashes
+    except Exception:
+        return {}
 
 
 class RemoteUploadClient:
@@ -425,6 +456,13 @@ class RemoteUploadClient:
                     }
                     operations.append(operation)
 
+                    # Once a delete operation has been recorded, drop the cache entry
+                    # so subsequent scans do not keep re-reporting the same deletion.
+                    try:
+                        remove_cached_file(str(path.resolve()), self.repo_name)
+                    except Exception:
+                        pass
+
                 except Exception as e:
                     print(f"[bundle_create] Error processing deleted file {path}: {e}")
                     continue
@@ -501,10 +539,8 @@ class RemoteUploadClient:
                 if not os.path.exists(bundle_path):
                     return {"success": False, "error": {"code": "BUNDLE_NOT_FOUND", "message": f"Bundle not found: {bundle_path}"}}
 
-                # Check bundle size (100MB limit)
+                # Check bundle size (server-side enforcement)
                 bundle_size = os.path.getsize(bundle_path)
-                if bundle_size > 100 * 1024 * 1024:
-                    return {"success": False, "error": {"code": "BUNDLE_TOO_LARGE", "message": f"Bundle too large: {bundle_size} bytes"}}
 
                 with open(bundle_path, 'rb') as bundle_file:
                     files = {
@@ -525,12 +561,35 @@ class RemoteUploadClient:
                         f"{self.upload_endpoint}/api/v1/delta/upload",
                         files=files,
                         data=data,
-                        timeout=self.timeout
+                        timeout=(10, self.timeout)
                     )
 
                     if response.status_code == 200:
                         result = response.json()
                         logger.info(f"[remote_upload] Successfully uploaded bundle {manifest['bundle_id']}")
+
+                        seq = None
+                        try:
+                            seq = result.get("sequence_number")
+                        except Exception:
+                            seq = None
+                        if seq is not None:
+                            try:
+                                manifest["sequence"] = seq
+                            except Exception:
+                                pass
+
+                        poll_result = self._poll_after_timeout(manifest)
+                        if poll_result.get("success"):
+                            combined = dict(result)
+                            for k, v in poll_result.items():
+                                if k in ("success", "error"):
+                                    continue
+                                if k not in combined:
+                                    combined[k] = v
+                            return combined
+
+                        logger.warning("[remote_upload] Upload accepted but polling did not confirm processing; returning original result")
                         return result
 
                     # Handle error
@@ -552,9 +611,37 @@ class RemoteUploadClient:
 
                     logger.warning(f"[remote_upload] Upload attempt {attempt + 1} failed: {error_msg}")
 
+            except requests.exceptions.ConnectTimeout as e:
+                last_error = {"success": False, "error": {"code": "TIMEOUT_ERROR", "message": f"Upload timeout: {str(e)}"}}
+                logger.warning(f"[remote_upload] Upload timeout on attempt {attempt + 1}: {e}")
+
+            except requests.exceptions.ReadTimeout as e:
+                last_error = {"success": False, "error": {"code": "TIMEOUT_ERROR", "message": f"Upload timeout: {str(e)}"}}
+                logger.warning(f"[remote_upload] Upload read timeout on attempt {attempt + 1}: {e}")
+                
+                # After read timeout, poll to check if server processed the bundle
+                logger.info(f"[remote_upload] Read timeout occurred, polling server to check if bundle was processed...")
+                poll_result = self._poll_after_timeout(manifest)
+                if poll_result.get("success"):
+                    logger.info(f"[remote_upload] Server confirmed processing of bundle {manifest['bundle_id']} after timeout")
+                    return poll_result
+                
+                logger.warning(f"[remote_upload] Server did not process bundle after timeout, proceeding with failure")
+                break
+
             except requests.exceptions.Timeout as e:
                 last_error = {"success": False, "error": {"code": "TIMEOUT_ERROR", "message": f"Upload timeout: {str(e)}"}}
                 logger.warning(f"[remote_upload] Upload timeout on attempt {attempt + 1}: {e}")
+                
+                # For generic timeout, also try polling
+                logger.info(f"[remote_upload] Timeout occurred, polling server to check if bundle was processed...")
+                poll_result = self._poll_after_timeout(manifest)
+                if poll_result.get("success"):
+                    logger.info(f"[remote_upload] Server confirmed processing of bundle {manifest['bundle_id']} after timeout")
+                    return poll_result
+                
+                logger.warning(f"[remote_upload] Server did not process bundle after timeout, proceeding with failure")
+                break
 
             except requests.exceptions.ConnectionError as e:
                 last_error = {"success": False, "error": {"code": "CONNECTION_ERROR", "message": f"Connection error: {str(e)}"}}
@@ -577,6 +664,87 @@ class RemoteUploadClient:
                 "message": f"Upload failed after {self.max_retries + 1} attempts"
             }
         }
+
+    def _poll_after_timeout(self, manifest: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Poll server status after a timeout to check if bundle was processed.
+        
+        Args:
+            manifest: Bundle manifest containing sequence information
+            
+        Returns:
+            Dictionary indicating success if bundle was processed
+        """
+        try:
+            # Get current server status to know the expected sequence
+            status = self.get_server_status()
+            if not status.get("success"):
+                return {"success": False, "error": status.get("error", {"code": "UNKNOWN", "message": "Failed to get status"})}
+
+            current_sequence = status.get("last_sequence", 0)
+            expected_sequence = manifest.get("sequence", current_sequence + 1)
+
+            logger.info(f"[remote_upload] Current server sequence: {current_sequence}, expected: {expected_sequence}")
+
+            # If server is already at expected sequence, bundle was processed
+            if current_sequence >= expected_sequence:
+                return {
+                    "success": True,
+                    "message": f"Bundle processed (server at sequence {current_sequence})",
+                    "sequence": current_sequence,
+                }
+
+            # Poll window is configurable via REMOTE_UPLOAD_POLL_MAX_SECS (seconds).
+            # Values <= 0 mean "no timeout" (poll until success or process exit).
+            try:
+                max_poll_time = int(os.environ.get("REMOTE_UPLOAD_POLL_MAX_SECS", "300"))
+            except Exception:
+                max_poll_time = 300
+            poll_interval = 5
+            start_time = time.time()
+
+            while True:
+                elapsed = time.time() - start_time
+                if max_poll_time > 0 and elapsed >= max_poll_time:
+                    logger.warning(
+                        f"[remote_upload] Polling timed out after {int(elapsed)}s (limit={max_poll_time}s), bundle was not confirmed as processed"
+                    )
+                    return {
+                        "success": False,
+                        "error": {
+                            "code": "POLL_TIMEOUT",
+                            "message": f"Bundle not confirmed processed after polling for {int(elapsed)}s (limit={max_poll_time}s)",
+                        },
+                    }
+
+                logger.info(
+                    f"[remote_upload] Polling server status... (elapsed: {int(elapsed)}s, limit={'no-limit' if max_poll_time <= 0 else max_poll_time}s)"
+                )
+                time.sleep(poll_interval)
+
+                status = self.get_server_status()
+                if status.get("success"):
+                    new_sequence = status.get("last_sequence", 0)
+                    if new_sequence >= expected_sequence:
+                        logger.info(
+                            f"[remote_upload] Server sequence advanced to {new_sequence}, bundle was processed!"
+                        )
+                        return {
+                            "success": True,
+                            "message": f"Bundle processed after timeout (server at sequence {new_sequence})",
+                            "sequence": new_sequence,
+                        }
+                    logger.debug(
+                        f"[remote_upload] Server sequence still at {new_sequence}, continuing to poll..."
+                    )
+                else:
+                    logger.warning(
+                        f"[remote_upload] Failed to get server status during poll: {status.get('error', {}).get('message', 'Unknown')}"
+                    )
+            
+        except Exception as e:
+            logger.error(f"[remote_upload] Error during post-timeout polling: {e}")
+            return {"success": False, "error": {"code": "POLL_ERROR", "message": f"Polling error: {str(e)}"}}
 
     def get_server_status(self) -> Dict[str, Any]:
         """Get server status with simplified error handling."""
@@ -697,23 +865,43 @@ class RemoteUploadClient:
 
     def get_all_code_files(self) -> List[Path]:
         """Get all code files in the workspace."""
-        all_files = []
+        files: List[Path] = []
         try:
             workspace_path = Path(self.workspace_path)
-            for ext in idx.CODE_EXTS:
-                all_files.extend(workspace_path.rglob(f"*{ext}"))
+            if not workspace_path.exists():
+                return files
 
-            # Filter out directories and hidden files
-            all_files = [
-                f for f in all_files
-                if f.is_file()
-                and not any(part.startswith('.') for part in f.parts)
-                and '.codebase' not in str(f)
-            ]
+            # Single walk with early pruning similar to standalone client
+            ext_suffixes = {str(ext).lower() for ext in idx.CODE_EXTS if str(ext).startswith('.')}
+            name_matches = {str(ext) for ext in idx.CODE_EXTS if not str(ext).startswith('.')}
+            dev_remote = os.environ.get("DEV_REMOTE_MODE") == "1" or os.environ.get("REMOTE_UPLOAD_MODE") == "development"
+            excluded = {
+                "node_modules", "vendor", "dist", "build", "target", "out",
+                ".git", ".hg", ".svn", ".vscode", ".idea", ".venv", "venv",
+                "__pycache__", ".pytest_cache", ".mypy_cache", ".cache",
+                ".context-engine", ".context-engine-uploader", ".codebase"
+            }
+            if dev_remote:
+                excluded.add("dev-workspace")
+
+            seen = set()
+            for root, dirnames, filenames in os.walk(workspace_path):
+                dirnames[:] = [d for d in dirnames if d not in excluded and not d.startswith('.')]
+
+                for filename in filenames:
+                    if filename.startswith('.'):
+                        continue
+                    candidate = Path(root) / filename
+                    suffix = candidate.suffix.lower()
+                    if filename in name_matches or suffix in ext_suffixes:
+                        resolved = candidate.resolve()
+                        if resolved not in seen:
+                            seen.add(resolved)
+                            files.append(candidate)
         except Exception as e:
             logger.error(f"[watch] Error scanning files: {e}")
 
-        return all_files
+        return files
 
     def watch_loop(self, interval: int = 5):
         """Main file watching loop using existing detection and upload methods."""
@@ -724,9 +912,29 @@ class RemoteUploadClient:
         try:
             while True:
                 try:
-                    # Use existing change detection (get all files in workspace)
-                    all_files = self.get_all_code_files()
-                    changes = self.detect_file_changes(all_files)
+                    # Use existing change detection over both filesystem and cached registry
+                    fs_files = self.get_all_code_files()
+                    path_map = {}
+                    for p in fs_files:
+                        try:
+                            resolved = p.resolve()
+                        except Exception:
+                            continue
+                        path_map[resolved] = p
+
+                    # Include any paths that are only present in the local cache (deleted files)
+                    cached_file_hashes = _load_local_cache_file_hashes(self.workspace_path, self.repo_name)
+                    for cached_abs in cached_file_hashes.keys():
+                        try:
+                            cached_path = Path(cached_abs)
+                            resolved = cached_path.resolve()
+                        except Exception:
+                            continue
+                        if resolved not in path_map:
+                            path_map[resolved] = cached_path
+
+                    all_paths = list(path_map.values())
+                    changes = self.detect_file_changes(all_paths)
 
                     # Count only meaningful changes (exclude unchanged)
                     meaningful_changes = len(changes.get("created", [])) + len(changes.get("updated", [])) + len(changes.get("deleted", [])) + len(changes.get("moved", []))
@@ -881,8 +1089,9 @@ def get_remote_config(cli_path: Optional[str] = None) -> Dict[str, str]:
         "upload_endpoint": os.environ.get("REMOTE_UPLOAD_ENDPOINT", "http://localhost:8080"),
         "workspace_path": workspace_path,
         "collection_name": collection_name,
-        "max_retries": int(os.environ.get("REMOTE_UPLOAD_MAX_RETRIES", "3")),
-        "timeout": int(os.environ.get("REMOTE_UPLOAD_TIMEOUT", "30"))
+        # Use higher, more robust defaults but still allow env overrides
+        "max_retries": int(os.environ.get("REMOTE_UPLOAD_MAX_RETRIES", "5")),
+        "timeout": int(os.environ.get("REMOTE_UPLOAD_TIMEOUT", "1800")),
     }
 
 

@@ -11,6 +11,9 @@
   "streaming": true,
   "require_context": true,
   "relevance_gate_enabled": false,
-  "min_relevance": 0.1
+  "min_relevance": 0.1,
+  "rewrite_max_tokens": 420,
+  "surface_qdrant_collection_hint": true
+
 }
 

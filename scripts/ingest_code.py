@@ -637,24 +637,49 @@ def generate_pseudo_tags(text: str) -> tuple[str, list[str]]:
     if not _pseudo_describe_enabled() or not text.strip():
         return pseudo, tags
     try:
-        from scripts.refrag_llamacpp import LlamaCppRefragClient, is_decoder_enabled  # type: ignore
+        from scripts.refrag_llamacpp import (  # type: ignore
+            LlamaCppRefragClient,
+            is_decoder_enabled,
+            get_runtime_kind,
+        )
         if not is_decoder_enabled():
             return "", []
-        # Keep decoding tight/fast – this is only enrichment for retrieval
-        prompt = (
-            "You label code spans for search enrichment.\n"
-            "Return strictly JSON: {\"pseudo\": string (<=20 tokens), \"tags\": [3-6 short strings]}.\n"
-            "Code:\n" + text[:2000]
-        )
-        client = LlamaCppRefragClient()
-        out = client.generate_with_soft_embeddings(
-            prompt=prompt,
-            max_tokens=int(os.environ.get("PSEUDO_MAX_TOKENS", "96") or 96),
-            temperature=float(os.environ.get("PSEUDO_TEMPERATURE", "0.10") or 0.10),
-            top_k=int(os.environ.get("PSEUDO_TOP_K", "30") or 30),
-            top_p=float(os.environ.get("PSEUDO_TOP_P", "0.9") or 0.9),
-            stop=["\n\n"],
-        )
+        runtime = get_runtime_kind()
+        # Keep decoding tight/fast – this is only enrichment for retrieval.
+        # Preserve original llama.cpp prompt semantics, and use a stricter
+        # JSON-only prompt only for the GLM runtime.
+        if runtime == "glm":
+            prompt = (
+                "You are a JSON-only function that labels code spans for search enrichment.\n"
+                "Respond with a single JSON object and nothing else (no prose, no markdown).\n"
+                "Exact format: {\"pseudo\": string (<=20 tokens), \"tags\": [3-6 short strings]}.\n"
+                "Code:\n" + text[:2000]
+            )
+            from scripts.refrag_glm import GLMRefragClient  # type: ignore
+            client = GLMRefragClient()
+            out = client.generate_with_soft_embeddings(
+                prompt=prompt,
+                max_tokens=int(os.environ.get("PSEUDO_MAX_TOKENS", "96") or 96),
+                temperature=float(os.environ.get("PSEUDO_TEMPERATURE", "0.10") or 0.10),
+                top_p=float(os.environ.get("PSEUDO_TOP_P", "0.9") or 0.9),
+                stop=["\n\n"],
+                force_json=True,
+            )
+        else:
+            prompt = (
+                "You label code spans for search enrichment.\n"
+                "Return strictly JSON: {\"pseudo\": string (<=20 tokens), \"tags\": [3-6 short strings]}.\n"
+                "Code:\n" + text[:2000]
+            )
+            client = LlamaCppRefragClient()
+            out = client.generate_with_soft_embeddings(
+                prompt=prompt,
+                max_tokens=int(os.environ.get("PSEUDO_MAX_TOKENS", "96") or 96),
+                temperature=float(os.environ.get("PSEUDO_TEMPERATURE", "0.10") or 0.10),
+                top_k=int(os.environ.get("PSEUDO_TOP_K", "30") or 30),
+                top_p=float(os.environ.get("PSEUDO_TOP_P", "0.9") or 0.9),
+                stop=["\n\n"],
+            )
         import json as _json
         try:
             obj = _json.loads(out)
@@ -1634,6 +1659,18 @@ def _choose_symbol_for_chunk(start: int, end: int, symbols: List[_Sym]):
     return "", "", ""
 
 
+def _get_host_path_from_origin(workspace_path: str, repo_name: str = None) -> Optional[str]:
+    """Get client host_path from origin source_path in workspace state."""
+    try:
+        from scripts.workspace_state import get_workspace_state
+        state = get_workspace_state(workspace_path, repo_name)
+        if state and state.get("origin", {}).get("source_path"):
+            return state["origin"]["source_path"]
+    except Exception:
+        pass
+    return None
+
+
 def index_single_file(
     client: QdrantClient,
     model: TextEmbedding,
@@ -1767,22 +1804,49 @@ def index_single_file(
             sym = ch.get("symbol") or sym
         if "symbol_path" in ch and ch.get("symbol_path"):
             sym_path = ch.get("symbol_path") or sym_path
-
         # Track both container path (/work mirror) and original host path for clarity across environments
         _cur_path = str(file_path)
         _host_root = str(os.environ.get("HOST_INDEX_PATH") or "").strip().rstrip("/")
         _host_path = None
         _container_path = None
+
+        # Try to get client workspace root from origin metadata first.
+        # upload_service writes origin.source_path from the client --path flag so we can
+        # reconstruct host paths even when indexing inside a slugged /work/<repo-hash> tree.
+        _origin_client_path = None
         try:
-            if _cur_path.startswith("/work/") and _host_root:
+            # Get workspace path from file path for origin lookup
+            if _cur_path.startswith("/work/"):
+                # Extract workspace from container path
+                _parts = _cur_path[6:].split("/")  # Remove "/work/" prefix
+                if len(_parts) >= 2:
+                    _repo_name = _parts[0]  # First part is repo name
+                    _workspace_path = f"/work/{_repo_name}"
+                    _origin_client_path = _get_host_path_from_origin(_workspace_path, _repo_name)
+        except Exception:
+            pass
+
+        try:
+            if _cur_path.startswith("/work/") and (_host_root or _origin_client_path):
                 _rel = _cur_path[len("/work/"):]
-                _host_path = os.path.realpath(os.path.join(_host_root, _rel))
+                # Prioritize client path from origin metadata over HOST_INDEX_PATH.
+                if _origin_client_path:
+                    # Drop the leading repo slug (e.g. Context-Engine-<hash>) when mapping
+                    # /work paths back to the client workspace root, so host_path is
+                    # /home/.../Context-Engine/<rel-path-inside-repo> instead of including
+                    # the slug directory.
+                    _parts = _rel.split("/", 1)
+                    _tail = _parts[1] if len(_parts) > 1 else ""
+                    _base = _origin_client_path.rstrip("/")
+                    _host_path = os.path.realpath(os.path.join(_base, _tail)) if _tail else _base
+                else:
+                    _host_path = os.path.realpath(os.path.join(_host_root, _rel))
                 _container_path = _cur_path
             else:
                 # Likely indexing on the host directly
                 _host_path = _cur_path
-                if _host_root and _cur_path.startswith((_host_root + "/")):
-                    _rel = _cur_path[len(_host_root) + 1 :]
+                if (_host_root or _origin_client_path) and _cur_path.startswith(((_origin_client_path or _host_root) + "/")):
+                    _rel = _cur_path[len((_origin_client_path or _host_root)) + 1 :]
                     _container_path = "/work/" + _rel
         except Exception:
             _host_path = _cur_path
@@ -2213,15 +2277,35 @@ def index_repo(
             _host_root = str(os.environ.get("HOST_INDEX_PATH") or "").strip().rstrip("/")
             _host_path = None
             _container_path = None
+
+            # Try to get client path from origin metadata first (from --path upload flag)
+            _origin_client_path = None
             try:
-                if _cur_path.startswith("/work/") and _host_root:
+                # Get workspace path from file path for origin lookup
+                if _cur_path.startswith("/work/"):
+                    # Extract workspace from container path
+                    _parts = _cur_path[6:].split("/")  # Remove "/work/" prefix
+                    if len(_parts) >= 2:
+                        _repo_name = _parts[0]  # First part is repo name
+                        _workspace_path = f"/work/{_repo_name}"
+                        _origin_client_path = _get_host_path_from_origin(_workspace_path, _repo_name)
+            except Exception:
+                pass
+
+            try:
+                if _cur_path.startswith("/work/") and (_host_root or _origin_client_path):
                     _rel = _cur_path[len("/work/"):]
-                    _host_path = os.path.realpath(os.path.join(_host_root, _rel))
+                    # Prioritize client path from origin metadata over HOST_INDEX_PATH
+                    if _origin_client_path:
+                        _host_path = os.path.realpath(os.path.join(_origin_client_path, _rel))
+                    else:
+                        _host_path = os.path.realpath(os.path.join(_host_root, _rel))
                     _container_path = _cur_path
                 else:
+                    # Likely indexing on the host directly
                     _host_path = _cur_path
-                    if _host_root and _cur_path.startswith((_host_root + "/")):
-                        _rel = _cur_path[len(_host_root) + 1 :]
+                    if (_host_root or _origin_client_path) and _cur_path.startswith(((_origin_client_path or _host_root) + "/")):
+                        _rel = _cur_path[len((_origin_client_path or _host_root)) + 1 :]
                         _container_path = "/work/" + _rel
             except Exception:
                 _host_path = _cur_path
@@ -2474,6 +2558,20 @@ def main():
         default=None,
         help="Print progress every N files (default 200; 0 disables)",
     )
+    # GLM psueo tag test - # TODO: Remove GLM psuedo tag test harness after confirming 100% stable and not needed
+    parser.add_argument(
+        "--test-pseudo",
+        type=str,
+        default=None,
+        help="Test generate_pseudo_tags on the given code snippet and print result, then exit",
+    )
+    parser.add_argument(
+        "--test-pseudo-file",
+        type=str,
+        default=None,
+        help="Test generate_pseudo_tags on the contents of the given file and print result, then exit",
+    )
+    # End
 
     args = parser.parse_args()
 
@@ -2497,6 +2595,53 @@ def main():
         os.environ["INDEX_CHUNK_OVERLAP"] = str(args.chunk_overlap)
     if args.progress_every is not None:
         os.environ["INDEX_PROGRESS_EVERY"] = str(args.progress_every)
+
+    # TODO: Remove GLM psuedo tag test harness after confirming 100% stable and not needed
+    # # Optional test mode: exercise generate_pseudo_tags (including GLM runtime) and exit
+    if args.test_pseudo or args.test_pseudo_file:
+        import json as _json
+
+        code_text = ""
+        if args.test_pseudo:
+            code_text = args.test_pseudo
+        if args.test_pseudo_file:
+            try:
+                code_text = Path(args.test_pseudo_file).read_text(
+                    encoding="utf-8", errors="ignore"
+                )
+            except Exception as e:
+                print(f"[TEST_PSEUDO] Failed to read file {args.test_pseudo_file}: {e}")
+                return
+        if not code_text.strip():
+            print("[TEST_PSEUDO] No code text provided")
+            return
+
+        # Use the normal generate_pseudo_tags path so behavior matches indexing.
+        try:
+            from scripts.refrag_llamacpp import get_runtime_kind  # type: ignore
+
+            runtime = get_runtime_kind()
+        except Exception:
+            runtime = "unknown"
+
+        pseudo, tags = "", []
+        try:
+            pseudo, tags = generate_pseudo_tags(code_text)
+        except Exception as e:
+            print(f"[TEST_PSEUDO] Error while generating pseudo tags: {e}")
+
+        print(
+            _json.dumps(
+                {
+                    "runtime": runtime,
+                    "pseudo": pseudo,
+                    "tags": tags,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return
 
     qdrant_url = os.environ.get("QDRANT_URL", "http://localhost:6333")
     api_key = os.environ.get("QDRANT_API_KEY")

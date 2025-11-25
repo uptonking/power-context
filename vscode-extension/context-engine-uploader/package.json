@@ -2,7 +2,7 @@
   "name": "context-engine-uploader",
   "displayName": "Context Engine Uploader",
   "description": "Runs the Context-Engine remote upload client with a force sync on startup followed by watch mode. Requires Python with pip install requests urllib3 charset_normalizer.",
-  "version": "0.1.25",
+  "version": "0.1.26",
   "publisher": "context-engine",
   "engines": {
     "vscode": "^1.85.0"
@@ -38,6 +38,14 @@
         "title": "Context Engine Uploader: Index Codebase"
       },
       {
+        "command": "contextEngineUploader.writeMcpConfig",
+        "title": "Context Engine Uploader: Write MCP Config (.mcp.json)"
+      },
+      {
+        "command": "contextEngineUploader.writeCtxConfig",
+        "title": "Context Engine Uploader: Write CTX Config (ctx_config.json/.env)"
+      },
+      {
         "command": "contextEngineUploader.showUploadServiceLogs",
         "title": "Context Engine Uploader: Show Upload Service Logs"
       },
@@ -58,22 +66,23 @@
         "contextEngineUploader.pythonPath": {
           "type": "string",
           "default": "python3",
-          "description": "Python executable used to run scripts.remote_upload_client."
+          "description": "Python executable used to run scripts.remote_upload_client. E.G. 'python' or 'python3'"
         },
         "contextEngineUploader.scriptWorkingDirectory": {
           "type": "string",
           "default": "",
           "description": "Optional override for the folder that contains standalone_upload_client.py. Defaults to the extension install directory or the workspace ./scripts folder."
         },
+        "contextEngineUploader.decoderRuntime": {
+          "type": "string",
+          "enum": ["glm", "llamacpp"],
+          "default": "glm",
+          "description": "Preferred decoder runtime for ctx.py scaffolding (controls REFRAG_RUNTIME in ctx_config.json/.env)."
+        },
         "contextEngineUploader.decoderUrl": {
           "type": "string",
           "default": "http://localhost:8081",
           "description": "Override DECODER_URL when running Prompt+ (ctx.py unicorn mode). Defaults to local llama.cpp on :8081 (appends /completion automatically)."
-        },
-        "contextEngineUploader.useGlmDecoder": {
-          "type": "boolean",
-          "default": false,
-          "description": "Use GLM decoder for Prompt+ (sets REFRAG_RUNTIME=glm). Leave off to use Ollama/llama.cpp style decoder."
         },
         "contextEngineUploader.useGpuDecoder": {
           "type": "boolean",
@@ -124,18 +133,78 @@
         },
         "contextEngineUploader.autoTailUploadLogs": {
           "type": "boolean",
-          "default": true,
-          "description": "Automatically open a terminal and tail 'docker compose logs -f upload_service' when indexing starts."
-        },
-        "contextEngineUploader.bundleSizeLimitMB": {
-          "type": "number",
-          "default": 100,
-          "description": "Maximum upload bundle size enforced by the Context Engine server (MB)."
+          "default": false,
+          "description": "Automatically open a terminal and tail 'docker compose logs -f upload_service' when indexing starts (for local docker setups)."
         },
         "contextEngineUploader.startWatchAfterForce": {
           "type": "boolean",
           "default": true,
           "description": "After a force index completes, automatically launch watch mode."
+        },
+        "contextEngineUploader.mcpClaudeEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable writing the project-local .mcp.json used by Claude Code MCP clients."
+        },
+        "contextEngineUploader.mcpWindsurfEnabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable writing Windsurf's global MCP config (requires Windsurf or compatible clients)."
+        },
+        "contextEngineUploader.mcpIndexerUrl": {
+          "type": "string",
+          "default": "http://localhost:8001/sse",
+          "description": "Claude Code MCP server URL for the Qdrant indexer. Used when writing the project-local .mcp.json via 'Write MCP Config'."
+        },
+        "contextEngineUploader.mcpMemoryUrl": {
+          "type": "string",
+          "default": "http://localhost:8000/sse",
+          "description": "Claude Code MCP server URL for the memory/search MCP server. Used when writing the project-local .mcp.json via 'Write MCP Config'."
+        },
+        "contextEngineUploader.ctxIndexerUrl": {
+          "type": "string",
+          "default": "http://localhost:8003/mcp",
+          "description": "CTX MCP indexer HTTP endpoint (MCP_INDEXER_URL) used by ctx.py when enhancing prompts via the Claude hook."
+        },
+        "contextEngineUploader.windsurfMcpPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional override for Windsurf's mcp_config.json path. Defaults to %USERPROFILE%/.codeium/windsurf/mcp_config.json."
+        },
+        "contextEngineUploader.claudeHookEnabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable writing the workspace .claude/settings.local.json hooks section for the Context Engine Claude Code hook."
+        },
+        "contextEngineUploader.surfaceQdrantCollectionHint": {
+          "type": "boolean",
+          "default": false,
+          "description": "When enabled and Claude MCP + hook configs are written, the CTX Claude hook adds a brief hint line with the Qdrant collection ID to enhanced prompts."
+        },
+        "contextEngineUploader.devRemoteMode": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable dev-remote upload mode for the standalone upload client. When enabled, the extension sets REMOTE_UPLOAD_MODE=development and DEV_REMOTE_MODE=1 for the child process, causing standalone_upload_client.py to ignore any 'dev-workspace' directories when scanning for files to upload."
+        },
+        "contextEngineUploader.scaffoldCtxConfig": {
+          "type": "boolean",
+          "default": true,
+          "description": "When enabled, the extension can create or update a minimal ctx_config.json and .env in the targetPath using the inferred collection name from the upload client."
+        },
+        "contextEngineUploader.glmApiKey": {
+          "type": "string",
+          "default": "",
+          "description": "GLM API key used by ctx.py when REFRAG_RUNTIME=glm. When scaffolding, this value is written to glm_api_key in ctx_config.json and GLM_API_KEY in .env if those fields are missing."
+        },
+        "contextEngineUploader.glmApiBase": {
+          "type": "string",
+          "default": "https://api.z.ai/api/coding/paas/v4/",
+          "description": "GLM API base URL (GLM_API_BASE) used by refrag_glm/ctx.py when REFRAG_RUNTIME=glm."
+        },
+        "contextEngineUploader.glmModel": {
+          "type": "string",
+          "default": "glm-4.6",
+          "description": "GLM model name (GLM_MODEL) used by refrag_glm/ctx.py when REFRAG_RUNTIME=glm."
         }
       }
     }
