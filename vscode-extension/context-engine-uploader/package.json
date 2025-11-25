@@ -36,6 +36,10 @@
       {
         "command": "contextEngineUploader.writeMcpConfig",
         "title": "Context Engine Uploader: Write MCP Config (.mcp.json)"
+      },
+      {
+        "command": "contextEngineUploader.writeCtxConfig",
+        "title": "Context Engine Uploader: Write CTX Config (ctx_config.json/.env)"
       }
     ],
     "configuration": {
@@ -64,7 +68,7 @@
         },
         "contextEngineUploader.endpoint": {
           "type": "string",
-          "default": "http://mcp.speramus.id:8004",
+          "default": "http://localhost:8004",
           "description": "Endpoint URL for the remote upload client."
         },
         "contextEngineUploader.intervalSeconds": {
@@ -99,11 +103,6 @@
           "default": "/work",
           "description": "Container path that mirrors the host root on the upload server."
         },
-        "contextEngineUploader.bundleSizeLimitMB": {
-          "type": "number",
-          "default": 100,
-          "description": "Maximum upload bundle size enforced by the Context Engine server (MB)."
-        },
         "contextEngineUploader.mcpClaudeEnabled": {
           "type": "boolean",
           "default": true,
@@ -124,6 +123,11 @@
           "default": "http://localhost:8000/sse",
           "description": "Claude Code MCP server URL for the memory/search MCP server. Used when writing the project-local .mcp.json via 'Write MCP Config'."
         },
+        "contextEngineUploader.ctxIndexerUrl": {
+          "type": "string",
+          "default": "http://localhost:8003/mcp",
+          "description": "CTX MCP indexer HTTP endpoint (MCP_INDEXER_URL) used by ctx.py when enhancing prompts via the Claude hook."
+        },
         "contextEngineUploader.windsurfMcpPath": {
           "type": "string",
           "default": "",
@@ -133,6 +137,36 @@
           "type": "boolean",
           "default": false,
           "description": "Enable writing the workspace .claude/settings.local.json hooks section for the Context Engine Claude Code hook."
+        },
+        "contextEngineUploader.surfaceQdrantCollectionHint": {
+          "type": "boolean",
+          "default": false,
+          "description": "When enabled and Claude MCP + hook configs are written, the CTX Claude hook adds a brief hint line with the Qdrant collection ID to enhanced prompts."
+        },
+        "contextEngineUploader.devRemoteMode": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable dev-remote upload mode for the standalone upload client. When enabled, the extension sets REMOTE_UPLOAD_MODE=development and DEV_REMOTE_MODE=1 for the child process, causing standalone_upload_client.py to ignore any 'dev-workspace' directories when scanning for files to upload."
+        },
+        "contextEngineUploader.scaffoldCtxConfig": {
+          "type": "boolean",
+          "default": true,
+          "description": "When enabled, the extension can create or update a minimal ctx_config.json and .env in the targetPath using the inferred collection name from the upload client."
+        },
+        "contextEngineUploader.glmApiKey": {
+          "type": "string",
+          "default": "",
+          "description": "GLM API key used by ctx.py when REFRAG_RUNTIME=glm. When scaffolding, this value is written to glm_api_key in ctx_config.json and GLM_API_KEY in .env if those fields are missing."
+        },
+        "contextEngineUploader.glmApiBase": {
+          "type": "string",
+          "default": "https://api.z.ai/api/coding/paas/v4/",
+          "description": "GLM API base URL (GLM_API_BASE) used by refrag_glm/ctx.py when REFRAG_RUNTIME=glm."
+        },
+        "contextEngineUploader.glmModel": {
+          "type": "string",
+          "default": "glm-4.6",
+          "description": "GLM model name (GLM_MODEL) used by refrag_glm/ctx.py when REFRAG_RUNTIME=glm."
         }
       }
     }

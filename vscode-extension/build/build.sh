@@ -11,6 +11,9 @@ BUNDLE_DEPS="${1:-}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 HOOK_SRC="$SCRIPT_DIR/../../ctx-hook-simple.sh"
 CTX_SRC="$SCRIPT_DIR/../../scripts/ctx.py"
+ROUTER_SRC="$SCRIPT_DIR/../../scripts/mcp_router.py"
+REFRAG_SRC="$SCRIPT_DIR/../../scripts/refrag_glm.py"
+ENV_EXAMPLE_SRC="$SCRIPT_DIR/../../.env.example"
 
 cleanup() {
     rm -rf "$STAGE_DIR"
@@ -43,6 +46,16 @@ if [[ -f "$HOOK_SRC" ]]; then
 fi
 if [[ -f "$CTX_SRC" ]]; then
     cp "$CTX_SRC" "$STAGE_DIR/ctx.py"
+fi
+if [[ -f "$ROUTER_SRC" ]]; then
+    cp "$ROUTER_SRC" "$STAGE_DIR/mcp_router.py"
+fi
+if [[ -f "$REFRAG_SRC" ]]; then
+    cp "$REFRAG_SRC" "$STAGE_DIR/refrag_glm.py"
+fi
+
+if [[ -f "$ENV_EXAMPLE_SRC" ]]; then
+    cp "$ENV_EXAMPLE_SRC" "$STAGE_DIR/env.example"
 fi
 
 # Optional: bundle Python deps into the staged extension when requested
