@@ -182,6 +182,19 @@ class SimpleHashCache:
         file_hashes[abs_path] = file_hash
         self._save_cache(file_hashes)
 
+    def all_paths(self) -> List[str]:
+        """Return all cached absolute file paths."""
+        file_hashes = self._load_cache()
+        return list(file_hashes.keys())
+
+    def remove_hash(self, file_path: str) -> None:
+        """Remove a cached file hash if present."""
+        file_hashes = self._load_cache()
+        abs_path = str(Path(file_path).resolve())
+        if abs_path in file_hashes:
+            file_hashes.pop(abs_path, None)
+            self._save_cache(file_hashes)
+
 # Create global cache instance (will be initialized in RemoteUploadClient)
 _hash_cache: Optional[SimpleHashCache] = None
 
@@ -197,6 +210,25 @@ def set_cached_file_hash(file_path: str, file_hash: str, repo_name: Optional[str
     global _hash_cache
     if _hash_cache:
         _hash_cache.set_hash(file_path, file_hash)
+
+
+def get_all_cached_paths(repo_name: Optional[str] = None) -> List[str]:
+    """Return all tracked file paths from the local cache.
+
+    The repo_name parameter is accepted for API symmetry with the non-standalone
+    client but is not used here, since this cache is always per-workspace.
+    """
+    global _hash_cache
+    if _hash_cache:
+        return _hash_cache.all_paths()
+    return []
+
+
+def remove_cached_file(file_path: str, repo_name: Optional[str] = None) -> None:
+    """Remove a file entry from the local cache if present."""
+    global _hash_cache
+    if _hash_cache:
+        _hash_cache.remove_hash(file_path)
 
 
 class RemoteUploadClient:
@@ -582,6 +614,9 @@ class RemoteUploadClient:
                         "language": CODE_EXTS.get(path.suffix.lower(), "unknown")
                     }
                     operations.append(operation)
+                    # Once a delete operation has been recorded, drop the cache entry
+                    # so subsequent scans do not keep re-reporting the same deletion.
+                    remove_cached_file(str(path.resolve()), self.repo_name)
 
                 except Exception as e:
                     print(f"[bundle_create] Error processing deleted file {path}: {e}")
@@ -991,9 +1026,28 @@ class RemoteUploadClient:
         try:
             while True:
                 try:
-                    # Use existing change detection (get all files in workspace)
-                    all_files = self.get_all_code_files()
-                    changes = self.detect_file_changes(all_files)
+                    # Use existing change detection over both filesystem and cached registry
+                    fs_files = self.get_all_code_files()
+                    path_map = {}
+                    for p in fs_files:
+                        try:
+                            resolved = p.resolve()
+                        except Exception:
+                            continue
+                        path_map[resolved] = p
+
+                    # Include any paths that are only present in the local cache (deleted files)
+                    for cached_abs in get_all_cached_paths(self.repo_name):
+                        try:
+                            cached_path = Path(cached_abs)
+                            resolved = cached_path.resolve()
+                        except Exception:
+                            continue
+                        if resolved not in path_map:
+                            path_map[resolved] = cached_path
+
+                    all_paths = list(path_map.values())
+                    changes = self.detect_file_changes(all_paths)
 
                     # Count only meaningful changes (exclude unchanged)
                     meaningful_changes = len(changes.get("created", [])) + len(changes.get("updated", [])) + len(changes.get("deleted", [])) + len(changes.get("moved", []))

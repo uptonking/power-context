@@ -37,10 +37,41 @@ from scripts.workspace_state import (
     set_cached_file_hash,
     get_collection_name,
     _extract_repo_name_from_path,
+    remove_cached_file,
 )
 
 # Import existing hash function
 import scripts.ingest_code as idx
+
+
+def _load_local_cache_file_hashes(workspace_path: str, repo_name: Optional[str]) -> Dict[str, str]:
+    """Best-effort read of the local cache.json file_hashes map.
+
+    This mirrors the layout used by workspace_state without introducing new
+    dependencies. It is used only to enumerate candidate paths; normal hash
+    lookups still go through get_cached_file_hash.
+    """
+    try:
+        base = Path(os.environ.get("WORKSPACE_PATH") or workspace_path).resolve()
+        multi_repo = os.environ.get("MULTI_REPO_MODE", "0").strip().lower() in {"1", "true", "yes", "on"}
+        if multi_repo and repo_name:
+            cache_path = base / ".codebase" / "repos" / repo_name / "cache.json"
+        else:
+            cache_path = base / ".codebase" / "cache.json"
+
+        if not cache_path.exists():
+            return {}
+
+        with open(cache_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return {}
+        file_hashes = data.get("file_hashes", {})
+        if not isinstance(file_hashes, dict):
+            return {}
+        return file_hashes
+    except Exception:
+        return {}
 
 
 class RemoteUploadClient:
@@ -424,6 +455,13 @@ class RemoteUploadClient:
                         "language": idx.CODE_EXTS.get(path.suffix.lower(), "unknown")
                     }
                     operations.append(operation)
+
+                    # Once a delete operation has been recorded, drop the cache entry
+                    # so subsequent scans do not keep re-reporting the same deletion.
+                    try:
+                        remove_cached_file(str(path.resolve()), self.repo_name)
+                    except Exception:
+                        pass
 
                 except Exception as e:
                     print(f"[bundle_create] Error processing deleted file {path}: {e}")
@@ -874,9 +912,29 @@ class RemoteUploadClient:
         try:
             while True:
                 try:
-                    # Use existing change detection (get all files in workspace)
-                    all_files = self.get_all_code_files()
-                    changes = self.detect_file_changes(all_files)
+                    # Use existing change detection over both filesystem and cached registry
+                    fs_files = self.get_all_code_files()
+                    path_map = {}
+                    for p in fs_files:
+                        try:
+                            resolved = p.resolve()
+                        except Exception:
+                            continue
+                        path_map[resolved] = p
+
+                    # Include any paths that are only present in the local cache (deleted files)
+                    cached_file_hashes = _load_local_cache_file_hashes(self.workspace_path, self.repo_name)
+                    for cached_abs in cached_file_hashes.keys():
+                        try:
+                            cached_path = Path(cached_abs)
+                            resolved = cached_path.resolve()
+                        except Exception:
+                            continue
+                        if resolved not in path_map:
+                            path_map[resolved] = cached_path
+
+                    all_paths = list(path_map.values())
+                    changes = self.detect_file_changes(all_paths)
 
                     # Count only meaningful changes (exclude unchanged)
                     meaningful_changes = len(changes.get("created", [])) + len(changes.get("updated", [])) + len(changes.get("deleted", [])) + len(changes.get("moved", []))
