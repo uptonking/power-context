@@ -49,8 +49,8 @@ All settings live under `Context Engine Uploader` in the VS Code settings UI or 
 | `contextEngineUploader.decoderUrl` | Override `DECODER_URL` passed into `scripts/ctx.py` when running Prompt+. Defaults to local llama.cpp (`http://localhost:8081`, auto-appends `/completion`). Use `http://localhost:11434/api/chat` for Ollama. |
 | `contextEngineUploader.useGlmDecoder` | Set `REFRAG_RUNTIME=glm` for Prompt+ to hit GLM instead of Ollama/llama.cpp. |
 | `contextEngineUploader.useGpuDecoder` | Set `USE_GPU_DECODER=1` so ctx.py prefers the GPU llama.cpp sidecar. |
-| `contextEngineUploader.targetPath` | Absolute path that should be passed to `--path` (for example `/Users/mikah/Nadi/dumon/dumon-ai-engine-revised`). |
-| `contextEngineUploader.endpoint` | Remote endpoint passed to `--endpoint`, defaulting to `http://mcp.speramus.id:8004`. |
+| `contextEngineUploader.targetPath` | Absolute path that should be passed to `--path` (for example `/users/mycode`). |
+| `contextEngineUploader.endpoint` | Remote endpoint passed to `--endpoint`, defaulting to `http://localhost:8004`. |
 | `contextEngineUploader.intervalSeconds` | Poll interval for watch mode. Set to `5` to match the previous command file. |
 | `contextEngineUploader.extraForceArgs` | Optional string array appended to the force invocation. Leave empty for the standard workflow. |
 | `contextEngineUploader.extraWatchArgs` | Optional string array appended to the watch invocation. |
