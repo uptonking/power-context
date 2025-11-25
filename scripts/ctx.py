@@ -58,25 +58,39 @@ from pathlib import Path
 
 # Load .env file if it exists (for local CLI usage)
 def _load_env_file():
-    """Load .env file from project root if it exists."""
-    # Find project root (where .env should be)
-    script_dir = Path(__file__).resolve().parent
-    project_root = script_dir.parent
-    env_file = project_root / ".env"
+	"""Load .env file from workspace (if provided) or project root if it exists."""
+	# Prefer an explicit workspace root (set by the hook) when available,
+	# otherwise fall back to the original project-root behavior based on this file.
+	script_dir = Path(__file__).resolve().parent
+	candidates = []
 
-    if env_file.exists():
-        with open(env_file) as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                if "=" in line:
-                    key, value = line.split("=", 1)
-                    key = key.strip()
-                    value = value.strip().strip('"').strip("'")
-                    # Only set if not already in environment
-                    if key and key not in os.environ:
-                        os.environ[key] = value
+	workspace_dir = os.environ.get("CTX_WORKSPACE_DIR")
+	if workspace_dir:
+		try:
+			candidates.append(Path(workspace_dir) / ".env")
+		except Exception:
+			pass
+
+	# Original project-root-based .env (for CLI / repo-local usage)
+	candidates.append(script_dir.parent / ".env")
+
+	for env_file in candidates:
+		if not env_file.exists():
+			continue
+		with open(env_file) as f:
+			for line in f:
+				line = line.strip()
+				if not line or line.startswith("#"):
+					continue
+				if "=" in line:
+					key, value = line.split("=", 1)
+					key = key.strip()
+					value = value.strip().strip('"').strip("'")
+					# Only set if not already in environment
+					if key and key not in os.environ:
+						os.environ[key] = value
+		# Only load the first existing .env
+		break
 
 _load_env_file()
 
@@ -261,7 +275,8 @@ def format_search_results(results: List[Dict[str, Any]], include_snippets: bool 
     """
     lines: List[str] = []
     for hit in results:
-        path = hit.get("path", "unknown")
+        # Prefer client-facing host_path, fall back to container path
+        path = hit.get("host_path") or hit.get("path", "unknown")
         start = hit.get("start_line", "?")
         end = hit.get("end_line", "?")
         language = hit.get("language") or ""
@@ -461,17 +476,48 @@ def sanitize_citations(text: str, allowed_paths: Set[str]) -> str:
         return text
     from os.path import basename
     allowed_set = set(allowed_paths or set())
-    allowed_basenames = {basename(p) for p in allowed_set}
+    basename_to_paths: Dict[str, Set[str]] = {}
+    for _p in allowed_set:
+        _b = basename(_p)
+        if _b:
+            basename_to_paths.setdefault(_b, set()).add(_p)
+
+    root = (os.environ.get("CTX_WORKSPACE_DIR") or "").strip()
+
+    def _to_display_path(full_path: str) -> str:
+        if not full_path:
+            return full_path
+        if not root:
+            return full_path
+        try:
+            root_norm = root.rstrip("/\\")
+            repo_name = os.path.basename(root_norm) if root_norm else ""
+            if full_path == root_norm:
+                return repo_name or "."
+            if full_path.startswith(root_norm + os.sep):
+                rel = os.path.relpath(full_path, root_norm)
+                if repo_name:
+                    return repo_name + os.sep + (rel or "")
+                return rel or "."
+        except Exception:
+            return full_path
+        return full_path
 
     def _repl(m):
         p = m.group(0)
-        if p in allowed_set or basename(p) in allowed_basenames:
+        if p in allowed_set:
+            return _to_display_path(p)
+        b = basename(p)
+        paths = basename_to_paths.get(b) if b else None
+        if paths:
+            if len(paths) == 1:
+                return _to_display_path(next(iter(paths)))
             return p
         return "the referenced file"
 
     cleaned = re.sub(r"/path/to/[^\s]+", "the referenced file", text)
     # Simple path-like matcher: segments with a slash and a dot-ext
-    cleaned = re.sub(r"(?<!\w)[./\w-]+/[./\w-]+\.[A-Za-z0-9_-]+", _repl, cleaned)
+    cleaned = re.sub(r"(?<!\w)([./\w-]+/[./\w-]+\.[A-Za-z0-9_-]+|[A-Za-z0-9_.-]+\.[A-Za-z0-9_-]+)", _repl, cleaned)
     return cleaned
 
 
@@ -901,6 +947,26 @@ def fetch_context(query: str, **filters) -> Tuple[str, str]:
     sys.stderr.write(f"[DEBUG] repo_search returned {len(hits)} hits (relevance={relevance:.3f})\n")
     sys.stderr.flush()
 
+    # Optional path-level debug: sample raw paths coming back from MCP
+    debug_paths_flag = os.environ.get("CTX_DEBUG_PATHS", "").strip().lower()
+    if debug_paths_flag in {"1", "true", "yes", "on"} and hits:
+        try:
+            sample = [
+                {
+                    "path": h.get("path"),
+                    "host_path": h.get("host_path"),
+                    "container_path": h.get("container_path"),
+                    "start_line": h.get("start_line"),
+                    "end_line": h.get("end_line"),
+                    "symbol": h.get("symbol"),
+                }
+                for h in hits[:5]
+            ]
+            sys.stderr.write("[DEBUG] repo_search sample paths:\n" + json.dumps(sample, indent=2) + "\n")
+            sys.stderr.flush()
+        except Exception:
+            pass
+
     gate_flag = os.environ.get("CTX_RELEVANCE_GATE", "").strip().lower()
     if hits and gate_flag in {"1", "true", "yes", "on"}:
         try:
@@ -960,10 +1026,12 @@ def rewrite_prompt(original_prompt: str, context: str, note: str, max_tokens: Op
     else:
         policy_system = (
             "If context is provided, use it to make the prompt more concrete by citing specific file paths, line ranges, and symbols that appear in the Context refs. "
+            "When you cite a file, use its full path exactly as it appears in the Context refs, including all directories and prefixes (for example, '/home/.../ctx.py'), rather than shortening it to just a filename. "
             "Never invent references - only cite what appears verbatim in the Context refs. "
         )
         policy_user = (
             "If the context above contains relevant references, cite concrete file paths, line ranges, and symbols in your rewrite. "
+            "When mentioning a file, use the full path exactly as shown in the Context refs (including directories), not a shortened form like 'ctx.py'. "
         )
 
     # Detect if we have actual code context or just a diagnostic note
@@ -1291,6 +1359,10 @@ Examples:
         else:
             context_text, context_note = fetch_context(args.query, **filters)
 
+            # Derive allowed paths from the formatted context so we can validate/normalize
+            # any file-like mentions in the final rewrite.
+            allowed_paths, _ = extract_allowed_citations(context_text)
+
             require_ctx_flag = os.environ.get("CTX_REQUIRE_CONTEXT", "").strip().lower()
             if require_ctx_flag in {"1", "true", "yes", "on"}:
                 has_real_context = bool((context_text or "").strip()) and not (
@@ -1304,10 +1376,10 @@ Examples:
                     output = (args.query or "").strip()
                 else:
                     rewritten = rewrite_prompt(args.query, context_text, context_note, max_tokens=args.rewrite_max_tokens)
-                    output = rewritten.strip()
+                    output = sanitize_citations(rewritten.strip(), allowed_paths)
             else:
                 rewritten = rewrite_prompt(args.query, context_text, context_note, max_tokens=args.rewrite_max_tokens)
-                output = rewritten.strip()
+                output = sanitize_citations(rewritten.strip(), allowed_paths)
 
         if args.cmd:
             subprocess.run(args.cmd, input=output.encode("utf-8"), shell=True, check=False)
