@@ -1101,6 +1101,18 @@ async function scaffoldCtxConfigFiles(workspaceDir, collectionName) {
       ctxConfig.require_context = true;
       ctxChanged = true;
     }
+    if (ctxConfig.surface_qdrant_collection_hint === undefined) {
+      let surfaceHintSetting = true;
+      if (uploaderSettings) {
+        try {
+          surfaceHintSetting = !!uploaderSettings.get('surfaceQdrantCollectionHint', true);
+        } catch (error) {
+          log(`Failed to read surfaceQdrantCollectionHint from configuration: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      ctxConfig.surface_qdrant_collection_hint = surfaceHintSetting;
+      ctxChanged = true;
+    }
     if (ctxConfig.refrag_runtime !== decoderRuntime) {
       ctxConfig.refrag_runtime = decoderRuntime;
       ctxChanged = true;
@@ -1482,9 +1494,9 @@ async function writeClaudeHookConfig(root, commandPath) {
     if (!config.hooks || typeof config.hooks !== 'object') {
       config.hooks = {};
     }
-    // Derive CTX workspace directory and optional hint flags for the hook from extension settings
+    // Derive CTX workspace directory for the hook from extension settings.
+    // Collection hint behavior is now driven by ctx_config.json, not hook env.
     let hookEnv;
-    let surfaceHintEnabled = false;
     try {
       const uploaderConfig = vscode.workspace.getConfiguration('contextEngineUploader');
       const targetPath = (uploaderConfig.get('targetPath') || '').trim();
@@ -1492,19 +1504,9 @@ async function writeClaudeHookConfig(root, commandPath) {
         const resolvedTarget = path.resolve(targetPath);
         hookEnv = { CTX_WORKSPACE_DIR: resolvedTarget };
       }
-      const surfaceHint = uploaderConfig.get('surfaceQdrantCollectionHint', true);
-      const claudeMcpEnabled = uploaderConfig.get('mcpClaudeEnabled', true);
-      surfaceHintEnabled = !!(surfaceHint && claudeMcpEnabled);
-      if (surfaceHintEnabled) {
-        if (!hookEnv) {
-          hookEnv = {};
-        }
-        hookEnv.CTX_SURFACE_COLLECTION_HINT = '1';
-      }
     } catch (error) {
       // Best-effort only; if anything fails, fall back to no extra env
       hookEnv = undefined;
-      surfaceHintEnabled = false;
     }
 
     const hook = {
@@ -1546,11 +1548,6 @@ async function writeClaudeHookConfig(root, commandPath) {
           }
           if (hookEnv) {
             existing.env = { ...existing.env, ...hookEnv };
-          }
-          if (!surfaceHintEnabled && Object.prototype.hasOwnProperty.call(existing.env, 'CTX_SURFACE_COLLECTION_HINT')) {
-            delete existing.env.CTX_SURFACE_COLLECTION_HINT;
-          } else if (surfaceHintEnabled) {
-            existing.env.CTX_SURFACE_COLLECTION_HINT = '1';
           }
           updated = true;
         }
