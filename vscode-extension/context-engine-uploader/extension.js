@@ -303,8 +303,19 @@ async function ensurePythonDependencies(pythonPath) {
 async function checkPythonDeps(pythonPath) {
   const missing = [];
   let pythonError;
+  const env = { ...process.env };
+  try {
+    const libsPath = path.join(extensionRoot, 'python_libs');
+    if (fs.existsSync(libsPath)) {
+      const existing = env.PYTHONPATH || '';
+      env.PYTHONPATH = existing ? `${libsPath}${path.delimiter}${existing}` : libsPath;
+      log(`Using bundled python_libs at ${libsPath} for dependency check.`);
+    }
+  } catch (error) {
+    log(`Failed to configure PYTHONPATH for dependency check: ${error instanceof Error ? error.message : String(error)}`);
+  }
   for (const moduleName of REQUIRED_PYTHON_MODULES) {
-    const check = spawnSync(pythonPath, ['-c', `import ${moduleName}`], { encoding: 'utf8' });
+    const check = spawnSync(pythonPath, ['-c', `import ${moduleName}`], { encoding: 'utf8', env });
     if (check.error) {
       pythonError = check.error;
       break;
