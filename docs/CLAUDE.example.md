@@ -83,21 +83,22 @@ Agentic AI Project Rules: When to Use MCP Qdrant-Indexer vs Grep
     - Use for: combining code hits with memory/docs when both matter.
     - Good for: "give me related code plus any notes/docs I wrote".
   - context_answer:
-    - Use for: natural-language explanations grounded in code, with citations.
-    - Good for: "how do uploads get triggered when files change?", "where is the watcher wired into the indexer?".
+    - Use for: short natural-language summaries/explanations of specific modules or tools, grounded in code/docs with citations.
+    - Good for: "What does scripts/standalone_upload_client.py do at a high level?", "Summarize the remote upload client pipeline.".
 
   Query Phrasing Tips for context_answer:
 
-  - Prefer behavior/architecture questions:
-    - "How do uploads get triggered when files change?"
-    - "Where is the VS Code file watcher that triggers indexing uploads?"
+  - Prefer behavior/architecture questions about a single module or tool:
+    - "What does scripts/standalone_upload_client.py do at a high level?"
+    - "Summarize how the remote upload client interacts with the indexer service."
   - If you care about a specific file, mention it explicitly:
     - "What does ingest_code.py do?", "Explain ensureIndexedWatcher in extension.js".
   - Mentioning a specific filename can bias retrieval to that file; for cross-file wiring
     questions, prefer behavior-describing queries without filenames.
-  - For very cross-file questions, you can:
-    - First use repo_search to discover key files,
-    - Then call context_answer with a behavior-focused question that doesn't over-specify filenames.
+  - For very cross-file or multi-part questions, you can:
+    - First use repo_search to discover key files and read critical code directly,
+    - Then call context_answer to summarize behavior, using a behavior-focused question that doesn't over-specify filenames.
+  - Avoid using context_answer as a primary debugger for low-level helper/env behavior; prefer repo_search + direct code reading for detailed semantics.
 
   Remember: the MCP tools themselves expose detailed descriptions and parameter docs.
   Use those for exact knobs; this guide is about choosing the right tool and shaping good queries.
