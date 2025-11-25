@@ -39,21 +39,30 @@ class GLMRefragClient:
         top_p = float(gen_kwargs.get("top_p", 0.95))
         stop = gen_kwargs.get("stop")
         timeout = gen_kwargs.pop("timeout", None)
+        # Optional hint from callers that they want strict JSON output.
+        force_json = bool(gen_kwargs.pop("force_json", False))
         try:
             timeout_val = float(timeout) if timeout is not None else None
         except Exception:
             timeout_val = None
 
         try:
-            response = self.client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=int(gen_kwargs.get("max_tokens", max_tokens)),
-                temperature=temperature,
-                top_p=top_p,
-                stop=stop if stop else None,
-                timeout=timeout_val,
-            )
+            create_kwargs: dict[str, Any] = {
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": int(gen_kwargs.get("max_tokens", max_tokens)),
+                "temperature": temperature,
+                "top_p": top_p,
+                "stop": stop if stop else None,
+                "timeout": timeout_val,
+            }
+            # When explicitly requested and supported by the backend, ask for
+            # JSON-only responses. If the provider rejects this parameter, the
+            # API call will raise and the caller will handle the failure.
+            if force_json:
+                create_kwargs["response_format"] = {"type": "json_object"}
+
+            response = self.client.chat.completions.create(**create_kwargs)
             msg = response.choices[0].message
             # GLM-4.6 uses reasoning_content for thinking models
             content = getattr(msg, 'reasoning_content', None) or msg.content or ""

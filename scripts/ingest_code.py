@@ -637,24 +637,49 @@ def generate_pseudo_tags(text: str) -> tuple[str, list[str]]:
     if not _pseudo_describe_enabled() or not text.strip():
         return pseudo, tags
     try:
-        from scripts.refrag_llamacpp import LlamaCppRefragClient, is_decoder_enabled  # type: ignore
+        from scripts.refrag_llamacpp import (  # type: ignore
+            LlamaCppRefragClient,
+            is_decoder_enabled,
+            get_runtime_kind,
+        )
         if not is_decoder_enabled():
             return "", []
-        # Keep decoding tight/fast – this is only enrichment for retrieval
-        prompt = (
-            "You label code spans for search enrichment.\n"
-            "Return strictly JSON: {\"pseudo\": string (<=20 tokens), \"tags\": [3-6 short strings]}.\n"
-            "Code:\n" + text[:2000]
-        )
-        client = LlamaCppRefragClient()
-        out = client.generate_with_soft_embeddings(
-            prompt=prompt,
-            max_tokens=int(os.environ.get("PSEUDO_MAX_TOKENS", "96") or 96),
-            temperature=float(os.environ.get("PSEUDO_TEMPERATURE", "0.10") or 0.10),
-            top_k=int(os.environ.get("PSEUDO_TOP_K", "30") or 30),
-            top_p=float(os.environ.get("PSEUDO_TOP_P", "0.9") or 0.9),
-            stop=["\n\n"],
-        )
+        runtime = get_runtime_kind()
+        # Keep decoding tight/fast – this is only enrichment for retrieval.
+        # Preserve original llama.cpp prompt semantics, and use a stricter
+        # JSON-only prompt only for the GLM runtime.
+        if runtime == "glm":
+            prompt = (
+                "You are a JSON-only function that labels code spans for search enrichment.\n"
+                "Respond with a single JSON object and nothing else (no prose, no markdown).\n"
+                "Exact format: {\"pseudo\": string (<=20 tokens), \"tags\": [3-6 short strings]}.\n"
+                "Code:\n" + text[:2000]
+            )
+            from scripts.refrag_glm import GLMRefragClient  # type: ignore
+            client = GLMRefragClient()
+            out = client.generate_with_soft_embeddings(
+                prompt=prompt,
+                max_tokens=int(os.environ.get("PSEUDO_MAX_TOKENS", "96") or 96),
+                temperature=float(os.environ.get("PSEUDO_TEMPERATURE", "0.10") or 0.10),
+                top_p=float(os.environ.get("PSEUDO_TOP_P", "0.9") or 0.9),
+                stop=["\n\n"],
+                force_json=True,
+            )
+        else:
+            prompt = (
+                "You label code spans for search enrichment.\n"
+                "Return strictly JSON: {\"pseudo\": string (<=20 tokens), \"tags\": [3-6 short strings]}.\n"
+                "Code:\n" + text[:2000]
+            )
+            client = LlamaCppRefragClient()
+            out = client.generate_with_soft_embeddings(
+                prompt=prompt,
+                max_tokens=int(os.environ.get("PSEUDO_MAX_TOKENS", "96") or 96),
+                temperature=float(os.environ.get("PSEUDO_TEMPERATURE", "0.10") or 0.10),
+                top_k=int(os.environ.get("PSEUDO_TOP_K", "30") or 30),
+                top_p=float(os.environ.get("PSEUDO_TOP_P", "0.9") or 0.9),
+                stop=["\n\n"],
+            )
         import json as _json
         try:
             obj = _json.loads(out)
@@ -2533,6 +2558,20 @@ def main():
         default=None,
         help="Print progress every N files (default 200; 0 disables)",
     )
+    # GLM psueo tag test - # TODO: Remove GLM psuedo tag test harness after confirming 100% stable and not needed
+    parser.add_argument(
+        "--test-pseudo",
+        type=str,
+        default=None,
+        help="Test generate_pseudo_tags on the given code snippet and print result, then exit",
+    )
+    parser.add_argument(
+        "--test-pseudo-file",
+        type=str,
+        default=None,
+        help="Test generate_pseudo_tags on the contents of the given file and print result, then exit",
+    )
+    # End
 
     args = parser.parse_args()
 
@@ -2556,6 +2595,53 @@ def main():
         os.environ["INDEX_CHUNK_OVERLAP"] = str(args.chunk_overlap)
     if args.progress_every is not None:
         os.environ["INDEX_PROGRESS_EVERY"] = str(args.progress_every)
+
+    # TODO: Remove GLM psuedo tag test harness after confirming 100% stable and not needed
+    # # Optional test mode: exercise generate_pseudo_tags (including GLM runtime) and exit
+    if args.test_pseudo or args.test_pseudo_file:
+        import json as _json
+
+        code_text = ""
+        if args.test_pseudo:
+            code_text = args.test_pseudo
+        if args.test_pseudo_file:
+            try:
+                code_text = Path(args.test_pseudo_file).read_text(
+                    encoding="utf-8", errors="ignore"
+                )
+            except Exception as e:
+                print(f"[TEST_PSEUDO] Failed to read file {args.test_pseudo_file}: {e}")
+                return
+        if not code_text.strip():
+            print("[TEST_PSEUDO] No code text provided")
+            return
+
+        # Use the normal generate_pseudo_tags path so behavior matches indexing.
+        try:
+            from scripts.refrag_llamacpp import get_runtime_kind  # type: ignore
+
+            runtime = get_runtime_kind()
+        except Exception:
+            runtime = "unknown"
+
+        pseudo, tags = "", []
+        try:
+            pseudo, tags = generate_pseudo_tags(code_text)
+        except Exception as e:
+            print(f"[TEST_PSEUDO] Error while generating pseudo tags: {e}")
+
+        print(
+            _json.dumps(
+                {
+                    "runtime": runtime,
+                    "pseudo": pseudo,
+                    "tags": tags,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return
 
     qdrant_url = os.environ.get("QDRANT_URL", "http://localhost:6333")
     api_key = os.environ.get("QDRANT_API_KEY")
