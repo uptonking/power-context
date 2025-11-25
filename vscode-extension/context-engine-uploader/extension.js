@@ -687,10 +687,6 @@ async function enhanceSelectionWithUnicorn() {
   }
   try {
     const cfg = vscode.workspace.getConfiguration('contextEngineUploader');
-    const useGlmDecoder = cfg.get('useGlmDecoder', false);
-    if (useGlmDecoder) {
-      env.REFRAG_RUNTIME = 'glm';
-    }
     const useGpuDecoder = cfg.get('useGpuDecoder', false);
     if (useGpuDecoder) {
       env.USE_GPU_DECODER = '1';
@@ -1036,26 +1032,42 @@ async function scaffoldCtxConfigFiles(workspaceDir, collectionName) {
   try {
     const placeholders = new Set(['', 'default-collection', 'my-collection', 'codebase']);
 
-    // Read GLM settings from extension configuration (with sane defaults)
+    let uploaderSettings;
+    try {
+      uploaderSettings = vscode.workspace.getConfiguration('contextEngineUploader');
+    } catch (error) {
+      log(`Failed to read uploader settings: ${error instanceof Error ? error.message : String(error)}`);
+      uploaderSettings = undefined;
+    }
+
+    // Decoder/runtime settings from configuration
+    let decoderRuntime = 'glm';
+    let useGpuDecoderSetting = false;
     let glmApiKey = '';
     let glmApiBase = 'https://api.z.ai/api/coding/paas/v4/';
     let glmModel = 'glm-4.6';
-    try {
-      const settings = vscode.workspace.getConfiguration('contextEngineUploader');
-      const cfgKey = (settings.get('glmApiKey') || '').trim();
-      const cfgBase = (settings.get('glmApiBase') || '').trim();
-      const cfgModel = (settings.get('glmModel') || '').trim();
-      if (cfgKey) {
-        glmApiKey = cfgKey;
+    if (uploaderSettings) {
+      try {
+        const runtimeSetting = String(uploaderSettings.get('decoderRuntime') ?? 'glm').trim().toLowerCase();
+        if (runtimeSetting === 'llamacpp') {
+          decoderRuntime = 'llamacpp';
+        }
+        useGpuDecoderSetting = !!uploaderSettings.get('useGpuDecoder', false);
+        const cfgKey = (uploaderSettings.get('glmApiKey') || '').trim();
+        const cfgBase = (uploaderSettings.get('glmApiBase') || '').trim();
+        const cfgModel = (uploaderSettings.get('glmModel') || '').trim();
+        if (cfgKey) {
+          glmApiKey = cfgKey;
+        }
+        if (cfgBase) {
+          glmApiBase = cfgBase;
+        }
+        if (cfgModel) {
+          glmModel = cfgModel;
+        }
+      } catch (error) {
+        log(`Failed to read decoder/GLM settings from configuration: ${error instanceof Error ? error.message : String(error)}`);
       }
-      if (cfgBase) {
-        glmApiBase = cfgBase;
-      }
-      if (cfgModel) {
-        glmModel = cfgModel;
-      }
-    } catch (error) {
-      log(`Failed to read GLM settings from configuration: ${error instanceof Error ? error.message : String(error)}`);
     }
 
     // ctx_config.json
@@ -1089,27 +1101,29 @@ async function scaffoldCtxConfigFiles(workspaceDir, collectionName) {
       ctxConfig.require_context = true;
       ctxChanged = true;
     }
-    if (ctxConfig.refrag_runtime === undefined) {
-      ctxConfig.refrag_runtime = 'glm';
+    if (ctxConfig.refrag_runtime !== decoderRuntime) {
+      ctxConfig.refrag_runtime = decoderRuntime;
       ctxChanged = true;
     }
-    if (ctxConfig.glm_api_base === undefined) {
-      ctxConfig.glm_api_base = glmApiBase;
-      ctxChanged = true;
-    }
-    if (ctxConfig.glm_model === undefined) {
-      ctxConfig.glm_model = glmModel;
-      ctxChanged = true;
-    }
-    const existingGlmKey = typeof ctxConfig.glm_api_key === 'string' ? ctxConfig.glm_api_key.trim() : '';
-    if (glmApiKey) {
-      if (!existingGlmKey) {
-        ctxConfig.glm_api_key = glmApiKey;
+    if (decoderRuntime === 'glm') {
+      if (ctxConfig.glm_api_base === undefined) {
+        ctxConfig.glm_api_base = glmApiBase;
         ctxChanged = true;
       }
-    } else if (ctxConfig.glm_api_key === undefined) {
-      ctxConfig.glm_api_key = '';
-      ctxChanged = true;
+      if (ctxConfig.glm_model === undefined) {
+        ctxConfig.glm_model = glmModel;
+        ctxChanged = true;
+      }
+      const existingGlmKey = typeof ctxConfig.glm_api_key === 'string' ? ctxConfig.glm_api_key.trim() : '';
+      if (glmApiKey) {
+        if (!existingGlmKey) {
+          ctxConfig.glm_api_key = glmApiKey;
+          ctxChanged = true;
+        }
+      } else if (ctxConfig.glm_api_key === undefined) {
+        ctxConfig.glm_api_key = '';
+        ctxChanged = true;
+      }
     }
     if (ctxChanged) {
       fs.writeFileSync(ctxConfigPath, JSON.stringify(ctxConfig, null, 2) + '\n', 'utf8');
@@ -1251,34 +1265,38 @@ async function scaffoldCtxConfigFiles(workspaceDir, collectionName) {
     upsertEnv('MULTI_REPO_MODE', '1', { overwrite: true });
     upsertEnv('REFRAG_MODE', '1', { overwrite: true });
     upsertEnv('REFRAG_DECODER', '1', { overwrite: true });
-    upsertEnv('REFRAG_RUNTIME', 'glm', { overwrite: true, placeholderValues: ['llamacpp'] });
+    upsertEnv('REFRAG_RUNTIME', decoderRuntime, { overwrite: true, placeholderValues: ['llamacpp', 'glm'] });
+    upsertEnv('USE_GPU_DECODER', useGpuDecoderSetting ? '1' : '0', { overwrite: true });
 
     // Ensure decoder/GLM env vars exist with sane defaults
     upsertEnv('REFRAG_ENCODER_MODEL', 'BAAI/bge-base-en-v1.5', { treatEmptyAsUnset: true });
     upsertEnv('REFRAG_PHI_PATH', '/work/models/refrag_phi_768_to_dmodel.bin', { treatEmptyAsUnset: true });
     upsertEnv('REFRAG_SENSE', 'heuristic', { treatEmptyAsUnset: true });
 
-    const glmKeyPlaceholders = ['YOUR_GLM_API_KEY', '"YOUR_GLM_API_KEY"', "''", '""'];
-    if (glmApiKey) {
-      upsertEnv('GLM_API_KEY', glmApiKey, {
-        treatEmptyAsUnset: true,
-        placeholderValues: glmKeyPlaceholders
-      });
-    } else {
-      upsertEnv('GLM_API_KEY', '', {});
+    if (decoderRuntime === 'glm') {
+      const glmKeyPlaceholders = ['YOUR_GLM_API_KEY', '"YOUR_GLM_API_KEY"', "''", '""'];
+      if (glmApiKey) {
+        upsertEnv('GLM_API_KEY', glmApiKey, {
+          treatEmptyAsUnset: true,
+          placeholderValues: glmKeyPlaceholders
+        });
+      } else {
+        upsertEnv('GLM_API_KEY', '', {});
+      }
+      upsertEnv('GLM_API_BASE', glmApiBase, { treatEmptyAsUnset: true });
+      upsertEnv('GLM_MODEL', glmModel, { treatEmptyAsUnset: true });
     }
-    upsertEnv('GLM_API_BASE', glmApiBase, { treatEmptyAsUnset: true });
-    upsertEnv('GLM_MODEL', glmModel, { treatEmptyAsUnset: true });
 
     // Ensure MCP_INDEXER_URL is present based on extension setting (for ctx.py)
-    try {
-      const settings = vscode.workspace.getConfiguration('contextEngineUploader');
-      const ctxIndexerUrl = (settings.get('ctxIndexerUrl') || 'http://localhost:8003/mcp').trim();
-      if (ctxIndexerUrl) {
-        upsertEnv('MCP_INDEXER_URL', ctxIndexerUrl, { treatEmptyAsUnset: true });
+    if (uploaderSettings) {
+      try {
+        const ctxIndexerUrl = (uploaderSettings.get('ctxIndexerUrl') || 'http://localhost:8003/mcp').trim();
+        if (ctxIndexerUrl) {
+          upsertEnv('MCP_INDEXER_URL', ctxIndexerUrl, { treatEmptyAsUnset: true });
+        }
+      } catch (error) {
+        log(`Failed to read ctxIndexerUrl setting for MCP_INDEXER_URL: ${error instanceof Error ? error.message : String(error)}`);
       }
-    } catch (error) {
-      log(`Failed to read ctxIndexerUrl setting for MCP_INDEXER_URL: ${error instanceof Error ? error.message : String(error)}`);
     }
 
     if (envChanged) {

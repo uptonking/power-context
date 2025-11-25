@@ -827,26 +827,43 @@ class RemoteUploadClient:
 
     def get_all_code_files(self) -> List[Path]:
         """Get all code files in the workspace."""
-        all_files = []
+        files: List[Path] = []
         try:
             workspace_path = Path(self.workspace_path)
-            for ext in idx.CODE_EXTS:
-                all_files.extend(workspace_path.rglob(f"*{ext}"))
+            if not workspace_path.exists():
+                return files
 
-            # Filter out directories and hidden files
+            # Single walk with early pruning similar to standalone client
+            ext_suffixes = {str(ext).lower() for ext in idx.CODE_EXTS if str(ext).startswith('.')}
+            name_matches = {str(ext) for ext in idx.CODE_EXTS if not str(ext).startswith('.')}
             dev_remote = os.environ.get("DEV_REMOTE_MODE") == "1" or os.environ.get("REMOTE_UPLOAD_MODE") == "development"
-            ignored_dirs = {"dev-workspace"} if dev_remote else set()
-            all_files = [
-                f for f in all_files
-                if f.is_file()
-                and not any(part.startswith('.') for part in f.parts)
-                and '.codebase' not in str(f)
-                and not any(part in ignored_dirs for part in f.parts)
-            ]
+            excluded = {
+                "node_modules", "vendor", "dist", "build", "target", "out",
+                ".git", ".hg", ".svn", ".vscode", ".idea", ".venv", "venv",
+                "__pycache__", ".pytest_cache", ".mypy_cache", ".cache",
+                ".context-engine", ".context-engine-uploader", ".codebase"
+            }
+            if dev_remote:
+                excluded.add("dev-workspace")
+
+            seen = set()
+            for root, dirnames, filenames in os.walk(workspace_path):
+                dirnames[:] = [d for d in dirnames if d not in excluded and not d.startswith('.')]
+
+                for filename in filenames:
+                    if filename.startswith('.'):
+                        continue
+                    candidate = Path(root) / filename
+                    suffix = candidate.suffix.lower()
+                    if filename in name_matches or suffix in ext_suffixes:
+                        resolved = candidate.resolve()
+                        if resolved not in seen:
+                            seen.add(resolved)
+                            files.append(candidate)
         except Exception as e:
             logger.error(f"[watch] Error scanning files: {e}")
 
-        return all_files
+        return files
 
     def watch_loop(self, interval: int = 5):
         """Main file watching loop using existing detection and upload methods."""

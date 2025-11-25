@@ -1042,7 +1042,7 @@ class RemoteUploadClient:
                 "__pycache__", ".pytest_cache", ".mypy_cache", ".cache",
                 ".context-engine", ".context-engine-uploader", ".codebase"
             }
-            if not dev_remote:
+            if dev_remote:
                 excluded.add("dev-workspace")
 
             seen = set()
