@@ -18,7 +18,7 @@ Configuration
 - `Target Path` is auto-filled from the workspace but can be overridden if you need to upload a different folder.
 - **Python dependencies:** the extension runs the standalone upload client via your configured `pythonPath`. Ensure the interpreter has `requests`, `urllib3`, and `charset_normalizer` installed. Run `python3 -m pip install requests urllib3 charset_normalizer` (or replace `python3` with your configured path) before starting the uploader.
 - **Path mapping:** `Host Root` + `Container Root` control how local paths are rewritten before reaching the remote service. By default the host root mirrors your `Target Path` and the container root is `/work`, which keeps Windows paths working without extra config.
-- **Prompt+ decoder:** set `Context Engine Uploader: Decoder Url` (default `http://localhost:8081`, auto-appends `/completion`) to point at your local llama.cpp decoder. For Ollama, set it to `http://localhost:11434/api/chat`. Turn on `Use Gpu Decoder` to set `USE_GPU_DECODER=1` so ctx.py prefers the GPU llama.cpp sidecar.
+- **Prompt+ decoder:** set `Context Engine Uploader: Decoder Url` (default `http://localhost:8081`, auto-appends `/completion`) to point at your local llama.cpp decoder. For Ollama, set it to `http://localhost:11434/api/chat`. Turn on `Use Gpu Decoder` to set `USE_GPU_DECODER=1` so ctx.py prefers the GPU llama.cpp sidecar. Prompt+ automatically runs the bundled `scripts/ctx.py` when an embedded copy is available, falling back to the workspace version if not.
 - **Claude Code MCP config:** `MCP Indexer Url` and `MCP Memory Url` control the URLs written into the project-local `.mcp.json` when you run the `Write MCP Config` command. This is only for configuring Claude Code MCP clients; other MCP integrations can be added separately later.
 - **CTX + GLM settings:**
   - `contextEngineUploader.ctxIndexerUrl` is copied into `.env` (as `MCP_INDEXER_URL`) so the embedded `ctx.py` knows which MCP indexer to call when enhancing prompts.
@@ -40,8 +40,8 @@ Workspace-level ctx integration
 
 Commands
 --------
-- Command Palette → “Context Engine Uploader” to access Start/Stop/Restart/Index Codebase.
-- Status-bar button (`Index Codebase`) mirrors the same behavior and displays progress.
+- Command Palette → “Context Engine Uploader” exposes Start/Stop/Restart/Index Codebase and Prompt+ (unicorn) rewrite commands.
+- Status-bar button (`Index Codebase`) mirrors Start/Stop/Restart/Index status, while the `Prompt+` status button runs the ctx rewrite command on the current selection.
 - `Context Engine Uploader: Write MCP Config (.mcp.json)` writes or updates a project-local `.mcp.json` with MCP server entries for the Qdrant indexer and memory/search endpoints, using the configured MCP URLs.
 - `Context Engine Uploader: Write CTX Config (ctx_config.json/.env)` scaffolds the ctx config + env files as described above. This command runs automatically after `Write MCP Config` if scaffolding is enabled, but it is also exposed in the Command Palette for manual use.
 
