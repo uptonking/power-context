@@ -82,11 +82,6 @@ spec:
             configMapKeyRef:
               name: context-engine-config
               key: LLAMACPP_MODEL_NAME
-        ports:
-        - name: http
-          containerPort: 8080
-          protocol: TCP
-        env:
         - name: LLAMA_ARG_MODEL
           value: "/models/model.gguf"
         - name: LLAMA_ARG_CTX_SIZE
@@ -95,6 +90,10 @@ spec:
           value: "0.0.0.0"
         - name: LLAMA_ARG_PORT
           value: "8080"
+        ports:
+        - name: http
+          containerPort: 8080
+          protocol: TCP
         command: ["llama-server"]
         args:
         - "--model"
