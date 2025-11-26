@@ -1,5 +1,9 @@
 # Kubernetes Deployment Guide
 
+**Documentation:** [README](../../README.md) · [Configuration](../../docs/CONFIGURATION.md) · [IDE Clients](../../docs/IDE_CLIENTS.md) · [MCP API](../../docs/MCP_API.md) · [ctx CLI](../../docs/CTX_CLI.md) · [Memory Guide](../../docs/MEMORY_GUIDE.md) · [Architecture](../../docs/ARCHITECTURE.md) · [Multi-Repo](../../docs/MULTI_REPO_COLLECTIONS.md) · Kubernetes · [VS Code Extension](../../docs/vscode-extension.md) · [Troubleshooting](../../docs/TROUBLESHOOTING.md) · [Development](../../docs/DEVELOPMENT.md)
+
+---
+
 ## Overview
 
 This directory contains Kubernetes manifests for deploying Context Engine on a remote cluster using **Kustomize**. This enables:

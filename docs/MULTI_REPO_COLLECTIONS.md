@@ -1,5 +1,18 @@
 # Multi-Repository Collection Architecture
 
+**Documentation:** [README](../README.md) · [Configuration](CONFIGURATION.md) · [IDE Clients](IDE_CLIENTS.md) · [MCP API](MCP_API.md) · [ctx CLI](CTX_CLI.md) · [Memory Guide](MEMORY_GUIDE.md) · [Architecture](ARCHITECTURE.md) · [Multi-Repo](MULTI_REPO_COLLECTIONS.md) · [Kubernetes](../deploy/kubernetes/README.md) · [VS Code Extension](vscode-extension.md) · [Troubleshooting](TROUBLESHOOTING.md) · [Development](DEVELOPMENT.md)
+
+---
+
+**On this page:**
+- [Overview](#overview)
+- [Architecture Principles](#architecture-principles)
+- [Indexing Multiple Repositories](#indexing-multiple-repositories)
+- [Filtering by Repository](#filtering-by-repository)
+- [Remote Deployment](#remote-deployment)
+
+---
+
 ## Overview
 
 Context Engine supports first-class multi-repository operation through a unified collection architecture. This enables:

@@ -1,8 +1,29 @@
-Context Engine Uploader VS Code Extension
-=========================================
+# VS Code Extension
 
-Build Prerequisites
--------------------
+Context Engine Uploader extension for automatic workspace sync and Prompt+ integration.
+
+**Documentation:** [README](../README.md) · [Configuration](CONFIGURATION.md) · [IDE Clients](IDE_CLIENTS.md) · [MCP API](MCP_API.md) · [ctx CLI](CTX_CLI.md) · [Memory Guide](MEMORY_GUIDE.md) · [Architecture](ARCHITECTURE.md) · [Multi-Repo](MULTI_REPO_COLLECTIONS.md) · [Kubernetes](../deploy/kubernetes/README.md) · [VS Code Extension](vscode-extension.md) · [Troubleshooting](TROUBLESHOOTING.md) · [Development](DEVELOPMENT.md)
+
+---
+
+**On this page:**
+- [Features](#features)
+- [Installation](#installation)
+- [Configuration](#configuration)
+- [Commands](#commands-and-lifecycle)
+
+---
+
+## Features
+
+- **Auto-sync**: Force sync on startup + watch mode keeps your workspace indexed
+- **Prompt+ button**: Status bar button to enhance selected text with unicorn mode
+- **Output channel**: Real-time logs for force-sync and watch operations
+- **GPU decoder support**: Configure llama.cpp, Ollama, or GLM as decoder backend
+
+## Installation
+
+### Build Prerequisites
 - Node.js 18+ and npm
 - Python 3 available on PATH for runtime testing
 - VS Code Extension Manager `vsce` (`npm install -g @vscode/vsce`) or run via `npx`
