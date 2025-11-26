@@ -39,7 +39,7 @@ spec:
           value: "6334"
         resources:
           requests:
-memory: "2Gi"
+            memory: "2Gi"
             cpu: "1"
           limits:
             memory: "8Gi"
@@ -49,13 +49,13 @@ memory: "2Gi"
           mountPath: /qdrant/storage
         livenessProbe:
           httpGet:
-path: /healthz
+            path: /healthz
             port: http
           initialDelaySeconds: 30
           periodSeconds: 10
         readinessProbe:
           httpGet:
-path: /readyz
+            path: /readyz
             port: http
           initialDelaySeconds: 5
           periodSeconds: 5
@@ -108,17 +108,17 @@ metadata:
     app: context-engine
     component: qdrant
 spec:
-type: NodePort  # Change to LoadBalancer if your cluster supports it
+  type: NodePort  # Change to LoadBalancer if your cluster supports it
   ports:
   - name: http
     port: 6333
     targetPort: http
-nodePort: 30333  # Optional: specify node port
+    nodePort: 30333  # Optional: specify node port
     protocol: TCP
   - name: grpc
     port: 6334
     targetPort: grpc
-nodePort: 30334  # Optional: specify node port
+    nodePort: 30334  # Optional: specify node port
     protocol: TCP
   selector:
     app: context-engine
