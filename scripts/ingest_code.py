@@ -697,6 +697,11 @@ def generate_pseudo_tags(text: str) -> tuple[str, list[str]]:
     return pseudo, tags
 
 
+class CollectionNeedsRecreateError(Exception):
+    """Raised when a collection needs to be recreated to add new vector types."""
+    pass
+
+
 def ensure_collection(client: QdrantClient, name: str, dim: int, vector_name: str):
     """Ensure collection exists with named vectors.
     Always includes dense (vector_name) and lexical (LEX_VECTOR_NAME).
@@ -744,9 +749,86 @@ def ensure_collection(client: QdrantClient, name: str, dim: int, vector_name: st
                         client.update_collection(
                             collection_name=name, vectors_config=missing
                         )
-                    except Exception:
-                        # Best-effort; if server doesn't support adding vectors, leave to recreate path
-                        pass
+                        print(f"[COLLECTION_SUCCESS] Successfully updated collection {name} with missing vectors")
+                    except Exception as update_e:
+                        # Qdrant doesn't support adding new vector names to existing collections
+                        # Fall back to recreating the collection with the correct vector configuration
+                        print(f"[COLLECTION_WARNING] Cannot add missing vectors to {name} ({update_e}). Recreating collection...")
+
+                        # Backup memories before recreating collection
+                        backup_file = None
+                        try:
+                            import tempfile
+                            import json
+                            from qdrant_client.models import Filter, FieldCondition, MatchValue, IsNull
+
+                            # Create temporary backup file
+                            with tempfile.NamedTemporaryFile(mode='w', suffix='_memories_backup.json', delete=False) as f:
+                                backup_file = f.name
+
+                            print(f"[MEMORY_BACKUP] Backing up memories from {name} to {backup_file}")
+
+                            # Export memories (points without file_path metadata)
+                            points = client.scroll(
+                                collection_name=name,
+                                scroll_filter=Filter(
+                                    must=[
+                                        IsNull(key="metadata.path")
+                                    ]
+                                ),
+                                limit=10000,  # Adjust based on expected memory count
+                                with_payload=True,
+                                with_vectors=True
+                            )[0]
+
+                            memories = []
+                            for point in points:
+                                memory_data = {
+                                    "id": str(point.id),
+                                    "payload": point.payload,
+                                    "vectors": {}
+                                }
+
+                                # Extract vectors if they exist
+                                if hasattr(point, 'vector') and point.vector:
+                                    if isinstance(point.vector, dict):
+                                        memory_data["vectors"] = {k: v.tolist() if hasattr(v, 'tolist') else v
+                                                                for k, v in point.vector.items()}
+                                    else:
+                                        # Single unnamed vector
+                                        memory_data["vectors"]["default"] = point.vector.tolist() if hasattr(point.vector, 'tolist') else point.vector
+
+                                memories.append(memory_data)
+
+                            with open(backup_file, 'w') as f:
+                                json.dump({
+                                    "collection": name,
+                                    "backup_time": datetime.now().isoformat(),
+                                    "memories": memories
+                                }, f, indent=2)
+
+                            print(f"[MEMORY_BACKUP] Successfully backed up {len(memories)} memories")
+
+                        except Exception as backup_e:
+                            print(f"[MEMORY_BACKUP_WARNING] Failed to backup memories: {backup_e}")
+                            # Continue with recreation even if backup fails
+
+                        try:
+                            client.delete_collection(name)
+                            print(f"[COLLECTION_INFO] Deleted existing collection {name}")
+                        except Exception:
+                            pass
+
+                        # Store backup info for restoration
+                        if backup_file:
+                            setattr(CollectionNeedsRecreateError, 'backup_file', backup_file)
+
+                        # Proceed to recreate with full vector configuration
+                        raise CollectionNeedsRecreateError(f"Collection {name} needs recreation for new vectors")
+        except CollectionNeedsRecreateError:
+            # Let this fall through to collection creation logic
+            print(f"[COLLECTION_INFO] Collection {name} needs recreation - proceeding...")
+            raise
         except Exception as e:
             print(f"[COLLECTION_ERROR] Failed to update collection {name}: {e}")
             pass
@@ -780,6 +862,71 @@ def ensure_collection(client: QdrantClient, name: str, dim: int, vector_name: st
         vectors_config=vectors_cfg,
         hnsw_config=models.HnswConfigDiff(m=16, ef_construct=256),
     )
+    print(f"[COLLECTION_INFO] Successfully created new collection {name} with vectors: {list(vectors_cfg.keys())}")
+
+    # Restore memories if we have a backup from recreation
+    try:
+        backup_file = getattr(CollectionNeedsRecreateError, 'backup_file', None)
+        if backup_file and os.path.exists(backup_file):
+            print(f"[MEMORY_RESTORE] Restoring memories from {backup_file}")
+            import json
+
+            with open(backup_file, 'r') as f:
+                backup_data = json.load(f)
+
+            memories = backup_data.get('memories', [])
+            if memories:
+                from qdrant_client.models import PointStruct
+                points_to_upsert = []
+
+                for memory in memories:
+                    # Convert vectors back to proper format
+                    vectors = {}
+                    for vector_name, vector_data in memory.get('vectors', {}).items():
+                        if isinstance(vector_data, list):
+                            vectors[vector_name] = vector_data
+                        else:
+                            vectors[vector_name] = vector_data
+
+                    # Important: Only include vectors that existed in backup
+                    # If new collection has additional vectors (e.g., 'mini'),
+                    # Qdrant will handle them gracefully as missing vectors
+                    point = PointStruct(
+                        id=memory['id'],
+                        payload=memory['payload'],
+                        vector=vectors if vectors else {}  # Ensure vector is never None
+                    )
+                    points_to_upsert.append(point)
+
+                # Batch restore memories
+                batch_size = 100
+                for i in range(0, len(points_to_upsert), batch_size):
+                    batch = points_to_upsert[i:i + batch_size]
+                    client.upsert(
+                        collection_name=name,
+                        points=batch
+                    )
+
+                print(f"[MEMORY_RESTORE] Successfully restored {len(points_to_upsert)} memories")
+
+            # Clean up backup file and reset class attribute
+            try:
+                os.unlink(backup_file)
+                print(f"[MEMORY_RESTORE] Cleaned up backup file {backup_file}")
+                # Reset the backup file attribute to prevent accidental reuse
+                setattr(CollectionNeedsRecreateError, 'backup_file', None)
+            except Exception:
+                setattr(CollectionNeedsRecreateError, 'backup_file', None)
+                pass
+
+        elif backup_file:
+            print(f"[MEMORY_RESTORE_WARNING] Backup file {backup_file} not found")
+            # Reset the backup file attribute even if file not found
+            setattr(CollectionNeedsRecreateError, 'backup_file', None)
+
+    except Exception as restore_e:
+        print(f"[MEMORY_RESTORE_ERROR] Failed to restore memories: {restore_e}")
+        # Continue even if restore fails - indexing is more important
 
 
 def recreate_collection(client: QdrantClient, name: str, dim: int, vector_name: str):
