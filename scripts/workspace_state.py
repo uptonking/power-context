@@ -252,6 +252,12 @@ def _atomic_write_state(state_path: Path, state: WorkspaceState) -> None:
         with open(temp_path, 'w', encoding='utf-8') as f:
             json.dump(state, f, indent=2, ensure_ascii=False)
         temp_path.replace(state_path)
+        # Ensure state/cache files are group-writable so multiple processes
+        # (upload service, watcher, indexer) can update them.
+        try:
+            os.chmod(state_path, 0o664)
+        except PermissionError:
+            pass
     except Exception:
         # Clean up temp file if something went wrong
         try:
@@ -805,5 +811,180 @@ def get_collection_mappings(search_root: Optional[str] = None) -> List[Dict[str,
         return mappings
 
     return mappings
+
+
+# ===== Symbol-Level Cache for Smart Reindexing =====
+
+def _get_symbol_cache_path(file_path: str) -> Path:
+    """Get symbol cache file path for a given file."""
+    try:
+        fp = str(Path(file_path).resolve())
+        # Create symbol cache using file hash to handle renames
+        file_hash = hashlib.md5(fp.encode('utf-8')).hexdigest()[:8]
+        if is_multi_repo_mode():
+            # Use the same repo-name detection as other state helpers so that
+            # symbol caches live under the correct per-repo .codebase directory
+            repo_name = _detect_repo_name_from_path(Path(file_path))
+            state_dir = _get_repo_state_dir(repo_name)
+            return state_dir / f"symbols_{file_hash}.json"
+        else:
+            cache_dir = _get_cache_path(_resolve_workspace_root()).parent
+            return cache_dir / f"symbols_{file_hash}.json"
+    except Exception:
+        # Fallback to simple file-based path
+        cache_dir = _get_cache_path(_resolve_workspace_root()).parent
+        filename = Path(file_path).name.replace('.', '_').replace('/', '_')
+        return cache_dir / f"symbols_{filename}.json"
+
+
+def get_cached_symbols(file_path: str) -> dict:
+    """Load cached symbol metadata for a file."""
+    cache_path = _get_symbol_cache_path(file_path)
+
+    if not cache_path.exists():
+        return {}
+
+    try:
+        with open(cache_path, 'r', encoding='utf-8') as f:
+            cache_data = json.load(f)
+            return cache_data.get("symbols", {})
+    except Exception:
+        return {}
+
+
+def set_cached_symbols(file_path: str, symbols: dict, file_hash: str) -> None:
+    """Save symbol metadata for a file. Extends existing to include pseudo data."""
+    cache_path = _get_symbol_cache_path(file_path)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        cache_data = {
+            "file_path": str(file_path),
+            "file_hash": file_hash,
+            "updated_at": datetime.now().isoformat(),
+            "symbols": symbols
+        }
+
+        with open(cache_path, 'w', encoding='utf-8') as f:
+            json.dump(cache_data, f, indent=2)
+
+        # Ensure symbol cache files are group-writable so both indexer and
+        # watcher processes (potentially different users sharing a group)
+        # can update them on shared volumes.
+        try:
+            os.chmod(cache_path, 0o664)
+        except PermissionError:
+            pass
+    except Exception as e:
+        print(f"[SYMBOL_CACHE_WARNING] Failed to save symbol cache for {file_path}: {e}")
+
+
+def get_cached_pseudo(file_path: str, symbol_id: str) -> tuple[str, list[str]]:
+    """Load cached pseudo description and tags for a specific symbol.
+
+    Returns:
+        (pseudo, tags) tuple, or ("", []) if not found
+    """
+    cached_symbols = get_cached_symbols(file_path)
+
+    if symbol_id in cached_symbols:
+        symbol_info = cached_symbols[symbol_id]
+        pseudo = symbol_info.get("pseudo", "")
+        tags = symbol_info.get("tags", [])
+
+        # Ensure correct types
+        if isinstance(pseudo, str):
+            pseudo = pseudo
+        else:
+            pseudo = ""
+
+        if isinstance(tags, list):
+            tags = [str(tag) for tag in tags]
+        else:
+            tags = []
+
+        return pseudo, tags
+
+    return "", []
+
+
+def set_cached_pseudo(file_path: str, symbol_id: str, pseudo: str, tags: list[str], file_hash: str) -> None:
+    """Update pseudo data for a specific symbol in the cache.
+
+    This function updates only the pseudo data without recreating the entire symbol cache,
+    making it efficient for incremental updates during indexing.
+    """
+    cached_symbols = get_cached_symbols(file_path)
+
+    # Update the symbol with pseudo data
+    if symbol_id in cached_symbols:
+        cached_symbols[symbol_id]["pseudo"] = pseudo
+        cached_symbols[symbol_id]["tags"] = tags
+
+        # Save the updated cache only when we actually have symbol entries, to
+        # avoid creating empty symbol cache files before the base symbol set
+        # has been seeded by the indexer/smart reindex path.
+        set_cached_symbols(file_path, cached_symbols, file_hash)
+
+
+def update_symbols_with_pseudo(file_path: str, symbols_with_pseudo: dict, file_hash: str) -> None:
+    """Update symbols cache with pseudo data for multiple symbols at once.
+
+    Args:
+        file_path: Path to the file
+        symbols_with_pseudo: Dict mapping symbol_id to (symbol_info, pseudo, tags) tuples
+        file_hash: Current file hash
+    """
+    cached_symbols = get_cached_symbols(file_path)
+
+    # Update symbols with their new pseudo data
+    for symbol_id, (symbol_info, pseudo, tags) in symbols_with_pseudo.items():
+        if symbol_id in cached_symbols:
+            # Update existing symbol with pseudo data
+            cached_symbols[symbol_id]["pseudo"] = pseudo
+            cached_symbols[symbol_id]["tags"] = tags
+
+            # Update content hash from symbol_info if available
+            if isinstance(symbol_info, dict):
+                cached_symbols[symbol_id].update(symbol_info)
+
+    # Save the updated cache
+    set_cached_symbols(file_path, cached_symbols, file_hash)
+
+
+def remove_cached_symbols(file_path: str) -> None:
+    """Remove symbol cache for a file (when file is deleted)."""
+    cache_path = _get_symbol_cache_path(file_path)
+    try:
+        if cache_path.exists():
+            cache_path.unlink()
+    except Exception:
+        pass
+
+
+def compare_symbol_changes(old_symbols: dict, new_symbols: dict) -> tuple[list, list]:
+    """
+    Compare old and new symbols to identify changes.
+
+    Returns:
+        (unchanged_symbols, changed_symbols)
+    """
+    unchanged = []
+    changed = []
+
+    for symbol_id, symbol_info in new_symbols.items():
+        if symbol_id in old_symbols:
+            old_info = old_symbols[symbol_id]
+            # Compare content hash
+            if old_info.get("content_hash") == symbol_info.get("content_hash"):
+                unchanged.append(symbol_id)
+            else:
+                changed.append(symbol_id)
+        else:
+            # New symbol
+            changed.append(symbol_id)
+
+    return unchanged, changed
+
 
 # Add missing functions that callers expect (already defined above)

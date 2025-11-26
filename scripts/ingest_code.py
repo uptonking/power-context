@@ -61,6 +61,13 @@ try:
         remove_cached_file,
         update_indexing_status,
         update_workspace_state,
+        get_cached_symbols,
+        set_cached_symbols,
+        remove_cached_symbols,
+        compare_symbol_changes,
+        get_cached_pseudo,
+        set_cached_pseudo,
+        update_symbols_with_pseudo,
     )
 except ImportError:
     # State integration is optional; continue if not available
@@ -70,6 +77,14 @@ except ImportError:
     remove_cached_file = None  # type: ignore
     update_indexing_status = None  # type: ignore
     update_workspace_state = None  # type: ignore
+    get_cached_symbols = None  # type: ignore
+    set_cached_symbols = None  # type: ignore
+    remove_cached_symbols = None  # type: ignore
+    get_cached_pseudo = None  # type: ignore
+    set_cached_pseudo = None  # type: ignore
+    update_symbols_with_pseudo = None  # type: ignore
+    compare_symbol_changes = None  # type: ignore
+    compare_symbol_changes = None  # type: ignore
 
 # Optional Tree-sitter import (graceful fallback)
 try:
@@ -629,6 +644,97 @@ def _pseudo_describe_enabled() -> bool:
         return False
 
 
+# ===== Symbol Extraction for Smart Reindexing =====
+
+def _smart_symbol_reindexing_enabled() -> bool:
+    """Check if symbol-aware reindexing is enabled."""
+    try:
+        return str(os.environ.get("SMART_SYMBOL_REINDEXING", "0")).strip().lower() in {"1","true","yes","on"}
+    except Exception:
+        return False
+
+
+def extract_symbols_with_tree_sitter(file_path: str) -> dict:
+    """Extract functions, classes, methods from file using tree-sitter or fallback.
+
+    Returns:
+        dict: {symbol_id: {name, type, start_line, end_line, content_hash, pseudo, tags}}
+    """
+    try:
+        # Read file content
+        text = Path(file_path).read_text(encoding="utf-8", errors="ignore")
+        language = detect_language(Path(file_path))
+
+        # Use existing symbol extraction infrastructure
+        symbols_list = _extract_symbols(language, text)
+
+        # Convert to our expected dict format
+        symbols = {}
+        for sym in symbols_list:
+            symbol_id = f"{sym['kind']}_{sym['name']}_{sym['start']}"
+
+            # Extract actual content for hashing
+            content_lines = text.split('\n')[sym['start']-1:sym['end']]
+            content = '\n'.join(content_lines)
+            content_hash = hashlib.sha1(content.encode('utf-8', errors='ignore')).hexdigest()
+
+            symbols[symbol_id] = {
+                'name': sym['name'],
+                'type': sym['kind'],
+                'start_line': sym['start'],
+                'end_line': sym['end'],
+                'content_hash': content_hash,
+                'content': content,
+                # These will be populated during processing
+                'pseudo': '',
+                'tags': [],
+                'qdrant_ids': []  # Will store Qdrant point IDs for this symbol
+            }
+
+        return symbols
+
+    except Exception as e:
+        print(f"[SYMBOL_EXTRACTION] Failed to extract symbols from {file_path}: {e}")
+        return {}
+
+
+def should_use_smart_reindexing(file_path: str, file_hash: str) -> tuple[bool, str]:
+    """Determine if smart reindexing should be used for a file.
+
+    Returns:
+        (use_smart, reason)
+    """
+    if not _smart_symbol_reindexing_enabled():
+        return False, "smart_reindexing_disabled"
+
+    if not get_cached_symbols or not set_cached_symbols:
+        return False, "symbol_cache_unavailable"
+
+    # Load cached symbols
+    cached_symbols = get_cached_symbols(file_path)
+    if not cached_symbols:
+        return False, "no_cached_symbols"
+
+    # Extract current symbols
+    current_symbols = extract_symbols_with_tree_sitter(file_path)
+    if not current_symbols:
+        return False, "no_current_symbols"
+
+    # Compare symbols
+    unchanged_symbols, changed_symbols = compare_symbol_changes(cached_symbols, current_symbols)
+
+    total_symbols = len(current_symbols)
+    changed_ratio = len(changed_symbols) / max(total_symbols, 1)
+
+    # Use thresholds to decide strategy
+    max_changed_ratio = float(os.environ.get("MAX_CHANGED_SYMBOLS_RATIO", "0.3"))
+    if changed_ratio > max_changed_ratio:
+        return False, f"too_many_changes_{changed_ratio:.2f}"
+
+    print(f"[SMART_REINDEX] {file_path}: {len(unchanged_symbols)} unchanged, {len(changed_symbols)} changed")
+    return True, f"smart_reindex_{len(changed_symbols)}/{total_symbols}"
+
+
 def generate_pseudo_tags(text: str) -> tuple[str, list[str]]:
     """Best-effort: ask local decoder to produce a short label and 3-6 tags.
     Returns (pseudo, tags). On failure returns ("", [])."""
@@ -695,6 +801,57 @@ def generate_pseudo_tags(text: str) -> tuple[str, list[str]]:
     except Exception:
         return "", []
     return pseudo, tags
+
+
+def should_process_pseudo_for_chunk(
+    file_path: str, chunk: dict, changed_symbols: set
+) -> tuple[bool, str, list[str]]:
+    """Determine if a chunk needs pseudo processing based on symbol changes AND pseudo cache.
+
+    Uses existing symbol change detection and pseudo cache lookup for optimal performance.
+
+    Args:
+        file_path: Path to the file containing this chunk
+        chunk: Chunk dict with symbol information
+        changed_symbols: Set of symbol IDs that changed (from compare_symbol_changes)
+
+    Returns:
+        (needs_processing, cached_pseudo, cached_tags)
+    """
+    # For chunks without symbol info, process them (fallback - no symbol to reuse from)
+    symbol_name = chunk.get("symbol", "")
+    if not symbol_name:
+        return True, "", []
+
+    # Create symbol ID matching the format used in symbol cache
+    kind = chunk.get("kind", "unknown")
+    start_line = chunk.get("start", 0)
+    symbol_id = f"{kind}_{symbol_name}_{start_line}"
+
+    # If we don't have any change information, best effort: try reusing cached pseudo when present
+    if not changed_symbols and get_cached_pseudo:
+        try:
+            cached_pseudo, cached_tags = get_cached_pseudo(file_path, symbol_id)
+            if cached_pseudo or cached_tags:
+                return False, cached_pseudo, cached_tags
+        except Exception:
+            pass
+        return True, "", []
+
+    # Unchanged symbol: prefer reuse when cached pseudo/tags exist
+    if symbol_id not in changed_symbols:
+        if get_cached_pseudo:
+            try:
+                cached_pseudo, cached_tags = get_cached_pseudo(file_path, symbol_id)
+                if cached_pseudo or cached_tags:
+                    return False, cached_pseudo, cached_tags
+            except Exception:
+                pass
+        # Unchanged but no cached data yet – process once
+        return True, "", []
+
+    # Symbol content changed: always re-run pseudo; do not reuse stale cached values
+    return True, "", []
 
 
 class CollectionNeedsRecreateError(Exception):
@@ -1789,6 +1946,19 @@ def index_single_file(
 
     repo_tag = _detect_repo_name_from_path(file_path)
 
+    # Get changed symbols for pseudo processing optimization
+    changed_symbols = set()
+    if get_cached_symbols and set_cached_symbols:
+        cached_symbols = get_cached_symbols(str(file_path))
+        if cached_symbols:
+            current_symbols = extract_symbols_with_tree_sitter(str(file_path))
+            _, changed = compare_symbol_changes(cached_symbols, current_symbols)
+            # Convert symbol names to IDs for lookup
+            for symbol_data in current_symbols.values():
+                symbol_id = f"{symbol_data['type']}_{symbol_data['name']}_{symbol_data['start_line']}"
+                if symbol_id in changed:
+                    changed_symbols.add(symbol_id)
+
     if skip_unchanged:
         # Prefer local workspace cache to avoid Qdrant lookups
         ws_path = os.environ.get("WATCH_ROOT") or os.environ.get("WORKSPACE_PATH") or "/work"
@@ -1900,6 +2070,13 @@ def index_single_file(
             sym = ch.get("symbol") or sym
         if "symbol_path" in ch and ch.get("symbol_path"):
             sym_path = ch.get("symbol_path") or sym_path
+        # Ensure chunks always carry symbol metadata so pseudo gating can work for all chunking modes
+        if not ch.get("kind") and kind:
+            ch["kind"] = kind
+        if not ch.get("symbol") and sym:
+            ch["symbol"] = sym
+        if not ch.get("symbol_path") and sym_path:
+            ch["symbol_path"] = sym_path
         # Track both container path (/work mirror) and original host path for clarity across environments
         _cur_path = str(file_path)
         _host_root = str(os.environ.get("HOST_INDEX_PATH") or "").strip().rstrip("/")
@@ -1976,15 +2153,32 @@ def index_single_file(
             },
         }
         # Optional LLM enrichment for lexical retrieval: pseudo + tags per micro-chunk
-        pseudo, tags = ("", [])
-        try:
-            pseudo, tags = generate_pseudo_tags(ch.get("text") or "")
-            if pseudo:
-                payload["pseudo"] = pseudo
-            if tags:
-                payload["tags"] = tags
-        except Exception:
-            pass
+        # Use symbol-aware gating and cached pseudo/tags where possible
+        needs_pseudo, cached_pseudo, cached_tags = should_process_pseudo_for_chunk(
+            str(file_path), ch, changed_symbols
+        )
+        pseudo, tags = cached_pseudo, cached_tags
+        if needs_pseudo:
+            try:
+                pseudo, tags = generate_pseudo_tags(ch.get("text") or "")
+                if pseudo or tags:
+                    # Cache the pseudo data for this symbol
+                    symbol_name = ch.get("symbol", "")
+                    if symbol_name:
+                        kind = ch.get("kind", "unknown")
+                        start_line = ch.get("start", 0)
+                        symbol_id = f"{kind}_{symbol_name}_{start_line}"
+
+                        if set_cached_pseudo:
+                            set_cached_pseudo(str(file_path), symbol_id, pseudo, tags, file_hash)
+            except Exception:
+                # Fall back to cached values (if any) or empty pseudo/tags
+                pass
+        # Attach whichever pseudo/tags we ended up with (cached or freshly generated)
+        if pseudo:
+            payload["pseudo"] = pseudo
+        if tags:
+            payload["tags"] = tags
         batch_texts.append(info)
         batch_meta.append(payload)
         batch_ids.append(hash_id(ch["text"], str(file_path), ch["start"], ch["end"]))
@@ -2264,6 +2458,8 @@ def index_repo(
                         continue
             except Exception:
                 pass
+
+            # Check existing indexed hash in Qdrant
             prev = get_indexed_file_hash(client, current_collection, str(file_path))
             if prev and file_hash and prev == file_hash:
                 # File exists in Qdrant with same hash - cache it locally for next time
@@ -2301,6 +2497,35 @@ def index_repo(
                     print(f"Skipping unchanged file: {file_path}")
                 continue
 
+            # At this point, file content has changed vs previous index; attempt smart reindex when enabled
+            if _smart_symbol_reindexing_enabled():
+                try:
+                    use_smart, smart_reason = should_use_smart_reindexing(str(file_path), file_hash)
+                    if use_smart:
+                        print(f"[SMART_REINDEX] Using smart reindexing for {file_path} ({smart_reason})")
+                        status = process_file_with_smart_reindexing(
+                            file_path,
+                            text,
+                            language,
+                            client,
+                            current_collection,
+                            per_file_repo,
+                            model,
+                            vector_name,
+                        )
+                        if status == "success":
+                            files_indexed += 1
+                            # Smart path handles point counts internally; skip full reindex for this file
+                            continue
+                        else:
+                            print(
+                                f"[SMART_REINDEX] Smart reindex failed for {file_path} (status={status}), falling back to full reindex"
+                            )
+                    else:
+                        print(f"[SMART_REINDEX] Using full reindexing for {file_path} ({smart_reason})")
+                except Exception as e:
+                    print(f"[SMART_REINDEX] Smart reindexing failed, falling back to full reindex: {e}")
+
         # Dedupe per-file by deleting previous points for this path (default)
         if dedupe:
             delete_points_by_path(client, current_collection, str(file_path))
@@ -2309,6 +2534,19 @@ def index_repo(
         symbols = _extract_symbols(language, text)
         imports, calls = _get_imports_calls(language, text)
         last_mod, churn_count, author_count = _git_metadata(file_path)
+
+        # Get changed symbols for pseudo processing optimization (reuse existing pattern)
+        changed_symbols = set()
+        if get_cached_symbols and set_cached_symbols:
+            cached_symbols = get_cached_symbols(str(file_path))
+            if cached_symbols:
+                current_symbols = extract_symbols_with_tree_sitter(str(file_path))
+                _, changed = compare_symbol_changes(cached_symbols, current_symbols)
+                # Convert symbol names to IDs for lookup
+                for symbol_data in current_symbols.values():
+                    symbol_id = f"{symbol_data['type']}_{symbol_data['name']}_{symbol_data['start_line']}"
+                    if symbol_id in changed:
+                        changed_symbols.add(symbol_id)
 
         # Micro-chunking (token-based) takes precedence; else semantic; else line-based
         use_micro = os.environ.get("INDEX_MICRO_CHUNKS", "0").lower() in {
@@ -2368,6 +2606,13 @@ def index_repo(
                 sym = ch.get("symbol") or sym
             if "symbol_path" in ch and ch.get("symbol_path"):
                 sym_path = ch.get("symbol_path") or sym_path
+            # Ensure chunks carry symbol metadata so pseudo gating works across all chunking modes
+            if not ch.get("kind") and kind:
+                ch["kind"] = kind
+            if not ch.get("symbol") and sym:
+                ch["symbol"] = sym
+            if not ch.get("symbol_path") and sym_path:
+                ch["symbol_path"] = sym_path
             # Track both container path (/work mirror) and original host path
             _cur_path = str(file_path)
             _host_root = str(os.environ.get("HOST_INDEX_PATH") or "").strip().rstrip("/")
@@ -2435,15 +2680,28 @@ def index_repo(
                 },
             }
             # Optional LLM enrichment for lexical retrieval: pseudo + tags per micro-chunk
-            pseudo, tags = ("", [])
-            try:
-                pseudo, tags = generate_pseudo_tags(ch.get("text") or "")
-                if pseudo:
-                    payload["pseudo"] = pseudo
-                if tags:
-                    payload["tags"] = tags
-            except Exception:
-                pass
+            # Use symbol-aware gating and cached pseudo/tags where possible
+            needs_pseudo, cached_pseudo, cached_tags = should_process_pseudo_for_chunk(
+                str(file_path), ch, changed_symbols
+            )
+            pseudo, tags = cached_pseudo, cached_tags
+            if needs_pseudo:
+                try:
+                    pseudo, tags = generate_pseudo_tags(ch.get("text") or "")
+                    if pseudo or tags:
+                        symbol_name = ch.get("symbol", "")
+                        if symbol_name:
+                            kind = ch.get("kind", "unknown")
+                            start_line = ch.get("start", 0)
+                            symbol_id = f"{kind}_{symbol_name}_{start_line}"
+                            if set_cached_pseudo:
+                                set_cached_pseudo(str(file_path), symbol_id, pseudo, tags, file_hash)
+                except Exception:
+                    pass
+            if pseudo:
+                payload["pseudo"] = pseudo
+            if tags:
+                payload["tags"] = tags
             batch_texts.append(info)
             batch_meta.append(payload)
             # Track per-file latest hash once we add the first chunk to any batch
@@ -2543,6 +2801,30 @@ def index_repo(
                                 set_cached_file_hash(_p, _h, per_file_repo)
                     except Exception:
                         continue
+
+            # NEW: Update symbol cache for files that were processed
+            if set_cached_symbols and _smart_symbol_reindexing_enabled():
+                try:
+                    # Process files that had chunks and extract/update their symbol cache
+                    processed_files = set(str(Path(_p).resolve()) for _p in batch_file_hashes.keys())
+
+                    for file_path_str in processed_files:
+                        try:
+                            # Extract current symbols for this file
+                            current_symbols = extract_symbols_with_tree_sitter(file_path_str)
+                            if current_symbols:
+                                # Generate file hash for this file
+                                with open(file_path_str, 'r', encoding='utf-8') as f:
+                                    content = f.read()
+                                file_hash = hashlib.sha1(content.encode('utf-8', errors='ignore')).hexdigest()
+
+                                # Save symbol cache
+                                set_cached_symbols(file_path_str, current_symbols, file_hash)
+                                print(f"[SYMBOL_CACHE] Updated symbols for {Path(file_path_str).name}: {len(current_symbols)} symbols")
+                        except Exception as e:
+                            print(f"[SYMBOL_CACHE] Failed to update symbols for {Path(_p).name}: {e}")
+                except Exception as e:
+                    print(f"[SYMBOL_CACHE] Symbol cache update failed: {e}")
         except Exception:
             pass
 
@@ -2590,6 +2872,381 @@ def index_repo(
         print(f"[ERROR] Failed to update workspace state after indexing completion: {e}")
         print(f"[ERROR] Traceback: {traceback.format_exc()}")
 
+
+def process_file_with_smart_reindexing(
+    file_path,
+    text: str,
+    language: str,
+    client: QdrantClient,
+    current_collection: str,
+    per_file_repo,
+    model: TextEmbedding,
+    vector_name: str | None,
+) -> str:
+    """Smart, chunk-level reindexing for a single file.
+
+    Rebuilds all points for the file with *accurate* line numbers while:
+    - Reusing existing embeddings/lexical vectors for unchanged chunks (by code content), and
+    - Re-embedding only for changed chunks.
+
+    Symbol cache is used to gate pseudo/tag generation, but embedding reuse is decided
+    at the chunk level by matching previous chunk code.
+    """
+    try:
+        print(f"[SMART_REINDEX] Processing {file_path} with chunk-level reindexing")
+
+        # Normalize path / types
+        try:
+            fp = str(file_path)
+        except Exception:
+            fp = str(file_path)
+        try:
+            if not isinstance(file_path, Path):
+                file_path = Path(fp)
+        except Exception:
+            file_path = Path(fp)
+
+        # Compute current file hash
+        file_hash = hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest()
+
+        # Extract current symbols for diffing (dict) and for chunk mapping (List[_Sym])
+        symbol_meta = extract_symbols_with_tree_sitter(fp)
+        if not symbol_meta:
+            print(f"[SMART_REINDEX] No symbols found in {file_path}, falling back to full reindex")
+            return "failed"
+
+        # Use the dict-style symbol_meta for cache diffing
+        cached_symbols = get_cached_symbols(fp) if get_cached_symbols else {}
+        unchanged_symbols: list[str] = []
+        changed_symbols: list[str] = []
+        if cached_symbols and compare_symbol_changes:
+            try:
+                unchanged_symbols, changed_symbols = compare_symbol_changes(
+                    cached_symbols, symbol_meta
+                )
+            except Exception:
+                # On failure, treat everything as changed
+                unchanged_symbols = []
+                changed_symbols = list(symbol_meta.keys())
+        else:
+            changed_symbols = list(symbol_meta.keys())
+        changed_set = set(changed_symbols)
+
+        # Load existing points for this file (for embedding reuse)
+        existing_points = []
+        try:
+            filt = models.Filter(
+                must=[
+                    models.FieldCondition(
+                        key="metadata.path", match=models.MatchValue(value=fp)
+                    )
+                ]
+            )
+            next_offset = None
+            while True:
+                pts, next_offset = client.scroll(
+                    collection_name=current_collection,
+                    scroll_filter=filt,
+                    with_payload=True,
+                    with_vectors=True,
+                    limit=256,
+                    offset=next_offset,
+                )
+                if not pts:
+                    break
+                existing_points.extend(pts)
+                if next_offset is None:
+                    break
+        except Exception as e:
+            print(f"[SMART_REINDEX] Failed to load existing points for {file_path}: {e}")
+            existing_points = []
+
+        # Index existing points by (symbol_id, code) for reuse
+        points_by_code: dict[tuple[str, str], list[models.Record]] = {}
+        try:
+            for rec in existing_points:
+                payload = rec.payload or {}
+                md = payload.get("metadata") or {}
+                code_text = md.get("code") or ""
+                kind = md.get("kind") or ""
+                sym_name = md.get("symbol") or ""
+                start_line = md.get("start_line") or 0
+                symbol_id = (
+                    f"{kind}_{sym_name}_{start_line}"
+                    if kind and sym_name and start_line
+                    else ""
+                )
+                key = (symbol_id, code_text) if symbol_id else ("", code_text)
+                points_by_code.setdefault(key, []).append(rec)
+        except Exception:
+            points_by_code = {}
+
+        # Chunk current file using the same strategy as normal indexing
+        CHUNK_LINES = int(os.environ.get("INDEX_CHUNK_LINES", "120") or 120)
+        CHUNK_OVERLAP = int(os.environ.get("INDEX_CHUNK_OVERLAP", "20") or 20)
+        use_micro = os.environ.get("INDEX_MICRO_CHUNKS", "0").lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        use_semantic = os.environ.get("INDEX_SEMANTIC_CHUNKS", "1").lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
+        if use_micro:
+            chunks = chunk_by_tokens(text)
+            symbol_spans: list[_Sym] = _extract_symbols(language, text)
+        elif use_semantic:
+            chunks = chunk_semantic(text, language, CHUNK_LINES, CHUNK_OVERLAP)
+            symbol_spans = _extract_symbols(language, text)
+        else:
+            chunks = chunk_lines(text, CHUNK_LINES, CHUNK_OVERLAP)
+            symbol_spans = _extract_symbols(language, text)
+
+        # Prepare collections for reused vs newly embedded points
+        reused_points: list[models.PointStruct] = []
+        embed_texts: list[str] = []
+        embed_payloads: list[dict] = []
+        embed_ids: list[int] = []
+        embed_lex: list[list[float]] = []
+
+        imports, calls = _get_imports_calls(language, text)
+        last_mod, churn_count, author_count = _git_metadata(file_path)
+
+        for ch in chunks:
+            info = build_information(
+                language,
+                file_path,
+                ch["start"],
+                ch["end"],
+                ch["text"].splitlines()[0] if ch["text"] else "",
+            )
+            # Use span-style symbols for mapping chunks to symbols
+            kind, sym, sym_path = _choose_symbol_for_chunk(
+                ch["start"], ch["end"], symbol_spans
+            )
+            # Prefer embedded symbol metadata from semantic chunker when present
+            if "kind" in ch and ch.get("kind"):
+                kind = ch.get("kind") or kind
+            if "symbol" in ch and ch.get("symbol"):
+                sym = ch.get("symbol") or sym
+            if "symbol_path" in ch and ch.get("symbol_path"):
+                sym_path = ch.get("symbol_path") or sym_path
+            # Ensure chunks carry symbol metadata so pseudo gating works
+            if not ch.get("kind") and kind:
+                ch["kind"] = kind
+            if not ch.get("symbol") and sym:
+                ch["symbol"] = sym
+            if not ch.get("symbol_path") and sym_path:
+                ch["symbol_path"] = sym_path
+
+            # Basic metadata payload
+            _cur_path = str(file_path)
+            _host_root = str(os.environ.get("HOST_INDEX_PATH") or "").strip().rstrip("/")
+            _host_path = None
+            _container_path = None
+            _origin_client_path = None
+            try:
+                if _cur_path.startswith("/work/"):
+                    _parts = _cur_path[6:].split("/")
+                    if len(_parts) >= 2:
+                        _repo_name = _parts[0]
+                        _workspace_path = f"/work/{_repo_name}"
+                        _origin_client_path = _get_host_path_from_origin(
+                            _workspace_path, _repo_name
+                        )
+            except Exception:
+                pass
+            try:
+                if _cur_path.startswith("/work/") and (_host_root or _origin_client_path):
+                    _rel = _cur_path[len("/work/") :]
+                    if _origin_client_path:
+                        _host_path = os.path.realpath(
+                            os.path.join(_origin_client_path, _rel)
+                        )
+                    else:
+                        _host_path = os.path.realpath(os.path.join(_host_root, _rel))
+                    _container_path = _cur_path
+                else:
+                    _host_path = _cur_path
+                    if (
+                        (_host_root or _origin_client_path)
+                        and _cur_path.startswith(
+                            ((_origin_client_path or _host_root) + "/")
+                        )
+                    ):
+                        _rel = _cur_path[
+                            len((_origin_client_path or _host_root)) + 1 :
+                        ]
+                        _container_path = "/work/" + _rel
+            except Exception:
+                _host_path = _cur_path
+                _container_path = (
+                    _cur_path if _cur_path.startswith("/work/") else None
+                )
+
+            payload = {
+                "document": info,
+                "information": info,
+                "metadata": {
+                    "path": str(file_path),
+                    "path_prefix": str(file_path.parent),
+                    "ext": str(file_path.suffix).lstrip(".").lower(),
+                    "language": language,
+                    "kind": kind,
+                    "symbol": sym,
+                    "symbol_path": sym_path or "",
+                    "repo": per_file_repo,
+                    "start_line": ch["start"],
+                    "end_line": ch["end"],
+                    "code": ch["text"],
+                    "file_hash": file_hash,
+                    "imports": imports,
+                    "calls": calls,
+                    "ingested_at": int(time.time()),
+                    "last_modified_at": int(last_mod),
+                    "churn_count": int(churn_count),
+                    "author_count": int(author_count),
+                    "host_path": _host_path,
+                    "container_path": _container_path,
+                },
+            }
+
+            # Pseudo / tags with symbol-aware gating
+            needs_pseudo, cached_pseudo, cached_tags = should_process_pseudo_for_chunk(
+                fp, ch, changed_set
+            )
+            pseudo, tags = cached_pseudo, cached_tags
+            if needs_pseudo:
+                try:
+                    pseudo, tags = generate_pseudo_tags(ch.get("text") or "")
+                    if pseudo or tags:
+                        symbol_name = ch.get("symbol", "")
+                        if symbol_name:
+                            k = ch.get("kind", "unknown")
+                            start_line = ch.get("start", 0)
+                            sid = f"{k}_{symbol_name}_{start_line}"
+                            if set_cached_pseudo:
+                                set_cached_pseudo(fp, sid, pseudo, tags, file_hash)
+                except Exception:
+                    pass
+            if pseudo:
+                payload["pseudo"] = pseudo
+            if tags:
+                payload["tags"] = tags
+
+            # Decide whether we can reuse an existing embedding for this chunk
+            code_text = ch.get("text") or ""
+            chunk_symbol_id = ""
+            if sym and kind:
+                chunk_symbol_id = f"{kind}_{sym}_{ch['start']}"
+
+            reuse_key = (chunk_symbol_id, code_text)
+            fallback_key = ("", code_text)
+            reused_rec = None
+            bucket = points_by_code.get(reuse_key) or points_by_code.get(fallback_key)
+            if bucket:
+                try:
+                    reused_rec = bucket.pop()
+                    if not bucket:
+                        # Clean up empty bucket
+                        points_by_code.pop(reuse_key, None)
+                        points_by_code.pop(fallback_key, None)
+                except Exception:
+                    reused_rec = None
+
+            if reused_rec is not None:
+                try:
+                    vec = reused_rec.vector
+                    pid = hash_id(code_text, fp, ch["start"], ch["end"])
+                    reused_points.append(
+                        models.PointStruct(id=pid, vector=vec, payload=payload)
+                    )
+                    continue
+                except Exception:
+                    # Fall through to re-embedding path
+                    pass
+
+            # Need to embed this chunk
+            embed_texts.append(info)
+            embed_payloads.append(payload)
+            embed_ids.append(
+                hash_id(code_text, fp, ch["start"], ch["end"])
+            )
+            aug_lex_text = (code_text or "") + (
+                " " + pseudo if pseudo else ""
+            ) + (" " + " ".join(tags) if tags else "")
+            embed_lex.append(_lex_hash_vector_text(aug_lex_text))
+
+        # Embed changed/new chunks and build final point set
+        new_points: list[models.PointStruct] = []
+        if embed_texts:
+            vectors = embed_batch(model, embed_texts)
+            for pid, v, lx, pl in zip(
+                embed_ids,
+                vectors,
+                embed_lex,
+                embed_payloads,
+            ):
+                if vector_name:
+                    vecs = {vector_name: v, LEX_VECTOR_NAME: lx}
+                    try:
+                        if os.environ.get("REFRAG_MODE", "").strip().lower() in {
+                            "1",
+                            "true",
+                            "yes",
+                            "on",
+                        }:
+                            vecs[MINI_VECTOR_NAME] = project_mini(
+                                list(v), MINI_VEC_DIM
+                            )
+                    except Exception:
+                        pass
+                    new_points.append(
+                        models.PointStruct(id=pid, vector=vecs, payload=pl)
+                    )
+                else:
+                    new_points.append(
+                        models.PointStruct(id=pid, vector=v, payload=pl)
+                    )
+
+        all_points = reused_points + new_points
+
+        # Replace existing points for this file with the new set
+        try:
+            delete_points_by_path(client, current_collection, fp)
+        except Exception as e:
+            print(f"[SMART_REINDEX] Failed to delete old points for {file_path}: {e}")
+
+        if all_points:
+            upsert_points(client, current_collection, all_points)
+
+        # Update caches with the new state
+        try:
+            if set_cached_symbols:
+                set_cached_symbols(fp, symbol_meta, file_hash)
+        except Exception as e:
+            print(f"[SMART_REINDEX] Failed to update symbol cache for {file_path}: {e}")
+        try:
+            if set_cached_file_hash:
+                set_cached_file_hash(fp, file_hash, per_file_repo)
+        except Exception:
+            pass
+
+        print(
+            f"[SMART_REINDEX] Completed {file_path}: chunks={len(chunks)}, reused_points={len(reused_points)}, embedded_points={len(new_points)}"
+        )
+        return "success"
+
+    except Exception as e:
+        print(f"[SMART_REINDEX] Failed to process {file_path}: {e}")
+        import traceback
+        print(f"[SMART_REINDEX] Traceback: {traceback.format_exc()}")
+        return "failed"
 
 def main():
     parser = argparse.ArgumentParser(

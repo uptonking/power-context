@@ -279,9 +279,25 @@ class IndexHandler(FileSystemEventHandler):
             if repo_path:
                 repo_name = _extract_repo_name_from_path(str(repo_path))
                 remove_cached_file(str(p), repo_name)
+
+                # Remove symbol cache entry
+                try:
+                    from scripts.workspace_state import remove_cached_symbols
+                    remove_cached_symbols(str(p))
+                    print(f"[deleted_symbol_cache] {p}")
+                except Exception as e:
+                    print(f"[symbol_cache_delete_error] {p}: {e}")
             else:
                 root_repo_name = _extract_repo_name_from_path(str(self.root))
                 remove_cached_file(str(p), root_repo_name)
+
+                # Remove symbol cache entry (single repo mode)
+                try:
+                    from scripts.workspace_state import remove_cached_symbols
+                    remove_cached_symbols(str(p))
+                    print(f"[deleted_symbol_cache] {p}")
+                except Exception as e:
+                    print(f"[symbol_cache_delete_error] {p}: {e}")
         except Exception:
             pass
 
@@ -816,15 +832,77 @@ def _process_paths(paths, client, model, vector_name: str, model_dim: int, works
 
             ok = False
             try:
-                ok = idx.index_single_file(
-                    client,
-                    model,
-                    collection,
-                    vector_name,
-                    p,
-                    dedupe=True,
-                    skip_unchanged=False,
-                )
+                # Prefer smart symbol-aware reindexing when enabled and cache is available
+                try:
+                    if getattr(idx, "_smart_symbol_reindexing_enabled", None) and idx._smart_symbol_reindexing_enabled():
+                        text: str | None = None
+                        try:
+                            text = p.read_text(encoding="utf-8", errors="ignore")
+                        except Exception:
+                            text = None
+                        if text is not None:
+                            try:
+                                language = idx.detect_language(p)
+                            except Exception:
+                                language = ""
+                            try:
+                                file_hash = hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest()
+                            except Exception:
+                                file_hash = ""
+                            if file_hash:
+                                try:
+                                    use_smart, smart_reason = idx.should_use_smart_reindexing(str(p), file_hash)
+                                except Exception:
+                                    use_smart, smart_reason = False, "smart_check_failed"
+
+                                # Bootstrap: if we have no symbol cache yet, still run smart path once
+                                bootstrap = smart_reason == "no_cached_symbols"
+                                if use_smart or bootstrap:
+                                    msg_kind = "smart reindexing" if use_smart else "bootstrap (no_cached_symbols) for smart reindex"
+                                    try:
+                                        print(f"[SMART_REINDEX][watcher] Using {msg_kind} for {p} ({smart_reason})")
+                                    except Exception:
+                                        pass
+                                    try:
+                                        status = idx.process_file_with_smart_reindexing(
+                                            p,
+                                            text,
+                                            language,
+                                            client,
+                                            collection,
+                                            repo_name,
+                                            model,
+                                            vector_name,
+                                        )
+                                        ok = status == "success"
+                                    except Exception as se:
+                                        try:
+                                            print(f"[SMART_REINDEX][watcher] Smart reindexing failed for {p}: {se}")
+                                        except Exception:
+                                            pass
+                                        ok = False
+                                else:
+                                    try:
+                                        print(f"[SMART_REINDEX][watcher] Using full reindexing for {p} ({smart_reason})")
+                                    except Exception:
+                                        pass
+                except Exception as e_smart:
+                    try:
+                        print(f"[SMART_REINDEX][watcher] Smart reindexing disabled or preview failed for {p}: {e_smart}")
+                    except Exception:
+                        pass
+
+                # Fallback: full single-file reindex
+                if not ok:
+                    ok = idx.index_single_file(
+                        client,
+                        model,
+                        collection,
+                        vector_name,
+                        p,
+                        dedupe=True,
+                        skip_unchanged=False,
+                    )
             except Exception as e:
                 try:
                     print(f"[index_error] {p}: {e}")
