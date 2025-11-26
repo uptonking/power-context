@@ -218,12 +218,14 @@ curl -sI http://localhost:8003/mcp | head -n1   # RMCP
 **Memory MCP** (port 8000 SSE, 8002 RMCP):
 - `store` — save memories with metadata
 - `find` — hybrid memory search
+- `set_session_defaults` — set default collection for session
 
 **Indexer MCP** (port 8001 SSE, 8003 RMCP):
-- `repo_search` — hybrid code search (dense + lexical + reranker)
-- `context_search` — search with optional memory blending
-- `context_answer` — Q&A with retrieval + local LLM
-- `qdrant_index` / `qdrant_prune` / `qdrant_status` — collection management
+- **Search**: `repo_search`, `code_search`, `context_search`, `context_answer`
+- **Specialized**: `search_tests_for`, `search_config_for`, `search_callers_for`, `search_importers_for`
+- **Indexing**: `qdrant_index_root`, `qdrant_index`, `qdrant_prune`
+- **Status**: `qdrant_status`, `qdrant_list`, `workspace_info`, `list_workspaces`, `collection_map`
+- **Utilities**: `expand_query`, `change_history_for_path`, `set_session_defaults`
 
 > **See [docs/MCP_API.md](docs/MCP_API.md) for complete API documentation.**
 

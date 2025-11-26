@@ -517,6 +517,110 @@ Generate alternative query variations using local LLM (requires decoder enabled)
 }
 ```
 
+### code_search()
+
+Exact alias of `repo_search()` for discoverability. Same parameters and return shape.
+
+### qdrant_index_root()
+
+Index the entire workspace root (`/work`).
+
+**Parameters:**
+- `recreate` (bool, default false): Drop and recreate collection before indexing
+- `collection` (str, optional): Target collection name
+
+**Returns:** Subprocess result with indexing status.
+
+### search_tests_for()
+
+Find test files related to a query. Presets common test file globs.
+
+**Parameters:**
+- `query` (str or list[str], required): Search query
+- `limit` (int, optional): Max results
+- `include_snippet` (bool, optional): Include code snippets
+- `language` (str, optional): Filter by language
+
+**Returns:** Same shape as `repo_search()`.
+
+### search_config_for()
+
+Find configuration files related to a query. Presets config file globs (yaml/json/toml/etc).
+
+**Parameters:** Same as `search_tests_for()`.
+
+**Returns:** Same shape as `repo_search()`.
+
+### search_callers_for()
+
+Heuristic search for callers/usages of a symbol.
+
+**Parameters:**
+- `query` (str, required): Symbol name to find callers for
+- `limit` (int, optional): Max results
+- `language` (str, optional): Filter by language
+
+**Returns:** Same shape as `repo_search()`.
+
+### search_importers_for()
+
+Find files likely importing or referencing a module/symbol.
+
+**Parameters:** Same as `search_callers_for()`.
+
+**Returns:** Same shape as `repo_search()`.
+
+### change_history_for_path()
+
+Summarize recent change metadata for a file path from the index.
+
+**Parameters:**
+- `path` (str, required): Relative path under /work
+- `collection` (str, optional): Target collection
+- `max_points` (int, optional): Cap on scanned points
+
+**Returns:**
+```json
+{
+  "ok": true,
+  "summary": {
+    "path": "scripts/ctx.py",
+    "last_modified": "2025-01-15T14:22:00"
+  }
+}
+```
+
+### collection_map()
+
+Return collection↔repo mappings with optional Qdrant payload samples.
+
+**Parameters:**
+- `search_root` (str, optional): Directory to scan
+- `collection` (str, optional): Filter by collection
+- `repo_name` (str, optional): Filter by repo
+- `include_samples` (bool, optional): Include payload samples
+- `limit` (int, optional): Max entries
+
+**Returns:** Mapping of collections to repositories.
+
+### set_session_defaults() (Indexer)
+
+Set default collection for subsequent calls on the same session.
+
+**Parameters:**
+- `collection` (str, optional): Default collection name
+- `session` (str, optional): Session token for cross-connection reuse
+
+**Returns:**
+```json
+{
+  "ok": true,
+  "session": "abc123",
+  "defaults": {"collection": "codebase"},
+  "applied": "connection"
+}
+```
+
 ## Error Handling
 
 All API methods follow consistent error handling patterns:
