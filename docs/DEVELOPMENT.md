@@ -73,15 +73,22 @@ Context-Engine/
 ├── scripts/                    # Core application code
 │   ├── mcp_memory_server.py   # Memory MCP server implementation
 │   ├── mcp_indexer_server.py  # Indexer MCP server implementation
+│   ├── mcp_router.py          # Intent-based tool routing
 │   ├── hybrid_search.py       # Search algorithm implementation
+│   ├── ctx.py                 # CLI prompt enhancer
 │   ├── cache_manager.py       # Unified caching system
 │   ├── async_subprocess_manager.py  # Process management
 │   ├── deduplication.py       # Request deduplication
 │   ├── semantic_expansion.py  # Query expansion
-│   ├── utils.py              # Shared utilities
-│   ├── ingest_code.py        # Code indexing logic
-│   ├── watch_index.py        # File system watcher
-│   └── logger.py             # Structured logging
+│   ├── collection_health.py   # Cache/collection sync checks
+│   ├── utils.py               # Shared utilities
+│   ├── ingest_code.py         # Code indexing logic
+│   ├── watch_index.py         # File system watcher
+│   ├── upload_service.py      # Remote upload HTTP service
+│   ├── remote_upload_client.py # Remote sync client
+│   ├── memory_backup.py       # Memory export
+│   ├── memory_restore.py      # Memory import
+│   └── logger.py              # Structured logging
 ├── tests/                     # Test suite
 │   ├── conftest.py           # Test configuration
 │   ├── test_*.py            # Unit and integration tests

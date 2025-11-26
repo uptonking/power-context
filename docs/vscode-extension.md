@@ -7,12 +7,21 @@ Context Engine Uploader extension for automatic workspace sync and Prompt+ integ
 ---
 
 **On this page:**
+- [Quick Start](#quick-start)
 - [Features](#features)
+- [Workflow Examples](#workflow-examples)
 - [Installation](#installation)
 - [Configuration](#configuration)
 - [Commands](#commands-and-lifecycle)
 
 ---
+
+## Quick Start
+
+1. **Install**: Build the `.vsix` and install in VS Code (see [Installation](#installation))
+2. **Configure server**: Settings → `contextEngineUploader.endpoint` → `http://localhost:9090` (or remote server)
+3. **Index workspace**: Click status bar button or run `Context Engine Uploader: Start`
+4. **Use Prompt+**: Select code, click `Prompt+` in status bar to enhance with AI
 
 ## Features
 
@@ -20,6 +29,52 @@ Context Engine Uploader extension for automatic workspace sync and Prompt+ integ
 - **Prompt+ button**: Status bar button to enhance selected text with unicorn mode
 - **Output channel**: Real-time logs for force-sync and watch operations
 - **GPU decoder support**: Configure llama.cpp, Ollama, or GLM as decoder backend
+- **Remote server support**: Index to any Context-Engine server (local, remote, Kubernetes)
+
+## Workflow Examples
+
+### Local Development
+Context-Engine running on same machine:
+```
+Endpoint: http://localhost:9090
+Target Path: (leave empty - uses current workspace)
+```
+Open any project → extension auto-syncs → MCP tools have your code context.
+
+### Remote Server
+Context-Engine on a team server:
+```
+Endpoint: http://context.yourcompany.com:9090
+Target Path: /Users/you/projects/my-app
+```
+Your local code is indexed to the shared server. Team members search across all indexed repos.
+
+### Multi-Project Workflow
+Index multiple projects to the same server:
+1. Open Project A → auto-syncs to `codebase` collection
+2. Open Project B → auto-syncs to same collection
+3. MCP tools search across both projects seamlessly
+
+### Prompt+ Enhancement
+1. Select code or write a prompt in your editor
+2. Click `Prompt+` in status bar (or run command)
+3. Extension runs `ctx.py --unicorn` with your selection
+4. Enhanced prompt replaces selection with code-grounded context
+
+**Example input:**
+```
+Add error handling to the upload function
+```
+
+**Example output:**
+```
+Looking at upload_service.py lines 120-180, the upload_file() function currently lacks error handling. Add try/except blocks to handle:
+1. Network timeouts (requests.exceptions.Timeout)
+2. Invalid file paths (FileNotFoundError)
+3. Server errors (HTTP 5xx responses)
+
+Reference the existing error patterns in remote_upload_client.py lines 45-67 which use structured logging via logger.error().
+```
 
 ## Installation
 
@@ -85,3 +140,29 @@ All settings live under `Context Engine Uploader` in the VS Code settings UI or 
 - `Context Engine Uploader: Prompt+ (Unicorn Mode)` — runs `scripts/ctx.py --unicorn` on your current selection and replaces it with the enhanced prompt (status bar button).
 
 The extension logs all subprocess output to the **Context Engine Upload** output channel so you can confirm uploads without leaving VS Code. The watch process shuts down automatically when VS Code exits or when you run the Stop command.
+
+## Troubleshooting
+
+### Extension not syncing
+1. Check **Context Engine Upload** output channel for errors
+2. Verify `endpoint` setting points to running upload service
+3. Ensure Python 3.8+ is available at configured `pythonPath`
+
+### Prompt+ not working
+1. Verify decoder is running: `curl http://localhost:8081/health`
+2. Check `decoderUrl` setting matches your decoder (llama.cpp, Ollama, or GLM)
+3. For GPU decoder: enable `useGpuDecoder` setting
+
+### Connection refused
+```bash
+# Verify upload service is running
+curl http://localhost:9090/health
+
+# Check Docker logs
+docker compose logs upload_service
+```
+
+### Remote server issues
+1. Ensure port 9090 is accessible from your machine
+2. Check firewall rules allow inbound connections
+3. Verify server's `upload_service` container is running

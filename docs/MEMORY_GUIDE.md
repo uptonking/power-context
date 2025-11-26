@@ -167,5 +167,14 @@ Different hash lengths for different workspace types:
 
 ## Backup and Migration
 
-For production-grade backup/migration strategies, see the official Qdrant documentation for snapshots and export/import. For local development, rely on Docker volumes and reindexing when needed.
+### Memory Backup/Restore Scripts
 
+```bash
+# Export memories to JSON
+python scripts/memory_backup.py --collection codebase --output memories.json
+
+# Restore memories from backup
+python scripts/memory_restore.py --input memories.json --collection codebase
+```
+
+For production-grade backup/migration strategies, see the official Qdrant documentation for snapshots and export/import. For local development, rely on Docker volumes and reindexing when needed.

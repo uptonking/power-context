@@ -1,17 +1,36 @@
 # IDE & Client Configuration
 
-Configuration examples for connecting various IDEs and MCP clients to Context Engine.
+Connect your IDE to a running Context-Engine stack. No need to clone this repo into your project.
 
 **Documentation:** [README](../README.md) · [Configuration](CONFIGURATION.md) · [IDE Clients](IDE_CLIENTS.md) · [MCP API](MCP_API.md) · [ctx CLI](CTX_CLI.md) · [Memory Guide](MEMORY_GUIDE.md) · [Architecture](ARCHITECTURE.md) · [Multi-Repo](MULTI_REPO_COLLECTIONS.md) · [Kubernetes](../deploy/kubernetes/README.md) · [VS Code Extension](vscode-extension.md) · [Troubleshooting](TROUBLESHOOTING.md) · [Development](DEVELOPMENT.md)
 
 ---
 
 **On this page:**
+- [Quick Start](#quick-start)
 - [Supported Clients](#supported-clients)
 - [SSE Clients](#sse-clients-port-80008001)
 - [RMCP Clients](#rmcp-clients-port-80028003)
 - [Mixed Transport](#mixed-transport-examples)
+- [Remote Server](#remote-server)
 - [Verification](#verification)
+
+---
+
+## Quick Start
+
+**Prerequisites:** Context-Engine running somewhere (localhost, remote server, or Kubernetes).
+
+**Minimal config** — add to your IDE's MCP settings:
+```json
+{
+  "mcpServers": {
+    "context-engine": { "url": "http://localhost:8001/sse" }
+  }
+}
+```
+
+Replace `localhost` with your server IP/hostname for remote setups.
 
 ---
 
@@ -166,6 +185,31 @@ url = "http://127.0.0.1:8003/mcp"
   }
 }
 ```
+
+---
+
+## Remote Server
+
+When Context-Engine runs on a remote server (e.g., `context.yourcompany.com`):
+
+```json
+{
+  "mcpServers": {
+    "context-engine": { "url": "http://context.yourcompany.com:8001/sse" }
+  }
+}
+```
+
+**Indexing your local project to the remote server:**
+```bash
+# Using VS Code extension (recommended)
+# Install vscode-context-engine, configure server URL, click "Upload Workspace"
+
+# Using CLI
+scripts/remote_upload_client.py --server http://context.yourcompany.com:9090 --path /your/project
+```
+
+> See [docs/MULTI_REPO_COLLECTIONS.md](MULTI_REPO_COLLECTIONS.md) for multi-repo and Kubernetes deployment.
 
 ---
 
