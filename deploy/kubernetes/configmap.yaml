@@ -5,7 +5,7 @@ metadata:
   namespace: context-engine
   labels:
     app: context-engine
-component: configuration
+    component: configuration
 data:
   COLLECTION_NAME: "codebase"
   EMBEDDING_MODEL: "BAAI/bge-base-en-v1.5"
