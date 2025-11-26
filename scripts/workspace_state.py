@@ -651,8 +651,12 @@ def set_cached_file_hash(file_path: str, file_hash: str, repo_name: Optional[str
 
         try:
             if cache_path.exists():
-                with open(cache_path, "r", encoding="utf-8") as f:
-                    cache = json.load(f)
+                try:
+                    with open(cache_path, "r", encoding="utf-8") as f:
+                        cache = json.load(f)
+                except Exception:
+                    # If the existing cache is corrupt/empty, recreate it
+                    cache = {"file_hashes": {}, "created_at": datetime.now().isoformat()}
             else:
                 cache = {"file_hashes": {}, "created_at": datetime.now().isoformat()}
 
