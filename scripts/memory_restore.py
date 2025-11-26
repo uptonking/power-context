@@ -98,7 +98,8 @@ def restore_memories(
     embedding_model_name: Optional[str] = None,
     vector_name: str = "memory",
     batch_size: int = 100,
-    skip_existing: bool = True
+    skip_existing: bool = True,
+    skip_collection_creation: bool = False
 ) -> Dict[str, Any]:
     """
     Restore memories from backup file to Qdrant collection.
@@ -111,6 +112,7 @@ def restore_memories(
         vector_name: Name for the memory vector in collection
         batch_size: Number of memories to upload per batch
         skip_existing: Skip memories that already exist in collection
+        skip_collection_creation: Skip collection creation (useful when collection is already configured)
 
     Returns:
         Dict with restore statistics
@@ -166,8 +168,18 @@ def restore_memories(
         embedding_model = None
         print(f"Using vectors from backup, dimension: {vector_dimension}")
 
-    # Ensure collection exists
-    ensure_collection_exists(client, collection_name, vector_dimension, vector_name)
+    # Ensure collection exists (unless skipped)
+    if not skip_collection_creation:
+        ensure_collection_exists(client, collection_name, vector_dimension, vector_name)
+    else:
+        print(f"Skipping collection creation for '{collection_name}' (as requested)")
+
+        # Verify collection actually exists when skipping creation
+        try:
+            client.get_collection(collection_name)
+            print(f"Confirmed collection '{collection_name}' exists")
+        except Exception:
+            raise RuntimeError(f"Collection '{collection_name}' does not exist but creation was skipped")
 
     # Check for existing memories if skip_existing is True
     existing_ids = set()
@@ -327,6 +339,12 @@ Examples:
         help="Show backup file information without restoring"
     )
 
+    parser.add_argument(
+        "--skip-collection-creation",
+        action="store_true",
+        help="Skip collection creation (useful when collection is already configured by other processes)"
+    )
+
     args = parser.parse_args()
 
     try:
@@ -361,7 +379,8 @@ Examples:
             embedding_model_name=args.embedding_model,
             vector_name=args.vector_name,
             batch_size=args.batch_size,
-            skip_existing=not args.no_skip_existing
+            skip_existing=not args.no_skip_existing,
+            skip_collection_creation=args.skip_collection_creation
         )
 
         if result["success"]:
