@@ -131,19 +131,17 @@ docker compose up -d --force-recreate mcp_indexer mcp_indexer_http llamacpp
 This re-enables the `llamacpp` container and resets `.env` to `http://llamacpp:8080`.
 
 ### Make targets (quick reference)
-- reset-dev: SSE stack on 8000/8001; seeds Qdrant, downloads tokenizer + tiny llama.cpp model, reindexes, brings up memory + indexer + watcher
-- reset-dev-codex: RMCP stack on 8002/8003; same seeding + bring-up for Codex/Qodo
-- reset-dev-dual: SSE + RMCP together (8000/8001 and 8002/8003)
-- up / down / logs / ps: Docker Compose lifecycle helpers
-- index / reindex / reindex-hard: Index current repo; `reindex` recreates the collection; `reindex-hard` also clears the local cache so unchanged files are re-uploaded
-- index-here / index-path: Index arbitrary host path without cloning into this repo
-- watch: Watch-and-reindex on file changes
-- warm / health: Warm caches and run health checks
-- hybrid / rerank: Example hybrid search + reranker helper
-- setup-reranker / rerank-local / quantize-reranker: Manage ONNX reranker assets and local runs
-- prune / prune-path: Remove stale points (missing files or hash mismatch)
-- llama-model / tokenizer: Fetch tiny GGUF model and tokenizer.json
-- qdrant-status / qdrant-list / qdrant-prune / qdrant-index-root: Convenience wrappers that route through the MCP bridge to inspect or maintain collections
+- **Setup**: `reset-dev`, `reset-dev-codex`, `reset-dev-dual` - Full stack with SSE, RMCP, or both
+- **Lifecycle**: `up`, `down`, `logs`, `ps`, `restart`, `rebuild`
+- **Indexing**: `index`, `reindex`, `reindex-hard`, `index-here`, `index-path`
+- **Watch**: `watch` (local), `watch-remote` (upload to remote server)
+- **Maintenance**: `prune`, `prune-path`, `warm`, `health`, `decoder-health`
+- **Search**: `hybrid`, `rerank`, `rerank-local`
+- **LLM**: `llama-model`, `tokenizer`, `llamacpp-up`, `setup-reranker`, `quantize-reranker`
+- **MCP Tools**: `qdrant-status`, `qdrant-list`, `qdrant-prune`, `qdrant-index-root`
+- **Remote**: `dev-remote-up`, `dev-remote-down`, `dev-remote-bootstrap`
+- **Router**: `route-plan`, `route-run`, `router-eval`, `router-smoke`
+- **CLI**: `ctx Q="your question"` - Prompt enhancement with repo context
 
 
 ### CLI: ctx prompt enhancer
