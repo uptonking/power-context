@@ -42,44 +42,86 @@ Context-Engine is a plug-and-play MCP retrieval stack that unifies code indexing
 
 > **See [docs/IDE_CLIENTS.md](docs/IDE_CLIENTS.md) for detailed configuration examples.**
 
-## Quickstart (5 minutes)
 
-This gets you from zero to “search works” in under five minutes.
+## Getting Started
 
-1) Prereqs
-- Docker + Docker Compose
-- make (optional but recommended)
-- Node/npm if you want to use mcp-remote (optional)
+### Option 1: Deploy & Connect (Recommended)
 
-2) command (recommended)
+Deploy Context-Engine once, connect any IDE. No need to clone this repo into your project.
+
+**1. Start the stack** (on your dev machine or a server):
 ```bash
-# Provisions tokenizer.json, downloads a tiny llama.cpp model, reindexes, and brings all services up
+git clone https://github.com/m1rl0k/Context-Engine.git && cd Context-Engine
+docker compose up -d
+```
+
+**2. Index your codebase** (point to any project):
+```bash
+HOST_INDEX_PATH=/path/to/your/project docker compose run --rm indexer
+```
+
+**3. Connect your IDE** — add to your MCP config:
+```json
+{
+  "mcpServers": {
+    "context-engine": { "url": "http://localhost:8001/sse" }
+  }
+}
+```
+
+> See [docs/IDE_CLIENTS.md](docs/IDE_CLIENTS.md) for Cursor, Windsurf, Cline, Codex, and other client configs.
+
+### Option 2: Remote Deployment
+
+Run Context-Engine on a server and connect from anywhere.
+
+**Docker on a server:**
+```bash
+# On server (e.g., context.yourcompany.com)
+git clone https://github.com/m1rl0k/Context-Engine.git && cd Context-Engine
+docker compose up -d
+```
+
+**Index from your local machine:**
+```bash
+# VS Code extension (recommended) - install, set server URL, click "Upload Workspace"
+# Or CLI:
+scripts/remote_upload_client.py --server http://context.yourcompany.com:9090 --path /your/project
+```
+
+**Connect IDE to remote:**
+```json
+{ "mcpServers": { "context-engine": { "url": "http://context.yourcompany.com:8001/sse" } } }
+```
+
+**Kubernetes:** See [deploy/kubernetes/README.md](deploy/kubernetes/README.md) for Kustomize deployment.
+
+### Option 3: Full Development Setup
+
+For contributors or advanced customization with LLM decoder:
+
+```bash
 INDEX_MICRO_CHUNKS=1 MAX_MICRO_CHUNKS_PER_FILE=200 make reset-dev-dual
 ```
-```bash
-# Provisions the context-engine for rapid development, 
-HOST_INDEX_PATH=. COLLECTION_NAME=codebase docker compose run --rm indexer --root /work --recreate --no-skip-unchanged
-```
 
-- Default ports: Memory MCP :8000, Indexer MCP :8001, 8003, Qdrant :6333, llama.cpp :8080
+### Default Endpoints
 
-**Seamless Setup Note:**
-- The stack uses a **single unified `codebase` collection** by default
-- All your code goes into one collection for seamless cross-repo search
-- No per-workspace fragmentation - search across everything at once
-- Health checks auto-detect and fix cache/collection sync issues
-- Just run `make reset-dev-dual` on any machine and it works™
+| Service | Port | Use |
+|---------|------|-----|
+| Indexer MCP | 8001 (SSE), 8003 (RMCP) | Code search, context retrieval |
+| Memory MCP | 8000 (SSE), 8002 (RMCP) | Knowledge storage |
+| Qdrant | 6333 | Vector database |
+| llama.cpp | 8080 | Local LLM decoder |
 
-### Make targets: SSE, RMCP, and dual-compat
-- Legacy SSE only (default):
-  - Ports: 8000 (/sse), 8001 (/sse)
-  - Command: `INDEX_MICRO_CHUNKS=1 MAX_MICRO_CHUNKS_PER_FILE=200 make reset-dev`
-- RMCP (Codex) only:
-  - Ports: 8002 (/mcp), 8003 (/mcp)
-  - Command: `INDEX_MICRO_CHUNKS=1 MAX_MICRO_CHUNKS_PER_FILE=200 make reset-dev-codex`
-- Dual compatibility (SSE + RMCP together):
-  - Ports: 8000/8001 (/sse) and 8002/8003 (/mcp)
-  - Command: `INDEX_MICRO_CHUNKS=1 MAX_MICRO_CHUNKS_PER_FILE=200 make reset-dev-dual`
+**Stack behavior:**
+- Single `codebase` collection — search across all indexed repos
+- Health checks auto-detect and fix cache/collection sync
+- Live file watching with automatic reindexing
+
+### Transport Modes
+- **SSE** (default): `http://localhost:8001/sse` — Cursor, Cline, Windsurf, Augment
+- **RMCP**: `http://localhost:8003/mcp` — Codex, Qodo
+- **Dual**: Both SSE + RMCP simultaneously (`make reset-dev-dual`)
 
 ### Environment Setup
 
