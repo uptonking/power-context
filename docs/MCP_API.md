@@ -2,6 +2,19 @@
 
 This document provides comprehensive API documentation for all MCP (Model Context Protocol) tools exposed by Context Engine's dual-server architecture.
 
+**Documentation:** [README](../README.md) · [Configuration](CONFIGURATION.md) · [IDE Clients](IDE_CLIENTS.md) · [MCP API](MCP_API.md) · [ctx CLI](CTX_CLI.md) · [Memory Guide](MEMORY_GUIDE.md) · [Architecture](ARCHITECTURE.md) · [Multi-Repo](MULTI_REPO_COLLECTIONS.md) · [Kubernetes](../deploy/kubernetes/README.md) · [VS Code Extension](vscode-extension.md) · [Troubleshooting](TROUBLESHOOTING.md) · [Development](DEVELOPMENT.md)
+
+---
+
+**On this page:**
+- [Overview](#overview)
+- [Memory Server API](#memory-server-api) - `store()`, `find()`
+- [Indexer Server API](#indexer-server-api) - `repo_search()`, `context_search()`, `context_answer()`, etc.
+- [Response Schemas](#response-schemas)
+- [Error Handling](#error-handling)
+
+---
+
 ## Overview
 
 Context Engine exposes two MCP servers:

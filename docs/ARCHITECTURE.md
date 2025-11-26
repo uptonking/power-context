@@ -1,5 +1,18 @@
 # Context Engine Architecture
 
+**Documentation:** [README](../README.md) · [Configuration](CONFIGURATION.md) · [IDE Clients](IDE_CLIENTS.md) · [MCP API](MCP_API.md) · [ctx CLI](CTX_CLI.md) · [Memory Guide](MEMORY_GUIDE.md) · [Architecture](ARCHITECTURE.md) · [Multi-Repo](MULTI_REPO_COLLECTIONS.md) · [Kubernetes](../deploy/kubernetes/README.md) · [VS Code Extension](vscode-extension.md) · [Troubleshooting](TROUBLESHOOTING.md) · [Development](DEVELOPMENT.md)
+
+---
+
+**On this page:**
+- [Overview](#overview)
+- [Core Principles](#core-principles)
+- [System Architecture](#system-architecture)
+- [Data Flow](#data-flow)
+- [ReFRAG Pipeline](#refrag-pipeline)
+
+---
+
 ## Overview
 
 Context Engine is a production-ready MCP (Model Context Protocol) retrieval stack that unifies code indexing, hybrid search, and optional LLM decoding. It enables teams to ship context-aware AI agents by providing sophisticated semantic and lexical search capabilities with dual-transport compatibility.

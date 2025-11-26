@@ -1,0 +1,161 @@
+# Configuration Reference
+
+Complete environment variable reference for Context Engine.
+
+**Documentation:** [README](../README.md) · [Configuration](CONFIGURATION.md) · [IDE Clients](IDE_CLIENTS.md) · [MCP API](MCP_API.md) · [ctx CLI](CTX_CLI.md) · [Memory Guide](MEMORY_GUIDE.md) · [Architecture](ARCHITECTURE.md) · [Multi-Repo](MULTI_REPO_COLLECTIONS.md) · [Kubernetes](../deploy/kubernetes/README.md) · [VS Code Extension](vscode-extension.md) · [Troubleshooting](TROUBLESHOOTING.md) · [Development](DEVELOPMENT.md)
+
+---
+
+**On this page:**
+- [Core Settings](#core-settings)
+- [Indexing & Micro-Chunks](#indexing--micro-chunks)
+- [Watcher Settings](#watcher-settings)
+- [Reranker](#reranker)
+- [Decoder (llama.cpp / GLM)](#decoder-llamacpp--glm)
+- [ReFRAG](#refrag)
+- [Ports](#ports)
+- [Search & Expansion](#search--expansion)
+- [Memory Blending](#memory-blending)
+
+---
+
+## Core Settings
+
+| Name | Description | Default |
+|------|-------------|---------|
+| COLLECTION_NAME | Qdrant collection name (unified across all repos) | codebase |
+| REPO_NAME | Logical repo tag stored in payload for filtering | auto-detect from git/folder |
+| HOST_INDEX_PATH | Host path mounted at /work in containers | current repo (.) |
+| QDRANT_URL | Qdrant base URL | container: http://qdrant:6333; local: http://localhost:6333 |
+
+## Indexing & Micro-Chunks
+
+| Name | Description | Default |
+|------|-------------|---------|
+| INDEX_MICRO_CHUNKS | Enable token-based micro-chunking | 0 (off) |
+| MAX_MICRO_CHUNKS_PER_FILE | Cap micro-chunks per file | 200 |
+| TOKENIZER_URL | HF tokenizer.json URL (for Make download) | n/a |
+| TOKENIZER_PATH | Local path where tokenizer is saved (Make) | models/tokenizer.json |
+| TOKENIZER_JSON | Runtime path for tokenizer (indexer) | models/tokenizer.json |
+| USE_TREE_SITTER | Enable tree-sitter parsing (py/js/ts) | 0 (off) |
+| INDEX_CHUNK_LINES | Lines per chunk (non-micro mode) | 120 |
+| INDEX_CHUNK_OVERLAP | Overlap lines between chunks | 20 |
+| INDEX_BATCH_SIZE | Upsert batch size | 64 |
+| INDEX_PROGRESS_EVERY | Log progress every N files | 200 |
+
+## Watcher Settings
+
+| Name | Description | Default |
+|------|-------------|---------|
+| WATCH_DEBOUNCE_SECS | Debounce between FS events | 1.5 |
+| INDEX_UPSERT_BATCH | Upsert batch size (watcher) | 128 |
+| INDEX_UPSERT_RETRIES | Retry count | 5 |
+| INDEX_UPSERT_BACKOFF | Seconds between retries | 0.5 |
+| QDRANT_TIMEOUT | HTTP timeout seconds | watcher: 60; search: 20 |
+| MCP_TOOL_TIMEOUT_SECS | Max duration for long-running MCP tools | 3600 |
+
+## Reranker
+
+| Name | Description | Default |
+|------|-------------|---------|
+| RERANKER_ONNX_PATH | Local ONNX cross-encoder model path | unset |
+| RERANKER_TOKENIZER_PATH | Tokenizer path for reranker | unset |
+| RERANKER_ENABLED | Enable reranker by default | 1 (enabled) |
+
+## Decoder (llama.cpp / GLM)
+
+| Name | Description | Default |
+|------|-------------|---------|
+| REFRAG_DECODER | Enable decoder for context_answer | 1 (enabled) |
+| REFRAG_RUNTIME | Decoder backend: llamacpp or glm | llamacpp |
+| LLAMACPP_URL | llama.cpp server endpoint | http://llamacpp:8080 or http://host.docker.internal:8081 |
+| LLAMACPP_TIMEOUT_SEC | Decoder request timeout | 300 |
+| DECODER_MAX_TOKENS | Max tokens for decoder responses | 4000 |
+| REFRAG_DECODER_MODE | prompt or soft (soft requires patched llama.cpp) | prompt |
+| GLM_API_KEY | API key for GLM provider | unset |
+| GLM_MODEL | GLM model name | glm-4.6 |
+| USE_GPU_DECODER | Native Metal decoder (1) vs Docker (0) | 0 (docker) |
+| LLAMACPP_GPU_LAYERS | Number of layers to offload to GPU, -1 for all | 32 |
+
+## ReFRAG (Micro-Chunking & Retrieval)
+
+| Name | Description | Default |
+|------|-------------|---------|
+| REFRAG_MODE | Enable micro-chunking and span budgeting | 1 (enabled) |
+| REFRAG_GATE_FIRST | Enable mini-vector gating | 1 (enabled) |
+| REFRAG_CANDIDATES | Candidates for gate-first filtering | 200 |
+| MICRO_BUDGET_TOKENS | Token budget for context_answer | 512 |
+| MICRO_OUT_MAX_SPANS | Max spans returned per query | 3 |
+| MICRO_CHUNK_TOKENS | Tokens per micro-chunk window | 16 |
+| MICRO_CHUNK_STRIDE | Stride between windows | 8 |
+| MICRO_MERGE_LINES | Lines to merge adjacent spans | 4 |
+| MICRO_TOKENS_PER_LINE | Estimated tokens per line | 32 |
+
+## Ports
+
+| Name | Description | Default |
+|------|-------------|---------|
+| FASTMCP_PORT | Memory MCP server port (SSE) | 8000 |
+| FASTMCP_INDEXER_PORT | Indexer MCP server port (SSE) | 8001 |
+| FASTMCP_HTTP_PORT | Memory RMCP host port mapping | 8002 |
+| FASTMCP_INDEXER_HTTP_PORT | Indexer RMCP host port mapping | 8003 |
+| FASTMCP_HEALTH_PORT | Health port (memory/indexer) | memory: 18000; indexer: 18001 |
+
+## Search & Expansion
+
+| Name | Description | Default |
+|------|-------------|---------|
+| HYBRID_EXPAND | Enable heuristic multi-query expansion | 0 (off) |
+| LLM_EXPAND_MAX | Max alternate queries via LLM | 0 |
+
+## Memory Blending
+
+| Name | Description | Default |
+|------|-------------|---------|
+| MEMORY_SSE_ENABLED | Enable SSE memory blending | false |
+| MEMORY_MCP_URL | Memory MCP endpoint for blending | http://mcp:8000/sse |
+| MEMORY_MCP_TIMEOUT | Timeout for memory queries | 6 |
+| MEMORY_AUTODETECT | Auto-detect memory collection | 1 |
+| MEMORY_COLLECTION_TTL_SECS | Cache TTL for collection detection | 300 |
+
+---
+
+## Exclusions (.qdrantignore)
+
+The indexer supports a `.qdrantignore` file at the repo root (similar to `.gitignore`).
+
+**Default exclusions** (overridable):
+- `/models`, `/node_modules`, `/dist`, `/build`
+- `/.venv`, `/venv`, `/__pycache__`, `/.git`
+- `*.onnx`, `*.bin`, `*.safetensors`, `tokenizer.json`, `*.whl`, `*.tar.gz`
+
+**Override via env or flags:**
+```bash
+# Disable defaults
+QDRANT_DEFAULT_EXCLUDES=0
+
+# Custom ignore file
+QDRANT_IGNORE_FILE=.myignore
+
+# Additional excludes
+QDRANT_EXCLUDES='tokenizer.json,*.onnx,/third_party'
+```
+
+**CLI examples:**
+```bash
+docker compose run --rm indexer --root /work --ignore-file .qdrantignore
+docker compose run --rm indexer --root /work --no-default-excludes --exclude '/vendor' --exclude '*.bin'
+```
+
+---
+
+## Scaling Recommendations
+
+| Repo Size | Chunk Lines | Overlap | Batch Size |
+|-----------|------------|---------|------------|
+| Small (<100 files) | 80-120 | 16-24 | 32-64 |
+| Medium (100s-1k files) | 120-160 | ~20 | 64-128 |
+| Large (1k+ files) | 120 (default) | 20 | 128+ |
+
+For large monorepos, set `INDEX_PROGRESS_EVERY=200` for visibility.
+
