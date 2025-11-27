@@ -104,7 +104,7 @@ spec:
       volumes:
       - name: work-volume
         persistentVolumeClaim:
-          claimName: upload-work-pvc
+          claimName: code-repos-pvc
       - name: codebase-volume
         persistentVolumeClaim:
           claimName: upload-codebase-pvc
