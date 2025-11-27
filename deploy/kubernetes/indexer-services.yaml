@@ -80,7 +80,6 @@ spec:
         volumeMounts:
         - name: work-volume
           mountPath: /work
-          readOnly: true
         - name: metadata-volume
           mountPath: /work/.codebase
         envFrom:
@@ -145,7 +144,6 @@ spec:
         volumeMounts:
         - name: work-volume
           mountPath: /work
-          readOnly: true
         - name: metadata-volume
           mountPath: /work/.codebase
         envFrom:
@@ -205,7 +203,6 @@ spec:
         volumeMounts:
         - name: work-volume
           mountPath: /work
-          readOnly: true
         - name: metadata-volume
           mountPath: /work/.codebase
         envFrom:

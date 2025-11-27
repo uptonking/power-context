@@ -39,8 +39,37 @@ def parse_env_file(env_path: Path) -> dict:
     with env_path.open("r", encoding="utf-8") as f:
         for raw_line in f:
             line = raw_line.strip()
-            if not line or line.startswith("#"):
+            if not line:
                 continue
+
+            commented = False
+            if line.startswith("#"):
+                # Support commented defaults of the form "# KEY=VALUE" so that
+                # template-style .env files can still drive configmap.yaml.
+                stripped = line.lstrip("#").strip()
+                if "=" not in stripped:
+                    # Pure comment, skip.
+                    continue
+
+                key_part, value_part = stripped.split("=", 1)
+                key_candidate = key_part.strip()
+
+                # Only treat as a default if the key looks like an env var:
+                # UPPERCASE letters, digits, and underscores, with no spaces/colons.
+                if (
+                    not key_candidate
+                    or " " in key_candidate
+                    or ":" in key_candidate
+                    or not key_candidate.replace("_", "").isalnum()
+                    or not key_candidate.isupper()
+                ):
+                    # Looks like prose (e.g. "Repository mode: 0=...") rather than
+                    # an environment variable. Leave it as a comment.
+                    continue
+
+                line = f"{key_candidate}={value_part.strip()}"
+                commented = True
+
             if "=" not in line:
                 continue
             key, value = line.split("=", 1)
@@ -48,6 +77,14 @@ def parse_env_file(env_path: Path) -> dict:
             value = value.strip()
             if not key:
                 continue
+            # Do not let commented defaults override explicit KEY=VALUE entries
+            # that appeared earlier in the file.
+            if commented and key in data:
+                continue
+            # Strip inline shell-style comments from unquoted values, so that
+            # "VALUE  # comment" becomes just "VALUE".
+            if "#" in value and not (value.startswith("\"") or value.startswith("'")):
+                value = value.split("#", 1)[0].rstrip()
             # Strip single/double quotes if the whole value is quoted
             if (value.startswith("\"") and value.endswith("\"")) or (
                 value.startswith("'") and value.endswith("'")

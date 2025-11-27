@@ -265,11 +265,6 @@ spec:
             configMapKeyRef:
               name: context-engine-config
               key: MEMORY_MCP_URL
-        - name: CTX_MULTI_COLLECTION
-          valueFrom:
-            configMapKeyRef:
-              name: context-engine-config
-              key: CTX_MULTI_COLLECTION
         - name: FASTMCP_HOST
           valueFrom:
             configMapKeyRef:
