@@ -122,7 +122,7 @@ spec:
   - name: http
     port: 8002
     targetPort: http
-    nodePort: 30804  # Optional: specify node port
+    nodePort: 30810  # Optional: specify node port
     protocol: TCP
   selector:
     app: context-engine

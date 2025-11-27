@@ -27,6 +27,7 @@ resources:
 
   # Optional services
   - llamacpp.yaml
+  - upload-service.yaml
   - ingress.yaml
 
 # Common labels
