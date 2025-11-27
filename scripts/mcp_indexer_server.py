@@ -1695,6 +1695,7 @@ async def repo_search(
     case: Any = None,
     # Response shaping
     compact: Any = None,
+    args: Any = None,  # Compatibility shim for mcp-remote/Claude wrappers that send args/kwargs
     kwargs: Any = None,
 ) -> Dict[str, Any]:
     """Zero-config code search over repositories (hybrid: vector + lexical RRF, optional rerank).
