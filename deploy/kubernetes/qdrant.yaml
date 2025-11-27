@@ -67,7 +67,7 @@ spec:
         component: qdrant
     spec:
       accessModes: ["ReadWriteOnce"]
-# storageClassName: "" # Uncomment and set if you want to specify a storage class
+      storageClassName: ceph-block  # Ceph RWO block storage
       resources:
         requests:
           storage: 20Gi

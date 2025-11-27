@@ -12,7 +12,7 @@ metadata:
 spec:
   accessModes:
     - ReadWriteMany  # CephFS supports RWX for multiple pods
-  storageClassName: rook-cephfs  # Adjust based on your CephFS storage class
+  storageClassName: ceph-filesystem  # Adjust based on your CephFS storage class
   resources:
     requests:
       storage: 10Gi  # Adjust size based on your needs
@@ -36,7 +36,7 @@ metadata:
 spec:
   accessModes:
     - ReadWriteMany  # CephFS supports RWX for multiple pods
-  storageClassName: rook-cephfs  # Adjust based on your CephFS storage class
+  storageClassName: ceph-filesystem  # Adjust based on your CephFS storage class
   resources:
     requests:
       storage: 5Gi  # Smaller size for metadata/cache
