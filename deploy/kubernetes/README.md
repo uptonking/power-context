@@ -199,6 +199,28 @@ MAX_MICRO_CHUNKS_PER_FILE: "200"
 WATCH_DEBOUNCE_SECS: "1.5"
 ```
 
+#### Syncing `configmap.yaml` from `.env`
+
+If you treat a `.env` file as the source of truth for configuration, you can use the helper script `scripts/sync_env_to_k8s.py` to keep `deploy/kubernetes/configmap.yaml` and the workloads in sync:
+
+```bash
+cd /path/to/Context-Engine
+python3 scripts/sync_env_to_k8s.py --env-file .env --k8s-dir deploy/kubernetes
+```
+
+This will:
+
+- Regenerate `deploy/kubernetes/configmap.yaml` so its `data:` keys match the provided `.env` (excluding sensitive keys such as `GLM_API_KEY` by default).
+- Ensure all Deployments and Jobs in `deploy/kubernetes/` include:
+
+  ```yaml
+  envFrom:
+    - configMapRef:
+        name: context-engine-config
+  ```
+
+In CI (for example Bamboo), you can run the same script against the workspace copy of the manifests before `kustomize build . | kubectl apply -f -`, and then provide any sensitive values (such as `GLM_API_KEY`) via Kubernetes `Secret` resources or per-environment overrides instead of committing them to git.
+
 ### Persistent Volumes
 
 The deployment uses HostPath volumes for simplicity (suitable for single-node clusters like minikube):

@@ -1,5 +1,3 @@
----
-# Delta Upload Service Deployment
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -26,9 +24,11 @@ spec:
         fsGroup: 1000
       containers:
       - name: upload-service
-        image: context-engine-upload-service  # Use service-specific image name
+        image: context-engine-upload-service
         imagePullPolicy: IfNotPresent
-        command: ["python", "scripts/upload_service.py"]
+        command:
+        - python
+        - scripts/upload_service.py
         ports:
         - name: http
           containerPort: 8002
@@ -45,15 +45,15 @@ spec:
               name: context-engine-config
               key: COLLECTION_NAME
         - name: UPLOAD_SERVICE_HOST
-          value: "0.0.0.0"
+          value: 0.0.0.0
         - name: UPLOAD_SERVICE_PORT
-          value: "8002"
+          value: '8002'
         - name: WORK_DIR
-          value: "/work"
+          value: /work
         - name: MAX_BUNDLE_SIZE_MB
-          value: "100"
+          value: '100'
         - name: UPLOAD_TIMEOUT_SECS
-          value: "300"
+          value: '300'
         - name: EMBEDDING_MODEL
           valueFrom:
             configMapKeyRef:
@@ -76,11 +76,11 @@ spec:
               key: INDEX_MICRO_CHUNKS
         resources:
           requests:
-            memory: "512Mi"
-            cpu: "250m"
+            memory: 512Mi
+            cpu: 250m
           limits:
-            memory: "2Gi"
-            cpu: "1000m"
+            memory: 2Gi
+            cpu: 1000m
         volumeMounts:
         - name: work-volume
           mountPath: /work
@@ -98,6 +98,9 @@ spec:
             port: http
           initialDelaySeconds: 10
           periodSeconds: 5
+        envFrom:
+        - configMapRef:
+            name: context-engine-config
       volumes:
       - name: work-volume
         persistentVolumeClaim:
@@ -105,9 +108,7 @@ spec:
       - name: codebase-volume
         persistentVolumeClaim:
           claimName: upload-codebase-pvc
-
 ---
-# Delta Upload Service Service
 apiVersion: v1
 kind: Service
 metadata:
@@ -117,12 +118,12 @@ metadata:
     app: context-engine
     component: upload-service
 spec:
-  type: NodePort  # Change to LoadBalancer for external access
+  type: NodePort
   ports:
   - name: http
     port: 8002
     targetPort: http
-    nodePort: 30810  # Optional: specify node port
+    nodePort: 30810
     protocol: TCP
   selector:
     app: context-engine
