@@ -12,7 +12,7 @@ metadata:
 spec:
   accessModes:
     - ReadWriteMany  # CephFS supports RWX for multiple pods
-  storageClassName: rook-cephfs  # Adjust based on your storage class
+  storageClassName: ceph-filesystem  # Adjust based on your storage class
   resources:
     requests:
       storage: 20Gi  # Adjust size based on expected model footprint
