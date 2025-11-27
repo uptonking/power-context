@@ -1,5 +1,3 @@
----
-# MCP Memory Server (SSE) Deployment
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -25,7 +23,9 @@ spec:
       - name: mcp-memory
         image: context-engine-memory
         imagePullPolicy: IfNotPresent
-        command: ["python", "/app/scripts/mcp_memory_server.py"]
+        command:
+        - python
+        - /app/scripts/mcp_memory_server.py
         ports:
         - name: sse
           containerPort: 8000
@@ -45,9 +45,9 @@ spec:
               name: context-engine-config
               key: FASTMCP_PORT
         - name: FASTMCP_HEALTH_PORT
-          value: "18000"
+          value: '18000'
         - name: FASTMCP_TRANSPORT
-          value: "sse"
+          value: sse
         - name: QDRANT_URL
           valueFrom:
             configMapKeyRef:
@@ -65,11 +65,11 @@ spec:
               key: EMBEDDING_MODEL
         resources:
           requests:
-            memory: "1Gi"
-            cpu: "500m"
+            memory: 1Gi
+            cpu: 500m
           limits:
-            memory: "4Gi"
-            cpu: "2"
+            memory: 4Gi
+            cpu: '2'
         volumeMounts:
         - name: work-volume
           mountPath: /work
@@ -86,13 +86,14 @@ spec:
             port: health
           initialDelaySeconds: 10
           periodSeconds: 5
+        envFrom:
+        - configMapRef:
+            name: context-engine-config
       volumes:
       - name: work-volume
         persistentVolumeClaim:
           claimName: code-repos-pvc
-
 ---
-# MCP Memory Server (SSE) Service
 apiVersion: v1
 kind: Service
 metadata:
@@ -102,7 +103,7 @@ metadata:
     app: context-engine
     component: mcp-memory
 spec:
-  type: ClusterIP  # Change to LoadBalancer for external access
+  type: ClusterIP
   ports:
   - name: sse
     port: 8000
@@ -115,9 +116,7 @@ spec:
   selector:
     app: context-engine
     component: mcp-memory
-
 ---
-# Optional: MCP Memory External Service
 apiVersion: v1
 kind: Service
 metadata:
@@ -142,4 +141,3 @@ spec:
   selector:
     app: context-engine
     component: mcp-memory
-
