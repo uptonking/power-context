@@ -208,7 +208,17 @@ def restore_memories(
         batch_points = []
 
         for memory in batch:
-            memory_id = memory.get("id", "")
+            raw_id = memory.get("id", "")
+
+            # Qdrant HTTP API expects point IDs to be either an unsigned integer
+            # or a UUID string. Backups store IDs as strings, so we convert
+            # purely numeric IDs back to integers to match the original type.
+            memory_id = raw_id
+            try:
+                if isinstance(raw_id, str) and raw_id.isdigit():
+                    memory_id = int(raw_id)
+            except Exception:
+                memory_id = raw_id
 
             # Skip if already exists
             if skip_existing and memory_id in existing_ids:

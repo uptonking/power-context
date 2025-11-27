@@ -864,6 +864,8 @@ def ensure_collection(client: QdrantClient, name: str, dim: int, vector_name: st
     Always includes dense (vector_name) and lexical (LEX_VECTOR_NAME).
     When REFRAG_MODE=1, also includes a compact mini vector (MINI_VECTOR_NAME).
     """
+    # Track backup file path for this ensure_collection call (per-collection, per-process)
+    backup_file = None
     try:
         info = client.get_collection(name)
         # Prevent I/O storm - only update vectors if they actually don't exist
@@ -950,8 +952,7 @@ def ensure_collection(client: QdrantClient, name: str, dim: int, vector_name: st
                             pass
 
                         # Store backup info for restoration
-                        if backup_file:
-                            setattr(CollectionNeedsRecreateError, 'backup_file', backup_file)
+                        # backup_file remains bound for this function call; used after collection creation
 
                         # Proceed to recreate with full vector configuration
                         raise CollectionNeedsRecreateError(f"Collection {name} needs recreation for new vectors")
@@ -995,8 +996,14 @@ def ensure_collection(client: QdrantClient, name: str, dim: int, vector_name: st
     print(f"[COLLECTION_INFO] Successfully created new collection {name} with vectors: {list(vectors_cfg.keys())}")
 
     # Restore memories if we have a backup from recreation using dedicated restore script
+    strict_restore = False
     try:
-        backup_file = getattr(CollectionNeedsRecreateError, 'backup_file', None)
+        val = os.environ.get("STRICT_MEMORY_RESTORE", "")
+        strict_restore = str(val or "").strip().lower() in {"1", "true", "yes", "on"}
+    except Exception:
+        strict_restore = False
+
+    try:
         if backup_file and os.path.exists(backup_file):
             print(f"[MEMORY_RESTORE] Restoring memories from {backup_file}")
             import subprocess
@@ -1004,35 +1011,47 @@ def ensure_collection(client: QdrantClient, name: str, dim: int, vector_name: st
 
             # Use battle-tested restore script (skip collection creation since ingest_code.py already handles it)
             restore_script = Path(__file__).parent / "memory_restore.py"
-            result = subprocess.run([
-                sys.executable, str(restore_script),
-                "--backup", backup_file,
-                "--collection", name,
-                "--skip-collection-creation"
-            ], capture_output=True, text=True, cwd=Path(__file__).parent.parent)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(restore_script),
+                    "--backup",
+                    backup_file,
+                    "--collection",
+                    name,
+                    "--skip-collection-creation",
+                ],
+                capture_output=True,
+                text=True,
+                cwd=Path(__file__).parent.parent,
+            )
 
             if result.returncode == 0:
                 print(f"[MEMORY_RESTORE] Successfully restored memories using {restore_script.name}")
             else:
-                print(f"[MEMORY_RESTORE_WARNING] Restore script failed: {result.stderr}")
+                msg = result.stderr or result.stdout or "unknown error"
+                print(f"[MEMORY_RESTORE_WARNING] Restore script failed: {msg}")
+                if strict_restore:
+                    raise RuntimeError(f"Memory restore failed for collection {name}: {msg}")
 
-            # Clean up backup file and reset class attribute
+            # Clean up backup file once we've attempted restore
             try:
                 os.unlink(backup_file)
                 print(f"[MEMORY_RESTORE] Cleaned up backup file {backup_file}")
             except Exception:
                 pass
-            # Reset the backup file attribute to prevent accidental reuse
-            setattr(CollectionNeedsRecreateError, 'backup_file', None)
+            finally:
+                backup_file = None
 
         elif backup_file:
             print(f"[MEMORY_RESTORE_WARNING] Backup file {backup_file} not found")
-            # Reset the backup file attribute even if file not found
-            setattr(CollectionNeedsRecreateError, 'backup_file', None)
+            backup_file = None
 
     except Exception as restore_e:
         print(f"[MEMORY_RESTORE_ERROR] Failed to restore memories: {restore_e}")
-        # Continue even if restore fails - indexing is more important
+        # Optionally fail hard when STRICT_MEMORY_RESTORE is enabled
+        if strict_restore:
+            raise
 
 
 def recreate_collection(client: QdrantClient, name: str, dim: int, vector_name: str):
