@@ -139,11 +139,23 @@ def _collect_git_history_for_workspace(workspace_path: str) -> Optional[Dict[str
         if current_head and cache.get("last_head") == current_head and cache.get("max_commits") == max_commits and str(cache.get("since") or "") == since:
             return None
 
+    base_head = ""
+    if not force_full:
+        try:
+            prev_head = str(cache.get("last_head") or "").strip()
+            if current_head and prev_head and prev_head != current_head:
+                base_head = prev_head
+        except Exception:
+            base_head = ""
+
     # Build git rev-list command (simple HEAD-based history)
     cmd: List[str] = ["git", "rev-list", "--no-merges"]
     if since:
         cmd.append(f"--since={since}")
-    cmd.append("HEAD")
+    if base_head and current_head:
+        cmd.append(f"{base_head}..{current_head}")
+    else:
+        cmd.append("HEAD")
 
     try:
         proc = subprocess.run(
