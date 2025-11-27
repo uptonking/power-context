@@ -285,8 +285,9 @@ function getTargetPath(config) {
     updateStatusBarTooltip();
     return undefined;
   }
-  updateStatusBarTooltip(folderPath);
-  return folderPath;
+  const autoTarget = detectDefaultTargetPath(folderPath);
+  updateStatusBarTooltip(autoTarget);
+  return autoTarget;
 }
 function saveTargetPath(config, targetPath) {
   const hasWorkspace = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length;
@@ -302,6 +303,66 @@ function getWorkspaceFolderPath() {
   }
   return folders[0].uri.fsPath;
 }
+function looksLikeRepoRoot(dirPath) {
+  try {
+    const contextEngineDir = path.join(dirPath, '.context-engine');
+    const ctxConfigPath = path.join(dirPath, 'ctx_config.json');
+    const codebaseStatePath = path.join(dirPath, '.codebase', 'state.json');
+    const gitDir = path.join(dirPath, '.git');
+    if (fs.existsSync(contextEngineDir) || fs.existsSync(ctxConfigPath) || fs.existsSync(codebaseStatePath) || fs.existsSync(gitDir)) {
+      return true;
+    }
+  } catch (error) {
+    log(`Repo root detection failed for ${dirPath}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return false;
+}
+function detectDefaultTargetPath(workspaceFolderPath) {
+  try {
+    const resolved = path.resolve(workspaceFolderPath);
+    if (!fs.existsSync(resolved)) {
+      return workspaceFolderPath;
+    }
+    if (looksLikeRepoRoot(resolved)) {
+      return resolved;
+    }
+    let entries;
+    try {
+      entries = fs.readdirSync(resolved);
+    } catch (error) {
+      log(`Auto targetPath discovery failed to read workspace folder: ${error instanceof Error ? error.message : String(error)}`);
+      return resolved;
+    }
+    const candidates = [];
+    for (const name of entries) {
+      const fullPath = path.join(resolved, name);
+      let stats;
+      try {
+        stats = fs.statSync(fullPath);
+      } catch (_) {
+        continue;
+      }
+      if (!stats.isDirectory()) {
+        continue;
+      }
+      if (looksLikeRepoRoot(fullPath)) {
+        candidates.push(path.resolve(fullPath));
+      }
+    }
+    if (candidates.length === 1) {
+      const detected = candidates[0];
+      log(`Target path auto-detected as ${detected} (under workspace folder).`);
+      return detected;
+    }
+    if (candidates.length > 1) {
+      log('Auto targetPath discovery found multiple candidate repos under workspace; using workspace folder instead.');
+    }
+    return resolved;
+  } catch (error) {
+    log(`Auto targetPath discovery failed: ${error instanceof Error ? error.message : String(error)}`);
+    return workspaceFolderPath;
+  }
+}
 function ensureTargetPathConfigured() {
   const config = vscode.workspace.getConfiguration('contextEngineUploader');
   const current = (config.get('targetPath') || '').trim();
@@ -314,9 +375,10 @@ function ensureTargetPathConfigured() {
     updateStatusBarTooltip();
     return;
   }
-  updateStatusBarTooltip(folderPath);
+  const autoTarget = detectDefaultTargetPath(folderPath);
+  updateStatusBarTooltip(autoTarget);
 }
-function updateStatusBarTooltip(targetPath) {
+  function updateStatusBarTooltip(targetPath) {
   if (!statusBarItem) {
     return;
   }
@@ -698,6 +760,21 @@ async function enhanceSelectionWithUnicorn() {
     const useGpuDecoder = cfg.get('useGpuDecoder', false);
     if (useGpuDecoder) {
       env.USE_GPU_DECODER = '1';
+    }
+    let ctxWorkspaceDir;
+    try {
+      ctxWorkspaceDir = getTargetPath(cfg);
+    } catch (error) {
+      ctxWorkspaceDir = undefined;
+    }
+    if (!ctxWorkspaceDir) {
+      const wsFolder = getWorkspaceFolderPath();
+      if (wsFolder) {
+        ctxWorkspaceDir = detectDefaultTargetPath(wsFolder);
+      }
+    }
+    if (ctxWorkspaceDir && typeof ctxWorkspaceDir === 'string' && fs.existsSync(ctxWorkspaceDir)) {
+      env.CTX_WORKSPACE_DIR = ctxWorkspaceDir;
     }
   } catch (_) {
     // ignore config read failures; fall back to defaults
