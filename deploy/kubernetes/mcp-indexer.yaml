@@ -111,17 +111,15 @@ metadata:
     app: context-engine
     component: mcp-indexer
 spec:
-  type: NodePort  # Change to LoadBalancer for external access
+  type: ClusterIP  # Change to LoadBalancer for external access
   ports:
   - name: sse
     port: 8001
     targetPort: sse
-    nodePort: 30802  # Optional: specify node port
     protocol: TCP
   - name: health
     port: 18001
     targetPort: health
-    nodePort: 30803  # Optional: specify node port
     protocol: TCP
   selector:
     app: context-engine

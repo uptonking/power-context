@@ -146,12 +146,12 @@ metadata:
     app: context-engine
     component: llamacpp
 spec:
-  type: NodePort  # Change to LoadBalancer for external access
+  type: ClusterIP  # Change to LoadBalancer for external access
   ports:
   - name: http
     port: 8080
     targetPort: http
-    nodePort: 30808  # Optional: specify node port
+    # nodePort: 30808  # Optional: specify node port
     protocol: TCP
   selector:
     app: context-engine
