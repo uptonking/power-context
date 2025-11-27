@@ -69,6 +69,11 @@ function activate(context) {
     }
     runSequence('force').catch(error => log(`Index failed: ${error instanceof Error ? error.message : String(error)}`));
   });
+  const uploadGitHistoryDisposable = vscode.commands.registerCommand('contextEngineUploader.uploadGitHistory', () => {
+    vscode.window.showInformationMessage('Context Engine git history upload (force sync) started.');
+    if (outputChannel) { outputChannel.show(true); }
+    runSequence('force').catch(error => log(`Git history upload failed: ${error instanceof Error ? error.message : String(error)}`));
+  });
   const ctxConfigDisposable = vscode.commands.registerCommand('contextEngineUploader.writeCtxConfig', () => {
     writeCtxConfig().catch(error => log(`CTX config write failed: ${error instanceof Error ? error.message : String(error)}`));
   });
@@ -118,6 +123,7 @@ function activate(context) {
     stopDisposable,
     restartDisposable,
     indexDisposable,
+    uploadGitHistoryDisposable,
     showLogsDisposable,
     promptEnhanceDisposable,
     mcpConfigDisposable,
@@ -509,7 +515,9 @@ function setStatusBarState(mode) {
 function runOnce(options) {
   return new Promise(resolve => {
     const args = buildArgs(options, 'force');
-    const child = spawn(options.pythonPath, args, { cwd: options.workingDirectory, env: buildChildEnv(options) });
+    const baseEnv = buildChildEnv(options);
+    const childEnv = { ...baseEnv, REMOTE_UPLOAD_GIT_FORCE: '1' };
+    const child = spawn(options.pythonPath, args, { cwd: options.workingDirectory, env: childEnv });
     forceProcess = child;
     attachOutput(child, 'force');
     let finished = false;
@@ -886,6 +894,15 @@ function buildChildEnv(options) {
       env.DEV_REMOTE_MODE = '1';
       log('Context Engine Uploader: devRemoteMode enabled (REMOTE_UPLOAD_MODE=development, DEV_REMOTE_MODE=1).');
     }
+    const gitMaxCommits = settings.get('gitMaxCommits');
+    if (typeof gitMaxCommits === 'number' && !Number.isNaN(gitMaxCommits)) {
+      env.REMOTE_UPLOAD_GIT_MAX_COMMITS = String(gitMaxCommits);
+    }
+    const gitSinceRaw = settings.get('gitSince');
+    const gitSince = typeof gitSinceRaw === 'string' ? gitSinceRaw.trim() : '';
+    if (gitSince) {
+      env.REMOTE_UPLOAD_GIT_SINCE = gitSince;
+    }
   } catch (error) {
     log(`Failed to read devRemoteMode setting: ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -1046,6 +1063,8 @@ async function scaffoldCtxConfigFiles(workspaceDir, collectionName) {
     let glmApiKey = '';
     let glmApiBase = 'https://api.z.ai/api/coding/paas/v4/';
     let glmModel = 'glm-4.6';
+    let gitMaxCommits = 500;
+    let gitSince = '';
     if (uploaderSettings) {
       try {
         const runtimeSetting = String(uploaderSettings.get('decoderRuntime') ?? 'glm').trim().toLowerCase();
@@ -1064,6 +1083,14 @@ async function scaffoldCtxConfigFiles(workspaceDir, collectionName) {
         }
         if (cfgModel) {
           glmModel = cfgModel;
+        }
+        const maxCommitsSetting = uploaderSettings.get('gitMaxCommits');
+        if (typeof maxCommitsSetting === 'number' && !Number.isNaN(maxCommitsSetting)) {
+          gitMaxCommits = maxCommitsSetting;
+        }
+        const sinceSetting = uploaderSettings.get('gitSince');
+        if (typeof sinceSetting === 'string') {
+          gitSince = sinceSetting.trim();
         }
       } catch (error) {
         log(`Failed to read decoder/GLM settings from configuration: ${error instanceof Error ? error.message : String(error)}`);
@@ -1309,6 +1336,13 @@ async function scaffoldCtxConfigFiles(workspaceDir, collectionName) {
       } catch (error) {
         log(`Failed to read ctxIndexerUrl setting for MCP_INDEXER_URL: ${error instanceof Error ? error.message : String(error)}`);
       }
+    }
+
+    if (typeof gitMaxCommits === 'number' && !Number.isNaN(gitMaxCommits)) {
+      upsertEnv('REMOTE_UPLOAD_GIT_MAX_COMMITS', String(gitMaxCommits), { overwrite: true });
+    }
+    if (gitSince) {
+      upsertEnv('REMOTE_UPLOAD_GIT_SINCE', gitSince, { overwrite: true, skipIfDesiredEmpty: true });
     }
 
     if (envChanged) {

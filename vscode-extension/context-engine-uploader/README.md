@@ -23,6 +23,9 @@ Configuration
 - **CTX + GLM settings:**
   - `contextEngineUploader.ctxIndexerUrl` is copied into `.env` (as `MCP_INDEXER_URL`) so the embedded `ctx.py` knows which MCP indexer to call when enhancing prompts.
   - `contextEngineUploader.glmApiKey`, `glmApiBase`, and `glmModel` are used when scaffolding `ctx_config.json`/`.env` to pre-fill GLM decoder options. Existing non-placeholder values are preserved, so you can override them in the files at any time.
+- **Git history upload settings:**
+  - `contextEngineUploader.gitMaxCommits` controls `REMOTE_UPLOAD_GIT_MAX_COMMITS`, bounding how many commits the upload client includes per bundle (set to 0 to disable git history).
+  - `contextEngineUploader.gitSince` controls `REMOTE_UPLOAD_GIT_SINCE`, letting you constrain the git log window (e.g. `2 years ago` or `2023-01-01`).
 - **Context scaffolding:**
   - `contextEngineUploader.scaffoldCtxConfig` (default `true`) controls whether the extension keeps a minimal `ctx_config.json` + `.env` in sync with your workspace. When enabled, running `Write MCP Config` or `Write CTX Config` will reuse the workspace’s existing files (if present) and only backfill placeholder or missing values from the bundled `env.example` plus the inferred collection name. Existing custom values are preserved.
   - The scaffolder also enforces CTX defaults (e.g., `MULTI_REPO_MODE=1`, `REFRAG_RUNTIME=glm`, `REFRAG_DECODER=1`) so the embedded `ctx.py` is ready for remote uploads, regardless of the “Use GLM Decoder” toggle.
@@ -44,6 +47,7 @@ Commands
 - Status-bar button (`Index Codebase`) mirrors Start/Stop/Restart/Index status, while the `Prompt+` status button runs the ctx rewrite command on the current selection.
 - `Context Engine Uploader: Write MCP Config (.mcp.json)` writes or updates a project-local `.mcp.json` with MCP server entries for the Qdrant indexer and memory/search endpoints, using the configured MCP URLs.
 - `Context Engine Uploader: Write CTX Config (ctx_config.json/.env)` scaffolds the ctx config + env files as described above. This command runs automatically after `Write MCP Config` if scaffolding is enabled, but it is also exposed in the Command Palette for manual use.
+- `Context Engine Uploader: Upload Git History (force sync bundle)` triggers a one-off force sync using the configured git history settings, producing a bundle that includes a `metadata/git_history.json` manifest for remote lineage ingestion.
 
 Logs
 ----

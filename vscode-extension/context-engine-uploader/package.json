@@ -38,6 +38,10 @@
         "title": "Context Engine Uploader: Index Codebase"
       },
       {
+        "command": "contextEngineUploader.uploadGitHistory",
+        "title": "Context Engine Uploader: Upload Git History (force sync bundle)"
+      },
+      {
         "command": "contextEngineUploader.writeMcpConfig",
         "title": "Context Engine Uploader: Write MCP Config (.mcp.json)"
       },
@@ -205,6 +209,17 @@
           "type": "string",
           "default": "glm-4.6",
           "description": "GLM model name (GLM_MODEL) used by refrag_glm/ctx.py when REFRAG_RUNTIME=glm."
+        },
+        "contextEngineUploader.gitMaxCommits": {
+          "type": "number",
+          "default": 500,
+          "minimum": 0,
+          "description": "Upper bound for REMOTE_UPLOAD_GIT_MAX_COMMITS passed to the upload clients via .env/child process environment. Set to 0 or a negative value to disable git history collection."
+        },
+        "contextEngineUploader.gitSince": {
+          "type": "string",
+          "default": "",
+          "description": "Optional REMOTE_UPLOAD_GIT_SINCE constraint (e.g. '2 years ago' or '2023-01-01') passed to the upload clients via .env/child process environment. Leave empty to use the clients' default behavior."
         }
       }
     }

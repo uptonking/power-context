@@ -1962,6 +1962,16 @@ async def repo_search(
     if include_snippet:
         compact = False
 
+    # Default behavior: exclude commit-history docs (which use path=".git") from
+    # generic repo_search calls, unless the caller explicitly asks for git
+    # content. This prevents normal code queries from surfacing commit-index
+    # points as if they were source files.
+    if (not language or language.lower() != "git") and (
+        not kind or kind.lower() != "git_message"
+    ):
+        if ".git" not in not_globs:
+            not_globs.append(".git")
+
     # Accept top-level alias `queries` as a drop-in for `query`
     # Many clients send queries=[...] instead of query=[...]
     if kwargs and "queries" in kwargs and kwargs.get("queries") is not None:
@@ -2759,10 +2769,174 @@ async def search_importers_for(
 
 
 @mcp.tool()
+async def search_commits_for(
+    query: Any = None,
+    path: Any = None,
+    collection: Any = None,
+    limit: Any = None,
+    max_points: Any = None,
+) -> Dict[str, Any]:
+    """Search git commit history indexed in Qdrant.
+
+    What it does:
+    - Queries commit documents ingested by scripts/ingest_history.py
+    - Filters by optional file path (metadata.files contains path)
+
+    Parameters:
+    - query: str or list[str]; matched lexically against commit message/text
+    - path: str (optional). Relative path under /work; filters commits that touched this file
+    - collection: str (optional). Defaults to env/WS collection
+    - limit: int (optional, default 10). Max commits to return
+    - max_points: int (optional). Safety cap on scanned points (default 1000)
+
+    Returns:
+    - {"ok": true, "results": [{"commit_id", "author_name", "authored_date", "message", "files"}, ...], "scanned": int}
+    - On error: {"ok": false, "error": "..."}
+    """
+    # Normalize inputs
+    # query may be a string ("ctx script build") or a list of terms;
+    # in both cases we normalize to lowercase tokens and require all of
+    # them to appear somewhere in the composite text.
+    q_terms: list[str] = []
+    if isinstance(query, (list, tuple)):
+        for x in query:
+            for tok in str(x).strip().split():
+                if tok.strip():
+                    q_terms.append(tok.strip().lower())
+    elif query is not None:
+        qs = str(query).strip()
+        if qs:
+            for tok in qs.split():
+                if tok.strip():
+                    q_terms.append(tok.strip().lower())
+    p = str(path or "").strip()
+    coll = str(collection or "").strip() or _default_collection()
+    try:
+        lim = int(limit) if limit not in (None, "") else 10
+    except (ValueError, TypeError):
+        lim = 10
+    try:
+        mcap = int(max_points) if max_points not in (None, "") else 1000
+    except (ValueError, TypeError):
+        mcap = 1000
+
+    try:
+        from qdrant_client import QdrantClient  # type: ignore
+        from qdrant_client import models as qmodels  # type: ignore
+
+        client = QdrantClient(
+            url=QDRANT_URL,
+            api_key=os.environ.get("QDRANT_API_KEY"),
+            timeout=float(os.environ.get("QDRANT_TIMEOUT", "20") or 20),
+        )
+
+        # Restrict to commit documents ingested by ingest_history.py
+        filt = qmodels.Filter(
+            must=[
+                qmodels.FieldCondition(
+                    key="metadata.language", match=qmodels.MatchValue(value="git")
+                ),
+                qmodels.FieldCondition(
+                    key="metadata.kind", match=qmodels.MatchValue(value="git_message")
+                ),
+            ]
+        )
+
+        page = None
+        scanned = 0
+        out: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        while scanned < mcap and len(seen_ids) < lim:
+            sc, page = await asyncio.to_thread(
+                lambda: client.scroll(
+                    collection_name=coll,
+                    with_payload=True,
+                    with_vectors=False,
+                    limit=200,
+                    offset=page,
+                    scroll_filter=filt,
+                )
+            )
+            if not sc:
+                break
+            for pt in sc:
+                scanned += 1
+                if scanned > mcap:
+                    break
+                payload = getattr(pt, "payload", {}) or {}
+                md = payload.get("metadata") or {}
+                msg = str(md.get("message") or "")
+                info = str(payload.get("information") or "")
+                files = md.get("files") or []
+                try:
+                    files_list = [str(f) for f in files]
+                except Exception:
+                    files_list = []
+                # Optional lineage-style metadata from ingest_history (GLM/decoder-backed)
+                lg = md.get("lineage_goal")
+                if isinstance(lg, str):
+                    lineage_goal = lg.strip()
+                else:
+                    lineage_goal = ""
+                ls_raw = md.get("lineage_symbols") or []
+                if isinstance(ls_raw, list):
+                    lineage_symbols = [
+                        str(x).strip() for x in ls_raw if str(x).strip()
+                    ][:6]
+                else:
+                    lineage_symbols = []
+                lt_raw = md.get("lineage_tags") or []
+                if isinstance(lt_raw, list):
+                    lineage_tags = [
+                        str(x).strip() for x in lt_raw if str(x).strip()
+                    ][:6]
+                else:
+                    lineage_tags = []
+                # Build a composite lowercase text blob for simple lexical matching
+                lineage_text_parts = []
+                if lineage_goal:
+                    lineage_text_parts.append(lineage_goal)
+                if lineage_symbols:
+                    lineage_text_parts.extend(lineage_symbols)
+                if lineage_tags:
+                    lineage_text_parts.extend(lineage_tags)
+                text_l = (msg + "\n" + info + "\n" + " ".join(lineage_text_parts)).lower()
+                if q_terms and not all(t in text_l for t in q_terms):
+                    continue
+                if p:
+                    # Require the path substring to appear in at least one touched file
+                    if not any(p in f for f in files_list):
+                        continue
+                cid = md.get("commit_id") or md.get("symbol")
+                scid = str(cid) if cid is not None else ""
+                if not scid or scid in seen_ids:
+                    continue
+                seen_ids.add(scid)
+                out.append(
+                    {
+                        "commit_id": cid,
+                        "author_name": md.get("author_name"),
+                        "authored_date": md.get("authored_date"),
+                        "message": msg.splitlines()[0] if msg else "",
+                        "files": files_list,
+                        "lineage_goal": lineage_goal,
+                        "lineage_symbols": lineage_symbols,
+                        "lineage_tags": lineage_tags,
+                    }
+                )
+                if len(seen_ids) >= lim:
+                    break
+        return {"ok": True, "results": out, "scanned": scanned, "collection": coll}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "collection": coll}
+
+
+@mcp.tool()
 async def change_history_for_path(
     path: Any,
     collection: Any = None,
     max_points: Any = None,
+    include_commits: Any = None,
 ) -> Dict[str, Any]:
     """Summarize recent change metadata for a file path from the index.
 
@@ -2770,6 +2944,8 @@ async def change_history_for_path(
     - path: str. Relative path under /work.
     - collection: str (optional). Defaults to env/WS default.
     - max_points: int (optional). Safety cap on scanned points.
+    - include_commits: bool (optional). If true, attach a small list of recent commits
+      touching this path based on the commit index.
 
     Returns:
     - {"ok": true, "summary": {...}} or {"ok": false, "error": "..."}.
@@ -2782,6 +2958,14 @@ async def change_history_for_path(
         mcap = int(max_points) if max_points not in (None, "") else 200
     except (ValueError, TypeError):
         mcap = 200
+    # Treat include_commits as a loose boolean flag
+    inc_commits = False
+    if include_commits not in (None, ""):
+        try:
+            inc_commits = str(include_commits).strip().lower() in {"1", "true", "yes", "on"}
+        except Exception:
+            inc_commits = False
+
     try:
         from qdrant_client import QdrantClient  # type: ignore
         from qdrant_client import models as qmodels  # type: ignore
@@ -2835,7 +3019,7 @@ async def change_history_for_path(
                 total += 1
                 if total >= mcap:
                     break
-        summary = {
+        summary: Dict[str, Any] = {
             "path": p,
             "points_scanned": total,
             "distinct_hashes": len(hashes),
@@ -2845,6 +3029,30 @@ async def change_history_for_path(
             "ingested_max": max(ingested) if ingested else None,
             "churn_count_max": max(churns) if churns else None,
         }
+        if inc_commits:
+            try:
+                commits = await search_commits_for(
+                    query=None,
+                    path=p,
+                    collection=coll,
+                    limit=10,
+                    max_points=1000,
+                )
+                if isinstance(commits, dict) and commits.get("ok"):
+                    raw = commits.get("results") or []
+                    seen: set[str] = set()
+                    uniq: list[dict[str, Any]] = []
+                    for c in raw:
+                        cid = c.get("commit_id") if isinstance(c, dict) else None
+                        scid = str(cid) if cid is not None else ""
+                        if not scid or scid in seen:
+                            continue
+                        seen.add(scid)
+                        uniq.append(c)
+                    summary["commits"] = uniq
+            except Exception:
+                # Best-effort: change-history summary is still useful without commit details
+                pass
         return {"ok": True, "summary": summary}
     except Exception as e:
         return {"ok": False, "error": str(e), "path": p}
@@ -4432,6 +4640,7 @@ def _ca_prepare_filters_and_retrieve(
         ".kiro/",
         "node_modules/",
         ".git/",
+        ".git",
     ]
 
     def _variants(p: str) -> list[str]:

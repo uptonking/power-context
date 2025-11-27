@@ -2,8 +2,10 @@
 import os
 import time
 import threading
+import json
+import subprocess
 from pathlib import Path
-from typing import Optional, Set
+from typing import Optional, Set, Dict, List, Any
 
 from qdrant_client import QdrantClient, models
 from fastembed import TextEmbedding
@@ -236,6 +238,9 @@ class IndexHandler(FileSystemEventHandler):
         if rel_dir == "/.":
             rel_dir = "/"
         if self.excl.exclude_dir(rel_dir):
+            return
+        if any(part == ".remote-git" for part in p.parts) and p.suffix.lower() == ".json":
+            self.queue.add(p)
             return
         # only code files
         if p.suffix.lower() not in idx.CODE_EXTS:
@@ -760,6 +765,39 @@ def main():
         obs.join()
 
 
+def _process_git_history_manifest(
+    p: Path,
+    client,
+    model,
+    collection: str,
+    vector_name: str,
+    repo_name: Optional[str],
+):
+    try:
+        import sys
+
+        script = ROOT_DIR / "scripts" / "ingest_history.py"
+        if not script.exists():
+            return
+        cmd = [sys.executable or "python3", str(script), "--manifest-json", str(p)]
+        env = os.environ.copy()
+        if collection:
+            env["COLLECTION_NAME"] = collection
+        if QDRANT_URL:
+            env["QDRANT_URL"] = QDRANT_URL
+        if repo_name:
+            env["REPO_NAME"] = repo_name
+        try:
+            print(
+                f"[git_history_manifest] launching ingest_history.py for {p} collection={collection} repo={repo_name}"
+            )
+        except Exception:
+            pass
+        subprocess.Popen(cmd, env=env)
+    except Exception:
+        return
+
+
 def _process_paths(paths, client, model, vector_name: str, model_dim: int, workspace_path: str):
     unique_paths = sorted(set(Path(x) for x in paths))
     if not unique_paths:
@@ -797,6 +835,27 @@ def _process_paths(paths, client, model, vector_name: str, model_dim: int, works
         repo_files = repo_groups.get(repo_key, [])
         repo_name = _extract_repo_name_from_path(repo_key)
         collection = _get_collection_for_file(p)
+
+        if ".remote-git" in p.parts and p.suffix.lower() == ".json":
+            try:
+                _process_git_history_manifest(p, client, model, collection, vector_name, repo_name)
+            except Exception as e:
+                try:
+                    print(f"[commit_ingest_error] {p}: {e}")
+                except Exception:
+                    pass
+            repo_progress[repo_key] = repo_progress.get(repo_key, 0) + 1
+            try:
+                _update_progress(
+                    repo_key,
+                    started_at,
+                    repo_progress[repo_key],
+                    len(repo_files),
+                    p,
+                )
+            except Exception:
+                pass
+            continue
 
         if not p.exists():
             if client is not None:

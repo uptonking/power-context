@@ -86,6 +86,20 @@ Agentic AI Project Rules: When to Use MCP Qdrant-Indexer vs Grep
     - Use for: short natural-language summaries/explanations of specific modules or tools, grounded in code/docs with citations.
     - Good for: "What does scripts/standalone_upload_client.py do at a high level?", "Summarize the remote upload client pipeline.".
 
+  Advanced lineage workflow (code + history):
+
+  - Goal: answer "when/why did behavior X change?" without flooding context.
+  - Step 1 – Find current implementation (code):
+    - Use repo_search to locate the relevant file/symbol, e.g. `repo_search(query: "upload client timeout", language: "python", under: "scripts")`.
+  - Step 2 – Summarize recent change activity for a file:
+    - Call change_history_for_path with `include_commits=true` to get churn stats and a small list of recent commits, e.g. `change_history_for_path(path: "scripts/remote_upload_client.py", include_commits: true)`.
+  - Step 3 – Pull commit lineage for a specific behavior:
+    - Use search_commits_for with short behavior phrases plus an optional path filter, e.g. `search_commits_for(query: "remote upload timeout retry", path: "scripts/remote_upload_client.py")`.
+    - Read lineage_goal / lineage_symbols / lineage_tags to understand intent and related concepts.
+  - Step 4 – Optionally summarize current behavior:
+    - After you have the right file/symbol from repo_search, use context_answer to explain what the module does now; treat commit lineage as background, not as primary code context.
+  - For exact line-level changes (e.g. "when did this literal constant change?"), use lineage tools to narrow candidate commits, then inspect diffs with git tooling; do not guess purely from summaries.
+
   Query Phrasing Tips for context_answer:
 
   - Prefer behavior/architecture questions about a single module or tool:

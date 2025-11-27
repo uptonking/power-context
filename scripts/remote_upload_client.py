@@ -20,6 +20,9 @@ import tarfile
 import tempfile
 import logging
 import argparse
+import subprocess
+import shlex
+import re
 from pathlib import Path, PurePosixPath
 from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime
@@ -42,6 +45,219 @@ from scripts.workspace_state import (
 
 # Import existing hash function
 import scripts.ingest_code as idx
+
+
+def _find_git_root(start: Path) -> Optional[Path]:
+    """Best-effort detection of the git repository root for a workspace.
+
+    Walks up from the given path looking for a .git directory. Returns None if
+    no repo is found or git metadata is unavailable.
+    """
+    try:
+        cur = start.resolve()
+    except Exception:
+        cur = start
+    try:
+        for p in [cur] + list(cur.parents):
+            try:
+                if (p / ".git").exists():
+                    return p
+            except Exception:
+                continue
+    except Exception:
+        return None
+    return None
+
+
+def _redact_emails(text: str) -> str:
+    """Redact email addresses from commit messages for privacy."""
+    try:
+        return re.sub(
+            r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", "<redacted>", text or "",
+        )
+    except Exception:
+        return text
+
+
+def _collect_git_history_for_workspace(workspace_path: str) -> Optional[Dict[str, Any]]:
+    """Best-effort collection of recent git history for a workspace.
+
+    Uses REMOTE_UPLOAD_GIT_MAX_COMMITS (0/empty disables) and
+    REMOTE_UPLOAD_GIT_SINCE (optional) to bound history. Returns a
+    serializable dict suitable for writing as metadata/git_history.json, or
+    None when git metadata is unavailable.
+    """
+    # Read configuration from environment
+    try:
+        raw_max = (os.environ.get("REMOTE_UPLOAD_GIT_MAX_COMMITS", "") or "").strip()
+        max_commits = int(raw_max) if raw_max else 0
+    except Exception:
+        max_commits = 0
+    since = (os.environ.get("REMOTE_UPLOAD_GIT_SINCE", "") or "").strip()
+    force_full = str(os.environ.get("REMOTE_UPLOAD_GIT_FORCE", "") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+    if max_commits <= 0:
+        return None
+
+    root = _find_git_root(Path(workspace_path))
+    if not root:
+        return None
+
+    # Git history cache: avoid emitting identical manifests when HEAD/settings are unchanged
+    base = Path(os.environ.get("WORKSPACE_PATH") or workspace_path).resolve()
+    git_cache_path = base / ".context-engine" / "git_history_cache.json"
+    current_head = ""
+    try:
+        head_proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(root),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if head_proc.returncode == 0 and head_proc.stdout.strip():
+            current_head = head_proc.stdout.strip()
+    except Exception:
+        current_head = ""
+
+    cache: Dict[str, Any] = {}
+    if not force_full:
+        try:
+            if git_cache_path.exists():
+                with git_cache_path.open("r", encoding="utf-8") as f:
+                    obj = json.load(f)
+                    if isinstance(obj, dict):
+                        cache = obj
+        except Exception:
+            cache = {}
+
+        if current_head and cache.get("last_head") == current_head and cache.get("max_commits") == max_commits and str(cache.get("since") or "") == since:
+            return None
+
+    # Build git rev-list command (simple HEAD-based history)
+    cmd: List[str] = ["git", "rev-list", "--no-merges"]
+    if since:
+        cmd.append(f"--since={since}")
+    cmd.append("HEAD")
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(root),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if proc.returncode != 0 or not proc.stdout.strip():
+            return None
+        commits = [l.strip() for l in proc.stdout.splitlines() if l.strip()]
+    except Exception:
+        return None
+
+    if not commits:
+        return None
+    if len(commits) > max_commits:
+        commits = commits[:max_commits]
+
+    records: List[Dict[str, Any]] = []
+    for sha in commits:
+        try:
+            fmt = "%H%x1f%an%x1f%ae%x1f%ad%x1f%s%x1f%b"
+            show_proc = subprocess.run(
+                ["git", "show", "-s", f"--format={fmt}", sha],
+                cwd=str(root),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            if show_proc.returncode != 0 or not show_proc.stdout.strip():
+                continue
+            parts = show_proc.stdout.strip().split("\x1f")
+            c_sha, an, _ae, ad, subj, body = (parts + [""] * 6)[:6]
+
+            files_proc = subprocess.run(
+                ["git", "diff-tree", "--no-commit-id", "--name-only", "-r", sha],
+                cwd=str(root),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            files: List[str] = []
+            if files_proc.returncode == 0 and files_proc.stdout:
+                files = [f for f in files_proc.stdout.splitlines() if f]
+
+            diff_text = ""
+            try:
+                diff_proc = subprocess.run(
+                    ["git", "show", "--stat", "--patch", "--unified=3", sha],
+                    cwd=str(root),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                if diff_proc.returncode == 0 and diff_proc.stdout:
+                    try:
+                        max_chars = int(os.environ.get("COMMIT_SUMMARY_DIFF_CHARS", "6000") or 6000)
+                    except Exception:
+                        max_chars = 6000
+                    diff_text = diff_proc.stdout[:max_chars]
+            except Exception:
+                diff_text = ""
+
+            msg = _redact_emails((subj + ("\n" + body if body else "")).strip())
+            if len(msg) > 2000:
+                msg = msg[:2000] + "\u2026"
+
+            records.append(
+                {
+                    "commit_id": c_sha or sha,
+                    "author_name": an,
+                    "authored_date": ad,
+                    "message": msg,
+                    "files": files,
+                    "diff": diff_text,
+                }
+            )
+        except Exception:
+            continue
+
+    if not records:
+        return None
+
+    try:
+        repo_name = root.name
+    except Exception:
+        repo_name = "workspace"
+
+    manifest = {
+        "version": 1,
+        "repo_name": repo_name,
+        "generated_at": datetime.now().isoformat(),
+        "max_commits": max_commits,
+        "since": since,
+        "commits": records,
+    }
+
+    # Update git history cache with the HEAD and settings used for this manifest
+    try:
+        git_cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_out = {
+            "last_head": current_head or (commits[0] if commits else ""),
+            "max_commits": max_commits,
+            "since": since,
+            "updated_at": datetime.now().isoformat(),
+        }
+        with git_cache_path.open("w", encoding="utf-8") as f:
+            json.dump(cache_out, f, indent=2)
+    except Exception:
+        pass
+
+    return manifest
 
 
 def _load_local_cache_file_hashes(workspace_path: str, repo_name: Optional[str]) -> Dict[str, str]:
@@ -505,6 +721,17 @@ class RemoteUploadClient:
                 "file_hashes": file_hashes
             }
             (metadata_dir / "hashes.json").write_text(json.dumps(hashes_metadata, indent=2))
+
+            # Optional: attach recent git history for this workspace
+            try:
+                git_history = _collect_git_history_for_workspace(self.workspace_path)
+                if git_history:
+                    (metadata_dir / "git_history.json").write_text(
+                        json.dumps(git_history, indent=2)
+                    )
+            except Exception:
+                # Best-effort only; never fail bundle creation on git history issues
+                pass
 
             # Create tarball in temporary directory
             temp_bundle_dir = self._get_temp_bundle_dir()

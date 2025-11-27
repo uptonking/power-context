@@ -7,6 +7,9 @@ import hashlib
 from typing import List, Dict, Any
 import re
 import time
+import json
+import sys
+from pathlib import Path
 
 from qdrant_client import QdrantClient, models
 from fastembed import TextEmbedding
@@ -17,6 +20,9 @@ QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
 API_KEY = os.environ.get("QDRANT_API_KEY")
 REPO_NAME = os.environ.get("REPO_NAME", "workspace")
 
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 from scripts.utils import sanitize_vector_name as _sanitize_vector_name
 
@@ -108,6 +114,119 @@ def stable_id(commit_id: str) -> int:
     return int(h[:16], 16)
 
 
+def _commit_summary_enabled() -> bool:
+    """Check REFRAG_COMMIT_DESCRIBE to decide if commit summarization is enabled.
+
+    This is an opt-in feature: set REFRAG_COMMIT_DESCRIBE=1 (and enable the decoder)
+    to generate per-commit lineage summaries at ingest time.
+    """
+    try:
+        return str(os.environ.get("REFRAG_COMMIT_DESCRIBE", "0")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+    except Exception:
+        return False
+
+
+def generate_commit_summary(md: Dict[str, Any], diff_text: str) -> tuple[str, list[str], list[str]]:
+    """Best-effort: ask local decoder to summarize a git commit.
+
+    Returns (goal, symbols, tags). On failure returns ("", [], []).
+
+    The summary is designed to be compact and search-friendly, mirroring the
+    Context Lineage goals: high-level intent, key symbols, and short tags.
+    """
+    goal: str = ""
+    symbols: list[str] = []
+    tags: list[str] = []
+    if not _commit_summary_enabled() or not diff_text.strip():
+        return goal, symbols, tags
+    try:
+        from scripts.refrag_llamacpp import (  # type: ignore
+            LlamaCppRefragClient,
+            is_decoder_enabled,
+            get_runtime_kind,
+        )
+
+        if not is_decoder_enabled():
+            return "", [], []
+        runtime = get_runtime_kind()
+        commit_id = str(md.get("commit_id") or "")
+        message = str(md.get("message") or "")
+        files = md.get("files") or []
+        try:
+            files_str = "\n".join(str(f) for f in files[:50])
+        except Exception:
+            files_str = ""
+        # Truncate diff text to keep summarization fast/token-efficient
+        try:
+            max_chars = int(os.environ.get("COMMIT_SUMMARY_DIFF_CHARS", "6000") or 6000)
+        except Exception:
+            max_chars = 6000
+        body = diff_text[:max_chars]
+
+        if runtime == "glm":
+            from scripts.refrag_glm import GLMRefragClient  # type: ignore
+
+            client = GLMRefragClient()
+            prompt = (
+                "You are a JSON-only function that summarizes git commits for search enrichment.\n"
+                "Respond with a single JSON object and nothing else (no prose, no markdown).\n"
+                "Exact format: {\"goal\": string (<=200 chars), \"symbols\": [1-6 short strings], \"tags\": [3-6 short strings]}.\n"
+                f"Commit id: {commit_id}\n"
+                f"Message:\n{message}\n"
+                f"Files:\n{files_str}\n"
+                "Diff:\n" + body
+            )
+            out = client.generate_with_soft_embeddings(
+                prompt=prompt,
+                max_tokens=int(os.environ.get("COMMIT_SUMMARY_MAX_TOKENS", "128") or 128),
+                temperature=float(os.environ.get("COMMIT_SUMMARY_TEMPERATURE", "0.10") or 0.10),
+                top_p=float(os.environ.get("COMMIT_SUMMARY_TOP_P", "0.9") or 0.9),
+                stop=["\n\n"],
+                force_json=True,
+            )
+        else:
+            client = LlamaCppRefragClient()
+            prompt = (
+                "You summarize git commits for search enrichment.\n"
+                "Return strictly JSON: {\"goal\": string (<=200 chars), \"symbols\": [1-6 short strings], \"tags\": [3-6 short strings]}.\n"
+                f"Commit id: {commit_id}\n"
+                f"Message:\n{message}\n"
+                f"Files:\n{files_str}\n"
+                "Diff:\n" + body
+            )
+            out = client.generate_with_soft_embeddings(
+                prompt=prompt,
+                max_tokens=int(os.environ.get("COMMIT_SUMMARY_MAX_TOKENS", "128") or 128),
+                temperature=float(os.environ.get("COMMIT_SUMMARY_TEMPERATURE", "0.10") or 0.10),
+                top_k=int(os.environ.get("COMMIT_SUMMARY_TOP_K", "30") or 30),
+                top_p=float(os.environ.get("COMMIT_SUMMARY_TOP_P", "0.9") or 0.9),
+                stop=["\n\n"],
+            )
+        import json as _json
+        try:
+            obj = _json.loads(out)
+            if isinstance(obj, dict):
+                g = obj.get("goal")
+                s = obj.get("symbols")
+                t = obj.get("tags")
+                if isinstance(g, str):
+                    goal = g.strip()[:200]
+                if isinstance(s, list):
+                    symbols = [str(x).strip() for x in s if str(x).strip()][:6]
+                if isinstance(t, list):
+                    tags = [str(x).strip() for x in t if str(x).strip()][:6]
+        except Exception:
+            pass
+    except Exception:
+        return "", [], []
+    return goal, symbols, tags
+
+
 def build_text(
     md: Dict[str, Any], max_files: int = 200, include_body: bool = True
 ) -> str:
@@ -118,6 +237,107 @@ def build_text(
     head = msg.strip()
     files_part = "\n".join(files[:max_files])
     return (head + "\n\nFiles:\n" + files_part).strip()
+
+
+def _ingest_from_manifest(
+    manifest_path: str,
+    model: TextEmbedding,
+    client: QdrantClient,
+    vec_name: str,
+    include_body: bool,
+    per_batch: int,
+) -> int:
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        print(f"Failed to read manifest {manifest_path}: {e}")
+        return 0
+
+    commits = data.get("commits") or []
+    if not commits:
+        print("No commits in manifest.")
+        return 0
+
+    points: List[models.PointStruct] = []
+    count = 0
+    for c in commits:
+        try:
+            if not isinstance(c, dict):
+                continue
+            commit_id = str(c.get("commit_id") or "").strip()
+            if not commit_id:
+                continue
+            author_name = str(c.get("author_name") or "")
+            authored_date = str(c.get("authored_date") or "")
+            message = str(c.get("message") or "")
+            files = c.get("files") or []
+            if not isinstance(files, list):
+                files = []
+            md: Dict[str, Any] = {
+                "commit_id": commit_id,
+                "author_name": author_name,
+                "authored_date": authored_date,
+                "message": message,
+                "files": files,
+            }
+            text = build_text(md, include_body=include_body)
+            try:
+                vec = next(model.embed([text])).tolist()
+            except Exception:
+                continue
+
+            goal: str = ""
+            sym: List[str] = []
+            tgs: List[str] = []
+            diff_text = str(c.get("diff") or "")
+            if diff_text.strip():
+                try:
+                    goal, sym, tgs = generate_commit_summary(md, diff_text)
+                except Exception:
+                    goal, sym, tgs = "", [], []
+
+            md_payload: Dict[str, Any] = {
+                "language": "git",
+                "kind": "git_message",
+                "symbol": commit_id,
+                "symbol_path": commit_id,
+                "repo": REPO_NAME,
+                "commit_id": commit_id,
+                "author_name": author_name,
+                "authored_date": authored_date,
+                "message": message,
+                "files": files,
+                "path": ".git",
+                "path_prefix": ".git",
+                "ingested_at": int(time.time()),
+            }
+            if goal:
+                md_payload["lineage_goal"] = goal
+            if sym:
+                md_payload["lineage_symbols"] = sym
+            if tgs:
+                md_payload["lineage_tags"] = tgs
+
+            payload = {
+                "document": (message.splitlines()[0] if message else commit_id),
+                "information": text[:512],
+                "metadata": md_payload,
+            }
+            pid = stable_id(commit_id)
+            pt = models.PointStruct(id=pid, vector={vec_name: vec}, payload=payload)
+            points.append(pt)
+            count += 1
+            if len(points) >= per_batch:
+                client.upsert(collection_name=COLLECTION, points=points)
+                points.clear()
+        except Exception:
+            continue
+
+    if points:
+        client.upsert(collection_name=COLLECTION, points=points)
+    print(f"Ingested {count} commits into {COLLECTION} from manifest {manifest_path}.")
+    return count
 
 
 def main():
@@ -147,6 +367,12 @@ def main():
         help="Remote to fetch from if no local HEAD is present",
     )
     ap.add_argument(
+        "--manifest-json",
+        type=str,
+        default=None,
+        help="Path to git history manifest JSON produced by upload client",
+    )
+    ap.add_argument(
         "--fetch-depth",
         type=int,
         default=1000,
@@ -158,6 +384,17 @@ def main():
     vec_name = _sanitize_vector_name(MODEL_NAME)
     client = QdrantClient(url=QDRANT_URL, api_key=API_KEY or None)
 
+    if args.manifest_json:
+        _ingest_from_manifest(
+            args.manifest_json,
+            model,
+            client,
+            vec_name,
+            args.include_body,
+            args.per_batch,
+        )
+        return
+
     commits = list_commits(args)
     if not commits:
         print("No commits matched filters.")
@@ -168,6 +405,35 @@ def main():
         md = commit_metadata(sha)
         text = build_text(md, include_body=args.include_body)
         vec = next(model.embed([text])).tolist()
+        goal, sym, tgs = "", [], []
+        try:
+            diff = run(f"git show --stat --patch --unified=3 {sha}")
+            goal, sym, tgs = generate_commit_summary(md, diff)
+        except Exception:
+            pass
+
+        md_payload: Dict[str, Any] = {
+            "language": "git",
+            "kind": "git_message",
+            "symbol": md["commit_id"],
+            "symbol_path": md["commit_id"],
+            "repo": REPO_NAME,
+            "commit_id": md["commit_id"],
+            "author_name": md["author_name"],
+            "authored_date": md["authored_date"],
+            "message": md["message"],
+            "files": md["files"],
+            "path": ".git",
+            "path_prefix": ".git",
+            "ingested_at": int(time.time()),
+        }
+        if goal:
+            md_payload["lineage_goal"] = goal
+        if sym:
+            md_payload["lineage_symbols"] = sym
+        if tgs:
+            md_payload["lineage_tags"] = tgs
+
         payload = {
             "document": (
                 md.get("message", "").splitlines()[0]
@@ -175,21 +441,7 @@ def main():
                 else md["commit_id"]
             ),
             "information": text[:512],
-            "metadata": {
-                "language": "git",
-                "kind": "git_message",
-                "symbol": md["commit_id"],
-                "symbol_path": md["commit_id"],
-                "repo": REPO_NAME,
-                "commit_id": md["commit_id"],
-                "author_name": md["author_name"],
-                "authored_date": md["authored_date"],
-                "message": md["message"],
-                "files": md["files"],
-                "path": ".git",
-                "path_prefix": ".git",
-                "ingested_at": int(time.time()),
-            },
+            "metadata": md_payload,
         }
         pid = stable_id(md["commit_id"])  # deterministic per-commit
         point = models.PointStruct(id=pid, vector={vec_name: vec}, payload=payload)

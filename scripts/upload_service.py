@@ -214,6 +214,28 @@ def process_delta_bundle(workspace_path: str, bundle_path: Path, manifest: Dict[
             operations_data = json.loads(ops_file.read().decode('utf-8'))
             operations = operations_data.get("operations", [])
 
+            # Best-effort: extract git history metadata for watcher to ingest
+            try:
+                git_member = None
+                for member in tar.getnames():
+                    if member.endswith("metadata/git_history.json"):
+                        git_member = member
+                        break
+                if git_member:
+                    git_file = tar.extractfile(git_member)
+                    if git_file:
+                        history_bytes = git_file.read()
+                        history_dir = workspace / ".remote-git"
+                        history_dir.mkdir(parents=True, exist_ok=True)
+                        bundle_id = manifest.get("bundle_id") or "unknown"
+                        history_path = history_dir / f"git_history_{bundle_id}.json"
+                        try:
+                            history_path.write_bytes(history_bytes)
+                        except Exception as write_err:
+                            logger.debug(f"[upload_service] Failed to write git history manifest: {write_err}")
+            except Exception as git_err:
+                logger.debug(f"[upload_service] Error extracting git history metadata: {git_err}")
+
             # Process each operation
             for operation in operations:
                 op_type = operation.get("operation")
