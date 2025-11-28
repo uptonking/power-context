@@ -19,6 +19,10 @@ spec:
         component: mcp-memory-http
     spec:
       serviceAccountName: context-engine
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
       containers:
       - name: mcp-memory-http
         image: context-engine-memory
@@ -178,6 +182,10 @@ spec:
         component: mcp-indexer-http
     spec:
       serviceAccountName: context-engine
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
       containers:
       - name: mcp-indexer-http
         image: context-engine-indexer

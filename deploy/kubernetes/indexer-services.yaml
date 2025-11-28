@@ -19,6 +19,10 @@ spec:
         component: indexer-service
     spec:
       serviceAccountName: context-engine
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
       containers:
       - name: watcher
         image: context-engine-indexer-service
@@ -109,6 +113,10 @@ spec:
         component: indexer
     spec:
       serviceAccountName: context-engine
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
       restartPolicy: OnFailure
       containers:
       - name: indexer
@@ -173,6 +181,10 @@ spec:
         component: init
     spec:
       serviceAccountName: context-engine
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
       restartPolicy: OnFailure
       containers:
       - name: init-payload

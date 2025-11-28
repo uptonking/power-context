@@ -107,7 +107,7 @@ spec:
           claimName: code-repos-pvc
       - name: codebase-volume
         persistentVolumeClaim:
-          claimName: upload-codebase-pvc
+          claimName: code-metadata-pvc
 ---
 apiVersion: v1
 kind: Service
