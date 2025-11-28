@@ -751,7 +751,31 @@ def main():
     )
     handler = IndexHandler(ROOT, q, client, default_collection)
 
-    obs = Observer()
+    use_polling = (os.environ.get("WATCH_USE_POLLING") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    if use_polling:
+        try:
+            from watchdog.observers.polling import PollingObserver  # type: ignore
+
+            obs = PollingObserver()
+            try:
+                print("[watch_mode] Using polling observer for filesystem events")
+            except Exception:
+                pass
+        except Exception:
+            obs = Observer()
+            try:
+                print(
+                    "[watch_mode] Polling observer unavailable, falling back to default Observer"
+                )
+            except Exception:
+                pass
+    else:
+        obs = Observer()
     obs.schedule(handler, str(ROOT), recursive=True)
     obs.start()
 
