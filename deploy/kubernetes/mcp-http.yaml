@@ -53,6 +53,10 @@ spec:
             configMapKeyRef:
               name: context-engine-config
               key: EMBEDDING_MODEL
+        - name: HF_HOME
+          value: /work/models/hf-cache
+        - name: XDG_CACHE_HOME
+          value: /work/models/hf-cache
         - name: EMBEDDING_PROVIDER
           valueFrom:
             configMapKeyRef:
@@ -277,6 +281,8 @@ spec:
           mountPath: /work
         - name: codebase-volume
           mountPath: /work/.codebase
+        - name: models-volume
+          mountPath: /work/models
         livenessProbe:
           httpGet:
             path: /readyz
@@ -303,6 +309,9 @@ spec:
       - name: codebase-volume
         persistentVolumeClaim:
           claimName: code-metadata-pvc
+      - name: models-volume
+        persistentVolumeClaim:
+          claimName: code-models-pvc
 ---
 apiVersion: v1
 kind: Service
