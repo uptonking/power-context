@@ -71,6 +71,8 @@ spec:
           value: /work/models/hf-cache
         - name: XDG_CACHE_HOME
           value: /work/models/hf-cache
+        - name: HF_HUB_CACHE
+          value: /work/models/hf-cache/huggingface
         resources:
           requests:
             memory: 512Mi
