@@ -119,6 +119,8 @@ def _collect_git_history_for_workspace(workspace_path: str) -> Optional[Dict[str
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         if head_proc.returncode == 0 and head_proc.stdout.strip():
             current_head = head_proc.stdout.strip()
@@ -164,6 +166,8 @@ def _collect_git_history_for_workspace(workspace_path: str) -> Optional[Dict[str
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         if proc.returncode != 0 or not proc.stdout.strip():
             return None
@@ -186,6 +190,8 @@ def _collect_git_history_for_workspace(workspace_path: str) -> Optional[Dict[str
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
             )
             if show_proc.returncode != 0 or not show_proc.stdout.strip():
                 continue
@@ -198,6 +204,8 @@ def _collect_git_history_for_workspace(workspace_path: str) -> Optional[Dict[str
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
             )
             files: List[str] = []
             if files_proc.returncode == 0 and files_proc.stdout:
@@ -211,6 +219,8 @@ def _collect_git_history_for_workspace(workspace_path: str) -> Optional[Dict[str
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                 )
                 if diff_proc.returncode == 0 and diff_proc.stdout:
                     try:
