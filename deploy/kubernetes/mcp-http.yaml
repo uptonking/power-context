@@ -1,5 +1,3 @@
----
-# MCP Memory Server (HTTP) Deployment
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -25,8 +23,9 @@ spec:
       - name: mcp-memory-http
         image: context-engine-memory
         imagePullPolicy: IfNotPresent
-        command: ["python", "-m", "mcp.server.fastmcp"]
-        args: ["--server-name", "context-engine-http", "--host", "0.0.0.0", "--port", "8000", "--transport", "http", "/app/scripts/memory_server.py"]
+        command:
+        - python
+        - /app/scripts/mcp_memory_server.py
         ports:
         - name: http
           containerPort: 8000
@@ -71,21 +70,21 @@ spec:
               name: context-engine-config
               key: FASTMCP_HOST
         - name: FASTMCP_PORT
-          value: "8000"
+          value: '8000'
         - name: FASTMCP_TRANSPORT
           valueFrom:
             configMapKeyRef:
               name: context-engine-config
               key: FASTMCP_HTTP_TRANSPORT
         - name: FASTMCP_HEALTH_PORT
-          value: "18000"
+          value: '18000'
         resources:
           requests:
-            memory: "512Mi"
-            cpu: "250m"
+            memory: 512Mi
+            cpu: 250m
           limits:
-            memory: "2Gi"
-            cpu: "1000m"
+            memory: 2Gi
+            cpu: 1000m
         volumeMounts:
         - name: work-volume
           mountPath: /work
@@ -102,13 +101,14 @@ spec:
             port: health
           initialDelaySeconds: 10
           periodSeconds: 5
+        envFrom:
+        - configMapRef:
+            name: context-engine-config
       volumes:
       - name: work-volume
         persistentVolumeClaim:
           claimName: code-repos-pvc
-
 ---
-# MCP Memory Server (HTTP) Service
 apiVersion: v1
 kind: Service
 metadata:
@@ -118,24 +118,20 @@ metadata:
     app: context-engine
     component: mcp-memory-http
 spec:
-  type: NodePort  # Change to LoadBalancer for external access
+  type: ClusterIP
   ports:
   - name: http
     port: 8002
     targetPort: http
-    nodePort: 30804  # Optional: specify node port
     protocol: TCP
   - name: health
     port: 18002
     targetPort: health
-    nodePort: 30805  # Optional: specify node port
     protocol: TCP
   selector:
     app: context-engine
     component: mcp-memory-http
-
 ---
-# Optional: MCP Memory HTTP External Service
 apiVersion: v1
 kind: Service
 metadata:
@@ -160,9 +156,7 @@ spec:
   selector:
     app: context-engine
     component: mcp-memory-http
-
 ---
-# MCP Indexer Server (HTTP) Deployment
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -188,8 +182,9 @@ spec:
       - name: mcp-indexer-http
         image: context-engine-indexer
         imagePullPolicy: IfNotPresent
-        command: ["python", "-m", "mcp.server.fastmcp"]
-        args: ["--server-name", "context-engine-indexer-http", "--host", "0.0.0.0", "--port", "8001", "--transport", "http", "/app/scripts/indexer_server.py"]
+        command:
+        - python
+        - /app/scripts/mcp_indexer_server.py
         ports:
         - name: http
           containerPort: 8001
@@ -248,32 +243,27 @@ spec:
             configMapKeyRef:
               name: context-engine-config
               key: MEMORY_MCP_URL
-        - name: CTX_MULTI_COLLECTION
-          valueFrom:
-            configMapKeyRef:
-              name: context-engine-config
-              key: CTX_MULTI_COLLECTION
         - name: FASTMCP_HOST
           valueFrom:
             configMapKeyRef:
               name: context-engine-config
               key: FASTMCP_HOST
         - name: FASTMCP_INDEXER_PORT
-          value: "8001"
+          value: '8001'
         - name: FASTMCP_TRANSPORT
           valueFrom:
             configMapKeyRef:
               name: context-engine-config
               key: FASTMCP_HTTP_TRANSPORT
         - name: FASTMCP_HEALTH_PORT
-          value: "18001"
+          value: '18001'
         resources:
           requests:
-            memory: "512Mi"
-            cpu: "250m"
+            memory: 512Mi
+            cpu: 250m
           limits:
-            memory: "2Gi"
-            cpu: "1000m"
+            memory: 2Gi
+            cpu: 1000m
         volumeMounts:
         - name: work-volume
           mountPath: /work
@@ -283,14 +273,21 @@ spec:
           httpGet:
             path: /readyz
             port: health
-          initialDelaySeconds: 30
-          periodSeconds: 10
+          initialDelaySeconds: 120
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 6
         readinessProbe:
           httpGet:
             path: /readyz
             port: health
-          initialDelaySeconds: 10
-          periodSeconds: 5
+          initialDelaySeconds: 60
+          periodSeconds: 15
+          timeoutSeconds: 10
+          failureThreshold: 6
+        envFrom:
+        - configMapRef:
+            name: context-engine-config
       volumes:
       - name: work-volume
         persistentVolumeClaim:
@@ -298,9 +295,7 @@ spec:
       - name: codebase-volume
         persistentVolumeClaim:
           claimName: code-metadata-pvc
-
 ---
-# MCP Indexer Server (HTTP) Service
 apiVersion: v1
 kind: Service
 metadata:
@@ -310,24 +305,20 @@ metadata:
     app: context-engine
     component: mcp-indexer-http
 spec:
-  type: NodePort  # Change to LoadBalancer for external access
+  type: ClusterIP
   ports:
   - name: http
     port: 8003
     targetPort: http
-    nodePort: 30806  # Optional: specify node port
     protocol: TCP
   - name: health
     port: 18003
     targetPort: health
-    nodePort: 30807  # Optional: specify node port
     protocol: TCP
   selector:
     app: context-engine
     component: mcp-indexer-http
-
 ---
-# Optional: MCP Indexer HTTP External Service
 apiVersion: v1
 kind: Service
 metadata:

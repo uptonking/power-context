@@ -1,5 +1,3 @@
----
-# MCP Indexer Server (SSE) Deployment
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -25,7 +23,9 @@ spec:
       - name: mcp-indexer
         image: context-engine-indexer
         imagePullPolicy: IfNotPresent
-        command: ["python", "/app/scripts/mcp_indexer_server.py"]
+        command:
+        - python
+        - /app/scripts/mcp_indexer_server.py
         ports:
         - name: sse
           containerPort: 8001
@@ -45,9 +45,9 @@ spec:
               name: context-engine-config
               key: FASTMCP_INDEXER_PORT
         - name: FASTMCP_HEALTH_PORT
-          value: "18001"
+          value: '18001'
         - name: FASTMCP_TRANSPORT
-          value: "sse"
+          value: sse
         - name: QDRANT_URL
           valueFrom:
             configMapKeyRef:
@@ -63,18 +63,13 @@ spec:
             configMapKeyRef:
               name: context-engine-config
               key: EMBEDDING_MODEL
-        - name: CTX_MULTI_COLLECTION
-          valueFrom:
-            configMapKeyRef:
-              name: context-engine-config
-              key: CTX_MULTI_COLLECTION
         resources:
           requests:
-            memory: "512Mi"
-            cpu: "250m"
+            memory: 512Mi
+            cpu: 250m
           limits:
-            memory: "2Gi"
-            cpu: "1000m"
+            memory: 2Gi
+            cpu: 1000m
         volumeMounts:
         - name: work-volume
           mountPath: /work
@@ -84,14 +79,21 @@ spec:
           httpGet:
             path: /readyz
             port: health
-          initialDelaySeconds: 30
-          periodSeconds: 10
+          initialDelaySeconds: 120
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 6
         readinessProbe:
           httpGet:
             path: /readyz
             port: health
-          initialDelaySeconds: 10
-          periodSeconds: 5
+          initialDelaySeconds: 60
+          periodSeconds: 15
+          timeoutSeconds: 10
+          failureThreshold: 6
+        envFrom:
+        - configMapRef:
+            name: context-engine-config
       volumes:
       - name: work-volume
         persistentVolumeClaim:
@@ -99,9 +101,7 @@ spec:
       - name: codebase-volume
         persistentVolumeClaim:
           claimName: code-metadata-pvc
-
 ---
-# MCP Indexer Server (SSE) Service
 apiVersion: v1
 kind: Service
 metadata:
@@ -111,24 +111,20 @@ metadata:
     app: context-engine
     component: mcp-indexer
 spec:
-  type: NodePort  # Change to LoadBalancer for external access
+  type: ClusterIP
   ports:
   - name: sse
     port: 8001
     targetPort: sse
-    nodePort: 30802  # Optional: specify node port
     protocol: TCP
   - name: health
     port: 18001
     targetPort: health
-    nodePort: 30803  # Optional: specify node port
     protocol: TCP
   selector:
     app: context-engine
     component: mcp-indexer
-
 ---
-# Optional: MCP Indexer External Service
 apiVersion: v1
 kind: Service
 metadata:

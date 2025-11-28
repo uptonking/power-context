@@ -27,16 +27,19 @@ resources:
 
   # Optional services
   - llamacpp.yaml
+  - upload-service.yaml
   - ingress.yaml
 
 # Common labels
-commonLabels:
-  app.kubernetes.io/name: context-engine
-  app.kubernetes.io/component: kubernetes-deployment
-  app.kubernetes.io/managed-by: kustomize
+labels:
+  - includeSelectors: true
+    pairs:
+      app.kubernetes.io/name: context-engine
+      app.kubernetes.io/component: kubernetes-deployment
+      app.kubernetes.io/managed-by: kustomize
 
 # Patches for production customization
-patchesStrategicMerge: []
+patches: []
 
 # ConfigMap generator (optional - for overrides)
 configMapGenerator:
