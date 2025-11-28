@@ -25,18 +25,7 @@ spec:
         imagePullPolicy: IfNotPresent
         command:
         - python
-        - -m
-        - mcp.server.fastmcp
-        args:
-        - --server-name
-        - context-engine-http
-        - --host
-        - 0.0.0.0
-        - --port
-        - '8000'
-        - --transport
-        - http
-        - /app/scripts/memory_server.py
+        - /app/scripts/mcp_memory_server.py
         ports:
         - name: http
           containerPort: 8000
@@ -195,18 +184,7 @@ spec:
         imagePullPolicy: IfNotPresent
         command:
         - python
-        - -m
-        - mcp.server.fastmcp
-        args:
-        - --server-name
-        - context-engine-indexer-http
-        - --host
-        - 0.0.0.0
-        - --port
-        - '8001'
-        - --transport
-        - http
-        - /app/scripts/indexer_server.py
+        - /app/scripts/mcp_indexer_server.py
         ports:
         - name: http
           containerPort: 8001
