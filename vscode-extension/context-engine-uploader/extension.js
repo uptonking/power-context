@@ -1093,10 +1093,17 @@ async function writeCtxConfig() {
     log('CTX config scaffolding skipped because scaffoldCtxConfig is false.');
     return;
   }
-  const options = resolveOptions();
+  let options = resolveOptions();
   if (!options) {
     return;
   }
+  const depsOk = await ensurePythonDependencies(options.pythonPath);
+  if (!depsOk) {
+    return;
+  }
+  // ensurePythonDependencies may switch to a better interpreter (pythonOverridePath),
+  // so re-resolve options to pick up the updated pythonPath and script/working directory.
+  options = resolveOptions() || options;
   const collectionName = inferCollectionFromUpload(options);
   if (!collectionName) {
     vscode.window.showErrorMessage('Context Engine Uploader: failed to infer collection name from upload client. Check the Output panel for details.');
