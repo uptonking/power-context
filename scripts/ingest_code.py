@@ -1113,6 +1113,23 @@ def ensure_payload_indexes(client: QdrantClient, collection: str):
         except Exception:
             pass
 
+ENSURED_COLLECTIONS: set[str] = set()
+
+
+def ensure_collection_and_indexes_once(
+    client: QdrantClient,
+    collection: str,
+    dim: int,
+    vector_name: str | None,
+) -> None:
+    if not collection:
+        return
+    if collection in ENSURED_COLLECTIONS:
+        return
+    ensure_collection(client, collection, dim, vector_name)
+    ensure_payload_indexes(client, collection)
+    ENSURED_COLLECTIONS.add(collection)
+
 
 # Lightweight import extraction per language (best-effort)
 def _extract_imports(language: str, text: str) -> list:
@@ -2348,10 +2365,8 @@ def index_repo(
     if not use_per_repo_collections:
         if recreate:
             recreate_collection(client, collection, dim, vector_name)
-        else:
-            ensure_collection(client, collection, dim, vector_name)
         # Ensure useful payload indexes exist (idempotent)
-        ensure_payload_indexes(client, collection)
+        ensure_collection_and_indexes_once(client, collection, dim, vector_name)
     else:
         print("[multi_repo] Skipping single collection setup - will create per-repo collections during indexing")
     # Repo tag for filtering: auto-detect from git or folder name
@@ -2416,8 +2431,7 @@ def index_repo(
             if _get_collection_for_file:
                 current_collection = _get_collection_for_file(file_path)
                 # Ensure collection exists on first use
-                ensure_collection(client, current_collection, dim, vector_name)
-                ensure_payload_indexes(client, current_collection)
+                ensure_collection_and_indexes_once(client, current_collection, dim, vector_name)
             else:
                 current_collection = get_collection_name(ws_path) if get_collection_name else "default-collection"
 

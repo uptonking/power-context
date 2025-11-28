@@ -714,10 +714,9 @@ def main():
         vector_name = idx._sanitize_vector_name(MODEL)
 
     try:
-        idx.ensure_collection(client, default_collection, model_dim, vector_name)
+        idx.ensure_collection_and_indexes_once(client, default_collection, model_dim, vector_name)
     except Exception:
         pass
-    idx.ensure_payload_indexes(client, default_collection)
 
     try:
         if multi_repo_enabled:
@@ -908,8 +907,7 @@ def _process_paths(paths, client, model, vector_name: str, model_dim: int, works
 
         if client is not None and model is not None:
             try:
-                idx.ensure_collection(client, collection, model_dim, vector_name)
-                idx.ensure_payload_indexes(client, collection)
+                idx.ensure_collection_and_indexes_once(client, collection, model_dim, vector_name)
             except Exception:
                 pass
 
