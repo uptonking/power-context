@@ -2657,7 +2657,10 @@ def index_repo(
                     _rel = _cur_path[len("/work/"):]
                     # Prioritize client path from origin metadata over HOST_INDEX_PATH
                     if _origin_client_path:
-                        _host_path = os.path.realpath(os.path.join(_origin_client_path, _rel))
+                        _parts = _rel.split("/", 1)
+                        _tail = _parts[1] if len(_parts) > 1 else ""
+                        _base = _origin_client_path.rstrip("/")
+                        _host_path = os.path.realpath(os.path.join(_base, _tail)) if _tail else _base
                     else:
                         _host_path = os.path.realpath(os.path.join(_host_root, _rel))
                     _container_path = _cur_path

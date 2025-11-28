@@ -306,8 +306,14 @@ def format_search_results(results: List[Dict[str, Any]], include_snippets: bool 
     """
     lines: List[str] = []
     for hit in results:
-        # Prefer client-facing host_path, fall back to container path
-        path = hit.get("host_path") or hit.get("path", "unknown")
+        # Prefer the server-chosen display path; fall back to host/container paths
+        raw_path = (
+            hit.get("path")
+            or hit.get("host_path")
+            or hit.get("container_path")
+            or "unknown"
+        )
+        path = raw_path
         start = hit.get("start_line", "?")
         end = hit.get("end_line", "?")
         language = hit.get("language") or ""
@@ -513,25 +519,19 @@ def sanitize_citations(text: str, allowed_paths: Set[str]) -> str:
         if _b:
             basename_to_paths.setdefault(_b, set()).add(_p)
 
+    # For now, keep allowed paths exactly as they appear in the context refs.
+    # Earlier versions tried to be clever by rewriting absolute paths to
+    # workspace-relative forms (e.g., "Context-Engine/scripts/ctx.py"), which
+    # could produce confusing hybrids when multiple workspace roots or
+    # slugged/collection-hash directories were involved.  To simplify behavior
+    # and avoid mixing host/container/hash paths, we preserve the original
+    # full path strings for any citation that is known to come from the
+    # formatted context.
     root = (os.environ.get("CTX_WORKSPACE_DIR") or "").strip()
 
     def _to_display_path(full_path: str) -> str:
-        if not full_path:
-            return full_path
-        if not root:
-            return full_path
-        try:
-            root_norm = root.rstrip("/\\")
-            repo_name = os.path.basename(root_norm) if root_norm else ""
-            if full_path == root_norm:
-                return repo_name or "."
-            if full_path.startswith(root_norm + os.sep):
-                rel = os.path.relpath(full_path, root_norm)
-                if repo_name:
-                    return repo_name + os.sep + (rel or "")
-                return rel or "."
-        except Exception:
-            return full_path
+        # Identity mapping: leave allowed paths as-is so the LLM sees the same
+        # absolute/host paths that appeared in the Context refs.
         return full_path
 
     def _repl(m):
