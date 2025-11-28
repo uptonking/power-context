@@ -155,6 +155,17 @@
           "default": false,
           "description": "Enable writing Windsurf's global MCP config (requires Windsurf or compatible clients)."
         },
+        "contextEngineUploader.autoWriteMcpConfigOnStartup": {
+          "type": "boolean",
+          "default": false,
+          "description": "When enabled, automatically run 'Write MCP Config' on extension activation to keep .mcp.json, Windsurf mcp_config.json, and .claude/settings.local.json in sync with settings and the current extension version."
+        },
+        "contextEngineUploader.mcpTransportMode": {
+          "type": "string",
+          "enum": ["sse-remote", "http"],
+          "default": "http",
+          "description": "Transport mode for Claude/Windsurf MCP configs: SSE via mcp-remote (sse-remote) or direct HTTP /mcp endpoints (http)."
+        },
         "contextEngineUploader.mcpIndexerUrl": {
           "type": "string",
           "default": "http://localhost:8001/sse",

@@ -66,6 +66,30 @@ curl http://localhost:8000/sse  # Memory server SSE
 curl http://localhost:8001/sse  # Indexer server SSE
 ```
 
+### 4. IDE MCP Configuration
+
+For MCP-aware IDEs (Claude Desktop, Windsurf, etc.), prefer the HTTP MCP endpoints:
+
+```bash
+# Memory MCP (HTTP)
+http://localhost:8002/mcp
+
+# Indexer MCP (HTTP)
+http://localhost:8003/mcp
+
+# Health checks
+curl http://localhost:18002/readyz  # Memory health
+curl http://localhost:18003/readyz  # Indexer health
+```
+
+SSE endpoints (`/sse`) remain available and are typically used via `mcp-remote`, but some clients that send MCP messages in parallel on a fresh session can hit a FastMCP initialization guard and intermittently log:
+
+```text
+Failed to validate request: Received request before initialization was complete
+```
+
+If you see tools/resources only appearing after a second reconnect, switch your IDE configuration to use the HTTP `/mcp` endpoints instead of SSE.
+
 ## Project Structure
 
 ```

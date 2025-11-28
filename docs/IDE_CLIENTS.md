@@ -21,7 +21,7 @@ Connect your IDE to a running Context-Engine stack. No need to clone this repo i
 
 **Prerequisites:** Context-Engine running somewhere (localhost, remote server, or Kubernetes).
 
-**Minimal config** — add to your IDE's MCP settings:
+**Minimal config (SSE)** — for clients that only understand SSE or use `mcp-remote`:
 ```json
 {
   "mcpServers": {
@@ -29,6 +29,25 @@ Connect your IDE to a running Context-Engine stack. No need to clone this repo i
   }
 }
 ```
+
+**HTTP (recommended for RMCP-capable IDEs)** — prefer this when your IDE supports HTTP MCP / RMCP (Claude Desktop, Windsurf, Qodo, etc.):
+
+```json
+{
+  "mcpServers": {
+    "memory": { "url": "http://localhost:8002/mcp" },
+    "qdrant-indexer": { "url": "http://localhost:8003/mcp" }
+  }
+}
+```
+
+Using HTTP `/mcp` avoids a FastMCP initialization race that some SSE clients hit when they send `listTools` in parallel with `initialize`, which can log:
+
+```text
+Failed to validate request: Received request before initialization was complete
+```
+
+If you see tools/resources only appearing after a second reconnect when using SSE, switch your IDE configuration to these HTTP endpoints instead.
 
 Replace `localhost` with your server IP/hostname for remote setups.
 
@@ -120,7 +139,7 @@ Add to your Zed `settings.json` (Command Palette → "Settings: Open Settings (J
 {
   "qdrant-indexer": {
     "type": "http",
-    "url": "http://localhost:8001/sse"
+    "url": "http://localhost:8003/mcp"
   }
 }
 ```
@@ -199,6 +218,19 @@ When Context-Engine runs on a remote server (e.g., `context.yourcompany.com`):
   }
 }
 ```
+
+If your IDE supports HTTP MCP / RMCP, prefer the HTTP endpoints instead:
+
+```json
+{
+  "mcpServers": {
+    "memory": { "url": "http://context.yourcompany.com:8002/mcp" },
+    "qdrant-indexer": { "url": "http://context.yourcompany.com:8003/mcp" }
+  }
+}
+```
+
+This uses the HTTP `/mcp` transport and avoids the initialization race described above.
 
 **Indexing your local project to the remote server:**
 ```bash

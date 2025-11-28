@@ -101,6 +101,7 @@ function activate(context) {
       event.affectsConfiguration('contextEngineUploader.mcpMemoryUrl') ||
       event.affectsConfiguration('contextEngineUploader.mcpClaudeEnabled') ||
       event.affectsConfiguration('contextEngineUploader.mcpWindsurfEnabled') ||
+      event.affectsConfiguration('contextEngineUploader.mcpTransportMode') ||
       event.affectsConfiguration('contextEngineUploader.windsurfMcpPath') ||
       event.affectsConfiguration('contextEngineUploader.claudeHookEnabled') ||
       event.affectsConfiguration('contextEngineUploader.surfaceQdrantCollectionHint')
@@ -138,8 +139,11 @@ function activate(context) {
     runSequence('auto').catch(error => log(`Startup run failed: ${error instanceof Error ? error.message : String(error)}`));
   }
 
-  // When enabled, best-effort auto-scaffold ctx_config.json/.env for the current targetPath on activation
-  if (config.get('scaffoldCtxConfig', true)) {
+  // Optionally keep MCP + hook + ctx config in sync on activation
+  if (config.get('autoWriteMcpConfigOnStartup')) {
+    writeMcpConfig().catch(error => log(`MCP config auto-write on activation failed: ${error instanceof Error ? error.message : String(error)}`));
+  } else if (config.get('scaffoldCtxConfig', true)) {
+    // Legacy behavior: scaffold ctx_config.json/.env directly when MCP auto-write is disabled
     writeCtxConfig().catch(error => log(`CTX config auto-scaffold on activation failed: ${error instanceof Error ? error.message : String(error)}`));
   }
 }
@@ -305,11 +309,9 @@ function getWorkspaceFolderPath() {
 }
 function looksLikeRepoRoot(dirPath) {
   try {
-    const contextEngineDir = path.join(dirPath, '.context-engine');
-    const ctxConfigPath = path.join(dirPath, 'ctx_config.json');
     const codebaseStatePath = path.join(dirPath, '.codebase', 'state.json');
     const gitDir = path.join(dirPath, '.git');
-    if (fs.existsSync(contextEngineDir) || fs.existsSync(ctxConfigPath) || fs.existsSync(codebaseStatePath) || fs.existsSync(gitDir)) {
+    if (fs.existsSync(codebaseStatePath) || fs.existsSync(gitDir)) {
       return true;
     }
   } catch (error) {
@@ -323,9 +325,7 @@ function detectDefaultTargetPath(workspaceFolderPath) {
     if (!fs.existsSync(resolved)) {
       return workspaceFolderPath;
     }
-    if (looksLikeRepoRoot(resolved)) {
-      return resolved;
-    }
+    const rootLooksLikeRepo = looksLikeRepoRoot(resolved);
     let entries;
     try {
       entries = fs.readdirSync(resolved);
@@ -353,6 +353,12 @@ function detectDefaultTargetPath(workspaceFolderPath) {
       const detected = candidates[0];
       log(`Target path auto-detected as ${detected} (under workspace folder).`);
       return detected;
+    }
+    if (rootLooksLikeRepo) {
+      if (candidates.length > 1) {
+        log('Auto targetPath discovery found multiple candidate repos under workspace; using workspace folder instead.');
+      }
+      return resolved;
     }
     if (candidates.length > 1) {
       log('Auto targetPath discovery found multiple candidate repos under workspace; using workspace folder instead.');
@@ -1011,8 +1017,11 @@ async function writeMcpConfig() {
     vscode.window.showInformationMessage('Context Engine Uploader: MCP config writing is disabled in settings.');
     return;
   }
-  const indexerUrl = (settings.get('mcpIndexerUrl') || 'http://localhost:8001/sse').trim();
-  const memoryUrl = (settings.get('mcpMemoryUrl') || 'http://localhost:8000/sse').trim();
+  const transportModeRaw = (settings.get('mcpTransportMode') || 'sse-remote');
+  const transportMode = (typeof transportModeRaw === 'string' ? transportModeRaw.trim() : 'sse-remote') || 'sse-remote';
+
+  let indexerUrl = (settings.get('mcpIndexerUrl') || 'http://localhost:8001/sse').trim();
+  let memoryUrl = (settings.get('mcpMemoryUrl') || 'http://localhost:8000/sse').trim();
   let wroteAny = false;
   let hookWrote = false;
   if (claudeEnabled) {
@@ -1020,14 +1029,14 @@ async function writeMcpConfig() {
     if (!root) {
       vscode.window.showErrorMessage('Context Engine Uploader: open a folder before writing .mcp.json.');
     } else {
-      const result = await writeClaudeMcpServers(root, indexerUrl, memoryUrl);
+      const result = await writeClaudeMcpServers(root, indexerUrl, memoryUrl, transportMode);
       wroteAny = wroteAny || result;
     }
   }
   if (windsurfEnabled) {
     const customPath = (settings.get('windsurfMcpPath') || '').trim();
     const windsPath = customPath || getDefaultWindsurfMcpPath();
-    const result = await writeWindsurfMcpServers(windsPath, indexerUrl, memoryUrl);
+    const result = await writeWindsurfMcpServers(windsPath, indexerUrl, memoryUrl, transportMode);
     wroteAny = wroteAny || result;
   }
   if (claudeHookEnabled) {
@@ -1467,7 +1476,7 @@ function getDefaultWindsurfMcpPath() {
   return path.join(os.homedir(), '.codeium', 'windsurf', 'mcp_config.json');
 }
 
-async function writeClaudeMcpServers(root, indexerUrl, memoryUrl) {
+async function writeClaudeMcpServers(root, indexerUrl, memoryUrl, transportMode) {
   const configPath = path.join(root, '.mcp.json');
   let config = { mcpServers: {} };
   if (fs.existsSync(configPath)) {
@@ -1487,27 +1496,46 @@ async function writeClaudeMcpServers(root, indexerUrl, memoryUrl) {
     config.mcpServers = {};
   }
   log(`Preparing to write .mcp.json at ${configPath} with indexerUrl=${indexerUrl || '""'} memoryUrl=${memoryUrl || '""'}`);
-  const isWindows = process.platform === 'win32';
-  const makeServer = url => {
-    if (isWindows) {
-      return {
-        command: 'cmd',
-        args: ['/c', 'npx', 'mcp-remote', url, '--transport', 'sse-only'],
-        env: {}
+  const servers = config.mcpServers;
+  const mode = (typeof transportMode === 'string' ? transportMode.trim() : 'sse-remote') || 'sse-remote';
+
+  if (mode === 'http') {
+    // Direct HTTP MCP endpoints for Claude (.mcp.json)
+    if (indexerUrl) {
+      servers['qdrant-indexer'] = {
+        type: 'http',
+        url: indexerUrl
       };
     }
-    return {
-      command: 'npx',
-      args: ['mcp-remote', url, '--transport', 'sse-only'],
-      env: {}
+    if (memoryUrl) {
+      servers.memory = {
+        type: 'http',
+        url: memoryUrl
+      };
+    }
+  } else {
+    // Legacy/default: stdio via mcp-remote SSE bridge
+    const isWindows = process.platform === 'win32';
+    const makeServer = url => {
+      if (isWindows) {
+        return {
+          command: 'cmd',
+          args: ['/c', 'npx', 'mcp-remote', url, '--transport', 'sse-only'],
+          env: {}
+        };
+      }
+      return {
+        command: 'npx',
+        args: ['mcp-remote', url, '--transport', 'sse-only'],
+        env: {}
+      };
     };
-  };
-  const servers = config.mcpServers;
-  if (indexerUrl) {
-    servers['qdrant-indexer'] = makeServer(indexerUrl);
-  }
-  if (memoryUrl) {
-    servers.memory = makeServer(memoryUrl);
+    if (indexerUrl) {
+      servers['qdrant-indexer'] = makeServer(indexerUrl);
+    }
+    if (memoryUrl) {
+      servers.memory = makeServer(memoryUrl);
+    }
   }
   try {
     const json = JSON.stringify(config, null, 2) + '\n';
@@ -1522,7 +1550,7 @@ async function writeClaudeMcpServers(root, indexerUrl, memoryUrl) {
   }
 }
 
-async function writeWindsurfMcpServers(configPath, indexerUrl, memoryUrl) {
+async function writeWindsurfMcpServers(configPath, indexerUrl, memoryUrl, transportMode) {
   try {
     fs.mkdirSync(path.dirname(configPath), { recursive: true });
   } catch (error) {
@@ -1548,17 +1576,53 @@ async function writeWindsurfMcpServers(configPath, indexerUrl, memoryUrl) {
     config.mcpServers = {};
   }
   log(`Preparing to write Windsurf mcp_config.json at ${configPath} with indexerUrl=${indexerUrl || '""'} memoryUrl=${memoryUrl || '""'}`);
-  const makeServer = url => ({
-    command: 'npx',
-    args: ['mcp-remote', url, '--transport', 'sse-only'],
-    env: {}
-  });
   const servers = config.mcpServers;
-  if (indexerUrl) {
-    servers['qdrant-indexer'] = makeServer(indexerUrl);
-  }
-  if (memoryUrl) {
-    servers.memory = makeServer(memoryUrl);
+  const mode = (typeof transportMode === 'string' ? transportMode.trim() : 'sse-remote') || 'sse-remote';
+
+  if (mode === 'http') {
+    // Direct HTTP MCP endpoints for Windsurf mcp_config.json
+    if (indexerUrl) {
+      servers['qdrant-indexer'] = {
+        type: 'http',
+        url: indexerUrl
+      };
+    }
+    if (memoryUrl) {
+      servers.memory = {
+        type: 'http',
+        url: memoryUrl
+      };
+    }
+  } else {
+    // Legacy/default: use mcp-remote SSE bridge
+    const makeServer = url => {
+      // Default args for local/HTTPS endpoints
+      const args = ['mcp-remote', url, '--transport', 'sse-only'];
+      try {
+        const u = new URL(url);
+        const isLocalHost =
+          u.hostname === 'localhost' ||
+          u.hostname === '127.0.0.1' ||
+          u.hostname === '::1';
+        // For non-local HTTP URLs, mcp-remote requires --allow-http
+        if (u.protocol === 'http:' && !isLocalHost) {
+          args.push('--allow-http');
+        }
+      } catch (e) {
+        // If URL parsing fails, fall back to default args without additional flags
+      }
+      return {
+        command: 'npx',
+        args,
+        env: {}
+      };
+    };
+    if (indexerUrl) {
+      servers['qdrant-indexer'] = makeServer(indexerUrl);
+    }
+    if (memoryUrl) {
+      servers.memory = makeServer(memoryUrl);
+    }
   }
   try {
     const json = JSON.stringify(config, null, 2) + '\n';
