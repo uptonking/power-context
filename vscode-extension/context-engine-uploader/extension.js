@@ -408,9 +408,24 @@ function needsForceSync(targetPath) {
   }
 }
 async function ensurePythonDependencies(pythonPath) {
-  // Probe current interpreter; if modules missing, offer to create a private venv and install deps
-  const ok = await checkPythonDeps(pythonPath);
-  if (ok) return true;
+  // Probe current interpreter with bundled python_libs first
+  let ok = await checkPythonDeps(pythonPath);
+  if (ok) {
+    return true;
+  }
+
+  // If that fails, try to auto-detect a better system Python before falling back to a venv
+  const autoPython = await detectSystemPython();
+  if (autoPython && autoPython !== pythonPath) {
+    log(`Falling back to auto-detected Python interpreter: ${autoPython}`);
+    ok = await checkPythonDeps(autoPython);
+    if (ok) {
+      pythonOverridePath = autoPython;
+      return true;
+    }
+  }
+
+  // As a last resort, offer to create a private venv and install deps via pip
   const choice = await vscode.window.showErrorMessage(
     'Context Engine Uploader: missing Python modules. Create isolated environment and auto-install?',
     'Auto-install to private venv',
@@ -430,7 +445,7 @@ async function ensurePythonDependencies(pythonPath) {
   if (!installed) return false;
   pythonOverridePath = venvPython;
   log(`Using private venv interpreter: ${pythonOverridePath}`);
-  return await checkPythonDeps(pythonOverridePath);
+  return await checkPythonDeps(venvPython);
 }
 
 async function checkPythonDeps(pythonPath) {
