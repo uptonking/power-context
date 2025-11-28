@@ -561,7 +561,7 @@ class RemoteUploadClient:
 
             # Process created files
             for path in changes["created"]:
-                rel_path = str(path.relative_to(Path(self.workspace_path)))
+                rel_path = path.relative_to(Path(self.workspace_path)).as_posix()
                 try:
                     with open(path, 'rb') as f:
                         content = f.read()
@@ -598,7 +598,7 @@ class RemoteUploadClient:
 
             # Process updated files
             for path in changes["updated"]:
-                rel_path = str(path.relative_to(Path(self.workspace_path)))
+                rel_path = path.relative_to(Path(self.workspace_path)).as_posix()
                 try:
                     with open(path, 'rb') as f:
                         content = f.read()
@@ -637,8 +637,8 @@ class RemoteUploadClient:
 
             # Process moved files
             for source_path, dest_path in changes["moved"]:
-                dest_rel_path = str(dest_path.relative_to(Path(self.workspace_path)))
-                source_rel_path = str(source_path.relative_to(Path(self.workspace_path)))
+                dest_rel_path = dest_path.relative_to(Path(self.workspace_path)).as_posix()
+                source_rel_path = source_path.relative_to(Path(self.workspace_path)).as_posix()
                 try:
                     with open(dest_path, 'rb') as f:
                         content = f.read()
@@ -678,7 +678,7 @@ class RemoteUploadClient:
 
             # Process deleted files
             for path in changes["deleted"]:
-                rel_path = str(path.relative_to(Path(self.workspace_path)))
+                rel_path = path.relative_to(Path(self.workspace_path)).as_posix()
                 try:
                     previous_hash = get_cached_file_hash(str(path.resolve()), self.repo_name)
 
