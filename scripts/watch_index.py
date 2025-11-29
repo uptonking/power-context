@@ -31,6 +31,10 @@ from scripts.workspace_state import (
     remove_cached_file,
     update_indexing_status,
     update_workspace_state,
+    get_workspace_state,
+    ensure_logical_repo_id,
+    find_collection_for_logical_repo,
+    logical_repo_reuse_enabled,
 )
 import hashlib
 from datetime import datetime
@@ -70,13 +74,75 @@ def _detect_repo_for_file(file_path: Path) -> Optional[Path]:
 
 
 def _get_collection_for_repo(repo_path: Path) -> str:
+    """Resolve Qdrant collection for a repo, with logical_repo_id-aware reuse.
+
+    In multi-repo mode, prefer reusing an existing canonical collection that has
+    already been associated with this logical repository (same git common dir)
+    by consulting workspace_state. Falls back to the legacy per-repo hashed
+    collection naming when no mapping exists.
+    """
+    default_coll = os.environ.get("COLLECTION_NAME", "my-collection")
     try:
         repo_name = _extract_repo_name_from_path(str(repo_path))
+    except Exception:
+        repo_name = None
+
+    # Multi-repo: try to reuse a canonical collection based on logical_repo_id
+    if repo_name and is_multi_repo_mode() and logical_repo_reuse_enabled():
+        workspace_root = os.environ.get("WORKSPACE_PATH") or os.environ.get("WATCH_ROOT") or "/work"
+        try:
+            ws_root_path = Path(workspace_root).resolve()
+        except Exception:
+            ws_root_path = Path(workspace_root)
+        ws_path = str((ws_root_path / repo_name).resolve())
+
+        state: Dict[str, Any]
+        try:
+            state = get_workspace_state(ws_path, repo_name) or {}
+        except Exception:
+            state = {}
+
+        if isinstance(state, dict):
+            try:
+                state = ensure_logical_repo_id(state, ws_path)
+            except Exception:
+                pass
+            lrid = state.get("logical_repo_id")
+            if isinstance(lrid, str) and lrid:
+                coll: Optional[str]
+                try:
+                    coll = find_collection_for_logical_repo(lrid, search_root=str(ws_root_path))
+                except Exception:
+                    coll = None
+                if isinstance(coll, str) and coll:
+                    try:
+                        update_workspace_state(
+                            workspace_path=ws_path,
+                            updates={"qdrant_collection": coll, "logical_repo_id": lrid},
+                            repo_name=repo_name,
+                        )
+                    except Exception:
+                        pass
+                    return coll
+
+            # Fallback to any explicit collection stored in state for this repo
+            coll2 = state.get("qdrant_collection")
+            if isinstance(coll2, str) and coll2:
+                return coll2
+
+        # Legacy behaviour: derive per-repo collection name
+        try:
+            return get_collection_name(repo_name)
+        except Exception:
+            return default_coll
+
+    # Single-repo mode or repo_name detection failed: use existing helpers/env
+    try:
         if repo_name:
             return get_collection_name(repo_name)
     except Exception:
         pass
-    return os.environ.get("COLLECTION_NAME", "my-collection")
+    return default_coll
 
 
 def _get_collection_for_file(file_path: Path) -> str:
@@ -265,6 +331,8 @@ class IndexHandler(FileSystemEventHandler):
         try:
             p = Path(event.src_path).resolve()
         except Exception:
+            return
+        if any(part == ".codebase" for part in p.parts):
             return
         # Only attempt deletion for code files we would have indexed
         if p.suffix.lower() not in idx.CODE_EXTS:

@@ -255,6 +255,36 @@ def _find_git_root(start: Path) -> Optional[Path]:
     return None
 
 
+def _compute_logical_repo_id(workspace_path: str) -> str:
+    try:
+        p = Path(workspace_path).resolve()
+    except Exception:
+        p = Path(workspace_path)
+
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(p), "rev-parse", "--git-common-dir"],
+            capture_output=True,
+            text=True,
+        )
+        raw = (r.stdout or "").strip()
+        if r.returncode == 0 and raw:
+            common = Path(raw)
+            if not common.is_absolute():
+                base = p if p.is_dir() else p.parent
+                common = base / common
+            key = str(common.resolve())
+            prefix = "git:"
+        else:
+            raise RuntimeError
+    except Exception:
+        key = str(p)
+        prefix = "fs:"
+
+    h = hashlib.sha1(key.encode("utf-8", errors="ignore")).hexdigest()[:16]
+    return f"{prefix}{h}"
+
+
 def _redact_emails(text: str) -> str:
     """Redact email addresses from commit messages for privacy."""
     try:
@@ -503,7 +533,8 @@ class RemoteUploadClient:
         return host_path.replace('\\', '/').replace(':', '')
 
     def __init__(self, upload_endpoint: str, workspace_path: str, collection_name: str,
-                 max_retries: int = 3, timeout: int = 30, metadata_path: Optional[str] = None):
+                 max_retries: int = 3, timeout: int = 30, metadata_path: Optional[str] = None,
+                 logical_repo_id: Optional[str] = None):
         """Initialize remote upload client."""
         self.upload_endpoint = upload_endpoint.rstrip('/')
         self.workspace_path = workspace_path
@@ -511,6 +542,7 @@ class RemoteUploadClient:
         self.max_retries = max_retries
         self.timeout = timeout
         self.temp_dir = None
+        self.logical_repo_id = logical_repo_id
 
         # Set environment variables for cache functions
         os.environ["WORKSPACE_PATH"] = workspace_path
@@ -955,6 +987,9 @@ class RemoteUploadClient:
                         'force': 'false',
                         'source_path': self.workspace_path,
                     }
+
+                    if getattr(self, "logical_repo_id", None):
+                        data['logical_repo_id'] = self.logical_repo_id
 
                     logger.info(f"[remote_upload] Uploading bundle {manifest['bundle_id']} (size: {bundle_size} bytes)")
 
@@ -1478,6 +1513,8 @@ def get_remote_config(cli_path: Optional[str] = None) -> Dict[str, str]:
     else:
         workspace_path = os.environ.get("WATCH_ROOT", os.environ.get("WORKSPACE_PATH", "/work"))
 
+    logical_repo_id = _compute_logical_repo_id(workspace_path)
+
     # Use auto-generated collection name based on repo name
     repo_name = _extract_repo_name_from_path(workspace_path)
     # Fallback to directory name if repo detection fails
@@ -1489,6 +1526,7 @@ def get_remote_config(cli_path: Optional[str] = None) -> Dict[str, str]:
         "upload_endpoint": os.environ.get("REMOTE_UPLOAD_ENDPOINT", "http://localhost:8080"),
         "workspace_path": workspace_path,
         "collection_name": collection_name,
+        "logical_repo_id": logical_repo_id,
         # Use higher, more robust defaults but still allow env overrides
         "max_retries": int(os.environ.get("REMOTE_UPLOAD_MAX_RETRIES", "5")),
         "timeout": int(os.environ.get("REMOTE_UPLOAD_TIMEOUT", "1800")),
@@ -1599,6 +1637,7 @@ Examples:
             collection_name=config["collection_name"],
             max_retries=config["max_retries"],
             timeout=config["timeout"],
+            logical_repo_id=config.get("logical_repo_id"),
         ) as client:
             client.log_mapping_summary()
         return 0
@@ -1612,7 +1651,8 @@ Examples:
                 workspace_path=config["workspace_path"],
                 collection_name=config["collection_name"],
                 max_retries=config["max_retries"],
-                timeout=config["timeout"]
+                timeout=config["timeout"],
+                logical_repo_id=config.get("logical_repo_id"),
             ) as client:
 
                 logger.info("Remote upload client initialized successfully")
@@ -1655,7 +1695,8 @@ Examples:
             workspace_path=config["workspace_path"],
             collection_name=config["collection_name"],
             max_retries=config["max_retries"],
-            timeout=config["timeout"]
+            timeout=config["timeout"],
+            logical_repo_id=config.get("logical_repo_id"),
         ) as client:
 
             logger.info("Remote upload client initialized successfully")

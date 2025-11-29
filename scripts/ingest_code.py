@@ -40,10 +40,14 @@ try:
     from scripts.workspace_state import (
         is_multi_repo_mode,
         get_collection_name,
+        logical_repo_reuse_enabled,
     )
 except ImportError:
     is_multi_repo_mode = None  # type: ignore
     get_collection_name = None  # type: ignore
+
+    def logical_repo_reuse_enabled() -> bool:  # type: ignore[no-redef]
+        return False
 
 # Import watcher's repo detection for surgical fix
 try:
@@ -68,6 +72,7 @@ try:
         get_cached_pseudo,
         set_cached_pseudo,
         update_symbols_with_pseudo,
+        get_workspace_state,
     )
 except ImportError:
     # State integration is optional; continue if not available
@@ -84,7 +89,7 @@ except ImportError:
     set_cached_pseudo = None  # type: ignore
     update_symbols_with_pseudo = None  # type: ignore
     compare_symbol_changes = None  # type: ignore
-    compare_symbol_changes = None  # type: ignore
+    get_workspace_state = None  # type: ignore
 
 # Optional Tree-sitter import (graceful fallback)
 try:
@@ -155,7 +160,6 @@ CODE_EXTS = {
     ".csproj": "xml",
     ".config": "xml",
     ".resx": "xml",
-
 }
 
 # --- Named vector config ---
@@ -307,7 +311,6 @@ _DEFAULT_EXCLUDE_DIRS = [
     "/.vs",
     "/.cache",
     "/.codebase",
-
     "/node_modules",
     "/dist",
     "/build",
@@ -317,7 +320,6 @@ _DEFAULT_EXCLUDE_DIRS = [
     "bin",
     "obj",
     "TestResults",
-
     "/.git",
 ]
 _DEFAULT_EXCLUDE_FILES = [
@@ -454,7 +456,6 @@ def chunk_lines(text: str, max_lines: int = 120, overlap: int = 20) -> List[Dict
         if j == n:
             break
 
-
         i = max(j - overlap, i + 1)
     return chunks
 
@@ -469,7 +470,6 @@ def chunk_semantic(
 
     lines = text.splitlines()
     n = len(lines)
-
 
     # Extract symbols with line ranges
     symbols = _extract_symbols(language, text)
@@ -529,7 +529,6 @@ def chunk_by_tokens(
         from tokenizers import Tokenizer  # lightweight, already in requirements
     except Exception:
         Tokenizer = None  # type: ignore
-
 
     try:
         k = int(os.environ.get("MICRO_CHUNK_TOKENS", str(k_tokens or 16)) or 16)
@@ -639,7 +638,12 @@ from scripts.utils import lex_hash_vector_text as _lex_hash_vector_text
 
 def _pseudo_describe_enabled() -> bool:
     try:
-        return str(os.environ.get("REFRAG_PSEUDO_DESCRIBE", "0")).strip().lower() in {"1","true","yes","on"}
+        return str(os.environ.get("REFRAG_PSEUDO_DESCRIBE", "0")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
     except Exception:
         return False
 
@@ -649,7 +653,12 @@ def _pseudo_describe_enabled() -> bool:
 def _smart_symbol_reindexing_enabled() -> bool:
     """Check if symbol-aware reindexing is enabled."""
     try:
-        return str(os.environ.get("SMART_SYMBOL_REINDEXING", "0")).strip().lower() in {"1","true","yes","on"}
+        return str(os.environ.get("SMART_SYMBOL_REINDEXING", "0")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
     except Exception:
         return False
 
@@ -674,21 +683,21 @@ def extract_symbols_with_tree_sitter(file_path: str) -> dict:
             symbol_id = f"{sym['kind']}_{sym['name']}_{sym['start']}"
 
             # Extract actual content for hashing
-            content_lines = text.split('\n')[sym['start']-1:sym['end']]
-            content = '\n'.join(content_lines)
-            content_hash = hashlib.sha1(content.encode('utf-8', errors='ignore')).hexdigest()
+            content_lines = text.split("\n")[sym["start"] - 1 : sym["end"]]
+            content = "\n".join(content_lines)
+            content_hash = hashlib.sha1(content.encode("utf-8", errors="ignore")).hexdigest()
 
             symbols[symbol_id] = {
-                'name': sym['name'],
-                'type': sym['kind'],
-                'start_line': sym['start'],
-                'end_line': sym['end'],
-                'content_hash': content_hash,
-                'content': content,
+                "name": sym["name"],
+                "type": sym["kind"],
+                "start_line": sym["start"],
+                "end_line": sym["end"],
+                "content_hash": content_hash,
+                "content": content,
                 # These will be populated during processing
-                'pseudo': '',
-                'tags': [],
-                'qdrant_ids': []  # Will store Qdrant point IDs for this symbol
+                "pseudo": "",
+                "tags": [],
+                "qdrant_ids": [],  # Will store Qdrant point IDs for this symbol
             }
 
         return symbols
@@ -1091,6 +1100,8 @@ def ensure_payload_indexes(client: QdrantClient, collection: str):
     for field in (
         "metadata.language",
         "metadata.path_prefix",
+        "metadata.repo_id",
+        "metadata.repo_rel_path",
         "metadata.repo",
         "metadata.kind",
         "metadata.symbol",
@@ -1269,8 +1280,50 @@ def _extract_calls(language: str, text: str) -> list:
     return out[:200]
 
 
-def get_indexed_file_hash(client: QdrantClient, collection: str, file_path: str) -> str:
-    """Return previously indexed file hash for this path, or empty string."""
+def get_indexed_file_hash(
+    client: QdrantClient,
+    collection: str,
+    file_path: str,
+    *,
+    repo_id: str | None = None,
+    repo_rel_path: str | None = None,
+) -> str:
+    """Return previously indexed file hash for this logical path, or empty string.
+
+    Prefers logical identity (repo_id + repo_rel_path) when available so that
+    worktrees sharing a logical repo can reuse existing index state, but falls
+    back to metadata.path for backwards compatibility.
+    """
+    # Prefer logical identity when both repo_id and repo_rel_path are provided
+    if logical_repo_reuse_enabled() and repo_id and repo_rel_path:
+        try:
+            filt = models.Filter(
+                must=[
+                    models.FieldCondition(
+                        key="metadata.repo_id", match=models.MatchValue(value=repo_id)
+                    ),
+                    models.FieldCondition(
+                        key="metadata.repo_rel_path",
+                        match=models.MatchValue(value=repo_rel_path),
+                    ),
+                ]
+            )
+            points, _ = client.scroll(
+                collection_name=collection,
+                scroll_filter=filt,
+                with_payload=True,
+                limit=1,
+            )
+            if points:
+                md = (points[0].payload or {}).get("metadata") or {}
+                fh = md.get("file_hash")
+                if fh:
+                    return str(fh)
+        except Exception:
+            # Fall back to path-based lookup below
+            pass
+
+    # Backwards-compatible path-based lookup
     try:
         filt = models.Filter(
             must=[
@@ -1287,7 +1340,9 @@ def get_indexed_file_hash(client: QdrantClient, collection: str, file_path: str)
         )
         if points:
             md = (points[0].payload or {}).get("metadata") or {}
-            return str(md.get("file_hash") or "")
+            fh = md.get("file_hash")
+            if fh:
+                return str(fh)
     except Exception:
         return ""
     return ""
@@ -1982,6 +2037,37 @@ def index_single_file(
 
     repo_tag = _detect_repo_name_from_path(file_path)
 
+    # Derive logical repo identity and repo-relative path for cross-worktree reuse.
+    repo_id: str | None = None
+    repo_rel_path: str | None = None
+    if logical_repo_reuse_enabled() and get_workspace_state is not None:
+        try:
+            ws_root = os.environ.get("WATCH_ROOT") or os.environ.get("WORKSPACE_PATH") or "/work"
+            # Resolve workspace state for this repo to read logical_repo_id
+            state = get_workspace_state(ws_root, repo_tag)
+            lrid = state.get("logical_repo_id") if isinstance(state, dict) else None
+            if isinstance(lrid, str) and lrid:
+                repo_id = lrid
+            # Compute repo-relative path within the current workspace tree
+            try:
+                fp = file_path.resolve()
+            except Exception:
+                fp = file_path
+            try:
+                ws_base = Path(os.environ.get("WATCH_ROOT") or os.environ.get("WORKSPACE_PATH") or "/work").resolve()
+                repo_root = ws_base
+                if repo_tag:
+                    # In multi-repo scenarios, repos live under /work/<repo_tag>
+                    candidate = ws_base / repo_tag
+                    if candidate.exists():
+                        repo_root = candidate
+                rel = fp.relative_to(repo_root)
+                repo_rel_path = rel.as_posix()
+            except Exception:
+                repo_rel_path = None
+        except Exception as e:
+            print(f"[logical_repo] Failed to derive logical identity for {file_path}: {e}")
+
     # Get changed symbols for pseudo processing optimization
     changed_symbols = set()
     if get_cached_symbols and set_cached_symbols:
@@ -2006,7 +2092,13 @@ def index_single_file(
                     return False
         except Exception:
             pass
-        prev = get_indexed_file_hash(client, collection, str(file_path))
+        prev = get_indexed_file_hash(
+            client,
+            collection,
+            str(file_path),
+            repo_id=repo_id,
+            repo_rel_path=repo_rel_path,
+        )
         if prev and prev == file_hash:
             print(f"Skipping unchanged file: {file_path}")
             return False
@@ -2185,6 +2277,9 @@ def index_single_file(
                 "last_modified_at": int(last_mod),
                 "churn_count": int(churn_count),
                 "author_count": int(author_count),
+                # Logical identity for cross-worktree reuse
+                "repo_id": repo_id,
+                "repo_rel_path": repo_rel_path,
                 # New: explicit dual-path tracking
                 "host_path": _host_path,
                 "container_path": _container_path,
@@ -2457,6 +2552,35 @@ def index_repo(
                 str(Path(workspace_root).resolve() / per_file_repo),
             )
 
+        # Derive logical repo identity and repo-relative path for cross-worktree reuse.
+        repo_id: str | None = None
+        repo_rel_path: str | None = None
+        try:
+            if get_workspace_state is not None:
+                ws_root = os.environ.get("WATCH_ROOT") or os.environ.get("WORKSPACE_PATH") or "/work"
+                state = get_workspace_state(ws_root, per_file_repo)
+                lrid = state.get("logical_repo_id") if isinstance(state, dict) else None
+                if isinstance(lrid, str) and lrid:
+                    repo_id = lrid
+            try:
+                fp_resolved = file_path.resolve()
+            except Exception:
+                fp_resolved = file_path
+            try:
+                ws_base = Path(workspace_root).resolve()
+                repo_root = ws_base
+                if per_file_repo:
+                    candidate = ws_base / per_file_repo
+                    if candidate.exists():
+                        repo_root = candidate
+                rel = fp_resolved.relative_to(repo_root)
+                repo_rel_path = rel.as_posix()
+            except Exception:
+                repo_rel_path = None
+        except Exception:
+            repo_id = None
+            repo_rel_path = None
+
         # Skip unchanged files if enabled (default)
         if skip_unchanged:
             # Prefer local workspace cache to avoid Qdrant lookups
@@ -2494,8 +2618,14 @@ def index_repo(
             except Exception:
                 pass
 
-            # Check existing indexed hash in Qdrant
-            prev = get_indexed_file_hash(client, current_collection, str(file_path))
+            # Check existing indexed hash in Qdrant (logical identity when available)
+            prev = get_indexed_file_hash(
+                client,
+                current_collection,
+                str(file_path),
+                repo_id=repo_id,
+                repo_rel_path=repo_rel_path,
+            )
             if prev and file_hash and prev == file_hash:
                 # File exists in Qdrant with same hash - cache it locally for next time
                 try:
@@ -2712,6 +2842,9 @@ def index_repo(
                     "last_modified_at": int(last_mod),
                     "churn_count": int(churn_count),
                     "author_count": int(author_count),
+                    # Logical identity for cross-worktree reuse
+                    "repo_id": repo_id,
+                    "repo_rel_path": repo_rel_path,
                     # New: dual-path tracking
                     "host_path": _host_path,
                     "container_path": _container_path,
@@ -2929,6 +3062,10 @@ def process_file_with_smart_reindexing(
 
     Symbol cache is used to gate pseudo/tag generation, but embedding reuse is decided
     at the chunk level by matching previous chunk code.
+
+    TODO(logical_repo): consider loading existing points by logical identity
+    (repo_id + repo_rel_path) instead of metadata.path so worktrees/branches
+    sharing a repo can reuse embeddings across slugs, not just per-path.
     """
     try:
         print(f"[SMART_REINDEX] Processing {file_path} with chunk-level reindexing")

@@ -33,6 +33,9 @@ try:
         _extract_repo_name_from_path,
         update_repo_origin,
         get_collection_mappings,
+        find_collection_for_logical_repo,
+        update_workspace_state,
+        logical_repo_reuse_enabled,
     )
 except ImportError:
     # Fallback for testing without full environment
@@ -43,6 +46,11 @@ except ImportError:
     _extract_repo_name_from_path = None
     update_repo_origin = None
     get_collection_mappings = None
+    find_collection_for_logical_repo = None
+    update_workspace_state = None
+
+    def logical_repo_reuse_enabled() -> bool:  # type: ignore[no-redef]
+        return False
 
 
 # Configure logging
@@ -424,6 +432,7 @@ async def upload_delta_bundle(
     sequence_number: Optional[int] = Form(None),
     force: Optional[bool] = Form(False),
     source_path: Optional[str] = Form(None),
+    logical_repo_id: Optional[str] = Form(None),
 ):
     """Upload and process delta bundle."""
     start_time = datetime.now()
@@ -443,8 +452,51 @@ async def upload_delta_bundle(
         if not repo_name:
             repo_name = Path(workspace_path).name
 
-        # Get collection name (respect client-supplied name when provided)
-        if not collection_name:
+        # Preserve any client-supplied collection name but allow server-side overrides
+        client_collection_name = collection_name
+        resolved_collection: Optional[str] = None
+
+        # Resolve collection name, preferring server-side mapping for logical_repo_id when enabled
+        if logical_repo_reuse_enabled() and logical_repo_id and find_collection_for_logical_repo:
+            try:
+                existing = find_collection_for_logical_repo(logical_repo_id, search_root=WORK_DIR)
+            except Exception:
+                existing = None
+            if existing:
+                resolved_collection = existing
+
+        # Latent migration: when no explicit mapping exists yet for this logical_repo_id, but there is a
+        # single existing collection mapping, prefer reusing it rather than creating a fresh collection.
+        if logical_repo_reuse_enabled() and logical_repo_id and resolved_collection is None and get_collection_mappings:
+            try:
+                mappings = get_collection_mappings(search_root=WORK_DIR) or []
+            except Exception:
+                mappings = []
+
+            if len(mappings) == 1:
+                canonical = mappings[0]
+                canonical_coll = canonical.get("collection_name")
+                if canonical_coll:
+                    resolved_collection = canonical_coll
+                    if update_workspace_state:
+                        try:
+                            update_workspace_state(
+                                workspace_path=canonical.get("container_path") or canonical.get("state_file"),
+                                updates={"logical_repo_id": logical_repo_id},
+                                repo_name=canonical.get("repo_name"),
+                            )
+                        except Exception as migrate_err:
+                            logger.debug(
+                                f"[upload_service] Failed to migrate logical_repo_id for existing mapping: {migrate_err}"
+                            )
+
+        # Finalize collection_name: prefer resolved server-side mapping, then client-supplied name,
+        # then standard get_collection_name/DEFAULT_COLLECTION fallbacks.
+        if resolved_collection is not None:
+            collection_name = resolved_collection
+        elif client_collection_name:
+            collection_name = client_collection_name
+        else:
             if get_collection_name and repo_name:
                 collection_name = get_collection_name(repo_name)
             else:
@@ -453,17 +505,35 @@ async def upload_delta_bundle(
         # Persist origin metadata for remote lookups (including client source_path)
         # Use slugged repo name (repo+16) for state so it matches ingest/watch_index usage
         try:
-            if update_repo_origin and repo_name:
+            if repo_name:
                 workspace_key = get_workspace_key(workspace_path)
                 slug_repo_name = f"{repo_name}-{workspace_key}"
                 container_workspace = str(Path(WORK_DIR) / slug_repo_name)
-                update_repo_origin(
-                    workspace_path=container_workspace,
-                    repo_name=slug_repo_name,
-                    container_path=container_workspace,
-                    source_path=source_path or workspace_path,
-                    collection_name=collection_name,
-                )
+
+                # Persist logical_repo_id mapping for this slug/workspace when provided (feature-gated)
+                if logical_repo_reuse_enabled() and logical_repo_id and update_workspace_state:
+                    try:
+                        update_workspace_state(
+                            workspace_path=container_workspace,
+                            updates={
+                                "logical_repo_id": logical_repo_id,
+                                "qdrant_collection": collection_name,
+                            },
+                            repo_name=slug_repo_name,
+                        )
+                    except Exception as state_err:
+                        logger.debug(
+                            f"[upload_service] Failed to persist logical_repo_id mapping: {state_err}"
+                        )
+
+                if update_repo_origin:
+                    update_repo_origin(
+                        workspace_path=container_workspace,
+                        repo_name=slug_repo_name,
+                        container_path=container_workspace,
+                        source_path=source_path or workspace_path,
+                        collection_name=collection_name,
+                    )
         except Exception as origin_err:
             logger.debug(f"[upload_service] Failed to persist origin info: {origin_err}")
 
