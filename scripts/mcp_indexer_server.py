@@ -2373,7 +2373,11 @@ async def repo_search(
                 el = int(item.get("end_line") or 0)
                 if not path or not sl:
                     return (i, "")
-                raw_path = str(path)
+                raw_path = (
+                    str(item.get("container_path"))
+                    if item.get("container_path")
+                    else str(path)
+                )
                 p = (
                     raw_path
                     if os.path.isabs(raw_path)
@@ -5718,12 +5722,14 @@ def _ca_fallback_and_budget(
             return ""
         try:
             path = str(span.get("path") or "")
+            container_path = str(span.get("container_path") or "")
             sline = int(span.get("start_line") or 0)
             eline = int(span.get("end_line") or 0)
-            if not path or sline <= 0:
+            if not (path or container_path) or sline <= 0:
                 span["_ident_snippet"] = ""
                 return ""
-            fp = path
+            raw_path = container_path or path
+            fp = raw_path
             if not os.path.isabs(fp):
                 fp = os.path.join("/work", fp)
             realp = os.path.realpath(fp)
