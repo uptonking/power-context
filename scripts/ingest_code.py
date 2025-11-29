@@ -2116,6 +2116,8 @@ def index_single_file(
         # Track both container path (/work mirror) and original host path for clarity across environments
         _cur_path = str(file_path)
         _host_root = str(os.environ.get("HOST_INDEX_PATH") or "").strip().rstrip("/")
+        if ":" in _host_root: # Windows drive letter (e.g., "C:")
+            _host_root = ""
         _host_path = None
         _container_path = None
 

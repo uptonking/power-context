@@ -573,6 +573,8 @@ def _rename_in_store(
                 host_root = (
                     str(os.environ.get("HOST_INDEX_PATH") or "").strip().rstrip("/")
                 )
+                if ":" in host_root: # Windows drive letter (e.g., "C:")
+                    host_root = ""
                 host_path = None
                 container_path = None
                 try:
