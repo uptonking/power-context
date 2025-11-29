@@ -2,7 +2,7 @@
 
 This guide covers setting up a development environment, understanding the codebase structure, and contributing to Context Engine.
 
-**Documentation:** [README](../README.md) · [Configuration](CONFIGURATION.md) · [IDE Clients](IDE_CLIENTS.md) · [MCP API](MCP_API.md) · [ctx CLI](CTX_CLI.md) · [Memory Guide](MEMORY_GUIDE.md) · [Architecture](ARCHITECTURE.md) · [Multi-Repo](MULTI_REPO_COLLECTIONS.md) · [Kubernetes](../deploy/kubernetes/README.md) · [VS Code Extension](vscode-extension.md) · [Troubleshooting](TROUBLESHOOTING.md) · [Development](DEVELOPMENT.md)
+**Documentation:** [README](../README.md) · [Getting Started](GETTING_STARTED.md) · [Configuration](CONFIGURATION.md) · [IDE Clients](IDE_CLIENTS.md) · [MCP API](MCP_API.md) · [ctx CLI](CTX_CLI.md) · [Memory Guide](MEMORY_GUIDE.md) · [Architecture](ARCHITECTURE.md) · [Multi-Repo](MULTI_REPO_COLLECTIONS.md) · [Kubernetes](../deploy/kubernetes/README.md) · [VS Code Extension](vscode-extension.md) · [Troubleshooting](TROUBLESHOOTING.md) · [Development](DEVELOPMENT.md)
 
 ---
 
@@ -68,7 +68,7 @@ curl http://localhost:8001/sse  # Indexer server SSE
 
 ### 4. IDE MCP Configuration
 
-For MCP-aware IDEs (Claude Desktop, Windsurf, etc.), prefer the HTTP MCP endpoints:
+For MCP-aware IDEs (Claude Code, Windsurf, etc.), prefer the HTTP MCP endpoints:
 
 ```bash
 # Memory MCP (HTTP)

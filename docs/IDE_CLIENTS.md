@@ -2,7 +2,7 @@
 
 Connect your IDE to a running Context-Engine stack. No need to clone this repo into your project.
 
-**Documentation:** [README](../README.md) · [Configuration](CONFIGURATION.md) · [IDE Clients](IDE_CLIENTS.md) · [MCP API](MCP_API.md) · [ctx CLI](CTX_CLI.md) · [Memory Guide](MEMORY_GUIDE.md) · [Architecture](ARCHITECTURE.md) · [Multi-Repo](MULTI_REPO_COLLECTIONS.md) · [Kubernetes](../deploy/kubernetes/README.md) · [VS Code Extension](vscode-extension.md) · [Troubleshooting](TROUBLESHOOTING.md) · [Development](DEVELOPMENT.md)
+**Documentation:** [README](../README.md) · [Getting Started](GETTING_STARTED.md) · [Configuration](CONFIGURATION.md) · [IDE Clients](IDE_CLIENTS.md) · [MCP API](MCP_API.md) · [ctx CLI](CTX_CLI.md) · [Memory Guide](MEMORY_GUIDE.md) · [Architecture](ARCHITECTURE.md) · [Multi-Repo](MULTI_REPO_COLLECTIONS.md) · [Kubernetes](../deploy/kubernetes/README.md) · [VS Code Extension](vscode-extension.md) · [Troubleshooting](TROUBLESHOOTING.md) · [Development](DEVELOPMENT.md)
 
 ---
 
@@ -30,7 +30,7 @@ Connect your IDE to a running Context-Engine stack. No need to clone this repo i
 }
 ```
 
-**HTTP (recommended for RMCP-capable IDEs)** — prefer this when your IDE supports HTTP MCP / RMCP (Claude Desktop, Windsurf, Qodo, etc.):
+**HTTP (recommended for RMCP-capable IDEs)** — prefer this when your IDE supports HTTP MCP / RMCP (Claude Code, Windsurf, Qodo, etc.):
 
 ```json
 {
@@ -66,7 +66,9 @@ Replace `localhost` with your server IP/hostname for remote setups.
 | OpenAI Codex | RMCP | TOML config |
 | Augment | SSE | Simple JSON configs |
 | AmpCode | SSE | Simple URL for SSE endpoints |
-| Claude Code CLI | SSE | Simple JSON configs |
+| Claude Code CLI | SSE / HTTP (RMCP) | Simple JSON configs via .mcp.json |
+
+**Claude Desktop (Connectors):** Claude Desktop also supports remote MCP servers over SSE and streamable HTTP, but configuration happens via the Claude Connectors UI (Settings → Connectors on claude.ai), not local `.mcp.json`. Treat Context-Engine as a normal remote MCP server there; this guide focuses on IDEs where you control MCP URLs/config files directly (Claude Code, Windsurf, etc.).
 
 ---
 

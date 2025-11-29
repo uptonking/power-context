@@ -2,7 +2,7 @@
 
 This document provides comprehensive API documentation for all MCP (Model Context Protocol) tools exposed by Context Engine's dual-server architecture.
 
-**Documentation:** [README](../README.md) · [Configuration](CONFIGURATION.md) · [IDE Clients](IDE_CLIENTS.md) · [MCP API](MCP_API.md) · [ctx CLI](CTX_CLI.md) · [Memory Guide](MEMORY_GUIDE.md) · [Architecture](ARCHITECTURE.md) · [Multi-Repo](MULTI_REPO_COLLECTIONS.md) · [Kubernetes](../deploy/kubernetes/README.md) · [VS Code Extension](vscode-extension.md) · [Troubleshooting](TROUBLESHOOTING.md) · [Development](DEVELOPMENT.md)
+**Documentation:** [README](../README.md) · [Getting Started](GETTING_STARTED.md) · [Configuration](CONFIGURATION.md) · [IDE Clients](IDE_CLIENTS.md) · [MCP API](MCP_API.md) · [ctx CLI](CTX_CLI.md) · [Memory Guide](MEMORY_GUIDE.md) · [Architecture](ARCHITECTURE.md) · [Multi-Repo](MULTI_REPO_COLLECTIONS.md) · [Kubernetes](../deploy/kubernetes/README.md) · [VS Code Extension](vscode-extension.md) · [Troubleshooting](TROUBLESHOOTING.md) · [Development](DEVELOPMENT.md)
 
 ---
 
@@ -41,7 +41,7 @@ For each server, two transports are available:
     - Indexer: `http://localhost:18003/readyz`
   - Tools (for debugging): `GET /tools` on the health ports.
 
-**Recommendation for IDEs:** Prefer the HTTP `/mcp` endpoints when integrating with IDE clients (Claude Desktop, Windsurf, etc.). HTTP uses a simple request/response pattern where `initialize` completes before `listTools` and other calls, avoiding initialization races.
+**Recommendation for IDEs:** Prefer the HTTP `/mcp` endpoints when integrating with IDE clients (Claude Code, Windsurf, etc.). HTTP uses a simple request/response pattern where `initialize` completes before `listTools` and other calls, avoiding initialization races.
 
 When using SSE via `mcp-remote`, some clients may send MCP messages (for example `listTools`) in parallel on a fresh session before `initialize` has fully completed. FastMCP enforces that only `initialize` may be processed during initialization; if a non-initialize request arrives too early, the server can log:
 
