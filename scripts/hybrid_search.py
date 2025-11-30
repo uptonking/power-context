@@ -1351,7 +1351,7 @@ def dense_query(
 
 # In-process API: run hybrid search and return structured items list
 # Optional: pass an existing TextEmbedding instance via model to reuse cache
-
+# Optional: pass mode to adjust implementation/docs weighting (code_first/balanced/docs_first)
 
 def run_hybrid_search(
     queries: List[str],
@@ -1370,6 +1370,7 @@ def run_hybrid_search(
     expand: bool = True,
     model: TextEmbedding | None = None,
     collection: str | None = None,
+    mode: str | None = None,
 ) -> List[Dict[str, Any]]:
     client = QdrantClient(url=os.environ.get("QDRANT_URL", QDRANT_URL), api_key=API_KEY)
     model_name = os.environ.get("EMBEDDING_MODEL", MODEL_NAME)
@@ -1474,6 +1475,7 @@ def run_hybrid_search(
                 str(_collection()),
                 _env_truthy(os.environ.get("HYBRID_ADAPTIVE_WEIGHTS"), True),
                 _env_truthy(os.environ.get("HYBRID_MMR"), True),
+                str(mode or ""),
             )
         except Exception:
             cache_key = None
@@ -1555,6 +1557,7 @@ def run_hybrid_search(
             'expand': expand,
             'collection': _collection(),
             'vector_name': vec_name,
+            'mode': mode,
         }
         is_duplicate, similar_fp = is_duplicate_request(request_data)
         if is_duplicate:
@@ -2084,6 +2087,18 @@ def run_hybrid_search(
 
     # Lexical + boosts
     timestamps: List[int] = []
+    # Mode-aware tweaks for implementation/docs weighting. Modes:
+    # - None / "code_first": full IMPLEMENTATION_BOOST and DOCUMENTATION_PENALTY
+    # - "balanced": keep impl boost, halve doc penalty
+    # - "docs_first": reduce impl boost slightly and disable doc penalty
+    eff_mode = (mode or "").strip().lower()
+    impl_boost = IMPLEMENTATION_BOOST
+    doc_penalty = DOCUMENTATION_PENALTY
+    if eff_mode in {"balanced"}:
+        doc_penalty = DOCUMENTATION_PENALTY * 0.5
+    elif eff_mode in {"docs_first", "docs-first", "docs"}:
+        impl_boost = IMPLEMENTATION_BOOST * 0.5
+        doc_penalty = 0.0
     for pid, rec in list(score_map.items()):
         payload = rec["pt"].payload or {}
         base_md = payload.get("metadata") or {}
@@ -2133,22 +2148,25 @@ def run_hybrid_search(
             if ext in {".json", ".yml", ".yaml", ".toml", ".ini"} or "/.codebase/" in path_lower or "/.kiro/" in path_lower:
                 rec["cfg"] = float(rec.get("cfg", 0.0)) - CONFIG_FILE_PENALTY
                 rec["s"] -= CONFIG_FILE_PENALTY
-        # Boost likely implementation files
-        if IMPLEMENTATION_BOOST > 0.0 and path:
+        # Boost likely implementation files (mode-aware)
+        if impl_boost > 0.0 and path:
             if ext in {".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".java", ".rs", ".rb", ".php", ".cs", ".cpp", ".c", ".hpp", ".h"}:
-                rec["impl"] = float(rec.get("impl", 0.0)) + IMPLEMENTATION_BOOST
-                rec["s"] += IMPLEMENTATION_BOOST
-        # Penalize docs for implementation-style questions
-        qlow = " ".join(qlist).lower()
-        if DOCUMENTATION_PENALTY > 0.0 and path:
-            if ("readme" in path_lower or "/docs/" in path_lower or "/documentation/" in path_lower or path_lower.endswith(".md")):
-                if any(w in qlow for w in ["how does", "explain", "works", "algorithm"]):
-                    rec["doc"] = float(rec.get("doc", 0.0)) - DOCUMENTATION_PENALTY
-                    rec["s"] -= DOCUMENTATION_PENALTY
+                rec["impl"] = float(rec.get("impl", 0.0)) + impl_boost
+                rec["s"] += impl_boost
+        # Penalize docs (README/docs/markdown) relative to implementation files (mode-aware)
+        if doc_penalty > 0.0 and path:
+            if (
+                "readme" in path_lower
+                or "/docs/" in path_lower
+                or "/documentation/" in path_lower
+                or path_lower.endswith(".md")
+            ):
+                rec["doc"] = float(rec.get("doc", 0.0)) - doc_penalty
+                rec["s"] -= doc_penalty
 
         if LANG_MATCH_BOOST > 0.0 and path and eff_language:
             lang = str(eff_language).lower()
-            md_lang = str((md.get("language") or "")).lower()
+            md_lang = str((md.get("language") or "").lower())
             if (lang and md_lang and md_lang == lang) or lang_matches_path(lang, path):
                 rec["langb"] += LANG_MATCH_BOOST
                 rec["s"] += LANG_MATCH_BOOST

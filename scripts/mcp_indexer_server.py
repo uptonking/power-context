@@ -1676,6 +1676,7 @@ async def repo_search(
     highlight_snippet: Any = None,
     collection: Any = None,
     workspace_path: Any = None,
+    mode: Any = None,
 
 
     session: Any = None,
@@ -1841,6 +1842,11 @@ async def repo_search(
                 case = _extra.get("case")
             if compact in (None, "") and _extra.get("compact") is not None:
                 compact = _extra.get("compact")
+            # Optional mode hint: "code_first", "docs_first", "balanced"
+            if (
+                mode is None or (isinstance(mode, str) and str(mode).strip() == "")
+            ) and _extra.get("mode") is not None:
+                mode = _extra.get("mode")
     except Exception:
         pass
 
@@ -1894,6 +1900,9 @@ async def repo_search(
         rerank_timeout_ms, int(os.environ.get("RERANKER_TIMEOUT_MS", "120") or 120)
     )
     highlight_snippet = _to_bool(highlight_snippet, True)
+
+    # Optional mode knob: "code_first" (default for IDE), "docs_first", "balanced"
+    mode_str = _to_str(mode, "").strip().lower()
 
     # Resolve collection precedence: explicit > per-connection defaults > token defaults > env default
     coll_hint = _to_str(collection, "").strip()
@@ -2039,6 +2048,7 @@ async def repo_search(
                     expand=str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower()
                     in {"1", "true", "yes", "on"},
                     model=model,
+                    mode=mode_str or None,
                 )
             finally:
                 if prev_coll is None:
@@ -2128,6 +2138,7 @@ async def repo_search(
                     expand=str(os.environ.get("HYBRID_EXPAND", "0")).strip().lower()
                     in {"1", "true", "yes", "on"},
                     model=model,
+                    mode=mode_str or None,
                 )
                 json_lines = items
             except Exception:
@@ -2360,6 +2371,124 @@ async def repo_search(
                 item["budget_tokens_used"] = int(obj.get("budget_tokens_used"))
             results.append(item)
 
+    # Mode-aware reordering: nudge core implementation code vs docs and non-core when requested
+    def _is_doc_path(p: str) -> bool:
+        pl = str(p or "").lower()
+        return (
+            "readme" in pl
+            or "/docs/" in pl
+            or "/documentation/" in pl
+            or pl.endswith(".md")
+            or pl.endswith(".rst")
+            or pl.endswith(".txt")
+        )
+
+    def _is_core_code_item(item: dict) -> bool:
+        try:
+            p = str(item.get("path") or "").lower()
+        except Exception:
+            return False
+        if not p:
+            return False
+        if _is_doc_path(p):
+            return False
+        # Extension-based implementation heuristic (mirrors hybrid_search IMPLEMENTATION_BOOST set)
+        ext = "." + p.rsplit(".", 1)[-1] if "." in p else ""
+        if ext not in {
+            ".py",
+            ".ts",
+            ".tsx",
+            ".js",
+            ".jsx",
+            ".go",
+            ".java",
+            ".rs",
+            ".rb",
+            ".php",
+            ".cs",
+            ".cpp",
+            ".c",
+            ".hpp",
+            ".h",
+        }:
+            return False
+        # Basic path-based exclusions for non-core code
+        if (
+            "/test" in p
+            or "/tests/" in p
+            or "/__tests__/" in p
+            or p.endswith("_test.py")
+            or p.endswith("test.py")
+            or "/fixtures/" in p
+            or "/vendor/" in p
+            or "/third_party/" in p
+            or "/.codebase/" in p
+            or "/.kiro/" in p
+        ):
+            return False
+        # Prefer items that were not explicitly tagged as docs/config/tests in hybrid components
+        comps = item.get("components") or {}
+        try:
+            if comps:
+                if comps.get("config_penalty") or comps.get("test_penalty") or comps.get("doc_penalty"):
+                    return False
+        except Exception:
+            pass
+        return True
+
+    if mode_str in {"code_first", "code-first", "code"}:
+        core_items: list[dict] = []
+        other_code: list[dict] = []
+        doc_items: list[dict] = []
+        for it in results:
+            p = it.get("path") or ""
+            if p and _is_doc_path(p):
+                doc_items.append(it)
+            elif _is_core_code_item(it):
+                core_items.append(it)
+            else:
+                other_code.append(it)
+        results = core_items + other_code + doc_items
+
+        try:
+            _min_core = int(os.environ.get("REPO_SEARCH_CODE_FIRST_MIN_CORE", "2") or 0)
+        except Exception:
+            _min_core = 2
+        try:
+            _top_k = int(os.environ.get("REPO_SEARCH_CODE_FIRST_TOP_K", "8") or 8)
+        except Exception:
+            _top_k = 8
+        if _min_core > 0 and results:
+            top_k = max(0, min(_top_k, len(results)))
+            if top_k > 0:
+                flags = [_is_core_code_item(it) for it in results]
+                cur_core = sum(1 for i in range(top_k) if flags[i])
+                if cur_core < _min_core:
+                    for src in range(top_k, len(results)):
+                        if not flags[src]:
+                            continue
+                        for dst in range(top_k - 1, -1, -1):
+                            if not flags[dst]:
+                                results[dst], results[src] = results[src], results[dst]
+                                flags[dst], flags[src] = flags[src], flags[dst]
+                                cur_core += 1
+                                break
+                        if cur_core >= _min_core:
+                            break
+    elif mode_str in {"docs_first", "docs-first", "docs"}:
+        core_items = []
+        other_code = []
+        doc_items = []
+        for it in results:
+            p = it.get("path") or ""
+            if p and _is_doc_path(p):
+                doc_items.append(it)
+            elif _is_core_code_item(it):
+                core_items.append(it)
+            else:
+                other_code.append(it)
+        results = doc_items + core_items + other_code
+
     # Optionally add snippets (with highlighting)
     toks = _tokens_from_queries(queries)
     if include_snippet:
@@ -2535,6 +2664,7 @@ async def repo_search_compat(**arguments) -> Dict[str, Any]:
             "not_": not_value,
             "case": args.get("case"),
             "compact": args.get("compact"),
+            "mode": args.get("mode"),
             # Alias passthroughs captured by repo_search(**kwargs)
             "queries": queries,
             "q": args.get("q"),
