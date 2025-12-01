@@ -2409,48 +2409,24 @@ async def repo_search(
         )
 
     def _is_core_code_item(item: dict) -> bool:
+        """Classify a result as core implementation code for mode-aware reordering.
+
+        This intentionally reuses hybrid_search's notion of core/test/vendor files
+        instead of duplicating extension and path heuristics here. We only apply
+        lightweight checks on top (docs/config/tests components) and delegate the
+        rest to helpers from hybrid_search when available.
+        """
         try:
-            p = str(item.get("path") or "").lower()
+            raw_path = item.get("path") or ""
+            p = str(raw_path)
         except Exception:
             return False
         if not p:
             return False
+        # Never treat docs as core code
         if _is_doc_path(p):
             return False
-        # Extension-based implementation heuristic (mirrors hybrid_search IMPLEMENTATION_BOOST set)
-        ext = "." + p.rsplit(".", 1)[-1] if "." in p else ""
-        if ext not in {
-            ".py",
-            ".ts",
-            ".tsx",
-            ".js",
-            ".jsx",
-            ".go",
-            ".java",
-            ".rs",
-            ".rb",
-            ".php",
-            ".cs",
-            ".cpp",
-            ".c",
-            ".hpp",
-            ".h",
-        }:
-            return False
-        # Basic path-based exclusions for non-core code
-        if (
-            "/test" in p
-            or "/tests/" in p
-            or "/__tests__/" in p
-            or p.endswith("_test.py")
-            or p.endswith("test.py")
-            or "/fixtures/" in p
-            or "/vendor/" in p
-            or "/third_party/" in p
-            or "/.codebase/" in p
-            or "/.kiro/" in p
-        ):
-            return False
+
         # Prefer items that were not explicitly tagged as docs/config/tests in hybrid components
         comps = item.get("components") or {}
         try:
@@ -2459,6 +2435,41 @@ async def repo_search(
                     return False
         except Exception:
             pass
+
+        # Defer to hybrid_search helpers when available to avoid duplicating
+        # extension and path-based logic.
+        try:
+            from scripts.hybrid_search import (  # type: ignore
+                is_core_file as _hy_core_file,
+                is_test_file as _hy_is_test_file,
+                is_vendor_path as _hy_is_vendor_path,
+            )
+        except Exception:
+            _hy_core_file = None
+            _hy_is_test_file = None
+            _hy_is_vendor_path = None
+
+        if _hy_core_file:
+            try:
+                if not _hy_core_file(p):
+                    return False
+            except Exception:
+                return False
+        if _hy_is_test_file:
+            try:
+                if _hy_is_test_file(p):
+                    return False
+            except Exception:
+                pass
+        if _hy_is_vendor_path:
+            try:
+                if _hy_is_vendor_path(p):
+                    return False
+            except Exception:
+                pass
+
+        # If helper imports failed, fall back to a permissive classification:
+        # treat the item as core code (we already filtered obvious docs/config/tests).
         return True
 
     if mode_str in {"code_first", "code-first", "code"}:
