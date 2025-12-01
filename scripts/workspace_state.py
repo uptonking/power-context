@@ -73,11 +73,27 @@ class WorkspaceState(TypedDict, total=False):
     last_activity: Optional[LastActivity]
     qdrant_stats: Optional[Dict[str, Any]]
     origin: Optional[OriginInfo]
+    logical_repo_id: Optional[str]
 
 def is_multi_repo_mode() -> bool:
     """Check if multi-repo mode is enabled."""
     return os.environ.get("MULTI_REPO_MODE", "0").strip().lower() in {
         "1", "true", "yes", "on"
+    }
+
+
+def logical_repo_reuse_enabled() -> bool:
+    """Feature flag for logical-repo / collection reuse.
+
+    Controlled by LOGICAL_REPO_REUSE env var: 1/true/yes/on => enabled.
+    When disabled, behavior falls back to legacy per-repo collection logic
+    and does not write logical_repo_id into workspace state.
+    """
+    return os.environ.get("LOGICAL_REPO_REUSE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
     }
 
 _state_lock = threading.Lock()
@@ -156,6 +172,59 @@ def _sanitize_name(s: str, max_len: int = 64) -> str:
     if not s:
         s = "workspace"
     return s[:max_len]
+
+
+def _detect_git_common_dir(start: Path) -> Optional[Path]:
+    try:
+        base = start if start.is_dir() else start.parent
+        r = subprocess.run(
+            ["git", "-C", str(base), "rev-parse", "--git-common-dir"],
+            capture_output=True,
+            text=True,
+        )
+        raw = (r.stdout or "").strip()
+        if r.returncode != 0 or not raw:
+            return None
+        p = Path(raw)
+        if not p.is_absolute():
+            p = base / p
+        return p.resolve()
+    except Exception:
+        return None
+
+
+def compute_logical_repo_id(workspace_path: str) -> str:
+    try:
+        p = Path(workspace_path).resolve()
+    except Exception:
+        p = Path(workspace_path)
+
+    common = _detect_git_common_dir(p)
+    if common is not None:
+        key = str(common)
+        prefix = "git:"
+    else:
+        key = str(p)
+        prefix = "fs:"
+
+    h = hashlib.sha1(key.encode("utf-8", errors="ignore")).hexdigest()[:16]
+    return f"{prefix}{h}"
+
+
+def ensure_logical_repo_id(state: WorkspaceState, workspace_path: str) -> WorkspaceState:
+    if not isinstance(state, dict):
+        return state
+    if not logical_repo_reuse_enabled():
+        # Gate: when logical repo reuse is disabled, leave state untouched
+        return state
+    if state.get("logical_repo_id"):
+        return state
+    lrid = compute_logical_repo_id(workspace_path)
+    state["logical_repo_id"] = lrid
+    origin = dict(state.get("origin", {}) or {})
+    origin.setdefault("logical_repo_id", lrid)
+    state["origin"] = origin
+    return state
 
 
 # Cross-process file locking (POSIX fcntl), falls back to no-op if unavailable
@@ -252,6 +321,12 @@ def _atomic_write_state(state_path: Path, state: WorkspaceState) -> None:
         with open(temp_path, 'w', encoding='utf-8') as f:
             json.dump(state, f, indent=2, ensure_ascii=False)
         temp_path.replace(state_path)
+        # Ensure state/cache files are group-writable so multiple processes
+        # (upload service, watcher, indexer) can update them.
+        try:
+            os.chmod(state_path, 0o664)
+        except PermissionError:
+            pass
     except Exception:
         # Clean up temp file if something went wrong
         try:
@@ -304,10 +379,17 @@ def get_workspace_state(
                 try:
                     with open(state_path, "r", encoding="utf-8") as f:
                         state = json.load(f)
-                        if isinstance(state, dict):
-                            return state
-                except (json.JSONDecodeError, ValueError, OSError):
-                    pass
+                    if isinstance(state, dict):
+                        if logical_repo_reuse_enabled():
+                            workspace_real = str(Path(workspace_path or _resolve_workspace_root()).resolve())
+                            state = ensure_logical_repo_id(state, workspace_real)
+                            try:
+                                _atomic_write_state(state_path, state)
+                            except Exception as e:
+                                print(f"[workspace_state] Failed to persist logical_repo_id to {state_path}: {e}")
+                        return state
+                except (json.JSONDecodeError, ValueError, OSError) as e:
+                    print(f"[workspace_state] Failed to read state from {state_path}: {e}")
 
             now = datetime.now().isoformat()
             collection_name = get_collection_name(repo_name)
@@ -319,6 +401,12 @@ def get_workspace_state(
                 "qdrant_collection": collection_name,
                 "indexing_status": {"state": "idle"},
             }
+
+            if logical_repo_reuse_enabled():
+                try:
+                    state = ensure_logical_repo_id(state, state.get("workspace_path", workspace_path or _resolve_workspace_root()))
+                except Exception as e:
+                    print(f"[workspace_state] Failed to ensure logical_repo_id for {workspace_path}: {e}")
 
             _atomic_write_state(state_path, state)
             return state
@@ -651,8 +739,12 @@ def set_cached_file_hash(file_path: str, file_hash: str, repo_name: Optional[str
 
         try:
             if cache_path.exists():
-                with open(cache_path, "r", encoding="utf-8") as f:
-                    cache = json.load(f)
+                try:
+                    with open(cache_path, "r", encoding="utf-8") as f:
+                        cache = json.load(f)
+                except Exception:
+                    # If the existing cache is corrupt/empty, recreate it
+                    cache = {"file_hashes": {}, "created_at": datetime.now().isoformat()}
             else:
                 cache = {"file_hashes": {}, "created_at": datetime.now().isoformat()}
 
@@ -758,7 +850,8 @@ def get_collection_mappings(search_root: Optional[str] = None) -> List[Dict[str,
                     try:
                         with open(state_path, "r", encoding="utf-8") as f:
                             state = json.load(f) or {}
-                    except Exception:
+                    except Exception as e:
+                        print(f"[workspace_state] Failed to read repo state from {state_path}: {e}")
                         continue
 
                     origin = state.get("origin", {}) or {}
@@ -801,5 +894,319 @@ def get_collection_mappings(search_root: Optional[str] = None) -> List[Dict[str,
         return mappings
 
     return mappings
+
+
+def find_collection_for_logical_repo(logical_repo_id: str, search_root: Optional[str] = None) -> Optional[str]:
+    if not logical_repo_reuse_enabled():
+        return None
+
+    root_path = Path(search_root or _resolve_workspace_root()).resolve()
+
+    try:
+        if is_multi_repo_mode():
+            repos_root = root_path / STATE_DIRNAME / "repos"
+            if repos_root.exists():
+                for repo_dir in repos_root.iterdir():
+                    if not repo_dir.is_dir():
+                        continue
+                    state_path = repo_dir / STATE_FILENAME
+                    if not state_path.exists():
+                        continue
+                    try:
+                        with open(state_path, "r", encoding="utf-8") as f:
+                            state = json.load(f) or {}
+                    except Exception:
+                        continue
+
+                    ws = state.get("workspace_path") or str(root_path)
+                    state = ensure_logical_repo_id(state, ws)
+                    if state.get("logical_repo_id") == logical_repo_id:
+                        coll = state.get("qdrant_collection")
+                        if coll:
+                            try:
+                                _atomic_write_state(state_path, state)
+                            except Exception as e:
+                                print(f"[workspace_state] Failed to persist logical_repo_id mapping to {state_path}: {e}")
+                            return coll
+
+        state_path = root_path / STATE_DIRNAME / STATE_FILENAME
+        if state_path.exists():
+            try:
+                with open(state_path, "r", encoding="utf-8") as f:
+                    state = json.load(f) or {}
+            except Exception as e:
+                print(f"[workspace_state] Failed to read workspace state from {state_path}: {e}")
+                state = {}
+
+            ws = state.get("workspace_path") or str(root_path)
+            state = ensure_logical_repo_id(state, ws)
+            if state.get("logical_repo_id") == logical_repo_id:
+                coll = state.get("qdrant_collection")
+                if coll:
+                    try:
+                        _atomic_write_state(state_path, state)
+                    except Exception as e:
+                        print(f"[workspace_state] Failed to persist logical_repo_id mapping to {state_path}: {e}")
+                    return coll
+    except Exception as e:
+        print(f"[workspace_state] Error while searching collections for logical_repo_id={logical_repo_id}: {e}")
+        return None
+
+    return None
+
+
+def get_or_create_collection_for_logical_repo(
+    workspace_path: str,
+    preferred_repo_name: Optional[str] = None,
+) -> str:
+    # Gate entire logical-repo based resolution behind feature flag
+    if not logical_repo_reuse_enabled():
+        base_repo = preferred_repo_name
+        try:
+            coll = get_collection_name(base_repo)
+        except Exception:
+            coll = get_collection_name(None)
+        try:
+            update_workspace_state(
+                workspace_path=workspace_path,
+                updates={"qdrant_collection": coll},
+                repo_name=preferred_repo_name,
+            )
+        except Exception as e:
+            print(f"[workspace_state] Failed to persist legacy qdrant_collection for {workspace_path}: {e}")
+        return coll
+    try:
+        ws = Path(workspace_path).resolve()
+    except Exception:
+        ws = Path(workspace_path)
+
+    common = _detect_git_common_dir(ws)
+    if common is not None:
+        canonical_root = common.parent
+    else:
+        canonical_root = ws
+
+    ws_path = str(canonical_root)
+
+    try:
+        state = get_workspace_state(workspace_path=ws_path, repo_name=preferred_repo_name)
+    except Exception:
+        state = {}
+
+    if not isinstance(state, dict):
+        state = {}
+
+    try:
+        state = ensure_logical_repo_id(state, ws_path)
+    except Exception:
+        pass
+
+    lrid = state.get("logical_repo_id")
+    if isinstance(lrid, str) and lrid:
+        coll = find_collection_for_logical_repo(lrid, search_root=ws_path)
+        if isinstance(coll, str) and coll:
+            if state.get("qdrant_collection") != coll:
+                try:
+                    update_workspace_state(
+                        workspace_path=ws_path,
+                        updates={"qdrant_collection": coll, "logical_repo_id": lrid},
+                        repo_name=preferred_repo_name,
+                    )
+                except Exception:
+                    pass
+            return coll
+
+    coll = state.get("qdrant_collection")
+    if not isinstance(coll, str) or not coll:
+        base_repo = preferred_repo_name
+        try:
+            coll = get_collection_name(base_repo)
+        except Exception:
+            coll = get_collection_name(None)
+        try:
+            update_workspace_state(
+                workspace_path=ws_path,
+                updates={"qdrant_collection": coll},
+                repo_name=preferred_repo_name,
+            )
+        except Exception:
+            pass
+
+    return coll
+
+
+# ===== Symbol-Level Cache for Smart Reindexing =====
+
+def _get_symbol_cache_path(file_path: str) -> Path:
+    """Get symbol cache file path for a given file."""
+    try:
+        fp = str(Path(file_path).resolve())
+        # Create symbol cache using file hash to handle renames
+        file_hash = hashlib.md5(fp.encode('utf-8')).hexdigest()[:8]
+        if is_multi_repo_mode():
+            # Use the same repo-name detection as other state helpers so that
+            # symbol caches live under the correct per-repo .codebase directory
+            repo_name = _detect_repo_name_from_path(Path(file_path))
+            state_dir = _get_repo_state_dir(repo_name)
+            return state_dir / f"symbols_{file_hash}.json"
+        else:
+            cache_dir = _get_cache_path(_resolve_workspace_root()).parent
+            return cache_dir / f"symbols_{file_hash}.json"
+    except Exception:
+        # Fallback to simple file-based path
+        cache_dir = _get_cache_path(_resolve_workspace_root()).parent
+        filename = Path(file_path).name.replace('.', '_').replace('/', '_')
+        return cache_dir / f"symbols_{filename}.json"
+
+
+def get_cached_symbols(file_path: str) -> dict:
+    """Load cached symbol metadata for a file."""
+    cache_path = _get_symbol_cache_path(file_path)
+
+    if not cache_path.exists():
+        return {}
+
+    try:
+        with open(cache_path, 'r', encoding='utf-8') as f:
+            cache_data = json.load(f)
+            return cache_data.get("symbols", {})
+    except Exception:
+        return {}
+
+
+def set_cached_symbols(file_path: str, symbols: dict, file_hash: str) -> None:
+    """Save symbol metadata for a file. Extends existing to include pseudo data."""
+    cache_path = _get_symbol_cache_path(file_path)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        cache_data = {
+            "file_path": str(file_path),
+            "file_hash": file_hash,
+            "updated_at": datetime.now().isoformat(),
+            "symbols": symbols
+        }
+
+        with open(cache_path, 'w', encoding='utf-8') as f:
+            json.dump(cache_data, f, indent=2)
+
+        # Ensure symbol cache files are group-writable so both indexer and
+        # watcher processes (potentially different users sharing a group)
+        # can update them on shared volumes.
+        try:
+            os.chmod(cache_path, 0o664)
+        except PermissionError:
+            pass
+    except Exception as e:
+        print(f"[SYMBOL_CACHE_WARNING] Failed to save symbol cache for {file_path}: {e}")
+
+
+def get_cached_pseudo(file_path: str, symbol_id: str) -> tuple[str, list[str]]:
+    """Load cached pseudo description and tags for a specific symbol.
+
+    Returns:
+        (pseudo, tags) tuple, or ("", []) if not found
+    """
+    cached_symbols = get_cached_symbols(file_path)
+
+    if symbol_id in cached_symbols:
+        symbol_info = cached_symbols[symbol_id]
+        pseudo = symbol_info.get("pseudo", "")
+        tags = symbol_info.get("tags", [])
+
+        # Ensure correct types
+        if isinstance(pseudo, str):
+            pseudo = pseudo
+        else:
+            pseudo = ""
+
+        if isinstance(tags, list):
+            tags = [str(tag) for tag in tags]
+        else:
+            tags = []
+
+        return pseudo, tags
+
+    return "", []
+
+
+def set_cached_pseudo(file_path: str, symbol_id: str, pseudo: str, tags: list[str], file_hash: str) -> None:
+    """Update pseudo data for a specific symbol in the cache.
+
+    This function updates only the pseudo data without recreating the entire symbol cache,
+    making it efficient for incremental updates during indexing.
+    """
+    cached_symbols = get_cached_symbols(file_path)
+
+    # Update the symbol with pseudo data
+    if symbol_id in cached_symbols:
+        cached_symbols[symbol_id]["pseudo"] = pseudo
+        cached_symbols[symbol_id]["tags"] = tags
+
+        # Save the updated cache only when we actually have symbol entries, to
+        # avoid creating empty symbol cache files before the base symbol set
+        # has been seeded by the indexer/smart reindex path.
+        set_cached_symbols(file_path, cached_symbols, file_hash)
+
+
+def update_symbols_with_pseudo(file_path: str, symbols_with_pseudo: dict, file_hash: str) -> None:
+    """Update symbols cache with pseudo data for multiple symbols at once.
+
+    Args:
+        file_path: Path to the file
+        symbols_with_pseudo: Dict mapping symbol_id to (symbol_info, pseudo, tags) tuples
+        file_hash: Current file hash
+    """
+    cached_symbols = get_cached_symbols(file_path)
+
+    # Update symbols with their new pseudo data
+    for symbol_id, (symbol_info, pseudo, tags) in symbols_with_pseudo.items():
+        if symbol_id in cached_symbols:
+            # Update existing symbol with pseudo data
+            cached_symbols[symbol_id]["pseudo"] = pseudo
+            cached_symbols[symbol_id]["tags"] = tags
+
+            # Update content hash from symbol_info if available
+            if isinstance(symbol_info, dict):
+                cached_symbols[symbol_id].update(symbol_info)
+
+    # Save the updated cache
+    set_cached_symbols(file_path, cached_symbols, file_hash)
+
+
+def remove_cached_symbols(file_path: str) -> None:
+    """Remove symbol cache for a file (when file is deleted)."""
+    cache_path = _get_symbol_cache_path(file_path)
+    try:
+        if cache_path.exists():
+            cache_path.unlink()
+    except Exception:
+        pass
+
+
+def compare_symbol_changes(old_symbols: dict, new_symbols: dict) -> tuple[list, list]:
+    """
+    Compare old and new symbols to identify changes.
+
+    Returns:
+        (unchanged_symbols, changed_symbols)
+    """
+    unchanged = []
+    changed = []
+
+    for symbol_id, symbol_info in new_symbols.items():
+        if symbol_id in old_symbols:
+            old_info = old_symbols[symbol_id]
+            # Compare content hash
+            if old_info.get("content_hash") == symbol_info.get("content_hash"):
+                unchanged.append(symbol_id)
+            else:
+                changed.append(symbol_id)
+        else:
+            # New symbol
+            changed.append(symbol_id)
+
+    return unchanged, changed
+
 
 # Add missing functions that callers expect (already defined above)

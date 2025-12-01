@@ -2,7 +2,7 @@
 
 Context Engine Uploader extension for automatic workspace sync and Prompt+ integration.
 
-**Documentation:** [README](../README.md) · [Configuration](CONFIGURATION.md) · [IDE Clients](IDE_CLIENTS.md) · [MCP API](MCP_API.md) · [ctx CLI](CTX_CLI.md) · [Memory Guide](MEMORY_GUIDE.md) · [Architecture](ARCHITECTURE.md) · [Multi-Repo](MULTI_REPO_COLLECTIONS.md) · [Kubernetes](../deploy/kubernetes/README.md) · [VS Code Extension](vscode-extension.md) · [Troubleshooting](TROUBLESHOOTING.md) · [Development](DEVELOPMENT.md)
+**Documentation:** [README](../README.md) · [Getting Started](GETTING_STARTED.md) · [Configuration](CONFIGURATION.md) · [IDE Clients](IDE_CLIENTS.md) · [MCP API](MCP_API.md) · [ctx CLI](CTX_CLI.md) · [Memory Guide](MEMORY_GUIDE.md) · [Architecture](ARCHITECTURE.md) · [Multi-Repo](MULTI_REPO_COLLECTIONS.md) · [Kubernetes](../deploy/kubernetes/README.md) · [VS Code Extension](vscode-extension.md) · [Troubleshooting](TROUBLESHOOTING.md) · [Development](DEVELOPMENT.md)
 
 ---
 
@@ -19,7 +19,7 @@ Context Engine Uploader extension for automatic workspace sync and Prompt+ integ
 ## Quick Start
 
 1. **Install**: Build the `.vsix` and install in VS Code (see [Installation](#installation))
-2. **Configure server**: Settings → `contextEngineUploader.endpoint` → `http://localhost:9090` (or remote server)
+2. **Configure server**: Settings → `contextEngineUploader.endpoint` → `http://localhost:8004` for the dev-remote Docker stack (or your upload_service URL)
 3. **Index workspace**: Click status bar button or run `Context Engine Uploader: Start`
 4. **Use Prompt+**: Select code, click `Prompt+` in status bar to enhance with AI
 
@@ -30,14 +30,15 @@ Context Engine Uploader extension for automatic workspace sync and Prompt+ integ
 - **Output channel**: Real-time logs for force-sync and watch operations
 - **GPU decoder support**: Configure llama.cpp, Ollama, or GLM as decoder backend
 - **Remote server support**: Index to any Context-Engine server (local, remote, Kubernetes)
+- **MCP + ctx scaffolding**: Optionally auto-writes Claude Code/Windsurf MCP configs, an optional Claude prompt hook, and a `ctx_config.json` wired to the right collection and decoder settings.
 
 ## Workflow Examples
 
-### Local Development
-Context-Engine running on same machine:
+### Local Development (dev-remote stack)
+Context-Engine running via `docker-compose.dev-remote.yml` on the same machine:
 ```
-Endpoint: http://localhost:9090
-Target Path: (leave empty - uses current workspace)
+Endpoint: http://localhost:8004
+Target Path: (leave empty - uses current workspace or let the extension auto-detect)
 ```
 Open any project → extension auto-syncs → MCP tools have your code context.
 
@@ -76,6 +77,13 @@ Looking at upload_service.py lines 120-180, the upload_file() function currently
 Reference the existing error patterns in remote_upload_client.py lines 45-67 which use structured logging via logger.error().
 ```
 
+### Claude Code hook (optional)
+
+For Claude Code, you can also enable a `/ctx` hook so that each prompt is expanded via `ctx.py` before it reaches Claude:
+
+- The extension can auto-write MCP config and, on Linux/dev-remote, a Claude hook when `claudeHookEnabled` is turned on.
+- See `docs/ctx/claude-hook-example.json` for a minimal `UserPromptSubmit` hook that shells out to `ctx-hook-simple.sh`.
+
 ## Installation
 
 ### Build Prerequisites
@@ -108,7 +116,7 @@ Key Settings After Install
 --------------------------
 - `Context Engine Upload` output channel shows force-sync and watch logs.
 - `Context Engine Uploader: Index Codebase` command or status bar button runs a force sync followed by watch.
-- Configure `contextEngineUploader.targetPath`, `endpoint`, and other options under Settings → Extensions → Context Engine Uploader.
+- Configure `contextEngineUploader.targetPath`, `endpoint`, and (optionally) MCP settings (`mcpIndexerUrl`, `mcpMemoryUrl`, `mcpTransportMode`, `mcpClaudeEnabled`, `mcpWindsurfEnabled`, `autoWriteMcpConfigOnStartup`) under Settings → Extensions → Context Engine Uploader.
 
 ## Prerequisites
 Python 3.8+ must be available on the host so the bundled client can run.
@@ -130,6 +138,14 @@ All settings live under `Context Engine Uploader` in the VS Code settings UI or 
 | `contextEngineUploader.intervalSeconds` | Poll interval for watch mode. Set to `5` to match the previous command file. |
 | `contextEngineUploader.extraForceArgs` | Optional string array appended to the force invocation. Leave empty for the standard workflow. |
 | `contextEngineUploader.extraWatchArgs` | Optional string array appended to the watch invocation. |
+| `contextEngineUploader.mcpClaudeEnabled` | Enable writing the project-local `.mcp.json` used by Claude Code MCP clients. |
+| `contextEngineUploader.mcpWindsurfEnabled` | Enable writing Windsurf’s global MCP config. |
+| `contextEngineUploader.autoWriteMcpConfigOnStartup` | Automatically run “Write MCP Config” on activation to keep `.mcp.json`, Windsurf config, and Claude hook in sync with these settings. |
+| `contextEngineUploader.mcpTransportMode` | Transport for MCP configs: `sse-remote` (SSE via mcp-remote) or `http` (direct `/mcp` endpoints). |
+| `contextEngineUploader.mcpIndexerUrl` | MCP indexer URL used when writing configs. For dev-remote, typical values are `http://localhost:8001/sse` (SSE) or `http://localhost:8003/mcp` (HTTP). |
+| `contextEngineUploader.mcpMemoryUrl` | MCP memory URL used when writing configs. For dev-remote, typical values are `http://localhost:8000/sse` (SSE) or `http://localhost:8002/mcp` (HTTP). |
+| `contextEngineUploader.ctxIndexerUrl` | HTTP MCP indexer endpoint used by `ctx.py` in the Claude Code `/ctx` hook, typically `http://localhost:8003/mcp` for dev-remote. |
+| `contextEngineUploader.claudeHookEnabled` | Enable writing a Claude Code `/ctx` hook in `.claude/settings.local.json`. |
 
 ## Commands and lifecycle
 
@@ -156,7 +172,7 @@ The extension logs all subprocess output to the **Context Engine Upload** output
 ### Connection refused
 ```bash
 # Verify upload service is running
-curl http://localhost:9090/health
+curl http://localhost:8004/health
 
 # Check Docker logs
 docker compose logs upload_service

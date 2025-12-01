@@ -1,25 +1,26 @@
-This file is intended for AI agents (Claude, etc.) using the Context‑Engine Qdrant‑Indexer and Memory MCP tools. It encodes project‑specific best practices; adapt it per‑repo.
+This file is intended for AI agents (Claude, etc.) using the Context‑Engine Qdrant‑Indexer and Memory MCP tools.
 
 
 Agentic AI Project Rules: When to Use MCP Qdrant-Indexer vs Grep
 
   Core Decision Rules (for AI agents)
 
+  Workspace default: For this repo, MCP Qdrant-Indexer tools are the primary way to explore code and history. Always start with MCP for exploration, debugging, or "where/why" questions; use literal search/file-open only for narrow exact-literal lookups.
+
   - Use MCP Qdrant-Indexer when:
     - You are exploring or don't know exact strings/symbols.
     - You need semantic or cross-file understanding (relationships, patterns, architecture).
     - You want ranked results with surrounding context, not just line hits.
 
-  - Use grep when:
-    - You know the exact string/function/variable or error message.
-    - You need fast literal search or are extremely token/latency constrained.
+  - Use literal search/file-open when (and only when):
+    - You know the exact string/function/variable or error message, and you only need to confirm its existence or a file/line quickly (not to understand behavior or architecture).
 
   Quick Heuristics:
 
-  - If you know the exact string → start with grep, then switch to MCP for broader context.
-  - If the question is conceptual/architectural → start with MCP.
+  - If the question is conceptual/architectural or about "where/why" behavior changed → start with MCP.
   - If you need rich context/snippets around matches → MCP.
-  - If you just need to confirm existence/location → grep.
+  - If you only need to confirm existence/location of a specific literal (error message, env var, exact function name) → literal search/file-open.
+  - If in doubt → start with MCP.
 
   Grep Anti-Patterns:
 
@@ -86,6 +87,20 @@ Agentic AI Project Rules: When to Use MCP Qdrant-Indexer vs Grep
     - Use for: short natural-language summaries/explanations of specific modules or tools, grounded in code/docs with citations.
     - Good for: "What does scripts/standalone_upload_client.py do at a high level?", "Summarize the remote upload client pipeline.".
 
+  Advanced lineage workflow (code + history):
+
+  - Goal: answer "when/why did behavior X change?" without flooding context.
+  - Step 1 – Find current implementation (code):
+    - Use repo_search to locate the relevant file/symbol, e.g. `repo_search(query: "upload client timeout", language: "python", under: "scripts")`.
+  - Step 2 – Summarize recent change activity for a file:
+    - Call change_history_for_path with `include_commits=true` to get churn stats and a small list of recent commits, e.g. `change_history_for_path(path: "scripts/remote_upload_client.py", include_commits: true)`.
+  - Step 3 – Pull commit lineage for a specific behavior:
+    - Use search_commits_for with short behavior phrases plus an optional path filter, e.g. `search_commits_for(query: "remote upload timeout retry", path: "scripts/remote_upload_client.py")`.
+    - Read lineage_goal / lineage_symbols / lineage_tags to understand intent and related concepts.
+  - Step 4 – Optionally summarize current behavior:
+    - After you have the right file/symbol from repo_search, use context_answer to explain what the module does now; treat commit lineage as background, not as primary code context.
+  - For exact line-level changes (e.g. "when did this literal constant change?"), use lineage tools to narrow candidate commits, then inspect diffs with git tooling; do not guess purely from summaries.
+
   Query Phrasing Tips for context_answer:
 
   - Prefer behavior/architecture questions about a single module or tool:
@@ -99,9 +114,6 @@ Agentic AI Project Rules: When to Use MCP Qdrant-Indexer vs Grep
     - First use repo_search to discover key files and read critical code directly,
     - Then call context_answer to summarize behavior, using a behavior-focused question that doesn't over-specify filenames.
   - Avoid using context_answer as a primary debugger for low-level helper/env behavior; prefer repo_search + direct code reading for detailed semantics.
-
-  Remember: the MCP tools themselves expose detailed descriptions and parameter docs.
-  Use those for exact knobs; this guide is about choosing the right tool and shaping good queries.
 
   MCP Tool Families (for AI agents)
 

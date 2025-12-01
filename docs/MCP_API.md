@@ -2,7 +2,7 @@
 
 This document provides comprehensive API documentation for all MCP (Model Context Protocol) tools exposed by Context Engine's dual-server architecture.
 
-**Documentation:** [README](../README.md) · [Configuration](CONFIGURATION.md) · [IDE Clients](IDE_CLIENTS.md) · [MCP API](MCP_API.md) · [ctx CLI](CTX_CLI.md) · [Memory Guide](MEMORY_GUIDE.md) · [Architecture](ARCHITECTURE.md) · [Multi-Repo](MULTI_REPO_COLLECTIONS.md) · [Kubernetes](../deploy/kubernetes/README.md) · [VS Code Extension](vscode-extension.md) · [Troubleshooting](TROUBLESHOOTING.md) · [Development](DEVELOPMENT.md)
+**Documentation:** [README](../README.md) · [Getting Started](GETTING_STARTED.md) · [Configuration](CONFIGURATION.md) · [IDE Clients](IDE_CLIENTS.md) · [MCP API](MCP_API.md) · [ctx CLI](CTX_CLI.md) · [Memory Guide](MEMORY_GUIDE.md) · [Architecture](ARCHITECTURE.md) · [Multi-Repo](MULTI_REPO_COLLECTIONS.md) · [Kubernetes](../deploy/kubernetes/README.md) · [VS Code Extension](vscode-extension.md) · [Troubleshooting](TROUBLESHOOTING.md) · [Development](DEVELOPMENT.md)
 
 ---
 
@@ -23,6 +23,33 @@ Context Engine exposes two MCP servers:
 2. **Indexer Server**: Code search, indexing, and management (`port 8001` SSE, `port 8003` HTTP)
 
 Both servers support SSE and HTTP RMCP transports simultaneously.
+
+### Transports & IDE Integration
+
+For each server, two transports are available:
+
+- **SSE (Server-Sent Events)**
+  - Memory: `http://localhost:8000/sse`
+  - Indexer: `http://localhost:8001/sse`
+  - Typically used via `mcp-remote` or legacy MCP clients.
+
+- **HTTP (streamable MCP over HTTP)**
+  - Memory: `http://localhost:8002/mcp`
+  - Indexer: `http://localhost:8003/mcp`
+  - Health:
+    - Memory: `http://localhost:18002/readyz`
+    - Indexer: `http://localhost:18003/readyz`
+  - Tools (for debugging): `GET /tools` on the health ports.
+
+**Recommendation for IDEs:** Prefer the HTTP `/mcp` endpoints when integrating with IDE clients (Claude Code, Windsurf, etc.). HTTP uses a simple request/response pattern where `initialize` completes before `listTools` and other calls, avoiding initialization races.
+
+When using SSE via `mcp-remote`, some clients may send MCP messages (for example `listTools`) in parallel on a fresh session before `initialize` has fully completed. FastMCP enforces that only `initialize` may be processed during initialization; if a non-initialize request arrives too early, the server can log:
+
+```text
+Failed to validate request: Received request before initialization was complete
+```
+
+This manifests as tools/resources only appearing after a second reconnect. Switching the IDE to talk directly to the HTTP `/mcp` endpoints avoids this class of issue.
 
 ## Memory Server API
 
@@ -657,16 +684,11 @@ All API methods follow consistent error handling patterns:
 
 ## Transport-Specific Behavior
 
-### SSE (Server-Sent Events)
-- Real-time bidirectional communication
-- Automatic reconnection on disconnect
-- Streaming responses for long operations
+Both SSE and HTTP RMCP transports expose the **same tools, arguments, and response shapes**. The choice of transport affects only how MCP messages are carried, not what the tools do.
 
-### HTTP RMCP
-- JSON-RPC over HTTP
-- Request/response pattern
-- Better for batch operations and integrations
+- **SSE (`/sse`)** is primarily intended for use behind `mcp-remote` or legacy clients.
+- **HTTP (`/mcp`)** is recommended for IDE integrations and direct tooling because it uses a simple request/response pattern where `initialize` completes before `listTools` and other calls, avoiding known initialization races in some SSE clients.
 
-Both transports provide identical API semantics and response formats.
+When in doubt, prefer the HTTP `/mcp` endpoints described in the Overview.
 
 This API reference should enable developers to effectively integrate Context Engine's MCP tools into their applications and workflows.

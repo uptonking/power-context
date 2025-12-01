@@ -69,6 +69,11 @@ function activate(context) {
     }
     runSequence('force').catch(error => log(`Index failed: ${error instanceof Error ? error.message : String(error)}`));
   });
+  const uploadGitHistoryDisposable = vscode.commands.registerCommand('contextEngineUploader.uploadGitHistory', () => {
+    vscode.window.showInformationMessage('Context Engine git history upload (force sync) started.');
+    if (outputChannel) { outputChannel.show(true); }
+    runSequence('force').catch(error => log(`Git history upload failed: ${error instanceof Error ? error.message : String(error)}`));
+  });
   const ctxConfigDisposable = vscode.commands.registerCommand('contextEngineUploader.writeCtxConfig', () => {
     writeCtxConfig().catch(error => log(`CTX config write failed: ${error instanceof Error ? error.message : String(error)}`));
   });
@@ -96,6 +101,7 @@ function activate(context) {
       event.affectsConfiguration('contextEngineUploader.mcpMemoryUrl') ||
       event.affectsConfiguration('contextEngineUploader.mcpClaudeEnabled') ||
       event.affectsConfiguration('contextEngineUploader.mcpWindsurfEnabled') ||
+      event.affectsConfiguration('contextEngineUploader.mcpTransportMode') ||
       event.affectsConfiguration('contextEngineUploader.windsurfMcpPath') ||
       event.affectsConfiguration('contextEngineUploader.claudeHookEnabled') ||
       event.affectsConfiguration('contextEngineUploader.surfaceQdrantCollectionHint')
@@ -118,6 +124,7 @@ function activate(context) {
     stopDisposable,
     restartDisposable,
     indexDisposable,
+    uploadGitHistoryDisposable,
     showLogsDisposable,
     promptEnhanceDisposable,
     mcpConfigDisposable,
@@ -132,8 +139,11 @@ function activate(context) {
     runSequence('auto').catch(error => log(`Startup run failed: ${error instanceof Error ? error.message : String(error)}`));
   }
 
-  // When enabled, best-effort auto-scaffold ctx_config.json/.env for the current targetPath on activation
-  if (config.get('scaffoldCtxConfig', true)) {
+  // Optionally keep MCP + hook + ctx config in sync on activation
+  if (config.get('autoWriteMcpConfigOnStartup')) {
+    writeMcpConfig().catch(error => log(`MCP config auto-write on activation failed: ${error instanceof Error ? error.message : String(error)}`));
+  } else if (config.get('scaffoldCtxConfig', true)) {
+    // Legacy behavior: scaffold ctx_config.json/.env directly when MCP auto-write is disabled
     writeCtxConfig().catch(error => log(`CTX config auto-scaffold on activation failed: ${error instanceof Error ? error.message : String(error)}`));
   }
 }
@@ -279,8 +289,9 @@ function getTargetPath(config) {
     updateStatusBarTooltip();
     return undefined;
   }
-  updateStatusBarTooltip(folderPath);
-  return folderPath;
+  const autoTarget = detectDefaultTargetPath(folderPath);
+  updateStatusBarTooltip(autoTarget);
+  return autoTarget;
 }
 function saveTargetPath(config, targetPath) {
   const hasWorkspace = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length;
@@ -296,6 +307,68 @@ function getWorkspaceFolderPath() {
   }
   return folders[0].uri.fsPath;
 }
+function looksLikeRepoRoot(dirPath) {
+  try {
+    const codebaseStatePath = path.join(dirPath, '.codebase', 'state.json');
+    const gitDir = path.join(dirPath, '.git');
+    if (fs.existsSync(codebaseStatePath) || fs.existsSync(gitDir)) {
+      return true;
+    }
+  } catch (error) {
+    log(`Repo root detection failed for ${dirPath}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return false;
+}
+function detectDefaultTargetPath(workspaceFolderPath) {
+  try {
+    const resolved = path.resolve(workspaceFolderPath);
+    if (!fs.existsSync(resolved)) {
+      return workspaceFolderPath;
+    }
+    const rootLooksLikeRepo = looksLikeRepoRoot(resolved);
+    let entries;
+    try {
+      entries = fs.readdirSync(resolved);
+    } catch (error) {
+      log(`Auto targetPath discovery failed to read workspace folder: ${error instanceof Error ? error.message : String(error)}`);
+      return resolved;
+    }
+    const candidates = [];
+    for (const name of entries) {
+      const fullPath = path.join(resolved, name);
+      let stats;
+      try {
+        stats = fs.statSync(fullPath);
+      } catch (_) {
+        continue;
+      }
+      if (!stats.isDirectory()) {
+        continue;
+      }
+      if (looksLikeRepoRoot(fullPath)) {
+        candidates.push(path.resolve(fullPath));
+      }
+    }
+    if (candidates.length === 1) {
+      const detected = candidates[0];
+      log(`Target path auto-detected as ${detected} (under workspace folder).`);
+      return detected;
+    }
+    if (rootLooksLikeRepo) {
+      if (candidates.length > 1) {
+        log('Auto targetPath discovery found multiple candidate repos under workspace; using workspace folder instead.');
+      }
+      return resolved;
+    }
+    if (candidates.length > 1) {
+      log('Auto targetPath discovery found multiple candidate repos under workspace; using workspace folder instead.');
+    }
+    return resolved;
+  } catch (error) {
+    log(`Auto targetPath discovery failed: ${error instanceof Error ? error.message : String(error)}`);
+    return workspaceFolderPath;
+  }
+}
 function ensureTargetPathConfigured() {
   const config = vscode.workspace.getConfiguration('contextEngineUploader');
   const current = (config.get('targetPath') || '').trim();
@@ -308,9 +381,10 @@ function ensureTargetPathConfigured() {
     updateStatusBarTooltip();
     return;
   }
-  updateStatusBarTooltip(folderPath);
+  const autoTarget = detectDefaultTargetPath(folderPath);
+  updateStatusBarTooltip(autoTarget);
 }
-function updateStatusBarTooltip(targetPath) {
+  function updateStatusBarTooltip(targetPath) {
   if (!statusBarItem) {
     return;
   }
@@ -334,9 +408,24 @@ function needsForceSync(targetPath) {
   }
 }
 async function ensurePythonDependencies(pythonPath) {
-  // Probe current interpreter; if modules missing, offer to create a private venv and install deps
-  const ok = await checkPythonDeps(pythonPath);
-  if (ok) return true;
+  // Probe current interpreter with bundled python_libs first
+  let ok = await checkPythonDeps(pythonPath);
+  if (ok) {
+    return true;
+  }
+
+  // If that fails, try to auto-detect a better system Python before falling back to a venv
+  const autoPython = await detectSystemPython();
+  if (autoPython && autoPython !== pythonPath) {
+    log(`Falling back to auto-detected Python interpreter: ${autoPython}`);
+    ok = await checkPythonDeps(autoPython);
+    if (ok) {
+      pythonOverridePath = autoPython;
+      return true;
+    }
+  }
+
+  // As a last resort, offer to create a private venv and install deps via pip
   const choice = await vscode.window.showErrorMessage(
     'Context Engine Uploader: missing Python modules. Create isolated environment and auto-install?',
     'Auto-install to private venv',
@@ -356,7 +445,7 @@ async function ensurePythonDependencies(pythonPath) {
   if (!installed) return false;
   pythonOverridePath = venvPython;
   log(`Using private venv interpreter: ${pythonOverridePath}`);
-  return await checkPythonDeps(pythonOverridePath);
+  return await checkPythonDeps(venvPython);
 }
 
 async function checkPythonDeps(pythonPath) {
@@ -509,7 +598,9 @@ function setStatusBarState(mode) {
 function runOnce(options) {
   return new Promise(resolve => {
     const args = buildArgs(options, 'force');
-    const child = spawn(options.pythonPath, args, { cwd: options.workingDirectory, env: buildChildEnv(options) });
+    const baseEnv = buildChildEnv(options);
+    const childEnv = { ...baseEnv, REMOTE_UPLOAD_GIT_FORCE: '1' };
+    const child = spawn(options.pythonPath, args, { cwd: options.workingDirectory, env: childEnv });
     forceProcess = child;
     attachOutput(child, 'force');
     let finished = false;
@@ -690,6 +781,21 @@ async function enhanceSelectionWithUnicorn() {
     const useGpuDecoder = cfg.get('useGpuDecoder', false);
     if (useGpuDecoder) {
       env.USE_GPU_DECODER = '1';
+    }
+    let ctxWorkspaceDir;
+    try {
+      ctxWorkspaceDir = getTargetPath(cfg);
+    } catch (error) {
+      ctxWorkspaceDir = undefined;
+    }
+    if (!ctxWorkspaceDir) {
+      const wsFolder = getWorkspaceFolderPath();
+      if (wsFolder) {
+        ctxWorkspaceDir = detectDefaultTargetPath(wsFolder);
+      }
+    }
+    if (ctxWorkspaceDir && typeof ctxWorkspaceDir === 'string' && fs.existsSync(ctxWorkspaceDir)) {
+      env.CTX_WORKSPACE_DIR = ctxWorkspaceDir;
     }
   } catch (_) {
     // ignore config read failures; fall back to defaults
@@ -886,6 +992,15 @@ function buildChildEnv(options) {
       env.DEV_REMOTE_MODE = '1';
       log('Context Engine Uploader: devRemoteMode enabled (REMOTE_UPLOAD_MODE=development, DEV_REMOTE_MODE=1).');
     }
+    const gitMaxCommits = settings.get('gitMaxCommits');
+    if (typeof gitMaxCommits === 'number' && !Number.isNaN(gitMaxCommits)) {
+      env.REMOTE_UPLOAD_GIT_MAX_COMMITS = String(gitMaxCommits);
+    }
+    const gitSinceRaw = settings.get('gitSince');
+    const gitSince = typeof gitSinceRaw === 'string' ? gitSinceRaw.trim() : '';
+    if (gitSince) {
+      env.REMOTE_UPLOAD_GIT_SINCE = gitSince;
+    }
   } catch (error) {
     log(`Failed to read devRemoteMode setting: ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -917,8 +1032,11 @@ async function writeMcpConfig() {
     vscode.window.showInformationMessage('Context Engine Uploader: MCP config writing is disabled in settings.');
     return;
   }
-  const indexerUrl = (settings.get('mcpIndexerUrl') || 'http://localhost:8001/sse').trim();
-  const memoryUrl = (settings.get('mcpMemoryUrl') || 'http://localhost:8000/sse').trim();
+  const transportModeRaw = (settings.get('mcpTransportMode') || 'sse-remote');
+  const transportMode = (typeof transportModeRaw === 'string' ? transportModeRaw.trim() : 'sse-remote') || 'sse-remote';
+
+  let indexerUrl = (settings.get('mcpIndexerUrl') || 'http://localhost:8001/sse').trim();
+  let memoryUrl = (settings.get('mcpMemoryUrl') || 'http://localhost:8000/sse').trim();
   let wroteAny = false;
   let hookWrote = false;
   if (claudeEnabled) {
@@ -926,14 +1044,14 @@ async function writeMcpConfig() {
     if (!root) {
       vscode.window.showErrorMessage('Context Engine Uploader: open a folder before writing .mcp.json.');
     } else {
-      const result = await writeClaudeMcpServers(root, indexerUrl, memoryUrl);
+      const result = await writeClaudeMcpServers(root, indexerUrl, memoryUrl, transportMode);
       wroteAny = wroteAny || result;
     }
   }
   if (windsurfEnabled) {
     const customPath = (settings.get('windsurfMcpPath') || '').trim();
     const windsPath = customPath || getDefaultWindsurfMcpPath();
-    const result = await writeWindsurfMcpServers(windsPath, indexerUrl, memoryUrl);
+    const result = await writeWindsurfMcpServers(windsPath, indexerUrl, memoryUrl, transportMode);
     wroteAny = wroteAny || result;
   }
   if (claudeHookEnabled) {
@@ -975,10 +1093,17 @@ async function writeCtxConfig() {
     log('CTX config scaffolding skipped because scaffoldCtxConfig is false.');
     return;
   }
-  const options = resolveOptions();
+  let options = resolveOptions();
   if (!options) {
     return;
   }
+  const depsOk = await ensurePythonDependencies(options.pythonPath);
+  if (!depsOk) {
+    return;
+  }
+  // ensurePythonDependencies may switch to a better interpreter (pythonOverridePath),
+  // so re-resolve options to pick up the updated pythonPath and script/working directory.
+  options = resolveOptions() || options;
   const collectionName = inferCollectionFromUpload(options);
   if (!collectionName) {
     vscode.window.showErrorMessage('Context Engine Uploader: failed to infer collection name from upload client. Check the Output panel for details.');
@@ -1046,6 +1171,8 @@ async function scaffoldCtxConfigFiles(workspaceDir, collectionName) {
     let glmApiKey = '';
     let glmApiBase = 'https://api.z.ai/api/coding/paas/v4/';
     let glmModel = 'glm-4.6';
+    let gitMaxCommits = 500;
+    let gitSince = '';
     if (uploaderSettings) {
       try {
         const runtimeSetting = String(uploaderSettings.get('decoderRuntime') ?? 'glm').trim().toLowerCase();
@@ -1064,6 +1191,14 @@ async function scaffoldCtxConfigFiles(workspaceDir, collectionName) {
         }
         if (cfgModel) {
           glmModel = cfgModel;
+        }
+        const maxCommitsSetting = uploaderSettings.get('gitMaxCommits');
+        if (typeof maxCommitsSetting === 'number' && !Number.isNaN(maxCommitsSetting)) {
+          gitMaxCommits = maxCommitsSetting;
+        }
+        const sinceSetting = uploaderSettings.get('gitSince');
+        if (typeof sinceSetting === 'string') {
+          gitSince = sinceSetting.trim();
         }
       } catch (error) {
         log(`Failed to read decoder/GLM settings from configuration: ${error instanceof Error ? error.message : String(error)}`);
@@ -1311,6 +1446,13 @@ async function scaffoldCtxConfigFiles(workspaceDir, collectionName) {
       }
     }
 
+    if (typeof gitMaxCommits === 'number' && !Number.isNaN(gitMaxCommits)) {
+      upsertEnv('REMOTE_UPLOAD_GIT_MAX_COMMITS', String(gitMaxCommits), { overwrite: true });
+    }
+    if (gitSince) {
+      upsertEnv('REMOTE_UPLOAD_GIT_SINCE', gitSince, { overwrite: true, skipIfDesiredEmpty: true });
+    }
+
     if (envChanged) {
       fs.writeFileSync(envPath, envLines.join('\n') + '\n', 'utf8');
       log(`Ensured decoder/GLM/MCP settings in .env at ${envPath}`);
@@ -1356,7 +1498,7 @@ function getDefaultWindsurfMcpPath() {
   return path.join(os.homedir(), '.codeium', 'windsurf', 'mcp_config.json');
 }
 
-async function writeClaudeMcpServers(root, indexerUrl, memoryUrl) {
+async function writeClaudeMcpServers(root, indexerUrl, memoryUrl, transportMode) {
   const configPath = path.join(root, '.mcp.json');
   let config = { mcpServers: {} };
   if (fs.existsSync(configPath)) {
@@ -1376,27 +1518,46 @@ async function writeClaudeMcpServers(root, indexerUrl, memoryUrl) {
     config.mcpServers = {};
   }
   log(`Preparing to write .mcp.json at ${configPath} with indexerUrl=${indexerUrl || '""'} memoryUrl=${memoryUrl || '""'}`);
-  const isWindows = process.platform === 'win32';
-  const makeServer = url => {
-    if (isWindows) {
-      return {
-        command: 'cmd',
-        args: ['/c', 'npx', 'mcp-remote', url, '--transport', 'sse-only'],
-        env: {}
+  const servers = config.mcpServers;
+  const mode = (typeof transportMode === 'string' ? transportMode.trim() : 'sse-remote') || 'sse-remote';
+
+  if (mode === 'http') {
+    // Direct HTTP MCP endpoints for Claude (.mcp.json)
+    if (indexerUrl) {
+      servers['qdrant-indexer'] = {
+        type: 'http',
+        url: indexerUrl
       };
     }
-    return {
-      command: 'npx',
-      args: ['mcp-remote', url, '--transport', 'sse-only'],
-      env: {}
+    if (memoryUrl) {
+      servers.memory = {
+        type: 'http',
+        url: memoryUrl
+      };
+    }
+  } else {
+    // Legacy/default: stdio via mcp-remote SSE bridge
+    const isWindows = process.platform === 'win32';
+    const makeServer = url => {
+      if (isWindows) {
+        return {
+          command: 'cmd',
+          args: ['/c', 'npx', 'mcp-remote', url, '--transport', 'sse-only'],
+          env: {}
+        };
+      }
+      return {
+        command: 'npx',
+        args: ['mcp-remote', url, '--transport', 'sse-only'],
+        env: {}
+      };
     };
-  };
-  const servers = config.mcpServers;
-  if (indexerUrl) {
-    servers['qdrant-indexer'] = makeServer(indexerUrl);
-  }
-  if (memoryUrl) {
-    servers.memory = makeServer(memoryUrl);
+    if (indexerUrl) {
+      servers['qdrant-indexer'] = makeServer(indexerUrl);
+    }
+    if (memoryUrl) {
+      servers.memory = makeServer(memoryUrl);
+    }
   }
   try {
     const json = JSON.stringify(config, null, 2) + '\n';
@@ -1411,7 +1572,7 @@ async function writeClaudeMcpServers(root, indexerUrl, memoryUrl) {
   }
 }
 
-async function writeWindsurfMcpServers(configPath, indexerUrl, memoryUrl) {
+async function writeWindsurfMcpServers(configPath, indexerUrl, memoryUrl, transportMode) {
   try {
     fs.mkdirSync(path.dirname(configPath), { recursive: true });
   } catch (error) {
@@ -1437,17 +1598,53 @@ async function writeWindsurfMcpServers(configPath, indexerUrl, memoryUrl) {
     config.mcpServers = {};
   }
   log(`Preparing to write Windsurf mcp_config.json at ${configPath} with indexerUrl=${indexerUrl || '""'} memoryUrl=${memoryUrl || '""'}`);
-  const makeServer = url => ({
-    command: 'npx',
-    args: ['mcp-remote', url, '--transport', 'sse-only'],
-    env: {}
-  });
   const servers = config.mcpServers;
-  if (indexerUrl) {
-    servers['qdrant-indexer'] = makeServer(indexerUrl);
-  }
-  if (memoryUrl) {
-    servers.memory = makeServer(memoryUrl);
+  const mode = (typeof transportMode === 'string' ? transportMode.trim() : 'sse-remote') || 'sse-remote';
+
+  if (mode === 'http') {
+    // Direct HTTP MCP endpoints for Windsurf mcp_config.json
+    if (indexerUrl) {
+      servers['qdrant-indexer'] = {
+        type: 'http',
+        url: indexerUrl
+      };
+    }
+    if (memoryUrl) {
+      servers.memory = {
+        type: 'http',
+        url: memoryUrl
+      };
+    }
+  } else {
+    // Legacy/default: use mcp-remote SSE bridge
+    const makeServer = url => {
+      // Default args for local/HTTPS endpoints
+      const args = ['mcp-remote', url, '--transport', 'sse-only'];
+      try {
+        const u = new URL(url);
+        const isLocalHost =
+          u.hostname === 'localhost' ||
+          u.hostname === '127.0.0.1' ||
+          u.hostname === '::1';
+        // For non-local HTTP URLs, mcp-remote requires --allow-http
+        if (u.protocol === 'http:' && !isLocalHost) {
+          args.push('--allow-http');
+        }
+      } catch (e) {
+        // If URL parsing fails, fall back to default args without additional flags
+      }
+      return {
+        command: 'npx',
+        args,
+        env: {}
+      };
+    };
+    if (indexerUrl) {
+      servers['qdrant-indexer'] = makeServer(indexerUrl);
+    }
+    if (memoryUrl) {
+      servers.memory = makeServer(memoryUrl);
+    }
   }
   try {
     const json = JSON.stringify(config, null, 2) + '\n';

@@ -105,16 +105,17 @@ fi
 
 # Read all settings from ctx_config.json
 if [ -n "$CONFIG_FILE" ] && [ -f "$CONFIG_FILE" ]; then
-    CTX_COLLECTION=$(grep -o '"default_collection"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_FILE" | sed 's/.*"default_collection"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/' )
-    REFRAG_RUNTIME=$(grep -o '"refrag_runtime"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_FILE" | sed 's/.*"refrag_runtime"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/' || echo "glm")
-    GLM_API_KEY=$(grep -o '"glm_api_key"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_FILE" | sed 's/.*"glm_api_key"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/' )
-    GLM_API_BASE=$(grep -o '"glm_api_base"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_FILE" | sed 's/.*"glm_api_base"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
-    GLM_MODEL=$(grep -o '"glm_model"[[:space:]]*:[[:space:]]*"[^\"]*"' "$CONFIG_FILE" | sed 's/.*"glm_model"[[:space:]]*:[[:space:]]*"\([^\"]*\)".*/\1/' || echo "glm-4.6")
-    CTX_DEFAULT_MODE=$(grep -o '"default_mode"[[:space:]]*:[[:space:]]*"[^\"]*"' "$CONFIG_FILE" | sed 's/.*"default_mode"[[:space:]]*:[[:space:]]*"\([^\"]*\)".*/\1/')
-    CTX_REQUIRE_CONTEXT=$(grep -o '"require_context"[[:space:]]*:[[:space:]]*\(true\|false\)' "$CONFIG_FILE" | sed 's/.*"require_context"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/')
-    CTX_RELEVANCE_GATE=$(grep -o '"relevance_gate_enabled"[[:space:]]*:[[:space:]]*\(true\|false\)' "$CONFIG_FILE" | sed 's/.*"relevance_gate_enabled"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/')
-    CTX_MIN_RELEVANCE=$(grep -o '"min_relevance"[[:space:]]*:[[:space:]]*[0-9.][0-9.]*' "$CONFIG_FILE" | sed 's/.*"min_relevance"[[:space:]]*:[[:space:]]*\([0-9.][0-9.]*\).*/\1/')
-    CTX_REWRITE_MAX_TOKENS=$(grep -o '"rewrite_max_tokens"[[:space:]]*:[[:space:]]*[0-9][0-9]*' "$CONFIG_FILE" | sed 's/.*"rewrite_max_tokens"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/')
+	CTX_COLLECTION=$(grep -o '"default_collection"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_FILE" | sed 's/.*"default_collection"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/' )
+	REFRAG_RUNTIME=$(grep -o '"refrag_runtime"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_FILE" | sed 's/.*"refrag_runtime"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/' || echo "glm")
+	GLM_API_KEY=$(grep -o '"glm_api_key"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_FILE" | sed 's/.*"glm_api_key"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/' )
+	GLM_API_BASE=$(grep -o '"glm_api_base"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_FILE" | sed 's/.*"glm_api_base"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
+	GLM_MODEL=$(grep -o '"glm_model"[[:space:]]*:[[:space:]]*"[^\"]*"' "$CONFIG_FILE" | sed 's/.*"glm_model"[[:space:]]*:[[:space:]]*"\([^\"]*\)".*/\1/' || echo "glm-4.6")
+	CTX_DEFAULT_MODE=$(grep -o '"default_mode"[[:space:]]*:[[:space:]]*"[^\"]*"' "$CONFIG_FILE" | sed 's/.*"default_mode"[[:space:]]*:[[:space:]]*"\([^\"]*\)".*/\1/')
+	CTX_REQUIRE_CONTEXT=$(grep -o '"require_context"[[:space:]]*:[[:space:]]*\(true\|false\)' "$CONFIG_FILE" | sed 's/.*"require_context"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/')
+	CTX_RELEVANCE_GATE=$(grep -o '"relevance_gate_enabled"[[:space:]]*:[[:space:]]*\(true\|false\)' "$CONFIG_FILE" | sed 's/.*"relevance_gate_enabled"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/')
+	CTX_MIN_RELEVANCE=$(grep -o '"min_relevance"[[:space:]]*:[[:space:]]*[0-9.][0-9.]*' "$CONFIG_FILE" | sed 's/.*"min_relevance"[[:space:]]*:[[:space:]]*\([0-9.][0-9.]*\).*/\1/')
+	CTX_REWRITE_MAX_TOKENS=$(grep -o '"rewrite_max_tokens"[[:space:]]*:[[:space:]]*[0-9][0-9]*' "$CONFIG_FILE" | sed 's/.*"rewrite_max_tokens"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/')
+	CTX_SURFACE_COLLECTION_CFG=$(grep -o '"surface_qdrant_collection_hint"[[:space:]]*:[[:space:]]*\(true\|false\)' "$CONFIG_FILE" | sed 's/.*"surface_qdrant_collection_hint"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/')
 fi
 
 # Set defaults if not found in config
@@ -128,6 +129,25 @@ CTX_REQUIRE_CONTEXT=${CTX_REQUIRE_CONTEXT:-true}
 CTX_RELEVANCE_GATE=${CTX_RELEVANCE_GATE:-false}
 CTX_MIN_RELEVANCE=${CTX_MIN_RELEVANCE:-0.1}
 CTX_REWRITE_MAX_TOKENS=${CTX_REWRITE_MAX_TOKENS:-320}
+
+# Normalize surface_qdrant_collection_hint from config (true/false) into 1/0
+CFG_HINT=""
+if [ -n "$CTX_SURFACE_COLLECTION_CFG" ]; then
+	if [ "$CTX_SURFACE_COLLECTION_CFG" = "true" ]; then
+		CFG_HINT="1"
+	elif [ "$CTX_SURFACE_COLLECTION_CFG" = "false" ]; then
+		CFG_HINT="0"
+	fi
+fi
+
+# Precedence: explicit env override > ctx_config flag > auto-on when collection known
+if [ -n "${CTX_SURFACE_COLLECTION_HINT:-}" ]; then
+	:
+elif [ -n "$CFG_HINT" ]; then
+	CTX_SURFACE_COLLECTION_HINT="$CFG_HINT"
+elif [ -n "$CTX_COLLECTION" ]; then
+	CTX_SURFACE_COLLECTION_HINT="1"
+fi
 
 # Export GLM/context environment variables from config
 export REFRAG_RUNTIME GLM_API_KEY GLM_API_BASE GLM_MODEL CTX_REQUIRE_CONTEXT CTX_RELEVANCE_GATE CTX_MIN_RELEVANCE CTX_REWRITE_MAX_TOKENS

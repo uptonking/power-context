@@ -1,6 +1,6 @@
 [![CI](https://github.com/m1rl0k/Context-Engine/actions/workflows/ci.yml/badge.svg)](https://github.com/m1rl0k/Context-Engine/actions/workflows/ci.yml)
 
-**Documentation:** README · [Configuration](docs/CONFIGURATION.md) · [IDE Clients](docs/IDE_CLIENTS.md) · [MCP API](docs/MCP_API.md) · [ctx CLI](docs/CTX_CLI.md) · [Memory Guide](docs/MEMORY_GUIDE.md) · [Architecture](docs/ARCHITECTURE.md) · [Multi-Repo](docs/MULTI_REPO_COLLECTIONS.md) · [Kubernetes](deploy/kubernetes/README.md) · [VS Code Extension](docs/vscode-extension.md) · [Troubleshooting](docs/TROUBLESHOOTING.md) · [Development](docs/DEVELOPMENT.md)
+**Documentation:** [Getting Started](docs/GETTING_STARTED.md) · README · [Configuration](docs/CONFIGURATION.md) · [IDE Clients](docs/IDE_CLIENTS.md) · [MCP API](docs/MCP_API.md) · [ctx CLI](docs/CTX_CLI.md) · [Memory Guide](docs/MEMORY_GUIDE.md) · [Architecture](docs/ARCHITECTURE.md) · [Multi-Repo](docs/MULTI_REPO_COLLECTIONS.md) · [Kubernetes](deploy/kubernetes/README.md) · [VS Code Extension](docs/vscode-extension.md) · [Troubleshooting](docs/TROUBLESHOOTING.md) · [Development](docs/DEVELOPMENT.md)
 
 ---
 
@@ -38,12 +38,18 @@ Context-Engine is a plug-and-play MCP retrieval stack that unifies code indexing
 | OpenAI Codex | RMCP | TOML config |
 | Augment | SSE | Simple JSON configs |
 | AmpCode | SSE | Simple URL for SSE endpoints |
-| Claude Code CLI | SSE | Simple JSON configs |
+| Claude Code CLI | SSE / HTTP (RMCP) | Simple JSON configs via .mcp.json |
 
 > **See [docs/IDE_CLIENTS.md](docs/IDE_CLIENTS.md) for detailed configuration examples.**
 
 
 ## Getting Started
+
+If you're a VS Code user trying Context-Engine locally, start with the low-friction dev-remote + extension guide:
+
+- **[docs/GETTING_STARTED.md](docs/GETTING_STARTED.md)**
+
+The options below describe the `docker compose` + CLI workflows.
 
 ### Option 1: Deploy & Connect (Recommended)
 

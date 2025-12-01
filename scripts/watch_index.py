@@ -2,8 +2,10 @@
 import os
 import time
 import threading
+import json
+import subprocess
 from pathlib import Path
-from typing import Optional, Set
+from typing import Optional, Set, Dict, List, Any
 
 from qdrant_client import QdrantClient, models
 from fastembed import TextEmbedding
@@ -29,6 +31,10 @@ from scripts.workspace_state import (
     remove_cached_file,
     update_indexing_status,
     update_workspace_state,
+    get_workspace_state,
+    ensure_logical_repo_id,
+    find_collection_for_logical_repo,
+    logical_repo_reuse_enabled,
 )
 import hashlib
 from datetime import datetime
@@ -68,13 +74,75 @@ def _detect_repo_for_file(file_path: Path) -> Optional[Path]:
 
 
 def _get_collection_for_repo(repo_path: Path) -> str:
+    """Resolve Qdrant collection for a repo, with logical_repo_id-aware reuse.
+
+    In multi-repo mode, prefer reusing an existing canonical collection that has
+    already been associated with this logical repository (same git common dir)
+    by consulting workspace_state. Falls back to the legacy per-repo hashed
+    collection naming when no mapping exists.
+    """
+    default_coll = os.environ.get("COLLECTION_NAME", "my-collection")
     try:
         repo_name = _extract_repo_name_from_path(str(repo_path))
+    except Exception:
+        repo_name = None
+
+    # Multi-repo: try to reuse a canonical collection based on logical_repo_id
+    if repo_name and is_multi_repo_mode() and logical_repo_reuse_enabled():
+        workspace_root = os.environ.get("WORKSPACE_PATH") or os.environ.get("WATCH_ROOT") or "/work"
+        try:
+            ws_root_path = Path(workspace_root).resolve()
+        except Exception:
+            ws_root_path = Path(workspace_root)
+        ws_path = str((ws_root_path / repo_name).resolve())
+
+        state: Dict[str, Any]
+        try:
+            state = get_workspace_state(ws_path, repo_name) or {}
+        except Exception:
+            state = {}
+
+        if isinstance(state, dict):
+            try:
+                state = ensure_logical_repo_id(state, ws_path)
+            except Exception:
+                pass
+            lrid = state.get("logical_repo_id")
+            if isinstance(lrid, str) and lrid:
+                coll: Optional[str]
+                try:
+                    coll = find_collection_for_logical_repo(lrid, search_root=str(ws_root_path))
+                except Exception:
+                    coll = None
+                if isinstance(coll, str) and coll:
+                    try:
+                        update_workspace_state(
+                            workspace_path=ws_path,
+                            updates={"qdrant_collection": coll, "logical_repo_id": lrid},
+                            repo_name=repo_name,
+                        )
+                    except Exception:
+                        pass
+                    return coll
+
+            # Fallback to any explicit collection stored in state for this repo
+            coll2 = state.get("qdrant_collection")
+            if isinstance(coll2, str) and coll2:
+                return coll2
+
+        # Legacy behaviour: derive per-repo collection name
+        try:
+            return get_collection_name(repo_name)
+        except Exception:
+            return default_coll
+
+    # Single-repo mode or repo_name detection failed: use existing helpers/env
+    try:
         if repo_name:
             return get_collection_name(repo_name)
     except Exception:
         pass
-    return os.environ.get("COLLECTION_NAME", "my-collection")
+    return default_coll
 
 
 def _get_collection_for_file(file_path: Path) -> str:
@@ -237,6 +305,9 @@ class IndexHandler(FileSystemEventHandler):
             rel_dir = "/"
         if self.excl.exclude_dir(rel_dir):
             return
+        if any(part == ".remote-git" for part in p.parts) and p.suffix.lower() == ".json":
+            self.queue.add(p)
+            return
         # only code files
         if p.suffix.lower() not in idx.CODE_EXTS:
             return
@@ -261,6 +332,8 @@ class IndexHandler(FileSystemEventHandler):
             p = Path(event.src_path).resolve()
         except Exception:
             return
+        if any(part == ".codebase" for part in p.parts):
+            return
         # Only attempt deletion for code files we would have indexed
         if p.suffix.lower() not in idx.CODE_EXTS:
             return
@@ -279,9 +352,25 @@ class IndexHandler(FileSystemEventHandler):
             if repo_path:
                 repo_name = _extract_repo_name_from_path(str(repo_path))
                 remove_cached_file(str(p), repo_name)
+
+                # Remove symbol cache entry
+                try:
+                    from scripts.workspace_state import remove_cached_symbols
+                    remove_cached_symbols(str(p))
+                    print(f"[deleted_symbol_cache] {p}")
+                except Exception as e:
+                    print(f"[symbol_cache_delete_error] {p}: {e}")
             else:
                 root_repo_name = _extract_repo_name_from_path(str(self.root))
                 remove_cached_file(str(p), root_repo_name)
+
+                # Remove symbol cache entry (single repo mode)
+                try:
+                    from scripts.workspace_state import remove_cached_symbols
+                    remove_cached_symbols(str(p))
+                    print(f"[deleted_symbol_cache] {p}")
+                except Exception as e:
+                    print(f"[symbol_cache_delete_error] {p}: {e}")
         except Exception:
             pass
 
@@ -552,6 +641,8 @@ def _rename_in_store(
                 host_root = (
                     str(os.environ.get("HOST_INDEX_PATH") or "").strip().rstrip("/")
                 )
+                if ":" in host_root: # Windows drive letter (e.g., "C:")
+                    host_root = ""
                 host_path = None
                 container_path = None
                 try:
@@ -693,10 +784,9 @@ def main():
         vector_name = idx._sanitize_vector_name(MODEL)
 
     try:
-        idx.ensure_collection(client, default_collection, model_dim, vector_name)
+        idx.ensure_collection_and_indexes_once(client, default_collection, model_dim, vector_name)
     except Exception:
         pass
-    idx.ensure_payload_indexes(client, default_collection)
 
     try:
         if multi_repo_enabled:
@@ -730,7 +820,31 @@ def main():
     )
     handler = IndexHandler(ROOT, q, client, default_collection)
 
-    obs = Observer()
+    use_polling = (os.environ.get("WATCH_USE_POLLING") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    if use_polling:
+        try:
+            from watchdog.observers.polling import PollingObserver  # type: ignore
+
+            obs = PollingObserver()
+            try:
+                print("[watch_mode] Using polling observer for filesystem events")
+            except Exception:
+                pass
+        except Exception:
+            obs = Observer()
+            try:
+                print(
+                    "[watch_mode] Polling observer unavailable, falling back to default Observer"
+                )
+            except Exception:
+                pass
+    else:
+        obs = Observer()
     obs.schedule(handler, str(ROOT), recursive=True)
     obs.start()
 
@@ -742,6 +856,39 @@ def main():
     finally:
         obs.stop()
         obs.join()
+
+
+def _process_git_history_manifest(
+    p: Path,
+    client,
+    model,
+    collection: str,
+    vector_name: str,
+    repo_name: Optional[str],
+):
+    try:
+        import sys
+
+        script = ROOT_DIR / "scripts" / "ingest_history.py"
+        if not script.exists():
+            return
+        cmd = [sys.executable or "python3", str(script), "--manifest-json", str(p)]
+        env = os.environ.copy()
+        if collection:
+            env["COLLECTION_NAME"] = collection
+        if QDRANT_URL:
+            env["QDRANT_URL"] = QDRANT_URL
+        if repo_name:
+            env["REPO_NAME"] = repo_name
+        try:
+            print(
+                f"[git_history_manifest] launching ingest_history.py for {p} collection={collection} repo={repo_name}"
+            )
+        except Exception:
+            pass
+        subprocess.Popen(cmd, env=env)
+    except Exception:
+        return
 
 
 def _process_paths(paths, client, model, vector_name: str, model_dim: int, workspace_path: str):
@@ -782,6 +929,27 @@ def _process_paths(paths, client, model, vector_name: str, model_dim: int, works
         repo_name = _extract_repo_name_from_path(repo_key)
         collection = _get_collection_for_file(p)
 
+        if ".remote-git" in p.parts and p.suffix.lower() == ".json":
+            try:
+                _process_git_history_manifest(p, client, model, collection, vector_name, repo_name)
+            except Exception as e:
+                try:
+                    print(f"[commit_ingest_error] {p}: {e}")
+                except Exception:
+                    pass
+            repo_progress[repo_key] = repo_progress.get(repo_key, 0) + 1
+            try:
+                _update_progress(
+                    repo_key,
+                    started_at,
+                    repo_progress[repo_key],
+                    len(repo_files),
+                    p,
+                )
+            except Exception:
+                pass
+            continue
+
         if not p.exists():
             if client is not None:
                 try:
@@ -809,22 +977,83 @@ def _process_paths(paths, client, model, vector_name: str, model_dim: int, works
 
         if client is not None and model is not None:
             try:
-                idx.ensure_collection(client, collection, model_dim, vector_name)
-                idx.ensure_payload_indexes(client, collection)
+                idx.ensure_collection_and_indexes_once(client, collection, model_dim, vector_name)
             except Exception:
                 pass
 
             ok = False
             try:
-                ok = idx.index_single_file(
-                    client,
-                    model,
-                    collection,
-                    vector_name,
-                    p,
-                    dedupe=True,
-                    skip_unchanged=False,
-                )
+                # Prefer smart symbol-aware reindexing when enabled and cache is available
+                try:
+                    if getattr(idx, "_smart_symbol_reindexing_enabled", None) and idx._smart_symbol_reindexing_enabled():
+                        text: str | None = None
+                        try:
+                            text = p.read_text(encoding="utf-8", errors="ignore")
+                        except Exception:
+                            text = None
+                        if text is not None:
+                            try:
+                                language = idx.detect_language(p)
+                            except Exception:
+                                language = ""
+                            try:
+                                file_hash = hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest()
+                            except Exception:
+                                file_hash = ""
+                            if file_hash:
+                                try:
+                                    use_smart, smart_reason = idx.should_use_smart_reindexing(str(p), file_hash)
+                                except Exception:
+                                    use_smart, smart_reason = False, "smart_check_failed"
+
+                                # Bootstrap: if we have no symbol cache yet, still run smart path once
+                                bootstrap = smart_reason == "no_cached_symbols"
+                                if use_smart or bootstrap:
+                                    msg_kind = "smart reindexing" if use_smart else "bootstrap (no_cached_symbols) for smart reindex"
+                                    try:
+                                        print(f"[SMART_REINDEX][watcher] Using {msg_kind} for {p} ({smart_reason})")
+                                    except Exception:
+                                        pass
+                                    try:
+                                        status = idx.process_file_with_smart_reindexing(
+                                            p,
+                                            text,
+                                            language,
+                                            client,
+                                            collection,
+                                            repo_name,
+                                            model,
+                                            vector_name,
+                                        )
+                                        ok = status == "success"
+                                    except Exception as se:
+                                        try:
+                                            print(f"[SMART_REINDEX][watcher] Smart reindexing failed for {p}: {se}")
+                                        except Exception:
+                                            pass
+                                        ok = False
+                                else:
+                                    try:
+                                        print(f"[SMART_REINDEX][watcher] Using full reindexing for {p} ({smart_reason})")
+                                    except Exception:
+                                        pass
+                except Exception as e_smart:
+                    try:
+                        print(f"[SMART_REINDEX][watcher] Smart reindexing disabled or preview failed for {p}: {e_smart}")
+                    except Exception:
+                        pass
+
+                # Fallback: full single-file reindex
+                if not ok:
+                    ok = idx.index_single_file(
+                        client,
+                        model,
+                        collection,
+                        vector_name,
+                        p,
+                        dedupe=True,
+                        skip_unchanged=False,
+                    )
             except Exception as e:
                 try:
                     print(f"[index_error] {p}: {e}")

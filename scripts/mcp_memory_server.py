@@ -241,7 +241,24 @@ def _ensure_collection(name: str):
         VECTOR_NAME: models.VectorParams(size=int(dense_dim or 768), distance=models.Distance.COSINE),
         LEX_VECTOR_NAME: models.VectorParams(size=LEX_VECTOR_DIM, distance=models.Distance.COSINE),
     }
+
+    # Add mini vector for ReFRAG mode (same logic as ingest_code.py)
+    try:
+        if os.environ.get("REFRAG_MODE", "").strip().lower() in {
+            "1", "true", "yes", "on"
+        }:
+            mini_vector_name = os.environ.get("MINI_VECTOR_NAME", "mini")
+            mini_vec_dim = int(os.environ.get("MINI_VEC_DIM", "64"))
+            vectors_cfg[mini_vector_name] = models.VectorParams(
+                size=mini_vec_dim,
+                distance=models.Distance.COSINE,
+            )
+    except Exception:
+        pass
+
     client.create_collection(collection_name=name, vectors_config=vectors_cfg)
+    vector_names = list(vectors_cfg.keys())
+    print(f"[MEMORY_SERVER] Created collection '{name}' with vectors: {vector_names}")
     return True
 
 
