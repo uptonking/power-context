@@ -2631,6 +2631,14 @@ def run_hybrid_search(
             _metadata.get("text") or
             ""
         )
+        # Carry through pseudo/tags so downstream consumers (e.g., repo_search reranker)
+        # can incorporate index-time GLM/llm labels into their own scoring or display.
+        _pseudo = _payload.get("pseudo")
+        if _pseudo is None:
+            _pseudo = _metadata.get("pseudo")
+        _tags = _payload.get("tags")
+        if _tags is None:
+            _tags = _metadata.get("tags")
         # Skip memory-like points without a real file path
         if not _path or not _path.strip():
             if os.environ.get("DEBUG_HYBRID_FILTER"):
@@ -2694,6 +2702,8 @@ def run_hybrid_search(
                 "span_budgeted": bool(m.get("_merged_start") is not None),
                 "budget_tokens_used": m.get("_budget_tokens"),
                 "text": _text,
+                "pseudo": _pseudo,
+                "tags": _tags,
             }
         )
     if _USE_CACHE and cache_key is not None:

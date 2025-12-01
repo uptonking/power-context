@@ -2191,24 +2191,62 @@ async def repo_search(
                     import concurrent.futures as _fut
 
                     rq = queries[0] if queries else ""
-                    # Prepare candidate docs from top-N hybrid hits (path+symbol + small snippet)
+                    # Prepare candidate docs from top-N hybrid hits (path+symbol + pseudo/tags + small snippet)
                     cand_objs = list(json_lines[: int(rerank_top_n)])
 
                     def _doc_for(obj: dict) -> str:
                         path = str(obj.get("path") or "")
                         symbol = str(obj.get("symbol") or "")
                         header = f"{symbol} — {path}".strip()
+
+                        # Try to enrich with pseudo/tags from underlying payload when available.
+                        # We expect hybrid to have preserved metadata in obj["components"] or
+                        # direct fields; if not, we fall back to header+code only.
+                        meta_lines: list[str] = [header] if header else []
+                        try:
+                            # Prefer explicit pseudo/tags fields on the top-level object when present
+                            pseudo_val = obj.get("pseudo")
+                            tags_val = obj.get("tags")
+                            if pseudo_val is None or tags_val is None:
+                                # Fallback: inspect a nested metadata view when present
+                                md = obj.get("metadata") or {}
+                                if pseudo_val is None:
+                                    pseudo_val = md.get("pseudo")
+                                if tags_val is None:
+                                    tags_val = md.get("tags")
+                            pseudo_s = str(pseudo_val).strip() if pseudo_val is not None else ""
+                            if pseudo_s:
+                                # Keep pseudo short to avoid bloating rerank input
+                                meta_lines.append(f"Summary: {pseudo_s[:256]}")
+                            if tags_val:
+                                try:
+                                    if isinstance(tags_val, (list, tuple)):
+                                        tags_text = ", ".join(
+                                            str(x) for x in tags_val
+                                        )[:128]
+                                        if tags_text:
+                                            meta_lines.append(f"Tags: {tags_text}")
+                                    else:
+                                        tags_text = str(tags_val)[:128]
+                                        if tags_text:
+                                            meta_lines.append(f"Tags: {tags_text}")
+                                except Exception:
+                                    pass
+                        except Exception:
+                            # If any of the above fails, we just keep header-only
+                            pass
+
                         sl = int(obj.get("start_line") or 0)
                         el = int(obj.get("end_line") or 0)
                         if not path or not sl:
-                            return header
+                            return "\n".join(meta_lines) if meta_lines else header
                         try:
                             p = path
                             if not os.path.isabs(p):
                                 p = os.path.join("/work", p)
                             realp = os.path.realpath(p)
                             if not (realp == "/work" or realp.startswith("/work/")):
-                                return header
+                                return "\n".join(meta_lines) if meta_lines else header
                             with open(
                                 realp, "r", encoding="utf-8", errors="ignore"
                             ) as f:
@@ -2221,11 +2259,12 @@ async def repo_search(
                             si = max(1, sl - ctx)
                             ei = min(len(lines), max(sl, el) + ctx)
                             snippet = "".join(lines[si - 1 : ei]).strip()
-                            return (
-                                header + ("\n" + snippet if snippet else "")
-                            ).strip()
+                            if snippet:
+                                meta = "\n".join(meta_lines) if meta_lines else header
+                                return (meta + "\n\n" + snippet).strip()
+                            return "\n".join(meta_lines) if meta_lines else header
                         except Exception:
-                            return header
+                            return "\n".join(meta_lines) if meta_lines else header
 
                     # Build docs concurrently
                     max_workers = min(16, (os.cpu_count() or 4) * 4)
