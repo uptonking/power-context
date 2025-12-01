@@ -2024,12 +2024,25 @@ async def repo_search(
             model = _get_embedding_model(model_name)
             # Ensure hybrid_search uses the intended collection when running in-process
             prev_coll = os.environ.get("COLLECTION_NAME")
+            # Determine effective hybrid candidate limit: if rerank is enabled, search up to rerank_top_n
+            try:
+                base_limit = int(limit)
+            except Exception:
+                base_limit = 10
+            eff_limit = base_limit
+            if rerank_enabled:
+                try:
+                    rt = int(rerank_top_n)
+                except Exception:
+                    rt = 0
+                if rt > eff_limit:
+                    eff_limit = rt
             try:
                 os.environ["COLLECTION_NAME"] = collection
                 # In-process path_glob/not_glob accept a single string; reduce list inputs safely
                 items = run_hybrid_search(
                     queries=queries,
-                    limit=int(limit),
+                    limit=eff_limit,
                     per_path=(
                         int(per_path)
                         if (per_path is not None and str(per_path).strip() != "")
@@ -2066,11 +2079,23 @@ async def repo_search(
 
     if not use_hybrid_inproc:
         # Try hybrid search via subprocess (JSONL output)
+        try:
+            base_limit = int(limit)
+        except Exception:
+            base_limit = 10
+        eff_limit = base_limit
+        if rerank_enabled:
+            try:
+                rt = int(rerank_top_n)
+            except Exception:
+                rt = 0
+            if rt > eff_limit:
+                eff_limit = rt
         cmd = [
             "python",
             _work_script("hybrid_search.py"),
             "--limit",
-            str(int(limit)),
+            str(eff_limit),
             "--json",
         ]
         if per_path is not None and str(per_path).strip() != "":
@@ -2488,6 +2513,14 @@ async def repo_search(
             else:
                 other_code.append(it)
         results = doc_items + core_items + other_code
+
+    # Enforce user-requested limit on final result count
+    try:
+        _limit_n = int(limit)
+    except Exception:
+        _limit_n = 0
+    if _limit_n > 0 and len(results) > _limit_n:
+        results = results[:_limit_n]
 
     # Optionally add snippets (with highlighting)
     toks = _tokens_from_queries(queries)
