@@ -23,6 +23,11 @@ import time
 from pathlib import Path
 from typing import List, Dict, Iterable
 
+try:
+    from tqdm import tqdm
+except ImportError:
+    tqdm = None  # type: ignore
+
 # Ensure project root is on sys.path when run as a script (so 'scripts' package imports work)
 ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
@@ -2024,8 +2029,25 @@ def index_single_file(
     *,
     dedupe: bool = True,
     skip_unchanged: bool = True,
+    trust_cache: bool | None = None,
 ) -> bool:
-    """Index a single file path. Returns True if indexed, False if skipped."""
+    """Index a single file path. Returns True if indexed, False if skipped.
+
+    When trust_cache is enabled (via argument or INDEX_TRUST_CACHE=1), rely solely on the
+    local .codebase/cache.json for unchanged detection and skip Qdrant per-file hash checks.
+    """
+    # Resolve trust_cache from env when not explicitly provided
+    if trust_cache is None:
+        try:
+            trust_cache = os.environ.get("INDEX_TRUST_CACHE", "").strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+        except Exception:
+            trust_cache = False
+
     try:
         text = file_path.read_text(encoding="utf-8", errors="ignore")
     except Exception as e:
@@ -2092,16 +2114,19 @@ def index_single_file(
                     return False
         except Exception:
             pass
-        prev = get_indexed_file_hash(
-            client,
-            collection,
-            str(file_path),
-            repo_id=repo_id,
-            repo_rel_path=repo_rel_path,
-        )
-        if prev and prev == file_hash:
-            print(f"Skipping unchanged file: {file_path}")
-            return False
+
+        # Optional Qdrant-backed unchanged detection; disabled when trust_cache is enabled
+        if not trust_cache:
+            prev = get_indexed_file_hash(
+                client,
+                collection,
+                str(file_path),
+                repo_id=repo_id,
+                repo_rel_path=repo_rel_path,
+            )
+            if prev and prev == file_hash:
+                print(f"Skipping unchanged file: {file_path}")
+                return False
 
     if dedupe:
         delete_points_by_path(client, collection, str(file_path))
@@ -2443,7 +2468,9 @@ def index_repo(
     )
 
     # Health check: detect cache/collection sync issues before indexing (single-collection mode only)
-    if not recreate and skip_unchanged and not use_per_repo_collections and collection:
+    # Skip with SKIP_HEALTH_CHECK=1 for large collections where scroll is slow
+    _skip_health = os.environ.get("SKIP_HEALTH_CHECK", "").strip().lower() in {"1", "true", "yes"}
+    if not _skip_health and not recreate and skip_unchanged and not use_per_repo_collections and collection:
         try:
             from scripts.collection_health import auto_heal_if_needed
 
@@ -2457,6 +2484,8 @@ def index_repo(
                 print("[health_check] Collection health OK")
         except Exception as e:
             print(f"[health_check] Warning: health check failed: {e}")
+    elif _skip_health:
+        print("[health_check] Skipped (SKIP_HEALTH_CHECK=1)")
 
     # Skip single collection setup in multi-repo mode
     if not use_per_repo_collections:
@@ -2481,6 +2510,15 @@ def index_repo(
     CHUNK_LINES = int(os.environ.get("INDEX_CHUNK_LINES", "120") or 120)
     CHUNK_OVERLAP = int(os.environ.get("INDEX_CHUNK_OVERLAP", "20") or 20)
     PROGRESS_EVERY = int(os.environ.get("INDEX_PROGRESS_EVERY", "200") or 200)
+    # Trust-cache mode: skip Qdrant hash lookups when local cache says unchanged
+    _trust_cache = os.environ.get("INDEX_TRUST_CACHE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if _trust_cache:
+        print("[trust_cache] INDEX_TRUST_CACHE enabled - skipping Qdrant per-file hash checks")
     # Semantic chunking toggle
     use_semantic = os.environ.get("INDEX_SEMANTIC_CHUNKS", "1").lower() in {
         "1",
@@ -2519,7 +2557,21 @@ def index_repo(
     # Track per-file hashes across the entire run for cache updates on any flush
     batch_file_hashes = {}
 
-    for file_path in iter_files(root):
+    # Collect files for progress bar (fast: just list paths, no I/O)
+    all_files = list(iter_files(root))
+    total_files = len(all_files)
+    print(f"Found {total_files} files to process")
+
+    # Use tqdm progress bar if available, otherwise simple iteration
+    # When progress bar is active, suppress per-file skip messages
+    _use_progress_bar = tqdm is not None
+    if _use_progress_bar:
+        file_iter = tqdm(all_files, desc="Indexing", unit="file", ncols=100,
+                         bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]")
+    else:
+        file_iter = all_files
+
+    for file_path in file_iter:
         files_seen += 1
 
         # Determine collection per-file in multi-repo mode (use watcher's exact logic)
@@ -2537,6 +2589,11 @@ def index_repo(
         except Exception as e:
             print(f"Skipping {file_path}: {e}")
             continue
+
+        # Skip empty files
+        if not text or not text.strip():
+            continue
+
         language = detect_language(file_path)
         file_hash = hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest()
 
@@ -2588,79 +2645,40 @@ def index_repo(
                 if get_cached_file_hash:
                     prev_local = get_cached_file_hash(str(file_path), per_file_repo)
                     if prev_local and file_hash and prev_local == file_hash:
-                        if PROGRESS_EVERY <= 0 and files_seen % 50 == 0:
-                            print(f"... processed {files_seen} files (skipping unchanged, cache)")
-                            try:
-                                if update_indexing_status:
-                                    target_workspace = (
-                                        ws_path if not use_per_repo_collections else str(file_path.parent)
-                                    )
-                                    target_repo = (
-                                        repo_tag if not use_per_repo_collections else per_file_repo
-                                    )
-                                    update_indexing_status(
-                                        workspace_path=target_workspace,
-                                        status={
-                                            "state": "indexing",
-                                            "progress": {
-                                                "files_processed": files_seen,
-                                                "total_files": None,
-                                                "current_file": str(file_path),
-                                            },
-                                        },
-                                        repo_name=target_repo,
-                                    )
-                            except Exception:
-                                pass
-                        else:
-                            print(f"Skipping unchanged file (cache): {file_path}")
+                        # Only print skip messages if no progress bar
+                        if not _use_progress_bar:
+                            if PROGRESS_EVERY <= 0 and files_seen % 50 == 0:
+                                print(f"... processed {files_seen} files (skipping unchanged, cache)")
+                            else:
+                                print(f"Skipping unchanged file (cache): {file_path}")
                         continue
             except Exception:
                 pass
 
             # Check existing indexed hash in Qdrant (logical identity when available)
-            prev = get_indexed_file_hash(
-                client,
-                current_collection,
-                str(file_path),
-                repo_id=repo_id,
-                repo_rel_path=repo_rel_path,
-            )
-            if prev and file_hash and prev == file_hash:
-                # File exists in Qdrant with same hash - cache it locally for next time
-                try:
-                    if set_cached_file_hash:
-                        set_cached_file_hash(str(file_path), file_hash, per_file_repo)
-                except Exception:
-                    pass
-                if PROGRESS_EVERY <= 0 and files_seen % 50 == 0:
-                    # minor heartbeat when no progress cadence configured
-                    print(f"... processed {files_seen} files (skipping unchanged)")
+            # Skip this when INDEX_TRUST_CACHE is enabled - rely solely on local cache
+            if not _trust_cache:
+                prev = get_indexed_file_hash(
+                    client,
+                    current_collection,
+                    str(file_path),
+                    repo_id=repo_id,
+                    repo_rel_path=repo_rel_path,
+                )
+                if prev and file_hash and prev == file_hash:
+                    # File exists in Qdrant with same hash - cache it locally for next time
                     try:
-                        if update_indexing_status:
-                            target_workspace = (
-                                ws_path if not use_per_repo_collections else str(file_path.parent)
-                            )
-                            target_repo = (
-                                repo_tag if not use_per_repo_collections else per_file_repo
-                            )
-                            update_indexing_status(
-                                workspace_path=target_workspace,
-                                status={
-                                    "state": "indexing",
-                                    "progress": {
-                                        "files_processed": files_seen,
-                                        "total_files": None,
-                                        "current_file": str(file_path),
-                                    },
-                                },
-                                repo_name=target_repo,
-                            )
+                        if set_cached_file_hash:
+                            set_cached_file_hash(str(file_path), file_hash, per_file_repo)
                     except Exception:
                         pass
-                else:
-                    print(f"Skipping unchanged file: {file_path}")
-                continue
+                    # Only print skip messages if no progress bar
+                    if not _use_progress_bar:
+                        if PROGRESS_EVERY <= 0 and files_seen % 50 == 0:
+                            print(f"... processed {files_seen} files (skipping unchanged)")
+                        else:
+                            print(f"Skipping unchanged file: {file_path}")
+                    continue
 
             # At this point, file content has changed vs previous index; attempt smart reindex when enabled
             if _smart_symbol_reindexing_enabled():
@@ -2696,6 +2714,8 @@ def index_repo(
             delete_points_by_path(client, current_collection, str(file_path))
 
         files_indexed += 1
+        # Progress: show each file being indexed
+        print(f"Indexing [{files_indexed}]: {file_path}")
         symbols = _extract_symbols(language, text)
         imports, calls = _get_imports_calls(language, text)
         last_mod, churn_count, author_count = _git_metadata(file_path)

@@ -160,6 +160,13 @@ Perform hybrid code search combining dense semantic, lexical BM25, and optional 
 - `limit` (int, default 10): Maximum total results to return
 - `per_path` (int, default 2): Maximum results per file path
 
+**Cross-Codebase Isolation:**
+- `repo` (str or list[str], optional): Filter results to specific repository(ies)
+  - Single repo: `"pathful-commons-app"` - Search only this repo
+  - Multiple repos: `["frontend", "backend"]` - Search related repos together
+  - All repos: `"*"` - Explicitly search all indexed repos (disable auto-filter)
+  - Default: Auto-detects current repo from `CURRENT_REPO` env when `REPO_AUTO_FILTER=1`
+
 **Content Filters:**
 - `language` (str, optional): Filter by programming language
 - `path_glob` (str or list[str], optional): Glob patterns for path filtering
@@ -184,6 +191,10 @@ Perform hybrid code search combining dense semantic, lexical BM25, and optional 
 - `rerank_enabled` (bool, optional): Override default reranker setting
 - `rerank_top_n` (int, default 50): Number of candidates to consider for reranking
 - `rerank_return_m` (int, default 12): Number of results to return after reranking
+
+Reranking uses a blended scoring approach that preserves symbol match boosts:
+- **Blend weight** (`RERANK_BLEND_WEIGHT`, default 0.6): Ratio of neural reranker score to fusion score
+- **Post-rerank symbol boost** (`POST_RERANK_SYMBOL_BOOST`, default 1.0): Applied after blending to ensure exact symbol matches rank highest even when the neural reranker disagrees
 
 **Response Format:**
 ```json
@@ -254,12 +265,30 @@ Perform hybrid code search combining dense semantic, lexical BM25, and optional 
 }
 ```
 
+**Cross-Codebase Search (multi-repo):**
+```json
+{
+  "query": "authentication middleware",
+  "repo": ["frontend", "backend"],
+  "limit": 15
+}
+```
+
+**Single Repo Search:**
+```json
+{
+  "query": "user authentication",
+  "repo": "my-repo",
+  "include_snippet": true
+}
+```
+
 ### context_search()
 
 Blend code search results with memory entries for comprehensive context.
 
 **Parameters:**
-All `repo_search` parameters plus:
+All `repo_search` parameters (including `repo` for cross-codebase isolation) plus:
 - `include_memories` (bool, default true): Whether to include memory results
 - `memory_weight` (float, default 1.0): Weight for memory results vs code results
 - `per_source_limits` (dict, optional): Limits per source type:
