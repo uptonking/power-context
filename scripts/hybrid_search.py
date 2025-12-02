@@ -1454,6 +1454,7 @@ def run_hybrid_search(
     expand: bool = True,
     model: TextEmbedding | None = None,
     collection: str | None = None,
+    repo: str | list[str] | None = None,  # Filter by repo name(s); "*" to disable auto-filter
 ) -> List[Dict[str, Any]]:
     client = QdrantClient(url=os.environ.get("QDRANT_URL", QDRANT_URL), api_key=API_KEY)
     model_name = os.environ.get("EMBEDDING_MODEL", MODEL_NAME)
@@ -1470,7 +1471,23 @@ def run_hybrid_search(
     eff_ext = ext or dsl.get("ext")
     eff_not = not_filter or dsl.get("not")
     eff_case = case or dsl.get("case") or os.environ.get("HYBRID_CASE", "insensitive")
-    eff_repo = dsl.get("repo")
+    # Repo filter: explicit param > DSL > auto-detect from env
+    eff_repo = repo or dsl.get("repo")
+    # Normalize repo to list for multi-repo support
+    if eff_repo and isinstance(eff_repo, str):
+        if eff_repo.strip() == "*":
+            eff_repo = None  # "*" means search all repos
+        else:
+            eff_repo = [r.strip() for r in eff_repo.split(",") if r.strip()]
+    elif eff_repo and isinstance(eff_repo, (list, tuple)):
+        eff_repo = [str(r).strip() for r in eff_repo if str(r).strip() and str(r).strip() != "*"]
+        if not eff_repo:
+            eff_repo = None
+    # Auto-detect repo from env if not specified and auto-filter is enabled
+    if eff_repo is None and str(os.environ.get("REPO_AUTO_FILTER", "1")).strip().lower() in {"1", "true", "yes", "on"}:
+        auto_repo = os.environ.get("CURRENT_REPO") or os.environ.get("REPO_NAME")
+        if auto_repo and auto_repo.strip():
+            eff_repo = [auto_repo.strip()]
     eff_path_regex = path_regex
 
     def _to_list(x):
@@ -1595,12 +1612,27 @@ def run_hybrid_search(
                 key="metadata.language", match=models.MatchValue(value=eff_language)
             )
         )
+    # Repo filter: supports single repo or list of repos (for related codebases)
     if eff_repo:
-        must.append(
-            models.FieldCondition(
-                key="metadata.repo", match=models.MatchValue(value=eff_repo)
+        if isinstance(eff_repo, list) and len(eff_repo) == 1:
+            must.append(
+                models.FieldCondition(
+                    key="metadata.repo", match=models.MatchValue(value=eff_repo[0])
+                )
             )
-        )
+        elif isinstance(eff_repo, list) and len(eff_repo) > 1:
+            # Multiple repos: use MatchAny for OR logic
+            must.append(
+                models.FieldCondition(
+                    key="metadata.repo", match=models.MatchAny(any=eff_repo)
+                )
+            )
+        elif isinstance(eff_repo, str):
+            must.append(
+                models.FieldCondition(
+                    key="metadata.repo", match=models.MatchValue(value=eff_repo)
+                )
+            )
     if eff_under:
         must.append(
             models.FieldCondition(

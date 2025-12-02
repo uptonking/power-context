@@ -883,6 +883,59 @@ def _tokens_from_queries(qs):
     return out
 
 
+def _detect_current_repo() -> str | None:
+    """Detect the current repository name from workspace/env.
+
+    Priority:
+    1. CURRENT_REPO env var (explicitly set)
+    2. REPO_NAME env var
+    3. Detect from /work directory structure (first subdirectory with .git)
+    4. Git remote origin name
+
+    Returns: repo name or None if detection fails
+    """
+    # Check explicit env vars first
+    for env_key in ("CURRENT_REPO", "REPO_NAME"):
+        val = os.environ.get(env_key, "").strip()
+        if val:
+            return val
+
+    # Try to detect from /work directory
+    work_path = Path("/work")
+    if work_path.exists():
+        try:
+            # Check for .git in /work itself
+            if (work_path / ".git").exists():
+                # Use git to get repo name from remote
+                try:
+                    import subprocess
+                    result = subprocess.run(
+                        ["git", "-C", str(work_path), "config", "--get", "remote.origin.url"],
+                        capture_output=True, text=True, timeout=5
+                    )
+                    if result.returncode == 0 and result.stdout.strip():
+                        url = result.stdout.strip()
+                        # Extract repo name from URL (e.g., git@github.com:user/repo.git -> repo)
+                        name = url.rstrip("/").rsplit("/", 1)[-1]
+                        if name.endswith(".git"):
+                            name = name[:-4]
+                        if name:
+                            return name
+                except Exception:
+                    pass
+                # Fallback to directory name
+                return work_path.name
+
+            # Check subdirectories for repos
+            for subdir in work_path.iterdir():
+                if subdir.is_dir() and (subdir / ".git").exists():
+                    return subdir.name
+        except Exception:
+            pass
+
+    return None
+
+
 @mcp.tool()
 async def qdrant_index_root(
     recreate: Optional[bool] = None, collection: Optional[str] = None
@@ -1693,6 +1746,8 @@ async def repo_search(
     ext: Any = None,
     not_: Any = None,
     case: Any = None,
+    # Repo scoping (cross-codebase isolation)
+    repo: Any = None,  # str, list[str], or "*" to search all repos
     # Response shaping
     compact: Any = None,
     args: Any = None,  # Compatibility shim for mcp-remote/Claude wrappers that send args/kwargs
@@ -1711,6 +1766,9 @@ async def repo_search(
     - include_snippet/context_lines: return inline snippets near hits when true.
     - rerank_*: optional ONNX reranker toggles; timeouts fall back to hybrid output.
     - collection: str. Target collection; defaults to workspace state or env COLLECTION_NAME.
+    - repo: str or list[str]. Filter by repo name(s). Use "*" to search all repos (disable auto-filter).
+      By default, auto-detects current repo from CURRENT_REPO env and filters to it.
+      Use repo=["frontend","backend"] to search related repos together.
     - Filters (optional): language, under (path prefix), kind, symbol, ext, path_regex,
       path_glob (str or list[str]), not_glob (str or list[str]), not_ (negative text), case.
 
@@ -1957,6 +2015,29 @@ async def repo_search(
     ext = _to_str(ext, "").strip()
     not_ = _to_str(not_, "").strip()
     case = _to_str(case, "").strip()
+
+    # Normalize repo filter: str, list[str], or "*" (search all)
+    # Default: auto-detect current repo unless REPO_AUTO_FILTER=0
+    repo_filter = None
+    if repo is not None:
+        if isinstance(repo, str):
+            r = repo.strip()
+            if r == "*":
+                repo_filter = "*"  # Explicit "search all repos"
+            elif r:
+                # Support comma-separated list
+                repo_filter = [x.strip() for x in r.split(",") if x.strip()]
+        elif isinstance(repo, (list, tuple)):
+            repo_filter = [str(x).strip() for x in repo if str(x).strip() and str(x).strip() != "*"]
+            if not repo_filter:
+                repo_filter = "*"  # Empty list after filtering means search all
+
+    # Auto-detect current repo if not explicitly specified and auto-filter is enabled
+    if repo_filter is None and str(os.environ.get("REPO_AUTO_FILTER", "1")).strip().lower() in {"1", "true", "yes", "on"}:
+        detected_repo = _detect_current_repo()
+        if detected_repo:
+            repo_filter = [detected_repo]
+
     compact_raw = compact
     compact = _to_bool(compact, False)
     # If snippets are requested, do not compact (we need snippet field in results)
@@ -2039,6 +2120,7 @@ async def repo_search(
                     expand=str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower()
                     in {"1", "true", "yes", "on"},
                     model=model,
+                    repo=repo_filter,  # Cross-codebase isolation
                 )
             finally:
                 if prev_coll is None:
@@ -2128,6 +2210,7 @@ async def repo_search(
                     expand=str(os.environ.get("HYBRID_EXPAND", "0")).strip().lower()
                     in {"1", "true", "yes", "on"},
                     model=model,
+                    repo=repo_filter,  # Cross-codebase isolation
                 )
                 json_lines = items
             except Exception:
@@ -2201,6 +2284,9 @@ async def repo_search(
                     # (symbol_exact, impl_boost, path boosts are otherwise lost)
                     _rerank_blend = float(os.environ.get("RERANK_BLEND_WEIGHT", "0.6") or 0.6)
                     _rerank_blend = max(0.0, min(1.0, _rerank_blend))  # clamp [0,1]
+                    # Post-rerank symbol boost: apply symbol boosts directly to blended score
+                    # This ensures exact symbol matches rank higher even when reranker disagrees
+                    _post_symbol_boost = float(os.environ.get("POST_RERANK_SYMBOL_BOOST", "1.0") or 1.0)
                     blended = []
                     for rr_score, obj in zip(scores, cand_objs):
                         fusion_score = float(obj.get("score", 0.0) or 0.0)
@@ -2209,19 +2295,29 @@ async def repo_search(
                         # Shift fusion to negative range: fusion=2 -> -1, fusion=0 -> -3
                         norm_fusion = fusion_score - 3.0
                         blended_score = _rerank_blend * rr_score + (1.0 - _rerank_blend) * norm_fusion
-                        blended.append((blended_score, rr_score, obj))
+                        # Apply post-rerank symbol boost: extract symbol boosts from components
+                        # and add them directly to blended score (not diluted by blend weight)
+                        comps = obj.get("components") or {}
+                        sym_sub = float(comps.get("symbol_substr", 0.0) or 0.0)
+                        sym_eq = float(comps.get("symbol_exact", 0.0) or 0.0)
+                        post_boost = (sym_sub + sym_eq) * _post_symbol_boost
+                        blended_score += post_boost
+                        blended.append((blended_score, rr_score, obj, post_boost))
                     ranked = sorted(blended, key=lambda x: x[0], reverse=True)
                     tmp = []
-                    for blended_s, rr_s, obj in ranked[: int(rerank_return_m)]:
+                    for blended_s, rr_s, obj, post_b in ranked[: int(rerank_return_m)]:
+                        why_parts = obj.get("why", []) + [f"rerank_onnx:{float(rr_s):.3f}", f"blend:{float(blended_s):.3f}"]
+                        if post_b > 0:
+                            why_parts.append(f"post_sym:{float(post_b):.3f}")
                         item = {
                             "score": float(blended_s),
                             "path": obj.get("path", ""),
                             "symbol": obj.get("symbol", ""),
                             "start_line": int(obj.get("start_line") or 0),
                             "end_line": int(obj.get("end_line") or 0),
-                            "why": obj.get("why", []) + [f"rerank_onnx:{float(rr_s):.3f}", f"blend:{float(blended_s):.3f}"],
+                            "why": why_parts,
                             "components": (obj.get("components") or {})
-                            | {"rerank_onnx": float(rr_s), "blended": float(blended_s)},
+                            | {"rerank_onnx": float(rr_s), "blended": float(blended_s), "post_symbol_boost": float(post_b)},
                         }
                         # Preserve dual-path metadata when available so clients can prefer host paths
                         _hostp = obj.get("host_path")
@@ -2546,6 +2642,7 @@ async def repo_search_compat(**arguments) -> Dict[str, Any]:
             "not_": not_value,
             "case": args.get("case"),
             "compact": args.get("compact"),
+            "repo": args.get("repo"),  # Cross-codebase isolation
             # Alias passthroughs captured by repo_search(**kwargs)
             "queries": queries,
             "q": args.get("q"),
@@ -3104,6 +3201,8 @@ async def context_search(
     not_: Any = None,
     case: Any = None,
     compact: Any = None,
+    # Repo scoping (cross-codebase isolation)
+    repo: Any = None,  # str, list[str], or "*" to search all repos
     kwargs: Any = None,
 ) -> Dict[str, Any]:
     """Blend code search results with memory-store entries (notes, docs) for richer context.
@@ -3118,6 +3217,8 @@ async def context_search(
     - memory_weight: float (default 1.0). Scales memory scores relative to code.
     - per_source_limits: dict, e.g. {"code": 5, "memory": 3}
     - All repo_search filters are supported and passed through.
+    - repo: str or list[str]. Filter by repo name(s). Use "*" to search all repos (disable auto-filter).
+      By default, auto-detects current repo from CURRENT_REPO env and filters to it.
 
     Returns:
     - {"results": [{"source": "code"| "memory", ...}, ...], "total": N[, "memory_note": str]}
@@ -3634,6 +3735,7 @@ async def context_search(
         not_=not_,
         case=case,
         compact=False,
+        repo=repo,  # Cross-codebase isolation
     )
 
     # Optional debug
@@ -4630,6 +4732,7 @@ def _ca_prepare_filters_and_retrieve(
     model: Any,
     did_local_expand: bool,
     kwargs: Dict[str, Any],
+    repo: Any = None,  # Cross-codebase isolation: str, list[str], or "*"
 ) -> Dict[str, Any]:
     """Build effective filters and run hybrid retrieval with identifier/usage augmentation.
     Returns a dict with: items, eff_language, eff_path_glob, eff_not_glob, override_under,
@@ -4865,6 +4968,7 @@ def _ca_prepare_filters_and_retrieve(
             in {"1", "true", "yes", "on"}
         ),
         model=model,
+        repo=repo,  # Cross-codebase isolation
     )
     if os.environ.get("DEBUG_CONTEXT_ANSWER"):
         try:
@@ -5096,6 +5200,7 @@ def _ca_fallback_and_budget(
     cwd_root: str,
     include_snippet: bool,
     kwargs: Dict[str, Any],
+    repo: Any = None,  # Cross-codebase isolation
 ) -> list[Dict[str, Any]]:
     """Run Tier2/Tier3 fallbacks, apply span budgeting, and select prioritized spans.
     Returns the final list of spans to use for citations/context.
@@ -5174,6 +5279,7 @@ def _ca_fallback_and_budget(
                     in {"1", "true", "yes", "on"}
                 ),
                 model=model,
+                repo=repo,  # Cross-codebase isolation
             )
             # Ensure last call reflects tier-2 relaxed filters for introspection/testing
             _ = run_hybrid_search(
@@ -5197,6 +5303,7 @@ def _ca_fallback_and_budget(
                     in {"1", "true", "yes", "on"}
                 ),
                 model=model,
+                repo=repo,  # Cross-codebase isolation
             )
 
             if os.environ.get("DEBUG_CONTEXT_ANSWER"):
@@ -6553,6 +6660,8 @@ async def context_answer(
     not_glob: Any = None,
     case: Any = None,
     not_: Any = None,
+    # Repo scoping (cross-codebase isolation)
+    repo: Any = None,  # str, list[str], or "*" to search all repos
     kwargs: Any = None,
 ) -> Dict[str, Any]:
     """Natural-language Q&A over the repo using retrieval + local LLM (llama.cpp).
@@ -6574,6 +6683,8 @@ async def context_answer(
     - mode: "stitch" (default) or "pack" for prompt assembly.
     - expand: bool. Use tiny local LLM to propose up to 2 alternate queries.
     - Filters: language, under, kind, symbol, ext, path_regex, path_glob, not_glob, not_, case.
+    - repo: str or list[str]. Filter by repo name(s). Use "*" to search all repos (disable auto-filter).
+      By default, auto-detects current repo from CURRENT_REPO env and filters to it.
 
     Returns:
     - {"answer": str, "citations": [{"path": str, "start_line": int, "end_line": int}], "query": list[str], "used": {...}}
@@ -6820,6 +6931,7 @@ async def context_answer(
                     "case": _cfg["filters"].get("case"),
                     "symbol": _cfg["filters"].get("symbol"),
                 },
+                repo=repo,  # Cross-codebase isolation
             )
             items = _retr["items"]
             eff_language = _retr["eff_language"]
@@ -6867,6 +6979,7 @@ async def context_answer(
                 cwd_root=cwd_root,
                 include_snippet=bool(include_snippet),
                 kwargs=fallback_kwargs,
+                repo=repo,  # Cross-codebase isolation
             )
         except Exception as e:
             err = str(e)
