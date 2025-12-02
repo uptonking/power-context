@@ -2197,20 +2197,31 @@ async def repo_search(
                         docs = list(ex.map(_doc_for, cand_objs))
                     pairs = [(rq, d) for d in docs]
                     scores = _rr_local(pairs)
-                    ranked = sorted(
-                        zip(scores, cand_objs), key=lambda x: x[0], reverse=True
-                    )
+                    # Blend rerank with fusion score to preserve pre-rerank boosts
+                    # (symbol_exact, impl_boost, path boosts are otherwise lost)
+                    _rerank_blend = float(os.environ.get("RERANK_BLEND_WEIGHT", "0.6") or 0.6)
+                    _rerank_blend = max(0.0, min(1.0, _rerank_blend))  # clamp [0,1]
+                    blended = []
+                    for rr_score, obj in zip(scores, cand_objs):
+                        fusion_score = float(obj.get("score", 0.0) or 0.0)
+                        # Normalize fusion_score to similar scale as rerank (rough heuristic)
+                        # Fusion scores are typically 0-3, rerank scores are -12 to 0
+                        # Shift fusion to negative range: fusion=2 -> -1, fusion=0 -> -3
+                        norm_fusion = fusion_score - 3.0
+                        blended_score = _rerank_blend * rr_score + (1.0 - _rerank_blend) * norm_fusion
+                        blended.append((blended_score, rr_score, obj))
+                    ranked = sorted(blended, key=lambda x: x[0], reverse=True)
                     tmp = []
-                    for s, obj in ranked[: int(rerank_return_m)]:
+                    for blended_s, rr_s, obj in ranked[: int(rerank_return_m)]:
                         item = {
-                            "score": float(s),
+                            "score": float(blended_s),
                             "path": obj.get("path", ""),
                             "symbol": obj.get("symbol", ""),
                             "start_line": int(obj.get("start_line") or 0),
                             "end_line": int(obj.get("end_line") or 0),
-                            "why": obj.get("why", []) + [f"rerank_onnx:{float(s):.3f}"],
+                            "why": obj.get("why", []) + [f"rerank_onnx:{float(rr_s):.3f}", f"blend:{float(blended_s):.3f}"],
                             "components": (obj.get("components") or {})
-                            | {"rerank_onnx": float(s)},
+                            | {"rerank_onnx": float(rr_s), "blended": float(blended_s)},
                         }
                         # Preserve dual-path metadata when available so clients can prefer host paths
                         _hostp = obj.get("host_path")
