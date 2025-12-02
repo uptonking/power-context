@@ -234,7 +234,12 @@ class IndexHandler(FileSystemEventHandler):
         self.client = client
         resolved_collection = collection if collection is not None else default_collection
         self.default_collection = resolved_collection
-        self.collection = resolved_collection
+        # In multi-repo mode, per-file collections are resolved via _get_collection_for_file.
+        # Avoid using a root-level default collection (e.g., "/work-<hash>") for data ops.
+        if is_multi_repo_mode():
+            self.collection = None
+        else:
+            self.collection = resolved_collection
         self.excl = idx._Excluder(root)
         # Track ignore file for live reloads
         try:
@@ -339,7 +344,10 @@ class IndexHandler(FileSystemEventHandler):
             return
         if self.client is not None:
             try:
-                collection = self.collection or _get_collection_for_file(p)
+                if is_multi_repo_mode():
+                    collection = _get_collection_for_file(p)
+                else:
+                    collection = self.collection or _get_collection_for_file(p)
                 idx.delete_points_by_path(self.client, collection, str(p))
                 print(f"[deleted] {p} -> {collection}")
             except Exception:
@@ -408,8 +416,12 @@ class IndexHandler(FileSystemEventHandler):
             if self.excl.exclude_dir(rel_dir):
                 if src.suffix.lower() in idx.CODE_EXTS:
                     try:
+                        if is_multi_repo_mode():
+                            coll = _get_collection_for_file(src)
+                        else:
+                            coll = self.collection or _get_collection_for_file(src)
                         idx.delete_points_by_path(
-                            self.client, self.collection, str(src)
+                            self.client, coll, str(src)
                         )
                         print(f"[moved:ignored_dest_deleted_src] {src} -> {dest}")
                         try:
@@ -488,11 +500,15 @@ class IndexHandler(FileSystemEventHandler):
                     try:
                         idx.delete_points_by_path(self.client, src_collection, str(src))
                     except Exception:
-                        idx.delete_points_by_path(
-                            self.client,
-                            self.collection or src_collection,
-                            str(src),
-                        )
+                        # In multi-repo mode, avoid falling back to any root-level collection.
+                        if (not is_multi_repo_mode()) and self.collection:
+                            idx.delete_points_by_path(
+                                self.client,
+                                self.collection,
+                                str(src),
+                            )
+                        else:
+                            raise
                     print(f"[moved:deleted_src] {src}")
             except Exception:
                 pass
@@ -716,7 +732,9 @@ def main():
         multi_repo_enabled = False
 
     default_collection = os.environ.get("COLLECTION_NAME", "my-collection")
-    if _get_coll:
+    # In multi-repo mode, per-repo collections are resolved via _get_collection_for_file
+    # and workspace_state; avoid deriving a root-level collection like "/work-<hash>".
+    if _get_coll and not multi_repo_enabled:
         try:
             resolved = _get_coll(str(ROOT))
             if resolved:
