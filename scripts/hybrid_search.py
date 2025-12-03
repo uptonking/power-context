@@ -38,6 +38,13 @@ try:
 except ImportError:
     SEMANTIC_EXPANSION_AVAILABLE = False
 
+# Import query optimizer for dynamic EF tuning
+try:
+    from scripts.query_optimizer import get_query_optimizer, optimize_query
+    QUERY_OPTIMIZER_AVAILABLE = True
+except ImportError:
+    QUERY_OPTIMIZER_AVAILABLE = False
+
 logger = logging.getLogger("hybrid_search")
 
 
@@ -1364,9 +1371,21 @@ def lex_query(client: QdrantClient, v: List[float], flt, per_query: int, collect
 
 
 def dense_query(
-    client: QdrantClient, vec_name: str, v: List[float], flt, per_query: int, collection_name: str | None = None
+    client: QdrantClient, vec_name: str, v: List[float], flt, per_query: int, collection_name: str | None = None, query_text: str | None = None
 ) -> List[Any]:
     ef = max(EF_SEARCH, 32 + 4 * int(per_query))
+    
+    # Apply dynamic EF optimization if query text provided
+    if QUERY_OPTIMIZER_AVAILABLE and query_text and os.environ.get("QUERY_OPTIMIZER_ADAPTIVE", "1") == "1":
+        try:
+            result = optimize_query(query_text)
+            ef = result["recommended_ef"]
+            if os.environ.get("DEBUG_HYBRID_SEARCH"):
+                logger.debug(f"Dynamic EF: {ef} (complexity={result['complexity']}, type={result['query_type']})")
+        except Exception as e:
+            if os.environ.get("DEBUG_HYBRID_SEARCH"):
+                logger.debug(f"Query optimizer failed, using default EF: {e}")
+    
     flt = _sanitize_filter_obj(flt)
     collection = _collection(collection_name)
 
@@ -1963,7 +1982,8 @@ def run_hybrid_search(
     flt_gated = _sanitize_filter_obj(flt_gated)
 
     result_sets: List[List[Any]] = [
-        dense_query(client, vec_name, v, flt_gated, _scaled_per_query, collection) for v in embedded
+        dense_query(client, vec_name, v, flt_gated, _scaled_per_query, collection, query_text=queries[i] if i < len(queries) else None) 
+        for i, v in enumerate(embedded)
     ]
     if os.environ.get("DEBUG_HYBRID_SEARCH"):
         total_dense_results = sum(len(rs) for rs in result_sets)
@@ -3091,7 +3111,8 @@ def main():
 
     embedded = _embed_queries_cached(model, queries)
     result_sets: List[List[Any]] = [
-        dense_query(client, vec_name, v, flt, _cli_scaled_per_query, eff_collection) for v in embedded
+        dense_query(client, vec_name, v, flt, _cli_scaled_per_query, eff_collection, query_text=queries[i] if i < len(queries) else None) 
+        for i, v in enumerate(embedded)
     ]
 
     # RRF fusion (weighted, with scaled RRF)
