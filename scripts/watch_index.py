@@ -35,6 +35,9 @@ from scripts.workspace_state import (
     ensure_logical_repo_id,
     find_collection_for_logical_repo,
     logical_repo_reuse_enabled,
+    _get_repo_state_dir,
+    _cross_process_lock,
+    get_collection_mappings,
 )
 import hashlib
 from datetime import datetime
@@ -718,6 +721,75 @@ def _rename_in_store(
         return -1, None
 
 
+def _start_pseudo_backfill_worker(client: QdrantClient, default_collection: str) -> None:
+    flag = (os.environ.get("PSEUDO_BACKFILL_ENABLED") or "").strip().lower()
+    if flag not in {"1", "true", "yes", "on"}:
+        return
+
+    try:
+        interval = float(os.environ.get("PSEUDO_BACKFILL_TICK_SECS", "60") or 60.0)
+    except Exception:
+        interval = 60.0
+    if interval <= 0:
+        return
+    try:
+        max_points = int(os.environ.get("PSEUDO_BACKFILL_MAX_POINTS", "256") or 256)
+    except Exception:
+        max_points = 256
+    if max_points <= 0:
+        max_points = 1
+
+    def _worker() -> None:
+        while True:
+            try:
+                try:
+                    mappings = get_collection_mappings(search_root=str(ROOT))
+                except Exception:
+                    mappings = []
+                if not mappings:
+                    mappings = [
+                        {"repo_name": None, "collection_name": default_collection},
+                    ]
+                for mapping in mappings:
+                    coll = mapping.get("collection_name") or default_collection
+                    repo_name = mapping.get("repo_name")
+                    if not coll:
+                        continue
+                    try:
+                        if is_multi_repo_mode() and repo_name:
+                            state_dir = _get_repo_state_dir(repo_name)
+                        else:
+                            state_dir = _get_global_state_dir(str(ROOT))
+                        lock_path = state_dir / "pseudo.lock"
+                        with _cross_process_lock(lock_path):
+                            processed = idx.pseudo_backfill_tick(
+                                client,
+                                coll,
+                                repo_name=repo_name,
+                                max_points=max_points,
+                            )
+                            if processed:
+                                try:
+                                    print(
+                                        f"[pseudo_backfill] repo={repo_name or 'default'} collection={coll} processed={processed}"
+                                    )
+                                except Exception:
+                                    pass
+                    except Exception as e:
+                        try:
+                            print(
+                                f"[pseudo_backfill] error repo={repo_name or 'default'} collection={coll}: {e}"
+                            )
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+            time.sleep(interval)
+
+    thread = threading.Thread(target=_worker, name="pseudo-backfill", daemon=True)
+    thread.start()
+
+
 def main():
     # Resolve collection name from workspace state before any client/state ops
     try:
@@ -805,6 +877,8 @@ def main():
         idx.ensure_collection_and_indexes_once(client, default_collection, model_dim, vector_name)
     except Exception:
         pass
+
+    _start_pseudo_backfill_worker(client, default_collection)
 
     try:
         if multi_repo_enabled:
@@ -1061,8 +1135,11 @@ def _process_paths(paths, client, model, vector_name: str, model_dim: int, works
                     except Exception:
                         pass
 
-                # Fallback: full single-file reindex
+                # Fallback: full single-file reindex. Pseudo/tags are inlined by default;
+                # when PSEUDO_BACKFILL_ENABLED=1 we run base-only and rely on backfill.
                 if not ok:
+                    flag = (os.environ.get("PSEUDO_BACKFILL_ENABLED") or "").strip().lower()
+                    pseudo_mode = "off" if flag in {"1", "true", "yes", "on"} else "full"
                     ok = idx.index_single_file(
                         client,
                         model,
@@ -1071,6 +1148,7 @@ def _process_paths(paths, client, model, vector_name: str, model_dim: int, works
                         p,
                         dedupe=True,
                         skip_unchanged=False,
+                        pseudo_mode=pseudo_mode,
                     )
             except Exception as e:
                 try:
