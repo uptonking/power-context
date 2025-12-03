@@ -22,6 +22,9 @@ def test_chunk_semantic_fallback_no_ts(monkeypatch):
     monkeypatch.setenv("USE_TREE_SITTER", "0")
     text = "\n".join(f"L{i}" for i in range(1, 26))
     chunks = ing.chunk_semantic(text, language="python", max_lines=8, overlap=3)
-    # Should behave like chunk_lines
+    # Should behave like chunk_lines but with is_semantic key added
     chunks2 = ing.chunk_lines(text, max_lines=8, overlap=3)
+    # Compare ignoring the is_semantic key (added by chunk_semantic wrapper)
+    for c in chunks:
+        c.pop("is_semantic", None)
     assert chunks == chunks2
