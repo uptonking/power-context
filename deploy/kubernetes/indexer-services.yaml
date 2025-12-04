@@ -23,6 +23,20 @@ spec:
         runAsUser: 1000
         runAsGroup: 1000
         fsGroup: 1000
+      initContainers:
+      - name: wait-for-qdrant
+        image: context-engine-indexer-service
+        imagePullPolicy: IfNotPresent
+        command:
+        - /bin/sh
+        - -c
+        - /app/scripts/wait-for-qdrant.sh
+        env:
+        - name: QDRANT_URL
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: QDRANT_URL
       containers:
       - name: watcher
         image: context-engine-indexer-service
@@ -130,6 +144,20 @@ spec:
         runAsUser: 1000
         runAsGroup: 1000
         fsGroup: 1000
+      initContainers:
+      - name: wait-for-qdrant
+        image: context-engine-indexer-service
+        imagePullPolicy: IfNotPresent
+        command:
+        - /bin/sh
+        - -c
+        - /app/scripts/wait-for-qdrant.sh
+        env:
+        - name: QDRANT_URL
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: QDRANT_URL
       restartPolicy: OnFailure
       containers:
       - name: indexer
@@ -207,6 +235,20 @@ spec:
         runAsUser: 1000
         runAsGroup: 1000
         fsGroup: 1000
+      initContainers:
+      - name: wait-for-qdrant
+        image: context-engine-indexer-service
+        imagePullPolicy: IfNotPresent
+        command:
+        - /bin/sh
+        - -c
+        - /app/scripts/wait-for-qdrant.sh
+        env:
+        - name: QDRANT_URL
+          valueFrom:
+            configMapKeyRef:
+              name: context-engine-config
+              key: QDRANT_URL
       restartPolicy: OnFailure
       containers:
       - name: init-payload
