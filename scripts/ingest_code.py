@@ -2288,6 +2288,12 @@ def index_single_file(
             if get_cached_file_hash:
                 prev_local = get_cached_file_hash(str(file_path), repo_tag)
                 if prev_local and file_hash and prev_local == file_hash:
+                    # When fs fast-path is enabled, refresh cache entry with size/mtime
+                    if fast_fs and set_cached_file_hash:
+                        try:
+                            set_cached_file_hash(str(file_path), file_hash, repo_tag)
+                        except Exception:
+                            pass
                     print(f"Skipping unchanged file (cache): {file_path}")
                     return False
         except Exception:
@@ -2300,6 +2306,11 @@ def index_single_file(
             repo_rel_path=repo_rel_path,
         )
         if prev and prev == file_hash:
+            if fast_fs and set_cached_file_hash:
+                try:
+                    set_cached_file_hash(str(file_path), file_hash, repo_tag)
+                except Exception:
+                    pass
             print(f"Skipping unchanged file: {file_path}")
             return False
 
@@ -2811,6 +2822,12 @@ def index_repo(
                 if get_cached_file_hash:
                     prev_local = get_cached_file_hash(str(file_path), per_file_repo)
                     if prev_local and file_hash and prev_local == file_hash:
+                        # When fs fast-path is enabled, refresh cache entry with size/mtime
+                        if fast_fs and set_cached_file_hash:
+                            try:
+                                set_cached_file_hash(str(file_path), file_hash, per_file_repo)
+                            except Exception:
+                                pass
                         if PROGRESS_EVERY <= 0 and files_seen % 50 == 0:
                             print(f"... processed {files_seen} files (skipping unchanged, cache)")
                             try:
