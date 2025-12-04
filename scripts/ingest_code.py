@@ -73,6 +73,7 @@ try:
         set_cached_pseudo,
         update_symbols_with_pseudo,
         get_workspace_state,
+        get_cached_file_meta,
     )
 except ImportError:
     # State integration is optional; continue if not available
@@ -90,6 +91,7 @@ except ImportError:
     update_symbols_with_pseudo = None  # type: ignore
     compare_symbol_changes = None  # type: ignore
     get_workspace_state = None  # type: ignore
+    get_cached_file_meta = None  # type: ignore
 
 # Optional Tree-sitter import (graceful fallback)
 try:
@@ -2206,6 +2208,24 @@ def index_single_file(
     pseudo_mode: str = "full",
 ) -> bool:
     """Index a single file path. Returns True if indexed, False if skipped."""
+
+    fast_fs = _env_truthy(os.environ.get("INDEX_FS_FASTPATH"), False)
+    if skip_unchanged and fast_fs and get_cached_file_meta is not None:
+        try:
+            repo_name_for_cache = _detect_repo_name_from_path(file_path)
+            meta = get_cached_file_meta(str(file_path), repo_name_for_cache) or {}
+            size = meta.get("size")
+            mtime = meta.get("mtime")
+            if size is not None and mtime is not None:
+                st = file_path.stat()
+                if int(getattr(st, "st_size", 0)) == int(size) and int(
+                    getattr(st, "st_mtime", 0)
+                ) == int(mtime):
+                    print(f"Skipping unchanged file (fs-meta): {file_path}")
+                    return False
+        except Exception:
+            pass
+
     try:
         text = file_path.read_text(encoding="utf-8", errors="ignore")
     except Exception as e:
@@ -2703,6 +2723,8 @@ def index_repo(
     # Track per-file hashes across the entire run for cache updates on any flush
     batch_file_hashes = {}
 
+    fast_fs = _env_truthy(os.environ.get("INDEX_FS_FASTPATH"), False)
+
     for file_path in iter_files(root):
         files_seen += 1
 
@@ -2715,6 +2737,23 @@ def index_repo(
                 ensure_collection_and_indexes_once(client, current_collection, dim, vector_name)
             else:
                 current_collection = get_collection_name(ws_path) if get_collection_name else "default-collection"
+
+        # Optional fs-metadata fast-path: skip files whose size/mtime match cache
+        if skip_unchanged and fast_fs and get_cached_file_meta is not None:
+            try:
+                per_file_repo_for_cache = _detect_repo_name_from_path(file_path)
+                meta = get_cached_file_meta(str(file_path), per_file_repo_for_cache) or {}
+                size = meta.get("size")
+                mtime = meta.get("mtime")
+                if size is not None and mtime is not None:
+                    st = file_path.stat()
+                    if int(getattr(st, "st_size", 0)) == int(size) and int(
+                        getattr(st, "st_mtime", 0)
+                    ) == int(mtime):
+                        print(f"Skipping unchanged file (fs-meta): {file_path}")
+                        continue
+            except Exception:
+                pass
 
         try:
             text = file_path.read_text(encoding="utf-8", errors="ignore")
