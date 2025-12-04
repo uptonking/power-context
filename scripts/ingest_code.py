@@ -1193,6 +1193,21 @@ def pseudo_backfill_tick(
         flt = None
 
     processed = 0
+    debug_enabled = (os.environ.get("PSEUDO_BACKFILL_DEBUG") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    debug_stats = {
+        "scanned": 0,
+        "glm_calls": 0,
+        "glm_success": 0,
+        "filled_new": 0,
+        "updated_existing": 0,
+        "skipped_no_code": 0,
+        "skipped_after_glm": 0,
+    }
     next_offset = None
 
     while processed < max_points:
@@ -1215,29 +1230,45 @@ def pseudo_backfill_tick(
         new_points: list[Any] = []
         for rec in points:
             try:
+                if debug_enabled:
+                    debug_stats["scanned"] += 1
                 payload = rec.payload or {}
                 md = payload.get("metadata") or {}
                 code = md.get("code") or ""
                 if not code:
+                    if debug_enabled:
+                        debug_stats["skipped_no_code"] += 1
                     continue
 
                 pseudo = payload.get("pseudo") or ""
                 tags_val = payload.get("tags") or []
                 tags: list[str] = list(tags_val) if isinstance(tags_val, list) else []
+                had_existing = bool(pseudo or tags)
 
                 # If pseudo/tags are missing, generate them once
                 if not pseudo and not tags:
                     try:
+                        if debug_enabled:
+                            debug_stats["glm_calls"] += 1
                         pseudo, tags = generate_pseudo_tags(code)
+                        if debug_enabled and (pseudo or tags):
+                            debug_stats["glm_success"] += 1
                     except Exception:
                         pseudo, tags = "", []
 
                 if not pseudo and not tags:
+                    if debug_enabled:
+                        debug_stats["skipped_after_glm"] += 1
                     continue
 
                 # Update payload and lexical vector with pseudo/tags
                 payload["pseudo"] = pseudo
                 payload["tags"] = tags
+                if debug_enabled:
+                    if had_existing:
+                        debug_stats["updated_existing"] += 1
+                    else:
+                        debug_stats["filled_new"] += 1
 
                 aug_text = f"{code} {pseudo} {' '.join(tags)}".strip()
                 lex_vec = _lex_hash_vector_text(aug_text)
