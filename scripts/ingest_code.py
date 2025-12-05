@@ -2569,6 +2569,34 @@ def index_repo(
     skip_unchanged: bool = True,
     pseudo_mode: str = "full",
 ):
+    # Optional fast no-change precheck: when INDEX_FS_FASTPATH is enabled, use
+    # fs metadata + cache.json to exit early before model/Qdrant setup when all
+    # files are unchanged.
+    fast_fs = _env_truthy(os.environ.get("INDEX_FS_FASTPATH"), False)
+    if skip_unchanged and not recreate and fast_fs and get_cached_file_meta is not None:
+        try:
+            all_unchanged = True
+            for file_path in iter_files(root):
+                per_file_repo_for_cache = _detect_repo_name_from_path(file_path) if _detect_repo_name_from_path else None
+                meta = get_cached_file_meta(str(file_path), per_file_repo_for_cache) or {}
+                size = meta.get("size")
+                mtime = meta.get("mtime")
+                if size is None or mtime is None:
+                    all_unchanged = False
+                    break
+                st = file_path.stat()
+                if int(getattr(st, "st_size", 0)) != int(size) or int(getattr(st, "st_mtime", 0)) != int(mtime):
+                    all_unchanged = False
+                    break
+            if all_unchanged:
+                try:
+                    print("[fast_index] No changes detected via fs metadata; skipping model and Qdrant setup")
+                except Exception:
+                    pass
+                return
+        except Exception:
+            pass
+
     model = TextEmbedding(model_name=model_name)
     # Determine embedding dimension
     dim = len(next(model.embed(["dimension probe"])))
@@ -2658,6 +2686,9 @@ def index_repo(
     )
 
     # Health check: detect cache/collection sync issues before indexing (single-collection mode only)
+    # TODO: In future, consider a dedicated "health-check-only" mode/command that runs these
+    # expensive Qdrant probes without doing a full index pass, so that "nothing changed" runs
+    # can stay as cheap as possible while still offering an explicit way to validate collections.
     if not recreate and skip_unchanged and not use_per_repo_collections and collection:
         try:
             from scripts.collection_health import auto_heal_if_needed
