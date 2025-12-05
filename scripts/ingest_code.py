@@ -107,6 +107,13 @@ except Exception:  # pragma: no cover
     get_language = None  # type: ignore
     _TS_AVAILABLE = False
 
+# Import AST analyzer for enhanced semantic chunking
+try:
+    from scripts.ast_analyzer import get_ast_analyzer, chunk_code_semantically
+    _AST_ANALYZER_AVAILABLE = True
+except ImportError:
+    _AST_ANALYZER_AVAILABLE = False
+
 
 _TS_WARNED = False
 
@@ -469,6 +476,25 @@ def chunk_semantic(
     text: str, language: str, max_lines: int = 120, overlap: int = 20
 ) -> List[Dict]:
     """AST-aware chunking that tries to keep complete functions/classes together."""
+    # Try enhanced AST analyzer first (if available)
+    use_enhanced = os.environ.get("INDEX_USE_ENHANCED_AST", "1").lower() in {"1", "true", "yes", "on"}
+    if use_enhanced and _AST_ANALYZER_AVAILABLE and language in ("python", "javascript", "typescript"):
+        try:
+            chunks = chunk_code_semantically(text, language, max_lines, overlap)
+            # Convert to expected format
+            return [
+                {
+                    "text": c["text"],
+                    "start": c["start"],
+                    "end": c["end"],
+                    "is_semantic": c.get("is_semantic", True)
+                }
+                for c in chunks
+            ]
+        except Exception as e:
+            if os.environ.get("DEBUG_INDEXING"):
+                print(f"[DEBUG] Enhanced AST chunking failed, falling back: {e}")
+    
     if not _use_tree_sitter() or language not in ("python", "javascript", "typescript"):
         # Fallback to line-based chunking
         return chunk_lines(text, max_lines, overlap)
