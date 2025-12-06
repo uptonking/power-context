@@ -1370,15 +1370,15 @@ class RemoteUploadClient:
             # Single walk with early pruning and set-based matching to reduce IO
             ext_suffixes = {str(ext).lower() for ext in CODE_EXTS if str(ext).startswith('.')}
             name_matches = {str(ext) for ext in CODE_EXTS if not str(ext).startswith('.')}
-            dev_remote = os.environ.get("DEV_REMOTE_MODE") == "1" or os.environ.get("REMOTE_UPLOAD_MODE") == "development"
+            # Always exclude dev-workspace to prevent recursive upload loops
+            # (upload service creates dev-workspace/<collection>/ which would otherwise get re-uploaded)
             excluded = {
                 "node_modules", "vendor", "dist", "build", "target", "out",
                 ".git", ".hg", ".svn", ".vscode", ".idea", ".venv", "venv",
                 "__pycache__", ".pytest_cache", ".mypy_cache", ".cache",
-                ".context-engine", ".context-engine-uploader", ".codebase"
+                ".context-engine", ".context-engine-uploader", ".codebase",
+                "dev-workspace"
             }
-            if dev_remote:
-                excluded.add("dev-workspace")
 
             seen = set()
             for root, dirnames, filenames in os.walk(workspace_path):

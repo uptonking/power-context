@@ -28,7 +28,7 @@ def test_hybrid_cli_json_output(monkeypatch, capsys):
             self.args = args
             self.kwargs = kwargs
 
-    def fake_dense_query(client, vec_name, vector, flt, per_query, collection_name=None):
+    def fake_dense_query(client, vec_name, vector, flt, per_query, collection_name=None, query_text=None):
         md = {
             "path": "/work/pkg/a.py",
             "symbol": "foo",

@@ -9,6 +9,7 @@ Complete environment variable reference for Context Engine.
 **On this page:**
 - [Core Settings](#core-settings)
 - [Indexing & Micro-Chunks](#indexing--micro-chunks)
+- [Query Optimization](#query-optimization)
 - [Watcher Settings](#watcher-settings)
 - [Reranker](#reranker)
 - [Decoder (llama.cpp / GLM)](#decoder-llamacpp--glm)
@@ -37,11 +38,31 @@ Complete environment variable reference for Context Engine.
 | TOKENIZER_URL | HF tokenizer.json URL (for Make download) | n/a |
 | TOKENIZER_PATH | Local path where tokenizer is saved (Make) | models/tokenizer.json |
 | TOKENIZER_JSON | Runtime path for tokenizer (indexer) | models/tokenizer.json |
-| USE_TREE_SITTER | Enable tree-sitter parsing (py/js/ts) | 0 (off) |
+| USE_TREE_SITTER | Enable tree-sitter parsing (py/js/ts) | 1 (on) |
+| INDEX_USE_ENHANCED_AST | Enable advanced AST-based semantic chunking | 1 (on) |
+| INDEX_SEMANTIC_CHUNKS | Enable semantic chunking (preserve function/class boundaries) | 1 (on) |
 | INDEX_CHUNK_LINES | Lines per chunk (non-micro mode) | 120 |
 | INDEX_CHUNK_OVERLAP | Overlap lines between chunks | 20 |
 | INDEX_BATCH_SIZE | Upsert batch size | 64 |
 | INDEX_PROGRESS_EVERY | Log progress every N files | 200 |
+
+## Query Optimization
+
+Dynamic HNSW_EF tuning and intelligent query routing for 2x faster simple queries.
+
+| Name | Description | Default |
+|------|-------------|---------|
+| QUERY_OPTIMIZER_ADAPTIVE | Enable adaptive EF optimization | 1 (on) |
+| QUERY_OPTIMIZER_MIN_EF | Minimum EF value | 64 |
+| QUERY_OPTIMIZER_MAX_EF | Maximum EF value | 512 |
+| QUERY_OPTIMIZER_SIMPLE_THRESHOLD | Complexity threshold for simple queries | 0.3 |
+| QUERY_OPTIMIZER_COMPLEX_THRESHOLD | Complexity threshold for complex queries | 0.7 |
+| QUERY_OPTIMIZER_SIMPLE_FACTOR | EF multiplier for simple queries | 0.5 |
+| QUERY_OPTIMIZER_SEMANTIC_FACTOR | EF multiplier for semantic queries | 1.0 |
+| QUERY_OPTIMIZER_COMPLEX_FACTOR | EF multiplier for complex queries | 2.0 |
+| QUERY_OPTIMIZER_DENSE_THRESHOLD | Complexity threshold for dense-only routing | 0.2 |
+| QUERY_OPTIMIZER_COLLECTION_SIZE | Approximate collection size for scaling | 10000 |
+| QDRANT_EF_SEARCH | Base HNSW_EF value (overridden by optimizer) | 128 |
 
 ## Watcher Settings
 

@@ -9,7 +9,7 @@ This document provides comprehensive API documentation for all MCP (Model Contex
 **On this page:**
 - [Overview](#overview)
 - [Memory Server API](#memory-server-api) - `store()`, `find()`
-- [Indexer Server API](#indexer-server-api) - `repo_search()`, `context_search()`, `context_answer()`, etc.
+- [Indexer Server API](#indexer-server-api) - `repo_search()`, `context_search()`, `context_answer()`, `info_request()`, etc.
 - [Response Schemas](#response-schemas)
 - [Error Handling](#error-handling)
 
@@ -160,6 +160,13 @@ Perform hybrid code search combining dense semantic, lexical BM25, and optional 
 - `limit` (int, default 10): Maximum total results to return
 - `per_path` (int, default 2): Maximum results per file path
 
+**Cross-Codebase Isolation:**
+- `repo` (str or list[str], optional): Filter results to specific repository(ies)
+  - Single repo: `"pathful-commons-app"` - Search only this repo
+  - Multiple repos: `["frontend", "backend"]` - Search related repos together
+  - All repos: `"*"` - Explicitly search all indexed repos (disable auto-filter)
+  - Default: Auto-detects current repo from `CURRENT_REPO` env when `REPO_AUTO_FILTER=1`
+
 **Content Filters:**
 - `language` (str, optional): Filter by programming language
 - `path_glob` (str or list[str], optional): Glob patterns for path filtering
@@ -184,6 +191,10 @@ Perform hybrid code search combining dense semantic, lexical BM25, and optional 
 - `rerank_enabled` (bool, optional): Override default reranker setting
 - `rerank_top_n` (int, default 50): Number of candidates to consider for reranking
 - `rerank_return_m` (int, default 12): Number of results to return after reranking
+
+Reranking uses a blended scoring approach that preserves symbol match boosts:
+- **Blend weight** (`RERANK_BLEND_WEIGHT`, default 0.6): Ratio of neural reranker score to fusion score
+- **Post-rerank symbol boost** (`POST_RERANK_SYMBOL_BOOST`, default 1.0): Applied after blending to ensure exact symbol matches rank highest even when the neural reranker disagrees
 
 **Response Format:**
 ```json
@@ -254,12 +265,30 @@ Perform hybrid code search combining dense semantic, lexical BM25, and optional 
 }
 ```
 
+**Cross-Codebase Search (multi-repo):**
+```json
+{
+  "query": "authentication middleware",
+  "repo": ["frontend", "backend"],
+  "limit": 15
+}
+```
+
+**Single Repo Search:**
+```json
+{
+  "query": "user authentication",
+  "repo": "my-repo",
+  "include_snippet": true
+}
+```
+
 ### context_search()
 
 Blend code search results with memory entries for comprehensive context.
 
 **Parameters:**
-All `repo_search` parameters plus:
+All `repo_search` parameters (including `repo` for cross-codebase isolation) plus:
 - `include_memories` (bool, default true): Whether to include memory results
 - `memory_weight` (float, default 1.0): Weight for memory results vs code results
 - `per_source_limits` (dict, optional): Limits per source type:
@@ -354,6 +383,132 @@ All `repo_search` parameters supported for context retrieval.
   "language": "python",
   "expand": true,
   "temperature": 0.2
+}
+```
+
+### info_request()
+
+Simplified codebase retrieval with optional explanation mode. Drop-in replacement for basic codebase retrieval tools with human-readable result descriptions.
+
+**Primary Parameters:**
+- `info_request` (str, required): Natural language description of the code you're looking for
+- `information_request` (str): Alias for `info_request`
+
+**Explanation Mode:**
+- `include_explanation` (bool, default false): Add summary, primary_locations, related_concepts, grouped_results, and confidence metrics
+- `include_relationships` (bool, default false): Add imports_from, calls, related_paths to each result
+
+**Filter Parameters:**
+- `limit` (int): Maximum results (smart defaults: 15 for short queries, 8 for questions, 10 otherwise)
+- `language` (str, optional): Filter by programming language
+- `under` (str, optional): Limit search to specific directory
+- `repo` (str or list[str], optional): Filter by repository name(s)
+- `path_glob` (str or list[str], optional): Glob patterns for file paths
+
+**Snippet Options:**
+- `include_snippet` (bool, default true): Include code snippets
+- `context_lines` (int, default 5): Lines of context around matches
+
+**Returns (basic mode):**
+```json
+{
+  "ok": true,
+  "results": [
+    {
+      "score": 0.85,
+      "path": "/work/src/hooks/useAuth.tsx",
+      "symbol": "useAuth",
+      "start_line": 15,
+      "end_line": 45,
+      "information": "Found 'useAuth' in useAuth.tsx (lines 15-45)",
+      "relevance_score": 0.85,
+      "snippet": "export function useAuth() { ... }"
+    }
+  ],
+  "total": 10,
+  "search_strategy": "hybrid+rerank"
+}
+```
+
+**Returns (with `include_explanation: true`):**
+```json
+{
+  "ok": true,
+  "results": [...],
+  "total": 10,
+  "search_strategy": "hybrid+rerank+lang:typescript",
+  "summary": "Found 10 results related to 'authentication hook' across 5 files",
+  "primary_locations": [
+    "/work/src/hooks/useAuth.tsx",
+    "/work/src/context/AuthContext.tsx"
+  ],
+  "related_concepts": ["auth", "hook", "context", "session", "token"],
+  "grouped_results": {
+    "by_file": {
+      "/work/src/hooks/useAuth.tsx": {
+        "count": 3,
+        "top_symbols": ["useAuth", "AuthProvider", "useSession"]
+      }
+    }
+  },
+  "confidence": {
+    "level": "high",
+    "score": 0.78,
+    "top_score": 0.85,
+    "symbol_matches": 2
+  },
+  "query_understanding": {
+    "intent": "search_for_code",
+    "detected_language": "typescript",
+    "detected_symbols": ["useAuth"],
+    "search_strategy": "hybrid+rerank+lang:typescript"
+  }
+}
+```
+
+**Returns (with `include_relationships: true`):**
+```json
+{
+  "results": [
+    {
+      "information": "Found 'useAuth' in useAuth.tsx (lines 15-45)",
+      "relationships": {
+        "imports_from": ["react", "@/context/AuthContext"],
+        "calls": ["useState", "useContext", "fetchUser"],
+        "symbol_path": "useAuth",
+        "related_paths": ["/work/src/context/AuthContext.tsx"]
+      }
+    }
+  ]
+}
+```
+
+**Smart Limits:**
+- Short queries (1-2 words): 15 results for broader coverage
+- Question queries ("how does", "what is"): 8 results for focused answers
+- Default: 10 results
+
+**Search Strategy Labels:**
+- `hybrid` - Base hybrid search (dense + lexical)
+- `+rerank` - Neural reranker applied
+- `+repo_filtered` - Filtered to specific repo(s)
+- `+lang:python` - Filtered by language
+- `+path_filtered` - Filtered by directory
+
+**Environment Variables:**
+- `INFO_REQUEST_LIMIT=10` - Default result limit
+- `INFO_REQUEST_CONTEXT_LINES=5` - Default context lines
+- `INFO_REQUEST_EXPLAIN_DEFAULT=0` - Enable explanation mode by default
+- `INFO_REQUEST_RELATIONSHIPS=0` - Enable relationships by default
+
+**Example:**
+```json
+{
+  "info_request": "authentication middleware",
+  "include_explanation": true,
+  "include_relationships": true,
+  "language": "python",
+  "limit": 5
 }
 ```
 

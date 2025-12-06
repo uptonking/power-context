@@ -38,6 +38,13 @@ try:
 except ImportError:
     SEMANTIC_EXPANSION_AVAILABLE = False
 
+# Import query optimizer for dynamic EF tuning
+try:
+    from scripts.query_optimizer import get_query_optimizer, optimize_query
+    QUERY_OPTIMIZER_AVAILABLE = True
+except ImportError:
+    QUERY_OPTIMIZER_AVAILABLE = False
+
 logger = logging.getLogger("hybrid_search")
 
 
@@ -1364,9 +1371,21 @@ def lex_query(client: QdrantClient, v: List[float], flt, per_query: int, collect
 
 
 def dense_query(
-    client: QdrantClient, vec_name: str, v: List[float], flt, per_query: int, collection_name: str | None = None
+    client: QdrantClient, vec_name: str, v: List[float], flt, per_query: int, collection_name: str | None = None, query_text: str | None = None
 ) -> List[Any]:
     ef = max(EF_SEARCH, 32 + 4 * int(per_query))
+    
+    # Apply dynamic EF optimization if query text provided
+    if QUERY_OPTIMIZER_AVAILABLE and query_text and os.environ.get("QUERY_OPTIMIZER_ADAPTIVE", "1") == "1":
+        try:
+            result = optimize_query(query_text)
+            ef = result["recommended_ef"]
+            if os.environ.get("DEBUG_HYBRID_SEARCH"):
+                logger.debug(f"Dynamic EF: {ef} (complexity={result['complexity']}, type={result['query_type']})")
+        except Exception as e:
+            if os.environ.get("DEBUG_HYBRID_SEARCH"):
+                logger.debug(f"Query optimizer failed, using default EF: {e}")
+    
     flt = _sanitize_filter_obj(flt)
     collection = _collection(collection_name)
 
@@ -1455,6 +1474,7 @@ def run_hybrid_search(
     model: TextEmbedding | None = None,
     collection: str | None = None,
     mode: str | None = None,
+    repo: str | list[str] | None = None,  # Filter by repo name(s); "*" to disable auto-filter
 ) -> List[Dict[str, Any]]:
     client = QdrantClient(url=os.environ.get("QDRANT_URL", QDRANT_URL), api_key=API_KEY)
     model_name = os.environ.get("EMBEDDING_MODEL", MODEL_NAME)
@@ -1471,7 +1491,23 @@ def run_hybrid_search(
     eff_ext = ext or dsl.get("ext")
     eff_not = not_filter or dsl.get("not")
     eff_case = case or dsl.get("case") or os.environ.get("HYBRID_CASE", "insensitive")
-    eff_repo = dsl.get("repo")
+    # Repo filter: explicit param > DSL > auto-detect from env
+    eff_repo = repo or dsl.get("repo")
+    # Normalize repo to list for multi-repo support
+    if eff_repo and isinstance(eff_repo, str):
+        if eff_repo.strip() == "*":
+            eff_repo = None  # "*" means search all repos
+        else:
+            eff_repo = [r.strip() for r in eff_repo.split(",") if r.strip()]
+    elif eff_repo and isinstance(eff_repo, (list, tuple)):
+        eff_repo = [str(r).strip() for r in eff_repo if str(r).strip() and str(r).strip() != "*"]
+        if not eff_repo:
+            eff_repo = None
+    # Auto-detect repo from env if not specified and auto-filter is enabled
+    if eff_repo is None and str(os.environ.get("REPO_AUTO_FILTER", "1")).strip().lower() in {"1", "true", "yes", "on"}:
+        auto_repo = os.environ.get("CURRENT_REPO") or os.environ.get("REPO_NAME")
+        if auto_repo and auto_repo.strip():
+            eff_repo = [auto_repo.strip()]
     eff_path_regex = path_regex
 
     def _to_list(x):
@@ -1597,12 +1633,27 @@ def run_hybrid_search(
                 key="metadata.language", match=models.MatchValue(value=eff_language)
             )
         )
+    # Repo filter: supports single repo or list of repos (for related codebases)
     if eff_repo:
-        must.append(
-            models.FieldCondition(
-                key="metadata.repo", match=models.MatchValue(value=eff_repo)
+        if isinstance(eff_repo, list) and len(eff_repo) == 1:
+            must.append(
+                models.FieldCondition(
+                    key="metadata.repo", match=models.MatchValue(value=eff_repo[0])
+                )
             )
-        )
+        elif isinstance(eff_repo, list) and len(eff_repo) > 1:
+            # Multiple repos: use MatchAny for OR logic
+            must.append(
+                models.FieldCondition(
+                    key="metadata.repo", match=models.MatchAny(any=eff_repo)
+                )
+            )
+        elif isinstance(eff_repo, str):
+            must.append(
+                models.FieldCondition(
+                    key="metadata.repo", match=models.MatchValue(value=eff_repo)
+                )
+            )
     if eff_under:
         must.append(
             models.FieldCondition(
@@ -1934,7 +1985,16 @@ def run_hybrid_search(
     flt_gated = _sanitize_filter_obj(flt_gated)
 
     result_sets: List[List[Any]] = [
-        dense_query(client, vec_name, v, flt_gated, _scaled_per_query, collection) for v in embedded
+        dense_query(
+            client,
+            vec_name,
+            v,
+            flt_gated,
+            _scaled_per_query,
+            collection,
+            query_text=queries[i] if i < len(queries) else None,
+        )
+        for i, v in enumerate(embedded)
     ]
     if os.environ.get("DEBUG_HYBRID_SEARCH"):
         total_dense_results = sum(len(rs) for rs in result_sets)
@@ -3087,7 +3147,16 @@ def main():
 
     embedded = _embed_queries_cached(model, queries)
     result_sets: List[List[Any]] = [
-        dense_query(client, vec_name, v, flt, _cli_scaled_per_query, eff_collection) for v in embedded
+        dense_query(
+            client,
+            vec_name,
+            v,
+            flt,
+            _cli_scaled_per_query,
+            eff_collection,
+            query_text=queries[i] if i < len(queries) else None,
+        )
+        for i, v in enumerate(embedded)
     ]
 
     # RRF fusion (weighted, with scaled RRF)

@@ -883,6 +883,59 @@ def _tokens_from_queries(qs):
     return out
 
 
+def _detect_current_repo() -> str | None:
+    """Detect the current repository name from workspace/env.
+
+    Priority:
+    1. CURRENT_REPO env var (explicitly set)
+    2. REPO_NAME env var
+    3. Detect from /work directory structure (first subdirectory with .git)
+    4. Git remote origin name
+
+    Returns: repo name or None if detection fails
+    """
+    # Check explicit env vars first
+    for env_key in ("CURRENT_REPO", "REPO_NAME"):
+        val = os.environ.get(env_key, "").strip()
+        if val:
+            return val
+
+    # Try to detect from /work directory
+    work_path = Path("/work")
+    if work_path.exists():
+        try:
+            # Check for .git in /work itself
+            if (work_path / ".git").exists():
+                # Use git to get repo name from remote
+                try:
+                    import subprocess
+                    result = subprocess.run(
+                        ["git", "-C", str(work_path), "config", "--get", "remote.origin.url"],
+                        capture_output=True, text=True, timeout=5
+                    )
+                    if result.returncode == 0 and result.stdout.strip():
+                        url = result.stdout.strip()
+                        # Extract repo name from URL (e.g., git@github.com:user/repo.git -> repo)
+                        name = url.rstrip("/").rsplit("/", 1)[-1]
+                        if name.endswith(".git"):
+                            name = name[:-4]
+                        if name:
+                            return name
+                except Exception:
+                    pass
+                # Fallback to directory name
+                return work_path.name
+
+            # Check subdirectories for repos
+            for subdir in work_path.iterdir():
+                if subdir.is_dir() and (subdir / ".git").exists():
+                    return subdir.name
+        except Exception:
+            pass
+
+    return None
+
+
 @mcp.tool()
 async def qdrant_index_root(
     recreate: Optional[bool] = None, collection: Optional[str] = None
@@ -1694,6 +1747,8 @@ async def repo_search(
     ext: Any = None,
     not_: Any = None,
     case: Any = None,
+    # Repo scoping (cross-codebase isolation)
+    repo: Any = None,  # str, list[str], or "*" to search all repos
     # Response shaping
     compact: Any = None,
     args: Any = None,  # Compatibility shim for mcp-remote/Claude wrappers that send args/kwargs
@@ -1712,6 +1767,9 @@ async def repo_search(
     - include_snippet/context_lines: return inline snippets near hits when true.
     - rerank_*: optional ONNX reranker toggles; timeouts fall back to hybrid output.
     - collection: str. Target collection; defaults to workspace state or env COLLECTION_NAME.
+    - repo: str or list[str]. Filter by repo name(s). Use "*" to search all repos (disable auto-filter).
+      By default, auto-detects current repo from CURRENT_REPO env and filters to it.
+      Use repo=["frontend","backend"] to search related repos together.
     - Filters (optional): language, under (path prefix), kind, symbol, ext, path_regex,
       path_glob (str or list[str]), not_glob (str or list[str]), not_ (negative text), case.
 
@@ -1966,6 +2024,29 @@ async def repo_search(
     ext = _to_str(ext, "").strip()
     not_ = _to_str(not_, "").strip()
     case = _to_str(case, "").strip()
+
+    # Normalize repo filter: str, list[str], or "*" (search all)
+    # Default: auto-detect current repo unless REPO_AUTO_FILTER=0
+    repo_filter = None
+    if repo is not None:
+        if isinstance(repo, str):
+            r = repo.strip()
+            if r == "*":
+                repo_filter = "*"  # Explicit "search all repos"
+            elif r:
+                # Support comma-separated list
+                repo_filter = [x.strip() for x in r.split(",") if x.strip()]
+        elif isinstance(repo, (list, tuple)):
+            repo_filter = [str(x).strip() for x in repo if str(x).strip() and str(x).strip() != "*"]
+            if not repo_filter:
+                repo_filter = "*"  # Empty list after filtering means search all
+
+    # Auto-detect current repo if not explicitly specified and auto-filter is enabled
+    if repo_filter is None and str(os.environ.get("REPO_AUTO_FILTER", "1")).strip().lower() in {"1", "true", "yes", "on"}:
+        detected_repo = _detect_current_repo()
+        if detected_repo:
+            repo_filter = [detected_repo]
+
     compact_raw = compact
     compact = _to_bool(compact, False)
     # If snippets are requested, do not compact (we need snippet field in results)
@@ -2062,6 +2143,7 @@ async def repo_search(
                     in {"1", "true", "yes", "on"},
                     model=model,
                     mode=mode_str or None,
+                    repo=repo_filter,  # Cross-codebase isolation
                 )
             finally:
                 if prev_coll is None:
@@ -2164,6 +2246,7 @@ async def repo_search(
                     in {"1", "true", "yes", "on"},
                     model=model,
                     mode=mode_str or None,
+                    repo=repo_filter,  # Cross-codebase isolation
                 )
                 json_lines = items
             except Exception:
@@ -2272,20 +2355,44 @@ async def repo_search(
                         docs = list(ex.map(_doc_for, cand_objs))
                     pairs = [(rq, d) for d in docs]
                     scores = _rr_local(pairs)
-                    ranked = sorted(
-                        zip(scores, cand_objs), key=lambda x: x[0], reverse=True
-                    )
+                    # Blend rerank with fusion score to preserve pre-rerank boosts
+                    # (symbol_exact, impl_boost, path boosts are otherwise lost)
+                    _rerank_blend = float(os.environ.get("RERANK_BLEND_WEIGHT", "0.6") or 0.6)
+                    _rerank_blend = max(0.0, min(1.0, _rerank_blend))  # clamp [0,1]
+                    # Post-rerank symbol boost: apply symbol boosts directly to blended score
+                    # This ensures exact symbol matches rank higher even when reranker disagrees
+                    _post_symbol_boost = float(os.environ.get("POST_RERANK_SYMBOL_BOOST", "1.0") or 1.0)
+                    blended = []
+                    for rr_score, obj in zip(scores, cand_objs):
+                        fusion_score = float(obj.get("score", 0.0) or 0.0)
+                        # Normalize fusion_score to similar scale as rerank (rough heuristic)
+                        # Fusion scores are typically 0-3, rerank scores are -12 to 0
+                        # Shift fusion to negative range: fusion=2 -> -1, fusion=0 -> -3
+                        norm_fusion = fusion_score - 3.0
+                        blended_score = _rerank_blend * rr_score + (1.0 - _rerank_blend) * norm_fusion
+                        # Apply post-rerank symbol boost: extract symbol boosts from components
+                        # and add them directly to blended score (not diluted by blend weight)
+                        comps = obj.get("components") or {}
+                        sym_sub = float(comps.get("symbol_substr", 0.0) or 0.0)
+                        sym_eq = float(comps.get("symbol_exact", 0.0) or 0.0)
+                        post_boost = (sym_sub + sym_eq) * _post_symbol_boost
+                        blended_score += post_boost
+                        blended.append((blended_score, rr_score, obj, post_boost))
+                    ranked = sorted(blended, key=lambda x: x[0], reverse=True)
                     tmp = []
-                    for s, obj in ranked[: int(rerank_return_m)]:
+                    for blended_s, rr_s, obj, post_b in ranked[: int(rerank_return_m)]:
+                        why_parts = obj.get("why", []) + [f"rerank_onnx:{float(rr_s):.3f}", f"blend:{float(blended_s):.3f}"]
+                        if post_b > 0:
+                            why_parts.append(f"post_sym:{float(post_b):.3f}")
                         item = {
-                            "score": float(s),
+                            "score": float(blended_s),
                             "path": obj.get("path", ""),
                             "symbol": obj.get("symbol", ""),
                             "start_line": int(obj.get("start_line") or 0),
                             "end_line": int(obj.get("end_line") or 0),
-                            "why": obj.get("why", []) + [f"rerank_onnx:{float(s):.3f}"],
+                            "why": why_parts,
                             "components": (obj.get("components") or {})
-                            | {"rerank_onnx": float(s)},
+                            | {"rerank_onnx": float(rr_s), "blended": float(blended_s), "post_symbol_boost": float(post_b)},
                         }
                         # Preserve dual-path metadata when available so clients can prefer host paths
                         _hostp = obj.get("host_path")
@@ -2748,6 +2855,7 @@ async def repo_search_compat(**arguments) -> Dict[str, Any]:
             "case": args.get("case"),
             "compact": args.get("compact"),
             "mode": args.get("mode"),
+            "repo": args.get("repo"),  # Cross-codebase isolation
             # Alias passthroughs captured by repo_search(**kwargs)
             "queries": queries,
             "q": args.get("q"),
@@ -3306,6 +3414,8 @@ async def context_search(
     not_: Any = None,
     case: Any = None,
     compact: Any = None,
+    # Repo scoping (cross-codebase isolation)
+    repo: Any = None,  # str, list[str], or "*" to search all repos
     kwargs: Any = None,
 ) -> Dict[str, Any]:
     """Blend code search results with memory-store entries (notes, docs) for richer context.
@@ -3320,6 +3430,8 @@ async def context_search(
     - memory_weight: float (default 1.0). Scales memory scores relative to code.
     - per_source_limits: dict, e.g. {"code": 5, "memory": 3}
     - All repo_search filters are supported and passed through.
+    - repo: str or list[str]. Filter by repo name(s). Use "*" to search all repos (disable auto-filter).
+      By default, auto-detects current repo from CURRENT_REPO env and filters to it.
 
     Returns:
     - {"results": [{"source": "code"| "memory", ...}, ...], "total": N[, "memory_note": str]}
@@ -3836,6 +3948,7 @@ async def context_search(
         not_=not_,
         case=case,
         compact=False,
+        repo=repo,  # Cross-codebase isolation
     )
 
     # Optional debug
@@ -4832,6 +4945,7 @@ def _ca_prepare_filters_and_retrieve(
     model: Any,
     did_local_expand: bool,
     kwargs: Dict[str, Any],
+    repo: Any = None,  # Cross-codebase isolation: str, list[str], or "*"
 ) -> Dict[str, Any]:
     """Build effective filters and run hybrid retrieval with identifier/usage augmentation.
     Returns a dict with: items, eff_language, eff_path_glob, eff_not_glob, override_under,
@@ -5067,6 +5181,7 @@ def _ca_prepare_filters_and_retrieve(
             in {"1", "true", "yes", "on"}
         ),
         model=model,
+        repo=repo,  # Cross-codebase isolation
     )
     if os.environ.get("DEBUG_CONTEXT_ANSWER"):
         try:
@@ -5298,6 +5413,7 @@ def _ca_fallback_and_budget(
     cwd_root: str,
     include_snippet: bool,
     kwargs: Dict[str, Any],
+    repo: Any = None,  # Cross-codebase isolation
 ) -> list[Dict[str, Any]]:
     """Run Tier2/Tier3 fallbacks, apply span budgeting, and select prioritized spans.
     Returns the final list of spans to use for citations/context.
@@ -5376,6 +5492,7 @@ def _ca_fallback_and_budget(
                     in {"1", "true", "yes", "on"}
                 ),
                 model=model,
+                repo=repo,  # Cross-codebase isolation
             )
             # Ensure last call reflects tier-2 relaxed filters for introspection/testing
             _ = run_hybrid_search(
@@ -5399,6 +5516,7 @@ def _ca_fallback_and_budget(
                     in {"1", "true", "yes", "on"}
                 ),
                 model=model,
+                repo=repo,  # Cross-codebase isolation
             )
 
             if os.environ.get("DEBUG_CONTEXT_ANSWER"):
@@ -6755,6 +6873,8 @@ async def context_answer(
     not_glob: Any = None,
     case: Any = None,
     not_: Any = None,
+    # Repo scoping (cross-codebase isolation)
+    repo: Any = None,  # str, list[str], or "*" to search all repos
     kwargs: Any = None,
 ) -> Dict[str, Any]:
     """Natural-language Q&A over the repo using retrieval + local LLM (llama.cpp).
@@ -6776,6 +6896,8 @@ async def context_answer(
     - mode: "stitch" (default) or "pack" for prompt assembly.
     - expand: bool. Use tiny local LLM to propose up to 2 alternate queries.
     - Filters: language, under, kind, symbol, ext, path_regex, path_glob, not_glob, not_, case.
+    - repo: str or list[str]. Filter by repo name(s). Use "*" to search all repos (disable auto-filter).
+      By default, auto-detects current repo from CURRENT_REPO env and filters to it.
 
     Returns:
     - {"answer": str, "citations": [{"path": str, "start_line": int, "end_line": int}], "query": list[str], "used": {...}}
@@ -7022,6 +7144,7 @@ async def context_answer(
                     "case": _cfg["filters"].get("case"),
                     "symbol": _cfg["filters"].get("symbol"),
                 },
+                repo=repo,  # Cross-codebase isolation
             )
             items = _retr["items"]
             eff_language = _retr["eff_language"]
@@ -7069,6 +7192,7 @@ async def context_answer(
                 cwd_root=cwd_root,
                 include_snippet=bool(include_snippet),
                 kwargs=fallback_kwargs,
+                repo=repo,  # Cross-codebase isolation
             )
         except Exception as e:
             err = str(e)
@@ -7590,6 +7714,338 @@ async def code_search(
         compact=compact,
         kwargs=kwargs,
     )
+
+
+# ---------------------------------------------------------------------------
+# info_request: Simplified codebase retrieval with explanation mode
+# ---------------------------------------------------------------------------
+
+
+def _extract_symbols_from_query(query: str) -> list[str]:
+    """Extract potential symbol names from a query string."""
+    import re
+    # Match CamelCase, snake_case, or standalone words that look like identifiers
+    patterns = [
+        r'\b[A-Z][a-z]+(?:[A-Z][a-z]+)+\b',  # CamelCase
+        r'\b[a-z_][a-z0-9_]*(?:_[a-z0-9]+)+\b',  # snake_case
+        r'\b(?:def|class|function|method|async)\s+(\w+)',  # explicit mentions
+    ]
+    symbols = set()
+    for pat in patterns:
+        for m in re.finditer(pat, query):
+            sym = m.group(1) if m.lastindex else m.group(0)
+            if len(sym) > 2:
+                symbols.add(sym)
+    return list(symbols)[:5]  # Limit to top 5
+
+
+def _extract_related_concepts(query: str, results: list) -> list[str]:
+    """Extract related technical concepts dynamically from results (codebase-agnostic)."""
+    import re
+    concepts = set()
+
+    # Extract from results - this works on any codebase
+    for r in results[:10]:
+        # From symbols: split CamelCase/snake_case into meaningful parts
+        sym = r.get("symbol", "") or ""
+        if sym and len(sym) > 2:
+            parts = [p for p in re.split(r'(?=[A-Z])|_|-', sym) if p and len(p) > 2]
+            for part in parts[:3]:
+                concepts.add(part.lower())
+
+        # From file paths: extract directory/module names
+        path = r.get("path", "") or ""
+        if path:
+            path_parts = path.replace("\\", "/").split("/")
+            for pp in path_parts[-3:]:  # Last 3 path segments
+                # Remove extension and split
+                name = pp.rsplit(".", 1)[0] if "." in pp else pp
+                if name and len(name) > 2 and not name.startswith("_"):
+                    concepts.add(name.lower())
+
+        # From kind: function, class, method, etc.
+        kind = r.get("kind", "") or ""
+        if kind and len(kind) > 2:
+            concepts.add(kind.lower())
+
+    # From query: extract significant words (skip common words)
+    skip_words = {"the", "is", "are", "how", "does", "what", "where", "find", "get", "set", "for", "and", "with"}
+    query_parts = re.split(r'\W+', query.lower())
+    for qp in query_parts:
+        if qp and len(qp) > 2 and qp not in skip_words:
+            concepts.add(qp)
+
+    # Sort by frequency in results for relevance
+    return list(concepts)[:10]
+
+
+def _format_information_field(result: dict) -> str:
+    """Generate human-readable information field for a result."""
+    path = result.get("path", "")
+    symbol = result.get("symbol", "")
+    start = result.get("start_line", 0)
+    end = result.get("end_line", 0)
+    kind = result.get("kind", "")
+
+    # Get just the filename
+    filename = path.split("/")[-1] if "/" in path else path
+
+    if symbol and kind:
+        return f"Found {kind} '{symbol}' in {filename} (lines {start}-{end})"
+    elif symbol:
+        return f"Found '{symbol}' in {filename} (lines {start}-{end})"
+    else:
+        return f"Found match in {filename} (lines {start}-{end})"
+
+
+def _extract_relationships(result: dict) -> dict:
+    """Extract relationship metadata (imports, calls) from a result."""
+    relations = result.get("relations") or {}
+    # Get from relations object if present
+    imports = relations.get("imports") or []
+    calls = relations.get("calls") or []
+    symbol_path = relations.get("symbol_path") or ""
+    # Also check top-level metadata (fallback)
+    if not imports:
+        imports = result.get("imports") or []
+    if not calls:
+        calls = result.get("calls") or []
+    # Get related paths if available
+    related_paths = result.get("related_paths") or []
+
+    return {
+        "imports_from": imports[:10] if imports else [],  # Limit to 10
+        "calls": calls[:10] if calls else [],
+        "symbol_path": symbol_path,
+        "related_paths": related_paths[:5] if related_paths else [],
+    }
+
+
+def _calculate_confidence(query: str, results: list) -> dict:
+    """Calculate confidence metrics for the search."""
+    if not results:
+        return {"level": "none", "score": 0.0, "reason": "no_results"}
+
+    avg_score = sum(r.get("score", 0) for r in results) / len(results)
+    top_score = results[0].get("score", 0) if results else 0
+
+    # Check if query terms match symbols
+    query_tokens = set(_split_ident(query.lower()))
+    symbol_matches = sum(
+        1 for r in results[:5]
+        if any(tok in _split_ident((r.get("symbol", "") or "").lower())
+               for tok in query_tokens)
+    )
+
+    if top_score > 0.8 and symbol_matches > 0:
+        level = "high"
+    elif avg_score > 0.6:
+        level = "medium"
+    elif results:
+        level = "low"
+    else:
+        level = "none"
+
+    return {
+        "level": level,
+        "score": round(avg_score, 3),
+        "top_score": round(top_score, 3),
+        "symbol_matches": symbol_matches,
+    }
+
+
+@mcp.tool()
+async def info_request(
+    # Primary parameter
+    info_request: str = None,
+    information_request: str = None,  # Alias
+    # Explanation mode
+    include_explanation: bool = None,
+    # Relationship mapping
+    include_relationships: bool = None,
+    # Optional filters (pass-through to repo_search)
+    limit: int = None,
+    language: str = None,
+    under: str = None,
+    repo: Any = None,
+    path_glob: Any = None,
+    # Additional options
+    include_snippet: bool = None,
+    context_lines: int = None,
+    kwargs: Any = None,
+) -> Dict[str, Any]:
+    """Simplified codebase retrieval with optional explanation mode.
+
+    When to use:
+    - Simple, single-parameter code search with human-readable descriptions
+    - When you want optional explanation mode for richer context
+    - Drop-in replacement for basic codebase retrieval tools
+
+    Key parameters:
+    - info_request: str. Natural language description of the code you're looking for.
+    - information_request: str. Alias for info_request.
+    - include_explanation: bool (default false). Add summary, primary_locations, related_concepts.
+    - include_relationships: bool (default false). Add imports_from, calls, related_paths to results.
+    - limit: int (default 10). Maximum results to return.
+    - language: str. Filter by programming language.
+    - under: str. Limit search to specific directory.
+    - repo: str or list[str]. Filter by repository name(s).
+
+    Returns:
+    - Compact mode (default): results with information field and relevance_score alias
+    - Explanation mode: adds summary, primary_locations, related_concepts, query_understanding
+
+    Example:
+    - {"info_request": "database connection pooling"}
+    - {"info_request": "authentication middleware", "include_explanation": true}
+    """
+    # Resolve query from either parameter
+    query = info_request or information_request
+    if not query or not str(query).strip():
+        return {"ok": False, "error": "info_request parameter is required", "results": []}
+    query = str(query).strip()
+
+    # Resolve defaults from env
+    _default_limit = safe_int(
+        os.environ.get("INFO_REQUEST_LIMIT", "10"), default=10, logger=logger
+    )
+    _default_context = safe_int(
+        os.environ.get("INFO_REQUEST_CONTEXT_LINES", "5"), default=5, logger=logger
+    )
+    _default_explain = str(
+        os.environ.get("INFO_REQUEST_EXPLAIN_DEFAULT", "0")
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    _default_relationships = str(
+        os.environ.get("INFO_REQUEST_RELATIONSHIPS", "0")
+    ).strip().lower() in {"1", "true", "yes", "on"}
+
+    # Apply defaults
+    eff_limit = limit if limit is not None else _default_limit
+    eff_context = context_lines if context_lines is not None else _default_context
+    eff_snippet = include_snippet if include_snippet is not None else True
+    eff_explain = include_explanation if include_explanation is not None else _default_explain
+    eff_relationships = include_relationships if include_relationships is not None else _default_relationships
+
+    # Smart limits based on query characteristics (only if user didn't override)
+    if limit is None:
+        query_words = len(query.split())
+        query_lower = query.lower()
+        if query_words <= 2:  # Short query like "auth handler"
+            eff_limit = 15  # More results for broad queries
+        elif "how does" in query_lower or "what is" in query_lower:
+            eff_limit = 8   # Questions need focused results
+
+    # Call repo_search
+    search_result = await repo_search(
+        query=query,
+        limit=eff_limit,
+        per_path=3,  # Better default for info requests
+        include_snippet=eff_snippet,
+        context_lines=eff_context,
+        language=language,
+        under=under,
+        repo=repo,
+        path_glob=path_glob,
+        kwargs=kwargs,
+    )
+
+    # Extract results
+    results = search_result.get("results", [])
+    total = search_result.get("total", len(results))
+    used_rerank = search_result.get("used_rerank", False)
+
+    # Enhance each result with information field and optional relationships
+    enhanced_results = []
+    for r in results:
+        enhanced = dict(r)
+        enhanced["information"] = _format_information_field(r)
+        enhanced["relevance_score"] = r.get("score", 0.0)  # Alias
+        # Add relationships if requested
+        if eff_relationships:
+            enhanced["relationships"] = _extract_relationships(r)
+        enhanced_results.append(enhanced)
+
+    # Build better search strategy string
+    strategy_parts = ["hybrid"]
+    if used_rerank:
+        strategy_parts.append("rerank")
+    if repo:
+        strategy_parts.append("repo_filtered")
+    if language:
+        strategy_parts.append(f"lang:{language}")
+    if under:
+        strategy_parts.append("path_filtered")
+    search_strategy = "+".join(strategy_parts)
+
+    # Build response
+    response: Dict[str, Any] = {
+        "ok": True,
+        "results": enhanced_results,
+        "total": total,
+        "search_strategy": search_strategy,
+    }
+
+    # Add explanation if requested
+    if eff_explain:
+        # Primary locations: unique file paths
+        seen_paths = set()
+        primary_locations = []
+        for r in results:
+            p = r.get("path", "")
+            if p and p not in seen_paths:
+                seen_paths.add(p)
+                primary_locations.append(p)
+                if len(primary_locations) >= 5:
+                    break
+
+        # Related concepts
+        related_concepts = _extract_related_concepts(query, results)
+
+        # Detected symbols from query
+        detected_symbols = _extract_symbols_from_query(query)
+
+        # Summary
+        n_files = len(seen_paths)
+        summary = f"Found {total} results related to '{query}' across {n_files} file{'s' if n_files != 1 else ''}"
+
+        # Group results by file
+        files_map: Dict[str, list] = {}
+        for r in enhanced_results:
+            p = r.get("path", "")
+            if p not in files_map:
+                files_map[p] = []
+            files_map[p].append({
+                "symbol": r.get("symbol", ""),
+                "line": r.get("start_line", 0),
+                "score": r.get("score", 0.0),
+            })
+
+        grouped_results = {
+            "by_file": {
+                path: {
+                    "count": len(items),
+                    "top_symbols": [i["symbol"] for i in sorted(items, key=lambda x: -x["score"])[:3] if i["symbol"]],
+                }
+                for path, items in files_map.items()
+            }
+        }
+
+        # Calculate confidence
+        confidence = _calculate_confidence(query, enhanced_results)
+
+        response["summary"] = summary
+        response["primary_locations"] = primary_locations
+        response["related_concepts"] = related_concepts
+        response["grouped_results"] = grouped_results
+        response["confidence"] = confidence
+        response["query_understanding"] = {
+            "intent": "search_for_code",
+            "detected_language": language or None,
+            "detected_symbols": detected_symbols,
+            "search_strategy": search_strategy,
+        }
+
+    return response
 
 
 _relax_var_kwarg_defaults()
