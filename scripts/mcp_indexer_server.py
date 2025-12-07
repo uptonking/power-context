@@ -3173,6 +3173,88 @@ async def search_commits_for(
             ]
         )
 
+        # Optional vector-augmented scoring: use commit embeddings produced by
+        # ingest_history.py to compute a semantic score for the query and blend
+        # it with the lexical/lineage score. Gated by COMMIT_VECTOR_SEARCH and
+        # only active when a textual query is present.
+        #
+        # Empirically, the lineage-aware lexical scoring (goal/tags/symbols +
+        # message/information) already performs very well for behavior-phrase
+        # commit search across this repository. We have not yet found a clear
+        # "sweet spot" where enabling COMMIT_VECTOR_SEARCH by default yields a
+        # consistently better ranking, especially given the extra latency and
+        # dependency surface. Keep this as an opt-in experimental boost so
+        # callers can toggle it via env without relying on vector similarity
+        # for core behavior.
+        vector_scores: Dict[str, float] = {}
+        use_vectors = use_scoring and str(
+            os.environ.get("COMMIT_VECTOR_SEARCH", "0") or "1"
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        if use_vectors:
+            try:
+                # Import lazily so environments without fastembed/sanitize helper
+                # still work with pure lexical search.
+                try:
+                    from scripts.utils import (  # type: ignore
+                        sanitize_vector_name as _sanitize_vector_name,
+                    )
+                except Exception:
+                    _sanitize_vector_name = None  # type: ignore
+
+                from fastembed import TextEmbedding  # type: ignore
+
+                model_name = os.environ.get(
+                    "MODEL_NAME", "BAAI/bge-base-en-v1.5"
+                )
+                vec_name: Optional[str]
+                if _sanitize_vector_name is not None:
+                    try:
+                        vec_name = _sanitize_vector_name(model_name)
+                    except Exception:
+                        vec_name = None
+                else:
+                    vec_name = None
+
+                if vec_name:
+                    # Embed the behavior phrase query once and run a vector
+                    # search over the commit collection. We keep the result set
+                    # modest and later blend its scores into the lexical
+                    # scoring for matching commits.
+                    embed_model = TextEmbedding(model_name=model_name)
+                    qtext = " ".join(q_terms) if q_terms else ""
+                    if qtext.strip():
+                        qvec = next(embed_model.embed([qtext])).tolist()
+
+                        def _vec_search():
+                            return client.search(
+                                collection_name=coll,
+                                query_vector={vec_name: qvec},
+                                query_filter=filt,
+                                limit=min(mcap, 128),
+                                with_payload=True,
+                                with_vectors=False,
+                            )
+
+                        v_hits = await asyncio.to_thread(_vec_search)
+                        for sp in v_hits or []:
+                            payload_v = getattr(sp, "payload", {}) or {}
+                            md_v = payload_v.get("metadata") or {}
+                            cid_v = md_v.get("commit_id") or md_v.get("symbol")
+                            scid_v = str(cid_v) if cid_v is not None else ""
+                            if not scid_v:
+                                continue
+                            try:
+                                vs = float(getattr(sp, "score", 0.0) or 0.0)
+                            except Exception:
+                                vs = 0.0
+                            if vs <= 0.0:
+                                continue
+                            # Keep the best vector score per commit id
+                            if scid_v not in vector_scores or vs > vector_scores[scid_v]:
+                                vector_scores[scid_v] = vs
+            except Exception:
+                vector_scores = {}
+
         page = None
         scanned = 0
         out: list[dict[str, Any]] = []
@@ -3268,6 +3350,22 @@ async def search_commits_for(
                 scid = str(cid) if cid is not None else ""
                 if not scid or scid in seen_ids:
                     continue
+                # Blend in vector similarity score when available. Qdrant's
+                # search returns higher scores for closer vectors (e.g., cosine
+                # similarity), so we can treat it as a positive boost on top of
+                # the lexical/lineage score.
+                try:
+                    if use_scoring and vector_scores and scid in vector_scores:
+                        vec_score = float(vector_scores.get(scid, 0.0) or 0.0)
+                        if vec_score > 0.0:
+                            weight = float(
+                                os.environ.get("COMMIT_VECTOR_WEIGHT", "2.0") or 2.0
+                            )
+                            score += weight * vec_score
+                except Exception:
+                    # On any unexpected issue with vector blending, fall back to
+                    # the lexical score we already computed.
+                    pass
                 seen_ids.add(scid)
                 out.append(
                     {
