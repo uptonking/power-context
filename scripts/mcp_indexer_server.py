@@ -3145,6 +3145,11 @@ async def search_commits_for(
         mcap = int(max_points) if max_points not in (None, "") else 1000
     except (ValueError, TypeError):
         mcap = 1000
+    # When a textual query is present, enable scoring and allow scanning up to
+    # max_points commits so we can rank the best matches. Without a query,
+    # preserve the previous behavior (early exit after "limit" unique commits).
+    use_scoring = bool(q_terms)
+    max_ids_for_scan = mcap if use_scoring else lim
 
     try:
         from qdrant_client import QdrantClient  # type: ignore
@@ -3172,7 +3177,7 @@ async def search_commits_for(
         scanned = 0
         out: list[dict[str, Any]] = []
         seen_ids: set[str] = set()
-        while scanned < mcap and len(seen_ids) < lim:
+        while scanned < mcap and len(seen_ids) < max_ids_for_scan:
             sc, page = await asyncio.to_thread(
                 lambda: client.scroll(
                     collection_name=coll,
@@ -3218,17 +3223,43 @@ async def search_commits_for(
                     ][:6]
                 else:
                     lineage_tags = []
-                # Build a composite lowercase text blob for simple lexical matching
-                lineage_text_parts = []
-                if lineage_goal:
-                    lineage_text_parts.append(lineage_goal)
-                if lineage_symbols:
-                    lineage_text_parts.extend(lineage_symbols)
-                if lineage_tags:
-                    lineage_text_parts.extend(lineage_tags)
-                text_l = (msg + "\n" + info + "\n" + " ".join(lineage_text_parts)).lower()
-                if q_terms and not all(t in text_l for t in q_terms):
-                    continue
+
+                # Field-aware lexical scoring using commit message + optional
+                # lineage metadata. This replaces the previous strict
+                # "all tokens must appear" filter, so we can rank commits by
+                # how well they match the behavior phrase.
+                score = 0.0
+                if q_terms:
+                    # Precompute lowercase field views once per commit
+                    msg_l = msg.lower()
+                    info_l = info.lower()
+                    goal_l = lineage_goal.lower() if lineage_goal else ""
+                    sym_l = " ".join(lineage_symbols).lower() if lineage_symbols else ""
+                    tags_l = " ".join(lineage_tags).lower() if lineage_tags else ""
+                    hits = 0
+                    for t in q_terms:
+                        term_hit = False
+                        if goal_l and t in goal_l:
+                            score += 3.0
+                            term_hit = True
+                        if tags_l and t in tags_l:
+                            score += 2.0
+                            term_hit = True
+                        if sym_l and t in sym_l:
+                            score += 1.5
+                            term_hit = True
+                        if msg_l and t in msg_l:
+                            score += 1.0
+                            term_hit = True
+                        if info_l and t in info_l:
+                            score += 0.5
+                            term_hit = True
+                        if term_hit:
+                            hits += 1
+                    # Require at least one token match across any field when a
+                    # query is provided; otherwise treat as non-match.
+                    if hits == 0:
+                        continue
                 if p:
                     # Require the path substring to appear in at least one touched file
                     if not any(p in f for f in files_list):
@@ -3248,11 +3279,29 @@ async def search_commits_for(
                         "lineage_goal": lineage_goal,
                         "lineage_symbols": lineage_symbols,
                         "lineage_tags": lineage_tags,
+                        "_score": score,
                     }
                 )
-                if len(seen_ids) >= lim:
+                if len(seen_ids) >= max_ids_for_scan:
                     break
-        return {"ok": True, "results": out, "scanned": scanned, "collection": coll}
+        results = out
+        # When scoring is enabled (query provided), sort by score descending
+        # and trim to the requested limit. When no query is provided, preserve
+        # the original behavior (scroll order, up to "lim" unique commits).
+        if use_scoring and results:
+            try:
+                results = sorted(
+                    results,
+                    key=lambda c: float(c.get("_score", 0.0)),
+                    reverse=True,
+                )
+            except Exception:
+                # On any unexpected error, fall back to unsorted results
+                pass
+            results = results[:lim]
+            for c in results:
+                c.pop("_score", None)
+        return {"ok": True, "results": results, "scanned": scanned, "collection": coll}
     except Exception as e:
         return {"ok": False, "error": str(e), "collection": coll}
 
