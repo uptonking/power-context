@@ -2540,6 +2540,13 @@ async def repo_search(
                 item["span_budgeted"] = bool(obj.get("span_budgeted"))
             if obj.get("budget_tokens_used") is not None:
                 item["budget_tokens_used"] = int(obj.get("budget_tokens_used"))
+            # Pass-through index-time pseudo/tags metadata so downstream consumers
+            # (e.g., MCP clients, rerankers, IDEs) can optionally incorporate
+            # GLM/LLM labels into their own scoring or display logic.
+            if obj.get("pseudo") is not None:
+                item["pseudo"] = obj.get("pseudo")
+            if obj.get("tags") is not None:
+                item["tags"] = obj.get("tags")
             results.append(item)
 
     # Mode-aware reordering: nudge core implementation code vs docs and non-core when requested
