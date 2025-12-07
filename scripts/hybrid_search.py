@@ -2661,6 +2661,20 @@ def run_hybrid_search(
     except Exception:
         all_paths = set()
 
+    # Build path -> host_path map so we can emit related_paths in host space
+    # when PATH_EMIT_MODE prefers host paths. This keeps human-facing paths
+    # consistent while still preserving container paths for backend use.
+    host_map: Dict[str, str] = {}
+    try:
+        for _m in merged:
+            _md = (_m["pt"].payload or {}).get("metadata") or {}
+            _p = str(_md.get("path") or "").strip()
+            _h = str(_md.get("host_path") or "").strip()
+            if _p and _h:
+                host_map[_p] = _h
+    except Exception:
+        host_map = {}
+
     items: List[Dict[str, Any]] = []
     if not merged:
         if _USE_CACHE and cache_key is not None:
@@ -2788,6 +2802,22 @@ def run_hybrid_search(
             pass
 
         _related = sorted(_related_set)[:10]
+        # Align related_paths with PATH_EMIT_MODE when possible: in host/auto
+        # modes, prefer host paths when we have a mapping; in container mode,
+        # keep container/path-space values as-is.
+        _related_out = _related
+        try:
+            _mode_related = str(os.environ.get("PATH_EMIT_MODE", "auto")).strip().lower()
+        except Exception:
+            _mode_related = "auto"
+        if _mode_related in {"host", "auto"}:
+            try:
+                _mapped: List[str] = []
+                for rp in _related:
+                    _mapped.append(host_map.get(rp, rp))
+                _related_out = _mapped
+            except Exception:
+                _related_out = _related
         # Best-effort snippet text directly from payload for downstream LLM stitching
         _payload = (m["pt"].payload or {}) if m.get("pt") is not None else {}
         _metadata = _payload.get("metadata", {}) or {}
@@ -2865,7 +2895,7 @@ def run_hybrid_search(
                 "components": comp,
                 "why": why,
                 "relations": {"imports": _imports, "calls": _calls, "symbol_path": _symp},
-                "related_paths": _related,
+                "related_paths": _related_out,
                 "span_budgeted": bool(m.get("_merged_start") is not None),
                 "budget_tokens_used": m.get("_budget_tokens"),
                 "text": _text,
