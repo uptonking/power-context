@@ -175,6 +175,25 @@ def validate_bundle_format(bundle_path: Path) -> Dict[str, Any]:
     except Exception as e:
         raise ValueError(f"Invalid bundle format: {str(e)}")
 
+def _cleanup_empty_dirs(path: Path, stop_at: Path) -> None:
+    """Recursively remove empty directories up to stop_at (exclusive)."""
+    try:
+        path = path.resolve()
+        stop_at = stop_at.resolve()
+    except Exception:
+        pass
+    while True:
+        try:
+            if path == stop_at or not path.exists() or not path.is_dir():
+                break
+            if any(path.iterdir()):
+                break
+            path.rmdir()
+            path = path.parent
+        except Exception:
+            break
+
+
 def process_delta_bundle(workspace_path: str, bundle_path: Path, manifest: Dict[str, Any]) -> Dict[str, int]:
     """Process delta bundle and return operation counts."""
     operations_count = {
@@ -313,10 +332,23 @@ def process_delta_bundle(workspace_path: str, bundle_path: Path, manifest: Dict[
                         else:
                             operations_count["failed"] += 1
 
+                        # Remove original source file if provided
+                        source_rel_path = operation.get("source_path") or operation.get("source_relative_path")
+                        if source_rel_path:
+                            source_path = workspace / source_rel_path
+                            if source_path.exists():
+                                try:
+                                    source_path.unlink()
+                                    operations_count["deleted"] += 1
+                                    _cleanup_empty_dirs(source_path.parent, workspace)
+                                except Exception as del_err:
+                                    logger.error(f"Error deleting source file for move {source_rel_path}: {del_err}")
+
                     elif op_type == "deleted":
                         # Delete file
                         if target_path.exists():
                             target_path.unlink()
+                            _cleanup_empty_dirs(target_path.parent, workspace)
                             operations_count["deleted"] += 1
                         else:
                             operations_count["skipped"] += 1
