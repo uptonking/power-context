@@ -1,9 +1,10 @@
 {
-  "name": "@context-engine/cli",
+  "name": "@context-engine/mcp-bridge",
   "version": "0.0.1",
-  "description": "Minimal MCP stdio proxy for Context-Engine indexer",
+  "description": "Context Engine MCP bridge (stdio proxy combining indexer + memory servers)",
   "bin": {
-    "ctxce": "bin/ctxce.js"
+    "ctxce": "bin/ctxce.js",
+    "ctxce-bridge": "bin/ctxce.js"
   },
   "type": "module",
   "scripts": {
