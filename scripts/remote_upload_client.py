@@ -47,6 +47,25 @@ from scripts.workspace_state import (
 import scripts.ingest_code as idx
 
 
+def _cache_missing_stats(file_hashes: Dict[str, Any]) -> Tuple[bool, int, int]:
+    """Return (is_stale, missing_count, checked_count) for cached paths."""
+    if not file_hashes:
+        return (False, 0, 0)
+    missing = 0
+    checked = 0
+    for path_str in file_hashes.keys():
+        try:
+            if not Path(path_str).exists():
+                missing += 1
+        except Exception:
+            missing += 1
+        checked += 1
+    if checked == 0:
+        return (False, 0, 0)
+    missing_ratio = missing / checked
+    return (missing_ratio >= 0.25, missing, checked)
+
+
 def _find_git_root(start: Path) -> Optional[Path]:
     """Best-effort detection of the git repository root for a workspace.
 
@@ -336,6 +355,24 @@ def _load_local_cache_file_hashes(workspace_path: str, repo_name: Optional[str])
             return {}
         file_hashes = data.get("file_hashes", {})
         if not isinstance(file_hashes, dict):
+            return {}
+        is_stale, missing, checked = _cache_missing_stats(file_hashes)
+        if is_stale:
+            logger.warning(
+                "[remote_upload] Detected stale local cache (%d/%d missing); clearing %s",
+                missing,
+                checked,
+                cache_path,
+            )
+            try:
+                cache_path.unlink(missing_ok=True)  # type: ignore[arg-type]
+            except TypeError:
+                try:
+                    cache_path.unlink()
+                except Exception:
+                    pass
+            except Exception:
+                pass
             return {}
         return file_hashes
     except Exception:

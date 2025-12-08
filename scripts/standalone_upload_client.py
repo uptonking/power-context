@@ -155,7 +155,15 @@ class SimpleHashCache:
         try:
             with open(self.cache_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-                return data.get("file_hashes", {})
+                file_hashes = data.get("file_hashes", {})
+                if self._cache_seems_stale(file_hashes):
+                    logger.warning(
+                        "[hash_cache] Detected stale cache with missing paths; resetting %s",
+                        self.cache_file,
+                    )
+                    self._save_cache({})
+                    return {}
+                return file_hashes
         except Exception:
             return {}
 
@@ -196,6 +204,21 @@ class SimpleHashCache:
         if abs_path in file_hashes:
             file_hashes.pop(abs_path, None)
             self._save_cache(file_hashes)
+
+    def _cache_seems_stale(self, file_hashes: Dict[str, str]) -> bool:
+        """Return True if a large portion of cached paths no longer exist on disk."""
+        total = len(file_hashes)
+        if total == 0:
+            return False
+        missing = 0
+        for path_str in file_hashes.keys():
+            try:
+                if not Path(path_str).exists():
+                    missing += 1
+            except Exception:
+                missing += 1
+        missing_ratio = missing / total
+        return missing_ratio >= 0.25
 
 # Create global cache instance (will be initialized in RemoteUploadClient)
 _hash_cache: Optional[SimpleHashCache] = None
