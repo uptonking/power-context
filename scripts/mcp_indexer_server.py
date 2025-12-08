@@ -1729,6 +1729,7 @@ async def repo_search(
     highlight_snippet: Any = None,
     collection: Any = None,
     workspace_path: Any = None,
+    mode: Any = None,
 
 
     session: Any = None,
@@ -1899,6 +1900,11 @@ async def repo_search(
                 case = _extra.get("case")
             if compact in (None, "") and _extra.get("compact") is not None:
                 compact = _extra.get("compact")
+            # Optional mode hint: "code_first", "docs_first", "balanced"
+            if (
+                mode is None or (isinstance(mode, str) and str(mode).strip() == "")
+            ) and _extra.get("mode") is not None:
+                mode = _extra.get("mode")
     except Exception:
         pass
 
@@ -1952,6 +1958,9 @@ async def repo_search(
         rerank_timeout_ms, int(os.environ.get("RERANKER_TIMEOUT_MS", "120") or 120)
     )
     highlight_snippet = _to_bool(highlight_snippet, True)
+
+    # Optional mode knob: "code_first" (default for IDE), "docs_first", "balanced"
+    mode_str = _to_str(mode, "").strip().lower()
 
     # Resolve collection precedence: explicit > per-connection defaults > token defaults > env default
     coll_hint = _to_str(collection, "").strip()
@@ -2096,12 +2105,25 @@ async def repo_search(
             model = _get_embedding_model(model_name)
             # Ensure hybrid_search uses the intended collection when running in-process
             prev_coll = os.environ.get("COLLECTION_NAME")
+            # Determine effective hybrid candidate limit: if rerank is enabled, search up to rerank_top_n
+            try:
+                base_limit = int(limit)
+            except Exception:
+                base_limit = 10
+            eff_limit = base_limit
+            if rerank_enabled:
+                try:
+                    rt = int(rerank_top_n)
+                except Exception:
+                    rt = 0
+                if rt > eff_limit:
+                    eff_limit = rt
             try:
                 os.environ["COLLECTION_NAME"] = collection
                 # In-process path_glob/not_glob accept a single string; reduce list inputs safely
                 items = run_hybrid_search(
                     queries=queries,
-                    limit=int(limit),
+                    limit=eff_limit,
                     per_path=(
                         int(per_path)
                         if (per_path is not None and str(per_path).strip() != "")
@@ -2120,6 +2142,7 @@ async def repo_search(
                     expand=str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower()
                     in {"1", "true", "yes", "on"},
                     model=model,
+                    mode=mode_str or None,
                     repo=repo_filter,  # Cross-codebase isolation
                 )
             finally:
@@ -2138,11 +2161,23 @@ async def repo_search(
 
     if not use_hybrid_inproc:
         # Try hybrid search via subprocess (JSONL output)
+        try:
+            base_limit = int(limit)
+        except Exception:
+            base_limit = 10
+        eff_limit = base_limit
+        if rerank_enabled:
+            try:
+                rt = int(rerank_top_n)
+            except Exception:
+                rt = 0
+            if rt > eff_limit:
+                eff_limit = rt
         cmd = [
             "python",
             _work_script("hybrid_search.py"),
             "--limit",
-            str(int(limit)),
+            str(eff_limit),
             "--json",
         ]
         if per_path is not None and str(per_path).strip() != "":
@@ -2210,6 +2245,7 @@ async def repo_search(
                     expand=str(os.environ.get("HYBRID_EXPAND", "0")).strip().lower()
                     in {"1", "true", "yes", "on"},
                     model=model,
+                    mode=mode_str or None,
                     repo=repo_filter,  # Cross-codebase isolation
                 )
                 json_lines = items
@@ -2238,24 +2274,62 @@ async def repo_search(
                     import concurrent.futures as _fut
 
                     rq = queries[0] if queries else ""
-                    # Prepare candidate docs from top-N hybrid hits (path+symbol + small snippet)
+                    # Prepare candidate docs from top-N hybrid hits (path+symbol + pseudo/tags + small snippet)
                     cand_objs = list(json_lines[: int(rerank_top_n)])
 
                     def _doc_for(obj: dict) -> str:
                         path = str(obj.get("path") or "")
                         symbol = str(obj.get("symbol") or "")
                         header = f"{symbol} — {path}".strip()
+
+                        # Try to enrich with pseudo/tags from underlying payload when available.
+                        # We expect hybrid to have preserved metadata in obj["components"] or
+                        # direct fields; if not, we fall back to header+code only.
+                        meta_lines: list[str] = [header] if header else []
+                        try:
+                            # Prefer explicit pseudo/tags fields on the top-level object when present
+                            pseudo_val = obj.get("pseudo")
+                            tags_val = obj.get("tags")
+                            if pseudo_val is None or tags_val is None:
+                                # Fallback: inspect a nested metadata view when present
+                                md = obj.get("metadata") or {}
+                                if pseudo_val is None:
+                                    pseudo_val = md.get("pseudo")
+                                if tags_val is None:
+                                    tags_val = md.get("tags")
+                            pseudo_s = str(pseudo_val).strip() if pseudo_val is not None else ""
+                            if pseudo_s:
+                                # Keep pseudo short to avoid bloating rerank input
+                                meta_lines.append(f"Summary: {pseudo_s[:256]}")
+                            if tags_val:
+                                try:
+                                    if isinstance(tags_val, (list, tuple)):
+                                        tags_text = ", ".join(
+                                            str(x) for x in tags_val
+                                        )[:128]
+                                        if tags_text:
+                                            meta_lines.append(f"Tags: {tags_text}")
+                                    else:
+                                        tags_text = str(tags_val)[:128]
+                                        if tags_text:
+                                            meta_lines.append(f"Tags: {tags_text}")
+                                except Exception:
+                                    pass
+                        except Exception:
+                            # If any of the above fails, we just keep header-only
+                            pass
+
                         sl = int(obj.get("start_line") or 0)
                         el = int(obj.get("end_line") or 0)
                         if not path or not sl:
-                            return header
+                            return "\n".join(meta_lines) if meta_lines else header
                         try:
                             p = path
                             if not os.path.isabs(p):
                                 p = os.path.join("/work", p)
                             realp = os.path.realpath(p)
                             if not (realp == "/work" or realp.startswith("/work/")):
-                                return header
+                                return "\n".join(meta_lines) if meta_lines else header
                             with open(
                                 realp, "r", encoding="utf-8", errors="ignore"
                             ) as f:
@@ -2268,11 +2342,12 @@ async def repo_search(
                             si = max(1, sl - ctx)
                             ei = min(len(lines), max(sl, el) + ctx)
                             snippet = "".join(lines[si - 1 : ei]).strip()
-                            return (
-                                header + ("\n" + snippet if snippet else "")
-                            ).strip()
+                            if snippet:
+                                meta = "\n".join(meta_lines) if meta_lines else header
+                                return (meta + "\n\n" + snippet).strip()
+                            return "\n".join(meta_lines) if meta_lines else header
                         except Exception:
-                            return header
+                            return "\n".join(meta_lines) if meta_lines else header
 
                     # Build docs concurrently
                     max_workers = min(16, (os.cpu_count() or 4) * 4)
@@ -2465,7 +2540,151 @@ async def repo_search(
                 item["span_budgeted"] = bool(obj.get("span_budgeted"))
             if obj.get("budget_tokens_used") is not None:
                 item["budget_tokens_used"] = int(obj.get("budget_tokens_used"))
+            # Pass-through index-time pseudo/tags metadata so downstream consumers
+            # (e.g., MCP clients, rerankers, IDEs) can optionally incorporate
+            # GLM/LLM labels into their own scoring or display logic.
+            if obj.get("pseudo") is not None:
+                item["pseudo"] = obj.get("pseudo")
+            if obj.get("tags") is not None:
+                item["tags"] = obj.get("tags")
             results.append(item)
+
+    # Mode-aware reordering: nudge core implementation code vs docs and non-core when requested
+    def _is_doc_path(p: str) -> bool:
+        pl = str(p or "").lower()
+        return (
+            "readme" in pl
+            or "/docs/" in pl
+            or "/documentation/" in pl
+            or pl.endswith(".md")
+            or pl.endswith(".rst")
+            or pl.endswith(".txt")
+        )
+
+    def _is_core_code_item(item: dict) -> bool:
+        """Classify a result as core implementation code for mode-aware reordering.
+
+        This intentionally reuses hybrid_search's notion of core/test/vendor files
+        instead of duplicating extension and path heuristics here. We only apply
+        lightweight checks on top (docs/config/tests components) and delegate the
+        rest to helpers from hybrid_search when available.
+        """
+        try:
+            raw_path = item.get("path") or ""
+            p = str(raw_path)
+        except Exception:
+            return False
+        if not p:
+            return False
+        # Never treat docs as core code
+        if _is_doc_path(p):
+            return False
+
+        # Prefer items that were not explicitly tagged as docs/config/tests in hybrid components
+        comps = item.get("components") or {}
+        try:
+            if comps:
+                if comps.get("config_penalty") or comps.get("test_penalty") or comps.get("doc_penalty"):
+                    return False
+        except Exception:
+            pass
+
+        # Defer to hybrid_search helpers when available to avoid duplicating
+        # extension and path-based logic.
+        try:
+            from scripts.hybrid_search import (  # type: ignore
+                is_core_file as _hy_core_file,
+                is_test_file as _hy_is_test_file,
+                is_vendor_path as _hy_is_vendor_path,
+            )
+        except Exception:
+            _hy_core_file = None
+            _hy_is_test_file = None
+            _hy_is_vendor_path = None
+
+        if _hy_core_file:
+            try:
+                if not _hy_core_file(p):
+                    return False
+            except Exception:
+                return False
+        if _hy_is_test_file:
+            try:
+                if _hy_is_test_file(p):
+                    return False
+            except Exception:
+                pass
+        if _hy_is_vendor_path:
+            try:
+                if _hy_is_vendor_path(p):
+                    return False
+            except Exception:
+                pass
+
+        # If helper imports failed, fall back to a permissive classification:
+        # treat the item as core code (we already filtered obvious docs/config/tests).
+        return True
+
+    if mode_str in {"code_first", "code-first", "code"}:
+        core_items: list[dict] = []
+        other_code: list[dict] = []
+        doc_items: list[dict] = []
+        for it in results:
+            p = it.get("path") or ""
+            if p and _is_doc_path(p):
+                doc_items.append(it)
+            elif _is_core_code_item(it):
+                core_items.append(it)
+            else:
+                other_code.append(it)
+        results = core_items + other_code + doc_items
+
+        try:
+            _min_core = int(os.environ.get("REPO_SEARCH_CODE_FIRST_MIN_CORE", "2") or 0)
+        except Exception:
+            _min_core = 2
+        try:
+            _top_k = int(os.environ.get("REPO_SEARCH_CODE_FIRST_TOP_K", "8") or 8)
+        except Exception:
+            _top_k = 8
+        if _min_core > 0 and results:
+            top_k = max(0, min(_top_k, len(results)))
+            if top_k > 0:
+                flags = [_is_core_code_item(it) for it in results]
+                cur_core = sum(1 for i in range(top_k) if flags[i])
+                if cur_core < _min_core:
+                    for src in range(top_k, len(results)):
+                        if not flags[src]:
+                            continue
+                        for dst in range(top_k - 1, -1, -1):
+                            if not flags[dst]:
+                                results[dst], results[src] = results[src], results[dst]
+                                flags[dst], flags[src] = flags[src], flags[dst]
+                                cur_core += 1
+                                break
+                        if cur_core >= _min_core:
+                            break
+    elif mode_str in {"docs_first", "docs-first", "docs"}:
+        core_items = []
+        other_code = []
+        doc_items = []
+        for it in results:
+            p = it.get("path") or ""
+            if p and _is_doc_path(p):
+                doc_items.append(it)
+            elif _is_core_code_item(it):
+                core_items.append(it)
+            else:
+                other_code.append(it)
+        results = doc_items + core_items + other_code
+
+    # Enforce user-requested limit on final result count
+    try:
+        _limit_n = int(limit)
+    except Exception:
+        _limit_n = 0
+    if _limit_n > 0 and len(results) > _limit_n:
+        results = results[:_limit_n]
 
     # Optionally add snippets (with highlighting)
     toks = _tokens_from_queries(queries)
@@ -2642,6 +2861,7 @@ async def repo_search_compat(**arguments) -> Dict[str, Any]:
             "not_": not_value,
             "case": args.get("case"),
             "compact": args.get("compact"),
+            "mode": args.get("mode"),
             "repo": args.get("repo"),  # Cross-codebase isolation
             # Alias passthroughs captured by repo_search(**kwargs)
             "queries": queries,
@@ -2932,6 +3152,11 @@ async def search_commits_for(
         mcap = int(max_points) if max_points not in (None, "") else 1000
     except (ValueError, TypeError):
         mcap = 1000
+    # When a textual query is present, enable scoring and allow scanning up to
+    # max_points commits so we can rank the best matches. Without a query,
+    # preserve the previous behavior (early exit after "limit" unique commits).
+    use_scoring = bool(q_terms)
+    max_ids_for_scan = mcap if use_scoring else lim
 
     try:
         from qdrant_client import QdrantClient  # type: ignore
@@ -2955,11 +3180,93 @@ async def search_commits_for(
             ]
         )
 
+        # Optional vector-augmented scoring: use commit embeddings produced by
+        # ingest_history.py to compute a semantic score for the query and blend
+        # it with the lexical/lineage score. Gated by COMMIT_VECTOR_SEARCH and
+        # only active when a textual query is present.
+        #
+        # Empirically, the lineage-aware lexical scoring (goal/tags/symbols +
+        # message/information) already performs very well for behavior-phrase
+        # commit search across this repository. We have not yet found a clear
+        # "sweet spot" where enabling COMMIT_VECTOR_SEARCH by default yields a
+        # consistently better ranking, especially given the extra latency and
+        # dependency surface. Keep this as an opt-in experimental boost so
+        # callers can toggle it via env without relying on vector similarity
+        # for core behavior.
+        vector_scores: Dict[str, float] = {}
+        use_vectors = use_scoring and str(
+            os.environ.get("COMMIT_VECTOR_SEARCH", "0") or "1"
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        if use_vectors:
+            try:
+                # Import lazily so environments without fastembed/sanitize helper
+                # still work with pure lexical search.
+                try:
+                    from scripts.utils import (  # type: ignore
+                        sanitize_vector_name as _sanitize_vector_name,
+                    )
+                except Exception:
+                    _sanitize_vector_name = None  # type: ignore
+
+                from fastembed import TextEmbedding  # type: ignore
+
+                model_name = os.environ.get(
+                    "MODEL_NAME", "BAAI/bge-base-en-v1.5"
+                )
+                vec_name: Optional[str]
+                if _sanitize_vector_name is not None:
+                    try:
+                        vec_name = _sanitize_vector_name(model_name)
+                    except Exception:
+                        vec_name = None
+                else:
+                    vec_name = None
+
+                if vec_name:
+                    # Embed the behavior phrase query once and run a vector
+                    # search over the commit collection. We keep the result set
+                    # modest and later blend its scores into the lexical
+                    # scoring for matching commits.
+                    embed_model = TextEmbedding(model_name=model_name)
+                    qtext = " ".join(q_terms) if q_terms else ""
+                    if qtext.strip():
+                        qvec = next(embed_model.embed([qtext])).tolist()
+
+                        def _vec_search():
+                            return client.search(
+                                collection_name=coll,
+                                query_vector={vec_name: qvec},
+                                query_filter=filt,
+                                limit=min(mcap, 128),
+                                with_payload=True,
+                                with_vectors=False,
+                            )
+
+                        v_hits = await asyncio.to_thread(_vec_search)
+                        for sp in v_hits or []:
+                            payload_v = getattr(sp, "payload", {}) or {}
+                            md_v = payload_v.get("metadata") or {}
+                            cid_v = md_v.get("commit_id") or md_v.get("symbol")
+                            scid_v = str(cid_v) if cid_v is not None else ""
+                            if not scid_v:
+                                continue
+                            try:
+                                vs = float(getattr(sp, "score", 0.0) or 0.0)
+                            except Exception:
+                                vs = 0.0
+                            if vs <= 0.0:
+                                continue
+                            # Keep the best vector score per commit id
+                            if scid_v not in vector_scores or vs > vector_scores[scid_v]:
+                                vector_scores[scid_v] = vs
+            except Exception:
+                vector_scores = {}
+
         page = None
         scanned = 0
         out: list[dict[str, Any]] = []
         seen_ids: set[str] = set()
-        while scanned < mcap and len(seen_ids) < lim:
+        while scanned < mcap and len(seen_ids) < max_ids_for_scan:
             sc, page = await asyncio.to_thread(
                 lambda: client.scroll(
                     collection_name=coll,
@@ -3005,17 +3312,43 @@ async def search_commits_for(
                     ][:6]
                 else:
                     lineage_tags = []
-                # Build a composite lowercase text blob for simple lexical matching
-                lineage_text_parts = []
-                if lineage_goal:
-                    lineage_text_parts.append(lineage_goal)
-                if lineage_symbols:
-                    lineage_text_parts.extend(lineage_symbols)
-                if lineage_tags:
-                    lineage_text_parts.extend(lineage_tags)
-                text_l = (msg + "\n" + info + "\n" + " ".join(lineage_text_parts)).lower()
-                if q_terms and not all(t in text_l for t in q_terms):
-                    continue
+
+                # Field-aware lexical scoring using commit message + optional
+                # lineage metadata. This replaces the previous strict
+                # "all tokens must appear" filter, so we can rank commits by
+                # how well they match the behavior phrase.
+                score = 0.0
+                if q_terms:
+                    # Precompute lowercase field views once per commit
+                    msg_l = msg.lower()
+                    info_l = info.lower()
+                    goal_l = lineage_goal.lower() if lineage_goal else ""
+                    sym_l = " ".join(lineage_symbols).lower() if lineage_symbols else ""
+                    tags_l = " ".join(lineage_tags).lower() if lineage_tags else ""
+                    hits = 0
+                    for t in q_terms:
+                        term_hit = False
+                        if goal_l and t in goal_l:
+                            score += 3.0
+                            term_hit = True
+                        if tags_l and t in tags_l:
+                            score += 2.0
+                            term_hit = True
+                        if sym_l and t in sym_l:
+                            score += 1.5
+                            term_hit = True
+                        if msg_l and t in msg_l:
+                            score += 1.0
+                            term_hit = True
+                        if info_l and t in info_l:
+                            score += 0.5
+                            term_hit = True
+                        if term_hit:
+                            hits += 1
+                    # Require at least one token match across any field when a
+                    # query is provided; otherwise treat as non-match.
+                    if hits == 0:
+                        continue
                 if p:
                     # Require the path substring to appear in at least one touched file
                     if not any(p in f for f in files_list):
@@ -3024,6 +3357,22 @@ async def search_commits_for(
                 scid = str(cid) if cid is not None else ""
                 if not scid or scid in seen_ids:
                     continue
+                # Blend in vector similarity score when available. Qdrant's
+                # search returns higher scores for closer vectors (e.g., cosine
+                # similarity), so we can treat it as a positive boost on top of
+                # the lexical/lineage score.
+                try:
+                    if use_scoring and vector_scores and scid in vector_scores:
+                        vec_score = float(vector_scores.get(scid, 0.0) or 0.0)
+                        if vec_score > 0.0:
+                            weight = float(
+                                os.environ.get("COMMIT_VECTOR_WEIGHT", "2.0") or 2.0
+                            )
+                            score += weight * vec_score
+                except Exception:
+                    # On any unexpected issue with vector blending, fall back to
+                    # the lexical score we already computed.
+                    pass
                 seen_ids.add(scid)
                 out.append(
                     {
@@ -3035,11 +3384,29 @@ async def search_commits_for(
                         "lineage_goal": lineage_goal,
                         "lineage_symbols": lineage_symbols,
                         "lineage_tags": lineage_tags,
+                        "_score": score,
                     }
                 )
-                if len(seen_ids) >= lim:
+                if len(seen_ids) >= max_ids_for_scan:
                     break
-        return {"ok": True, "results": out, "scanned": scanned, "collection": coll}
+        results = out
+        # When scoring is enabled (query provided), sort by score descending
+        # and trim to the requested limit. When no query is provided, preserve
+        # the original behavior (scroll order, up to "lim" unique commits).
+        if use_scoring and results:
+            try:
+                results = sorted(
+                    results,
+                    key=lambda c: float(c.get("_score", 0.0)),
+                    reverse=True,
+                )
+            except Exception:
+                # On any unexpected error, fall back to unsorted results
+                pass
+            results = results[:lim]
+            for c in results:
+                c.pop("_score", None)
+        return {"ok": True, "results": results, "scanned": scanned, "collection": coll}
     except Exception as e:
         return {"ok": False, "error": str(e), "collection": coll}
 

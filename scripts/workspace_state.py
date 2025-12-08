@@ -717,12 +717,20 @@ def get_cached_file_hash(file_path: str, repo_name: Optional[str] = None) -> str
                 with open(cache_path, 'r', encoding='utf-8') as f:
                     cache = json.load(f)
                     file_hashes = cache.get("file_hashes", {})
-                    return file_hashes.get(str(Path(file_path).resolve()), "")
+                    fp = str(Path(file_path).resolve())
+                    val = file_hashes.get(fp, "")
+                    if isinstance(val, dict):
+                        return str(val.get("hash") or "")
+                    return str(val or "")
             except Exception:
                 pass
     else:
         cache = _read_cache(_resolve_workspace_root())
-        return cache.get("file_hashes", {}).get(str(Path(file_path).resolve()), "")
+        fp = str(Path(file_path).resolve())
+        val = cache.get("file_hashes", {}).get(fp, "")
+        if isinstance(val, dict):
+            return str(val.get("hash") or "")
+        return str(val or "")
 
     return ""
 
@@ -748,7 +756,18 @@ def set_cached_file_hash(file_path: str, file_hash: str, repo_name: Optional[str
             else:
                 cache = {"file_hashes": {}, "created_at": datetime.now().isoformat()}
 
-            cache.setdefault("file_hashes", {})[fp] = file_hash
+            entry: Any = file_hash
+            try:
+                st = Path(file_path).stat()
+                entry = {
+                    "hash": file_hash,
+                    "size": int(getattr(st, "st_size", 0)),
+                    "mtime": int(getattr(st, "st_mtime", 0)),
+                }
+            except Exception:
+                pass
+
+            cache.setdefault("file_hashes", {})[fp] = entry
             cache["updated_at"] = datetime.now().isoformat()
 
             _atomic_write_state(cache_path, cache)  # reuse atomic writer for files
@@ -757,9 +776,50 @@ def set_cached_file_hash(file_path: str, file_hash: str, repo_name: Optional[str
         return
 
     cache = _read_cache(_resolve_workspace_root())
-    cache.setdefault("file_hashes", {})[fp] = file_hash
+    entry: Any = file_hash
+    try:
+        st = Path(file_path).stat()
+        entry = {
+            "hash": file_hash,
+            "size": int(getattr(st, "st_size", 0)),
+            "mtime": int(getattr(st, "st_mtime", 0)),
+        }
+    except Exception:
+        pass
+    cache.setdefault("file_hashes", {})[fp] = entry
     cache["updated_at"] = datetime.now().isoformat()
     _write_cache(_resolve_workspace_root(), cache)
+
+
+def get_cached_file_meta(file_path: str, repo_name: Optional[str] = None) -> Dict[str, Any]:
+    fp = str(Path(file_path).resolve())
+    if is_multi_repo_mode() and repo_name:
+        state_dir = _get_repo_state_dir(repo_name)
+        cache_path = state_dir / CACHE_FILENAME
+
+        if cache_path.exists():
+            try:
+                with open(cache_path, 'r', encoding='utf-8') as f:
+                    cache = json.load(f)
+                    file_hashes = cache.get("file_hashes", {})
+                    val = file_hashes.get(fp)
+            except Exception:
+                val = None
+        else:
+            val = None
+    else:
+        cache = _read_cache(_resolve_workspace_root())
+        val = cache.get("file_hashes", {}).get(fp)
+
+    if isinstance(val, dict):
+        return {
+            "hash": str(val.get("hash") or ""),
+            "size": val.get("size"),
+            "mtime": val.get("mtime"),
+        }
+    if isinstance(val, str):
+        return {"hash": val}
+    return {}
 
 
 def remove_cached_file(file_path: str, repo_name: Optional[str] = None) -> None:

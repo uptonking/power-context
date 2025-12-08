@@ -78,6 +78,7 @@ try:
         set_cached_pseudo,
         update_symbols_with_pseudo,
         get_workspace_state,
+        get_cached_file_meta,
     )
 except ImportError:
     # State integration is optional; continue if not available
@@ -95,6 +96,7 @@ except ImportError:
     update_symbols_with_pseudo = None  # type: ignore
     compare_symbol_changes = None  # type: ignore
     get_workspace_state = None  # type: ignore
+    get_cached_file_meta = None  # type: ignore
 
 # Optional Tree-sitter import (graceful fallback)
 try:
@@ -1158,6 +1160,185 @@ def ensure_payload_indexes(client: QdrantClient, collection: str):
 ENSURED_COLLECTIONS: set[str] = set()
 
 
+def pseudo_backfill_tick(
+    client: QdrantClient,
+    collection: str,
+    repo_name: str | None = None,
+    *,
+    max_points: int = 256,
+) -> int:
+    """Best-effort pseudo/tag backfill for a collection.
+
+    Scans up to max_points points for a given repo (when provided) that have not yet
+    been marked as pseudo-enriched and updates them in-place with pseudo/tags and
+    refreshed lexical vectors. Does not touch cache.json or hash-based skip logic;
+    operates purely on Qdrant payloads/vectors.
+    """
+
+    if not collection or max_points <= 0:
+        return 0
+
+    try:
+        from qdrant_client import models as _models
+    except Exception:
+        return 0
+
+    must_conditions: list[Any] = []
+    if repo_name:
+        try:
+            must_conditions.append(
+                _models.FieldCondition(
+                    key="metadata.repo",
+                    match=_models.MatchValue(value=repo_name),
+                )
+            )
+        except Exception:
+            pass
+
+    flt = None
+    try:
+        # Prefer server-side filtering for points missing pseudo/tags when supported
+        null_cond = getattr(_models, "IsNullCondition", None)
+        empty_cond = getattr(_models, "IsEmptyCondition", None)
+        if null_cond is not None:
+            should_conditions = []
+            try:
+                should_conditions.append(null_cond(is_null="pseudo"))
+            except Exception:
+                pass
+            try:
+                should_conditions.append(null_cond(is_null="tags"))
+            except Exception:
+                pass
+            if empty_cond is not None:
+                try:
+                    should_conditions.append(empty_cond(is_empty="tags"))
+                except Exception:
+                    pass
+            flt = _models.Filter(
+                must=must_conditions or None,
+                should=should_conditions or None,
+            )
+        else:
+            # Fallback: only scope by repo, rely on Python-side pseudo/tags checks
+            flt = _models.Filter(must=must_conditions or None)
+    except Exception:
+        flt = None
+
+    processed = 0
+    debug_enabled = (os.environ.get("PSEUDO_BACKFILL_DEBUG") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    debug_stats = {
+        "scanned": 0,
+        "glm_calls": 0,
+        "glm_success": 0,
+        "filled_new": 0,
+        "updated_existing": 0,
+        "skipped_no_code": 0,
+        "skipped_after_glm": 0,
+    }
+    next_offset = None
+
+    while processed < max_points:
+        batch_limit = max(1, min(64, max_points - processed))
+        try:
+            points, next_offset = client.scroll(
+                collection_name=collection,
+                scroll_filter=flt,
+                limit=batch_limit,
+                with_payload=True,
+                with_vectors=True,
+                offset=next_offset,
+            )
+        except Exception:
+            break
+
+        if not points:
+            break
+
+        new_points: list[Any] = []
+        for rec in points:
+            try:
+                if debug_enabled:
+                    debug_stats["scanned"] += 1
+                payload = rec.payload or {}
+                md = payload.get("metadata") or {}
+                code = md.get("code") or ""
+                if not code:
+                    if debug_enabled:
+                        debug_stats["skipped_no_code"] += 1
+                    continue
+
+                pseudo = payload.get("pseudo") or ""
+                tags_val = payload.get("tags") or []
+                tags: list[str] = list(tags_val) if isinstance(tags_val, list) else []
+                had_existing = bool(pseudo or tags)
+
+                # If pseudo/tags are missing, generate them once
+                if not pseudo and not tags:
+                    try:
+                        if debug_enabled:
+                            debug_stats["glm_calls"] += 1
+                        pseudo, tags = generate_pseudo_tags(code)
+                        if debug_enabled and (pseudo or tags):
+                            debug_stats["glm_success"] += 1
+                    except Exception:
+                        pseudo, tags = "", []
+
+                if not pseudo and not tags:
+                    if debug_enabled:
+                        debug_stats["skipped_after_glm"] += 1
+                    continue
+
+                # Update payload and lexical vector with pseudo/tags
+                payload["pseudo"] = pseudo
+                payload["tags"] = tags
+                if debug_enabled:
+                    if had_existing:
+                        debug_stats["updated_existing"] += 1
+                    else:
+                        debug_stats["filled_new"] += 1
+
+                aug_text = f"{code} {pseudo} {' '.join(tags)}".strip()
+                lex_vec = _lex_hash_vector_text(aug_text)
+
+                vec = rec.vector
+                if isinstance(vec, dict):
+                    vecs = dict(vec)
+                    vecs[LEX_VECTOR_NAME] = lex_vec
+                    new_vec = vecs
+                else:
+                    # Fallback: collections without named vectors - leave dense vector as-is
+                    new_vec = vec
+
+                new_points.append(
+                    models.PointStruct(
+                        id=rec.id,
+                        vector=new_vec,
+                        payload=payload,
+                    )
+                )
+                processed += 1
+            except Exception:
+                continue
+
+        if new_points:
+            try:
+                upsert_points(client, collection, new_points)
+            except Exception:
+                # Best-effort: on failure, stop this tick
+                break
+
+        if next_offset is None:
+            break
+
+    return processed
+
+
 def ensure_collection_and_indexes_once(
     client: QdrantClient,
     collection: str,
@@ -2055,14 +2236,19 @@ def index_single_file(
     *,
     dedupe: bool = True,
     skip_unchanged: bool = True,
+    pseudo_mode: str = "full",
     trust_cache: bool | None = None,
 ) -> bool:
     """Index a single file path. Returns True if indexed, False if skipped.
 
     When trust_cache is enabled (via argument or INDEX_TRUST_CACHE=1), rely solely on the
     local .codebase/cache.json for unchanged detection and skip Qdrant per-file hash checks.
+    This is a debug-only escape hatch and is unsafe for normal operation: enabling it may
+    hide index/cache drift, especially with git worktree reuse or collection rebuilds.
     """
-    # Resolve trust_cache from env when not explicitly provided
+
+    # Resolve trust_cache from env when not explicitly provided. INDEX_TRUST_CACHE is intended
+    # for debugging only and should not be enabled in normal indexing runs.
     if trust_cache is None:
         try:
             trust_cache = os.environ.get("INDEX_TRUST_CACHE", "").strip().lower() in {
@@ -2073,6 +2259,23 @@ def index_single_file(
             }
         except Exception:
             trust_cache = False
+
+    fast_fs = _env_truthy(os.environ.get("INDEX_FS_FASTPATH"), False)
+    if skip_unchanged and fast_fs and get_cached_file_meta is not None:
+        try:
+            repo_name_for_cache = _detect_repo_name_from_path(file_path)
+            meta = get_cached_file_meta(str(file_path), repo_name_for_cache) or {}
+            size = meta.get("size")
+            mtime = meta.get("mtime")
+            if size is not None and mtime is not None:
+                st = file_path.stat()
+                if int(getattr(st, "st_size", 0)) == int(size) and int(
+                    getattr(st, "st_mtime", 0)
+                ) == int(mtime):
+                    print(f"Skipping unchanged file (fs-meta): {file_path}")
+                    return False
+        except Exception:
+            pass
 
     try:
         text = file_path.read_text(encoding="utf-8", errors="ignore")
@@ -2136,6 +2339,12 @@ def index_single_file(
             if get_cached_file_hash:
                 prev_local = get_cached_file_hash(str(file_path), repo_tag)
                 if prev_local and file_hash and prev_local == file_hash:
+                    # When fs fast-path is enabled, refresh cache entry with size/mtime
+                    if fast_fs and set_cached_file_hash:
+                        try:
+                            set_cached_file_hash(str(file_path), file_hash, repo_tag)
+                        except Exception:
+                            pass
                     print(f"Skipping unchanged file (cache): {file_path}")
                     return False
         except Exception:
@@ -2151,6 +2360,12 @@ def index_single_file(
                 repo_rel_path=repo_rel_path,
             )
             if prev and prev == file_hash:
+                # When fs fast-path is enabled, refresh cache entry with size/mtime
+                if fast_fs and set_cached_file_hash:
+                    try:
+                        set_cached_file_hash(str(file_path), file_hash, repo_tag)
+                    except Exception:
+                        pass
                 print(f"Skipping unchanged file: {file_path}")
                 return False
 
@@ -2338,26 +2553,29 @@ def index_single_file(
         }
         # Optional LLM enrichment for lexical retrieval: pseudo + tags per micro-chunk
         # Use symbol-aware gating and cached pseudo/tags where possible
-        needs_pseudo, cached_pseudo, cached_tags = should_process_pseudo_for_chunk(
-            str(file_path), ch, changed_symbols
-        )
-        pseudo, tags = cached_pseudo, cached_tags
-        if needs_pseudo:
-            try:
-                pseudo, tags = generate_pseudo_tags(ch.get("text") or "")
-                if pseudo or tags:
-                    # Cache the pseudo data for this symbol
-                    symbol_name = ch.get("symbol", "")
-                    if symbol_name:
-                        kind = ch.get("kind", "unknown")
-                        start_line = ch.get("start", 0)
-                        symbol_id = f"{kind}_{symbol_name}_{start_line}"
+        pseudo = ""
+        tags = []
+        if pseudo_mode != "off":
+            needs_pseudo, cached_pseudo, cached_tags = should_process_pseudo_for_chunk(
+                str(file_path), ch, changed_symbols
+            )
+            pseudo, tags = cached_pseudo, cached_tags
+            if pseudo_mode == "full" and needs_pseudo:
+                try:
+                    pseudo, tags = generate_pseudo_tags(ch.get("text") or "")
+                    if pseudo or tags:
+                        # Cache the pseudo data for this symbol
+                        symbol_name = ch.get("symbol", "")
+                        if symbol_name:
+                            kind = ch.get("kind", "unknown")
+                            start_line = ch.get("start", 0)
+                            symbol_id = f"{kind}_{symbol_name}_{start_line}"
 
-                        if set_cached_pseudo:
-                            set_cached_pseudo(str(file_path), symbol_id, pseudo, tags, file_hash)
-            except Exception:
-                # Fall back to cached values (if any) or empty pseudo/tags
-                pass
+                            if set_cached_pseudo:
+                                set_cached_pseudo(str(file_path), symbol_id, pseudo, tags, file_hash)
+                except Exception:
+                    # Fall back to cached values (if any) or empty pseudo/tags
+                    pass
         # Attach whichever pseudo/tags we ended up with (cached or freshly generated)
         if pseudo:
             payload["pseudo"] = pseudo
@@ -2404,7 +2622,36 @@ def index_repo(
     *,
     dedupe: bool = True,
     skip_unchanged: bool = True,
+    pseudo_mode: str = "full",
 ):
+    # Optional fast no-change precheck: when INDEX_FS_FASTPATH is enabled, use
+    # fs metadata + cache.json to exit early before model/Qdrant setup when all
+    # files are unchanged.
+    fast_fs = _env_truthy(os.environ.get("INDEX_FS_FASTPATH"), False)
+    if skip_unchanged and not recreate and fast_fs and get_cached_file_meta is not None:
+        try:
+            all_unchanged = True
+            for file_path in iter_files(root):
+                per_file_repo_for_cache = _detect_repo_name_from_path(file_path) if _detect_repo_name_from_path else None
+                meta = get_cached_file_meta(str(file_path), per_file_repo_for_cache) or {}
+                size = meta.get("size")
+                mtime = meta.get("mtime")
+                if size is None or mtime is None:
+                    all_unchanged = False
+                    break
+                st = file_path.stat()
+                if int(getattr(st, "st_size", 0)) != int(size) or int(getattr(st, "st_mtime", 0)) != int(mtime):
+                    all_unchanged = False
+                    break
+            if all_unchanged:
+                try:
+                    print("[fast_index] No changes detected via fs metadata; skipping model and Qdrant setup")
+                except Exception:
+                    pass
+                return
+        except Exception:
+            pass
+
     model = TextEmbedding(model_name=model_name)
     # Determine embedding dimension
     dim = len(next(model.embed(["dimension probe"])))
@@ -2494,6 +2741,9 @@ def index_repo(
     )
 
     # Health check: detect cache/collection sync issues before indexing (single-collection mode only)
+    # TODO: In future, consider a dedicated "health-check-only" mode/command that runs these
+    # expensive Qdrant probes without doing a full index pass, so that "nothing changed" runs
+    # can stay as cheap as possible while still offering an explicit way to validate collections.
     # Skip with SKIP_HEALTH_CHECK=1 for large collections where scroll is slow
     _skip_health = os.environ.get("SKIP_HEALTH_CHECK", "").strip().lower() in {"1", "true", "yes"}
     if not _skip_health and not recreate and skip_unchanged and not use_per_repo_collections and collection:
@@ -2583,6 +2833,8 @@ def index_repo(
     # Track per-file hashes across the entire run for cache updates on any flush
     batch_file_hashes = {}
 
+    fast_fs = _env_truthy(os.environ.get("INDEX_FS_FASTPATH"), False)
+
     # Collect files for progress bar (fast: just list paths, no I/O)
     all_files = list(iter_files(root))
     total_files = len(all_files)
@@ -2592,8 +2844,13 @@ def index_repo(
     # When progress bar is active, suppress per-file skip messages
     _use_progress_bar = tqdm is not None
     if _use_progress_bar:
-        file_iter = tqdm(all_files, desc="Indexing", unit="file", ncols=100,
-                         bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]")
+        file_iter = tqdm(
+            all_files,
+            desc="Indexing",
+            unit="file",
+            ncols=100,
+            bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]",
+        )
     else:
         file_iter = all_files
 
@@ -2609,6 +2866,23 @@ def index_repo(
                 ensure_collection_and_indexes_once(client, current_collection, dim, vector_name)
             else:
                 current_collection = get_collection_name(ws_path) if get_collection_name else "default-collection"
+
+        # Optional fs-metadata fast-path: skip files whose size/mtime match cache
+        if skip_unchanged and fast_fs and get_cached_file_meta is not None:
+            try:
+                per_file_repo_for_cache = _detect_repo_name_from_path(file_path)
+                meta = get_cached_file_meta(str(file_path), per_file_repo_for_cache) or {}
+                size = meta.get("size")
+                mtime = meta.get("mtime")
+                if size is not None and mtime is not None:
+                    st = file_path.stat()
+                    if int(getattr(st, "st_size", 0)) == int(size) and int(
+                        getattr(st, "st_mtime", 0)
+                    ) == int(mtime):
+                        print(f"Skipping unchanged file (fs-meta): {file_path}")
+                        continue
+            except Exception:
+                pass
 
         try:
             text = file_path.read_text(encoding="utf-8", errors="ignore")
@@ -2671,10 +2945,38 @@ def index_repo(
                 if get_cached_file_hash:
                     prev_local = get_cached_file_hash(str(file_path), per_file_repo)
                     if prev_local and file_hash and prev_local == file_hash:
+                        # When fs fast-path is enabled, refresh cache entry with size/mtime
+                        if fast_fs and set_cached_file_hash:
+                            try:
+                                set_cached_file_hash(str(file_path), file_hash, per_file_repo)
+                            except Exception:
+                                pass
                         # Only print skip messages if no progress bar
                         if not _use_progress_bar:
                             if PROGRESS_EVERY <= 0 and files_seen % 50 == 0:
                                 print(f"... processed {files_seen} files (skipping unchanged, cache)")
+                                try:
+                                    if update_indexing_status:
+                                        target_workspace = (
+                                            ws_path if not use_per_repo_collections else str(file_path.parent)
+                                        )
+                                        target_repo = (
+                                            repo_tag if not use_per_repo_collections else per_file_repo
+                                        )
+                                        update_indexing_status(
+                                            workspace_path=target_workspace,
+                                            status={
+                                                "state": "indexing",
+                                                "progress": {
+                                                    "files_processed": files_seen,
+                                                    "total_files": None,
+                                                    "current_file": str(file_path),
+                                                },
+                                            },
+                                            repo_name=target_repo,
+                                        )
+                                except Exception:
+                                    pass
                             else:
                                 print(f"Skipping unchanged file (cache): {file_path}")
                         continue
@@ -2898,23 +3200,26 @@ def index_repo(
             }
             # Optional LLM enrichment for lexical retrieval: pseudo + tags per micro-chunk
             # Use symbol-aware gating and cached pseudo/tags where possible
-            needs_pseudo, cached_pseudo, cached_tags = should_process_pseudo_for_chunk(
-                str(file_path), ch, changed_symbols
-            )
-            pseudo, tags = cached_pseudo, cached_tags
-            if needs_pseudo:
-                try:
-                    pseudo, tags = generate_pseudo_tags(ch.get("text") or "")
-                    if pseudo or tags:
-                        symbol_name = ch.get("symbol", "")
-                        if symbol_name:
-                            kind = ch.get("kind", "unknown")
-                            start_line = ch.get("start", 0)
-                            symbol_id = f"{kind}_{symbol_name}_{start_line}"
-                            if set_cached_pseudo:
-                                set_cached_pseudo(str(file_path), symbol_id, pseudo, tags, file_hash)
-                except Exception:
-                    pass
+            pseudo = ""
+            tags: list[str] = []
+            if pseudo_mode != "off":
+                needs_pseudo, cached_pseudo, cached_tags = should_process_pseudo_for_chunk(
+                    str(file_path), ch, changed_symbols
+                )
+                pseudo, tags = cached_pseudo, cached_tags
+                if pseudo_mode == "full" and needs_pseudo:
+                    try:
+                        pseudo, tags = generate_pseudo_tags(ch.get("text") or "")
+                        if pseudo or tags:
+                            symbol_name = ch.get("symbol", "")
+                            if symbol_name:
+                                kind = ch.get("kind", "unknown")
+                                start_line = ch.get("start", 0)
+                                symbol_id = f"{kind}_{symbol_name}_{start_line}"
+                                if set_cached_pseudo:
+                                    set_cached_pseudo(str(file_path), symbol_id, pseudo, tags, file_hash)
+                    except Exception:
+                        pass
             if pseudo:
                 payload["pseudo"] = pseudo
             if tags:
@@ -3642,6 +3947,9 @@ def main():
             collection = os.environ.get("COLLECTION_NAME", "codebase")
         print(f"[single_repo] Single-repo mode enabled - using collection: {collection}")
 
+    flag = (os.environ.get("PSEUDO_BACKFILL_ENABLED") or "").strip().lower()
+    pseudo_mode = "off" if flag in {"1", "true", "yes", "on"} else "full"
+
     index_repo(
         Path(args.root).resolve(),
         qdrant_url,
@@ -3651,6 +3959,9 @@ def main():
         args.recreate,
         dedupe=(not args.no_dedupe),
         skip_unchanged=(not args.no_skip_unchanged),
+        # Pseudo/tags are inlined by default; when PSEUDO_BACKFILL_ENABLED=1 we run
+        # base-only and rely on the background backfill worker to add pseudo/tags.
+        pseudo_mode=pseudo_mode,
     )
 
 

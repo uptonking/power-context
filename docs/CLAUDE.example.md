@@ -1,5 +1,6 @@
 This file is intended for AI agents (Claude, etc.) using the Context‑Engine Qdrant‑Indexer and Memory MCP tools.
 
+These rules are NOT optional - you may existing tools for file reading, "grep" like searching tools and 'codebase search' tools - unrelated to qdrant-indexer mcp tools - you are to favour the qdrant-indexer tooling at all costs, as per these guidelines
 
 Agentic AI Project Rules: When to Use MCP Qdrant-Indexer vs Grep
 
@@ -37,7 +38,9 @@ Agentic AI Project Rules: When to Use MCP Qdrant-Indexer vs Grep
 
   MCP Tool Patterns:
 
-  # DO - Use concept/keyword-style queries (short natural-language fragments)
+  # DO - Use concept/keyword-style queries (short natural-language fragments).
+  # repo_search is semantic search, not grep, regex, or boolean syntax.
+  # Write queries as short descriptions, not as "foo OR bar" expressions.
   "input validation mechanisms"
   "database connection handling"
   "performance bottlenecks in request path"
