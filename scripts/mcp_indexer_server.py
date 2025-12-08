@@ -1644,11 +1644,14 @@ async def qdrant_index(
 @mcp.tool()
 async def set_session_defaults(
     collection: Any = None,
+    mode: Any = None,
+    under: Any = None,
+    language: Any = None,
     session: Any = None,
     ctx: Context = None,
     **kwargs,
 ) -> Dict[str, Any]:
-    """Set defaults (e.g., collection) for subsequent calls.
+    """Set defaults (e.g., collection, mode, under) for subsequent calls.
 
     Behavior:
     - If request Context is available, persist defaults per-connection so later calls on
@@ -1660,6 +1663,12 @@ async def set_session_defaults(
         if _extra:
             if (collection is None or (isinstance(collection, str) and collection.strip() == "")) and _extra.get("collection") is not None:
                 collection = _extra.get("collection")
+            if (mode is None or (isinstance(mode, str) and str(mode).strip() == "")) and _extra.get("mode") is not None:
+                mode = _extra.get("mode")
+            if (under is None or (isinstance(under, str) and str(under).strip() == "")) and _extra.get("under") is not None:
+                under = _extra.get("under")
+            if (language is None or (isinstance(language, str) and str(language).strip() == "")) and _extra.get("language") is not None:
+                language = _extra.get("language")
             if (session is None or (isinstance(session, str) and str(session).strip() == "")) and _extra.get("session") is not None:
                 session = _extra.get("session")
     except Exception:
@@ -1668,6 +1677,12 @@ async def set_session_defaults(
     defaults: Dict[str, Any] = {}
     if isinstance(collection, str) and collection.strip():
         defaults["collection"] = str(collection).strip()
+    if isinstance(mode, str) and mode.strip():
+        defaults["mode"] = str(mode).strip()
+    if isinstance(under, str) and under.strip():
+        defaults["under"] = str(under).strip()
+    if isinstance(language, str) and language.strip():
+        defaults["language"] = str(language).strip()
 
     # Per-connection storage (preferred)
     try:
@@ -1959,35 +1974,61 @@ async def repo_search(
     )
     highlight_snippet = _to_bool(highlight_snippet, True)
 
-    # Optional mode knob: "code_first" (default for IDE), "docs_first", "balanced"
-    mode_str = _to_str(mode, "").strip().lower()
-
-    # Resolve collection precedence: explicit > per-connection defaults > token defaults > env default
+    # Resolve collection and related hints: explicit > per-connection defaults > token defaults > env
     coll_hint = _to_str(collection, "").strip()
+    mode_hint = _to_str(mode, "").strip()
+    under_hint = _to_str(under, "").strip()
+    lang_hint = _to_str(language, "").strip()
 
     # 1) Per-connection defaults via ctx (no token required)
-    if (not coll_hint) and ctx is not None and getattr(ctx, "session", None) is not None:
+    if ctx is not None and getattr(ctx, "session", None) is not None:
         try:
             with _SESSION_CTX_LOCK:
                 _d2 = SESSION_DEFAULTS_BY_SESSION.get(ctx.session) or {}
-                _sc2 = str((_d2.get("collection") or "")).strip()
-                if _sc2:
-                    coll_hint = _sc2
+                if not coll_hint:
+                    _sc2 = str((_d2.get("collection") or "")).strip()
+                    if _sc2:
+                        coll_hint = _sc2
+                if not mode_hint:
+                    _sm2 = str((_d2.get("mode") or "")).strip()
+                    if _sm2:
+                        mode_hint = _sm2
+                if not under_hint:
+                    _su2 = str((_d2.get("under") or "")).strip()
+                    if _su2:
+                        under_hint = _su2
+                if not lang_hint:
+                    _sl2 = str((_d2.get("language") or "")).strip()
+                    if _sl2:
+                        lang_hint = _sl2
         except Exception:
             pass
 
     # 2) Legacy token-based defaults
-    if (not coll_hint) and sid:
+    if sid:
         try:
             with _SESSION_LOCK:
                 _d = SESSION_DEFAULTS.get(sid) or {}
-                _sc = str((_d.get("collection") or "")).strip()
-                if _sc:
-                    coll_hint = _sc
+                if not coll_hint:
+                    _sc = str((_d.get("collection") or "")).strip()
+                    if _sc:
+                        coll_hint = _sc
+                if not mode_hint:
+                    _sm = str((_d.get("mode") or "")).strip()
+                    if _sm:
+                        mode_hint = _sm
+                if not under_hint:
+                    _su = str((_d.get("under") or "")).strip()
+                    if _su:
+                        under_hint = _su
+                if not lang_hint:
+                    _sl = str((_d.get("language") or "")).strip()
+                    if _sl:
+                        lang_hint = _sl
         except Exception:
             pass
 
-    # 3) Environment default
+    # 3) Environment default (collection only for now)
     env_coll = (os.environ.get("DEFAULT_COLLECTION") or os.environ.get("COLLECTION_NAME") or "").strip()
     if (not coll_hint) and env_coll:
         coll_hint = env_coll
@@ -1995,6 +2036,17 @@ async def repo_search(
     # Final fallback
     env_fallback = (os.environ.get("DEFAULT_COLLECTION") or os.environ.get("COLLECTION_NAME") or "my-collection").strip()
     collection = coll_hint or env_fallback
+
+    # Optional mode knob: "code_first" (default for IDE), "docs_first", "balanced"
+    if not mode:
+        mode = mode_hint
+    mode_str = _to_str(mode, "").strip().lower()
+
+    # Apply defaults for language / under when explicit args are empty
+    if not language:
+        language = lang_hint
+    if not under:
+        under = under_hint
 
     language = _to_str(language, "").strip()
     under = _to_str(under, "").strip()
