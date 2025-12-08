@@ -1,3 +1,15 @@
+function debugLog(message) {
+  try {
+    const text = typeof message === "string" ? message : String(message);
+    console.error(text);
+    const dest = process.env.CTXCE_DEBUG_LOG;
+    if (dest) {
+      fs.appendFileSync(dest, `${new Date().toISOString()} ${text}\n`, "utf8");
+    }
+  } catch {
+  }
+}
+
 async function sendSessionDefaults(client, payload, label) {
   if (!client) {
     return;
@@ -36,13 +48,50 @@ async function listMemoryTools(client) {
     return [];
   }
   try {
-    const remote = await client.listTools();
+    const remote = await withTimeout(
+      client.listTools(),
+      5000,
+      "memory tools/list",
+    );
     return Array.isArray(remote?.tools) ? remote.tools.slice() : [];
   } catch (err) {
-    // eslint-disable-next-line no-console
-    console.error("[ctxce] Error calling memory tools/list:", err);
+    debugLog("[ctxce] Error calling memory tools/list: " + String(err));
     return [];
   }
+}
+
+function withTimeout(promise, ms, label) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      const errorMessage =
+        label != null
+          ? `[ctxce] Timeout after ${ms}ms in ${label}`
+          : `[ctxce] Timeout after ${ms}ms`;
+      reject(new Error(errorMessage));
+    }, ms);
+    promise
+      .then((value) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      })
+      .catch((err) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        reject(err);
+      });
+  });
 }
 
 function selectClientForTool(name, indexerClient, memoryClient) {
@@ -84,8 +133,7 @@ export async function runMcpServer(options) {
   const defaultUnder =
     config && typeof config.default_under === "string" ? config.default_under : null;
 
-  // eslint-disable-next-line no-console
-  console.error(
+  debugLog(
     `[ctxce] MCP low-level stdio bridge starting: workspace=${workspace}, indexerUrl=${indexerUrl}`,
   );
 
@@ -115,8 +163,7 @@ export async function runMcpServer(options) {
   try {
     await indexerClient.connect(indexerTransport);
   } catch (err) {
-    // eslint-disable-next-line no-console
-    console.error("[ctxce] Failed to connect MCP HTTP client to indexer:", err);
+    debugLog("[ctxce] Failed to connect MCP HTTP client to indexer: " + String(err));
     throw err;
   }
 
@@ -138,11 +185,9 @@ export async function runMcpServer(options) {
         },
       );
       await memoryClient.connect(memoryTransport);
-      // eslint-disable-next-line no-console
-      console.error("[ctxce] Connected memory MCP client:", memoryUrl);
+      debugLog(`[ctxce] Connected memory MCP client: ${memoryUrl}`);
     } catch (err) {
-      // eslint-disable-next-line no-console
-      console.error("[ctxce] Failed to connect memory MCP client:", err);
+      debugLog("[ctxce] Failed to connect memory MCP client: " + String(err));
       memoryClient = null;
     }
   }
@@ -186,45 +231,47 @@ export async function runMcpServer(options) {
     },
   );
 
-  // tools/list → fetch tools from remote indexer and append local ping tool
+  // tools/list → fetch tools from remote indexer
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     let remote;
     try {
-      remote = await indexerClient.listTools();
+      debugLog("[ctxce] tools/list: fetching tools from indexer");
+      remote = await withTimeout(
+        indexerClient.listTools(),
+        10000,
+        "indexer tools/list",
+      );
     } catch (err) {
-      // eslint-disable-next-line no-console
-      console.error("[ctxce] Error calling remote tools/list:", err);
-      return { tools: [buildPingTool()] };
+      debugLog("[ctxce] Error calling remote tools/list: " + String(err));
+      const memoryToolsFallback = await listMemoryTools(memoryClient);
+      const toolsFallback = dedupeTools([...memoryToolsFallback]);
+      return { tools: toolsFallback };
     }
 
-    // eslint-disable-next-line no-console
-    console.error("[ctxce] tools/list remote result:", JSON.stringify(remote));
+    try {
+      const toolNames =
+        remote && Array.isArray(remote.tools)
+          ? remote.tools.map((t) => (t && typeof t.name === "string" ? t.name : "<unnamed>"))
+          : [];
+      debugLog("[ctxce] tools/list remote result tools: " + JSON.stringify(toolNames));
+    } catch (err) {
+      debugLog("[ctxce] tools/list remote result: <unserializable> " + String(err));
+    }
 
     const indexerTools = Array.isArray(remote?.tools) ? remote.tools.slice() : [];
     const memoryTools = await listMemoryTools(memoryClient);
-    const tools = dedupeTools([...indexerTools, ...memoryTools, buildPingTool()]);
+    const tools = dedupeTools([...indexerTools, ...memoryTools]);
+    debugLog(`[ctxce] tools/list: returning ${tools.length} tools`);
     return { tools };
   });
 
-  // tools/call → handle ping locally, everything else is proxied to indexer
+  // tools/call → proxied to indexer or memory server
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const params = request.params || {};
     const name = params.name;
     let args = params.arguments;
 
-    if (name === "ping") {
-      const branch = detectGitBranch(workspace);
-      const text = args && typeof args.text === "string" ? args.text : "pong";
-      const suffix = branch ? ` (branch=${branch})` : "";
-      return {
-        content: [
-          {
-            type: "text",
-            text: `${text}${suffix}`,
-          },
-        ],
-      };
-    }
+    debugLog(`[ctxce] tools/call: ${name || "<no-name>"}`);
 
     // Attach session id so the target server can apply per-session defaults.
     if (sessionId && (args === undefined || args === null || typeof args === "object")) {
@@ -241,8 +288,7 @@ export async function runMcpServer(options) {
         try {
           await memoryClient.callTool({ name, arguments: args });
         } catch (err) {
-          // eslint-disable-next-line no-console
-          console.error("[ctxce] Memory set_session_defaults failed:", err);
+          debugLog("[ctxce] Memory set_session_defaults failed: " + String(err));
         }
       }
       return indexerResult;
@@ -293,23 +339,6 @@ function loadConfig(startDir) {
     console.error("[ctxce] Error while loading ctx_config.json:", err);
   }
   return null;
-}
-
-function buildPingTool() {
-  return {
-    name: "ping",
-    description: "Basic ping tool exposed by the ctx bridge",
-    inputSchema: {
-      type: "object",
-      properties: {
-        text: {
-          type: "string",
-          description: "Optional text to echo back.",
-        },
-      },
-      required: [],
-    },
-  };
 }
 
 function detectGitBranch(workspace) {
