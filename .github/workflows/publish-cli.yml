@@ -26,11 +26,9 @@ jobs:
           registry-url: "https://registry.npmjs.org"
 
       - name: Install dependencies
-        working-directory: ctxce-cli
+        working-directory: ctx-mcp-bridge
         run: npm install
 
       - name: Publish to npm
-        working-directory: ctxce-cli
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --access public
+        working-directory: ctx-mcp-bridge
+        run: npm publish --access public --provenance
