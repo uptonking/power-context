@@ -1269,11 +1269,19 @@ def compare_symbol_changes(old_symbols: dict, new_symbols: dict) -> tuple[list, 
     return unchanged, changed
 
 
-def list_workspaces(search_root: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Scan search_root recursively for .codebase/state.json and summarize workspaces.
+def list_workspaces(
+    search_root: Optional[str] = None,
+    use_qdrant_fallback: bool = True,
+) -> List[Dict[str, Any]]:
+    """Scan for workspaces via local filesystem or Qdrant collections.
+
+    Supports both local/mounted and remote client-server scenarios:
+    - Local: Scans filesystem for .codebase/state.json files
+    - Remote: Falls back to querying Qdrant collections for workspace metadata
 
     Args:
-        search_root: Directory to scan; defaults to parent of /work.
+        search_root: Directory to scan for local mode; defaults to parent of /work.
+        use_qdrant_fallback: If True and no local workspaces found, query Qdrant.
 
     Returns:
         List of workspace info dicts with keys:
@@ -1281,6 +1289,7 @@ def list_workspaces(search_root: Optional[str] = None) -> List[Dict[str, Any]]:
         - collection_name: str
         - last_updated: str or int (ISO timestamp or unix)
         - indexing_state: str
+        - source: "local" or "qdrant" (indicates discovery method)
     """
     if search_root is None:
         # Default to parent of workspace root
@@ -1293,6 +1302,7 @@ def list_workspaces(search_root: Optional[str] = None) -> List[Dict[str, Any]]:
     workspaces: List[Dict[str, Any]] = []
     seen_paths: set = set()
 
+    # --- Local filesystem scan ---
     try:
         # Find all state.json files
         for state_file in root_path.rglob(f"{STATE_DIRNAME}/{STATE_FILENAME}"):
@@ -1330,6 +1340,7 @@ def list_workspaces(search_root: Optional[str] = None) -> List[Dict[str, Any]]:
                     "collection_name": collection_name,
                     "last_updated": updated_at,
                     "indexing_state": indexing_state,
+                    "source": "local",
                 })
             except Exception:
                 continue
@@ -1373,15 +1384,121 @@ def list_workspaces(search_root: Optional[str] = None) -> List[Dict[str, Any]]:
                             "last_updated": updated_at,
                             "indexing_state": indexing_state,
                             "repo_name": repo_name,
+                            "source": "local",
                         })
                     except Exception:
                         continue
     except Exception:
         pass
 
+    # --- Qdrant fallback for remote scenarios ---
+    if not workspaces and use_qdrant_fallback:
+        try:
+            workspaces = _list_workspaces_from_qdrant(seen_paths)
+        except Exception:
+            pass
+
     # Sort by last_updated descending
     try:
         workspaces.sort(key=lambda w: w.get("last_updated", ""), reverse=True)
+    except Exception:
+        pass
+
+    return workspaces
+
+
+def _list_workspaces_from_qdrant(seen_paths: set) -> List[Dict[str, Any]]:
+    """Query Qdrant collections to discover workspaces (for remote scenarios).
+
+    Samples points from each collection to extract workspace metadata.
+    """
+    workspaces: List[Dict[str, Any]] = []
+
+    try:
+        from qdrant_client import QdrantClient
+    except ImportError:
+        return workspaces
+
+    qdrant_url = os.environ.get("QDRANT_URL", "http://localhost:6333")
+    qdrant_key = os.environ.get("QDRANT_API_KEY")
+
+    try:
+        client = QdrantClient(
+            url=qdrant_url,
+            api_key=qdrant_key,
+            timeout=float(os.environ.get("QDRANT_TIMEOUT", "10") or 10),
+        )
+
+        # List all collections
+        collections = client.get_collections().collections
+
+        for coll in collections:
+            coll_name = coll.name
+            if not coll_name:
+                continue
+
+            # Sample a few points to extract workspace metadata
+            try:
+                points, _ = client.scroll(
+                    collection_name=coll_name,
+                    limit=5,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+
+                if not points:
+                    continue
+
+                # Extract workspace info from sampled points
+                workspace_path = None
+                repo_name = None
+                last_ingested = None
+
+                for pt in points:
+                    payload = getattr(pt, "payload", {}) or {}
+                    md = payload.get("metadata", {}) or {}
+
+                    # Try to get workspace path from metadata
+                    if not workspace_path:
+                        workspace_path = (
+                            md.get("workspace_path")
+                            or md.get("source_root")
+                            or payload.get("workspace_path")
+                        )
+
+                    # Try to get repo name
+                    if not repo_name:
+                        repo_name = md.get("repo") or md.get("repo_name")
+
+                    # Get ingestion timestamp
+                    ts = md.get("ingested_at") or payload.get("ingested_at")
+                    if ts and (last_ingested is None or ts > last_ingested):
+                        last_ingested = ts
+
+                # Build workspace entry
+                ws_path = workspace_path or f"/work/{repo_name}" if repo_name else f"[{coll_name}]"
+
+                if ws_path in seen_paths:
+                    continue
+                seen_paths.add(ws_path)
+
+                workspaces.append({
+                    "workspace_path": ws_path,
+                    "collection_name": coll_name,
+                    "last_updated": last_ingested or "",
+                    "indexing_state": "indexed",  # If points exist, it's indexed
+                    "repo_name": repo_name or "",
+                    "source": "qdrant",
+                })
+            except Exception:
+                # Collection exists but couldn't sample - still report it
+                workspaces.append({
+                    "workspace_path": f"[{coll_name}]",
+                    "collection_name": coll_name,
+                    "last_updated": "",
+                    "indexing_state": "unknown",
+                    "source": "qdrant",
+                })
     except Exception:
         pass
 
