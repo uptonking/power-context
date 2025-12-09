@@ -21,7 +21,7 @@ import re
 import ast
 import time
 from pathlib import Path
-from typing import List, Dict, Iterable
+from typing import List, Dict, Iterable, Any, Optional
 
 try:
     from tqdm import tqdm
@@ -3286,8 +3286,8 @@ def index_repo(
                             status={
                                 "state": "indexing",
                                 "progress": {
-                                    "files_processed": repo_progress.get(per_file_repo, 0),
-                                    "total_files": repo_total.get(per_file_repo, None),
+                                    "files_processed": files_indexed,
+                                    "total_files": files_seen,
                                     "current_file": str(file_path),
                                 },
                             },

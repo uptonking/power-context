@@ -1269,4 +1269,123 @@ def compare_symbol_changes(old_symbols: dict, new_symbols: dict) -> tuple[list, 
     return unchanged, changed
 
 
+def list_workspaces(search_root: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Scan search_root recursively for .codebase/state.json and summarize workspaces.
+
+    Args:
+        search_root: Directory to scan; defaults to parent of /work.
+
+    Returns:
+        List of workspace info dicts with keys:
+        - workspace_path: str
+        - collection_name: str
+        - last_updated: str or int (ISO timestamp or unix)
+        - indexing_state: str
+    """
+    if search_root is None:
+        # Default to parent of workspace root
+        try:
+            search_root = str(Path(_resolve_workspace_root()).parent)
+        except Exception:
+            search_root = "/work"
+
+    root_path = Path(search_root).resolve()
+    workspaces: List[Dict[str, Any]] = []
+    seen_paths: set = set()
+
+    try:
+        # Find all state.json files
+        for state_file in root_path.rglob(f"{STATE_DIRNAME}/{STATE_FILENAME}"):
+            try:
+                # Skip if in repos subdirectory (multi-repo per-repo states)
+                if "repos" in state_file.parts:
+                    continue
+
+                workspace_path = str(state_file.parent.parent.resolve())
+
+                # Skip duplicates
+                if workspace_path in seen_paths:
+                    continue
+                seen_paths.add(workspace_path)
+
+                # Read state file
+                with open(state_file, "r", encoding="utf-8") as f:
+                    state = json.load(f)
+
+                if not isinstance(state, dict):
+                    continue
+
+                # Extract info
+                collection_name = state.get("qdrant_collection", "")
+                updated_at = state.get("updated_at", "")
+
+                indexing_status = state.get("indexing_status", {})
+                if isinstance(indexing_status, dict):
+                    indexing_state = indexing_status.get("state", "unknown")
+                else:
+                    indexing_state = "unknown"
+
+                workspaces.append({
+                    "workspace_path": workspace_path,
+                    "collection_name": collection_name,
+                    "last_updated": updated_at,
+                    "indexing_state": indexing_state,
+                })
+            except Exception:
+                continue
+
+        # Also check multi-repo states
+        if is_multi_repo_mode():
+            repos_root = root_path / STATE_DIRNAME / "repos"
+            if repos_root.exists():
+                for repo_dir in repos_root.iterdir():
+                    if not repo_dir.is_dir():
+                        continue
+                    state_file = repo_dir / STATE_FILENAME
+                    if not state_file.exists():
+                        continue
+                    try:
+                        with open(state_file, "r", encoding="utf-8") as f:
+                            state = json.load(f)
+
+                        if not isinstance(state, dict):
+                            continue
+
+                        repo_name = repo_dir.name
+                        workspace_path = state.get("workspace_path", str(root_path / repo_name))
+
+                        if workspace_path in seen_paths:
+                            continue
+                        seen_paths.add(workspace_path)
+
+                        collection_name = state.get("qdrant_collection", "")
+                        updated_at = state.get("updated_at", "")
+
+                        indexing_status = state.get("indexing_status", {})
+                        if isinstance(indexing_status, dict):
+                            indexing_state = indexing_status.get("state", "unknown")
+                        else:
+                            indexing_state = "unknown"
+
+                        workspaces.append({
+                            "workspace_path": workspace_path,
+                            "collection_name": collection_name,
+                            "last_updated": updated_at,
+                            "indexing_state": indexing_state,
+                            "repo_name": repo_name,
+                        })
+                    except Exception:
+                        continue
+    except Exception:
+        pass
+
+    # Sort by last_updated descending
+    try:
+        workspaces.sort(key=lambda w: w.get("last_updated", ""), reverse=True)
+    except Exception:
+        pass
+
+    return workspaces
+
+
 # Add missing functions that callers expect (already defined above)
