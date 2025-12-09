@@ -94,6 +94,22 @@ function withTimeout(promise, ms, label) {
   });
 }
 
+function getBridgeToolTimeoutMs() {
+  try {
+    const raw = process.env.CTXCE_TOOL_TIMEOUT_MSEC;
+    if (!raw) {
+      return 300000;
+    }
+    const parsed = Number.parseInt(String(raw), 10);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      return 300000;
+    }
+    return parsed;
+  } catch {
+    return 300000;
+  }
+}
+
 function selectClientForTool(name, indexerClient, memoryClient) {
   if (!name) {
     return indexerClient;
@@ -300,10 +316,15 @@ async function createBridgeServer(options) {
       throw new Error(`Tool ${name} not available on any configured MCP server`);
     }
 
-    const result = await targetClient.callTool({
-      name,
-      arguments: args,
-    });
+    const timeoutMs = getBridgeToolTimeoutMs();
+    const result = await targetClient.callTool(
+      {
+        name,
+        arguments: args,
+      },
+      undefined,
+      { timeout: timeoutMs },
+    );
     return result;
   });
 
