@@ -2,6 +2,8 @@
 import os
 import argparse
 from typing import List, Dict, Any, Tuple
+from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 
 from qdrant_client import QdrantClient, models
 from fastembed import TextEmbedding
@@ -9,8 +11,48 @@ import re
 import json
 import math
 
+# Prefer orjson for faster serialization (2-3x speedup)
+try:
+    import orjson
+    def _json_dumps(obj):
+        return orjson.dumps(obj).decode()
+except ImportError:
+    orjson = None
+    def _json_dumps(obj):
+        return json.dumps(obj)
+
 import logging
 import threading
+
+# Connection pooling imports
+try:
+    from scripts.qdrant_client_manager import get_qdrant_client, return_qdrant_client, pooled_qdrant_client
+    _POOL_AVAILABLE = True
+except ImportError:
+    _POOL_AVAILABLE = False
+    def get_qdrant_client(url=None, api_key=None, force_new=False, use_pool=True):
+        return QdrantClient(url=url or os.environ.get("QDRANT_URL", "http://localhost:6333"),
+                           api_key=api_key or os.environ.get("QDRANT_API_KEY"))
+    def return_qdrant_client(client):
+        pass
+
+# ThreadPoolExecutor for parallel queries (reuse across calls)
+_QUERY_EXECUTOR = None
+_EXECUTOR_LOCK = threading.Lock()
+
+def _get_query_executor(max_workers: int = 4) -> ThreadPoolExecutor:
+    """Get or create a shared ThreadPoolExecutor for parallel queries."""
+    global _QUERY_EXECUTOR
+    if _QUERY_EXECUTOR is None:
+        with _EXECUTOR_LOCK:
+            if _QUERY_EXECUTOR is None:
+                _QUERY_EXECUTOR = ThreadPoolExecutor(max_workers=max_workers)
+    return _QUERY_EXECUTOR
+
+# Filter sanitization cache (avoids repeated deep copies)
+_FILTER_CACHE = {}
+_FILTER_CACHE_LOCK = threading.Lock()
+_FILTER_CACHE_MAX = 256
 
 # Import unified caching system
 try:
