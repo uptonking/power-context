@@ -1022,6 +1022,70 @@ function buildChildEnv(options) {
   }
   return env;
 }
+function normalizeBridgeUrl(url) {
+  if (!url || typeof url !== 'string') {
+    return '';
+  }
+  const trimmed = url.trim();
+  if (!trimmed) {
+    return '';
+  }
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.pathname.endsWith('/sse')) {
+      parsed.pathname = parsed.pathname.replace(/\/sse$/, '/mcp');
+      return parsed.toString();
+    }
+  } catch (_) {
+    // fall through to return trimmed
+  }
+  return trimmed;
+}
+
+function normalizeWorkspaceForBridge(workspacePath) {
+  if (!workspacePath || typeof workspacePath !== 'string') {
+    return '';
+  }
+  try {
+    const resolved = path.resolve(workspacePath);
+    if (process.platform === 'win32') {
+      return resolved.replace(/\//g, '\\');
+    }
+    return resolved;
+  } catch (_) {
+    return workspacePath;
+  }
+}
+
+function buildBridgeServerConfig(workspacePath, indexerUrl, memoryUrl) {
+  const isWindows = process.platform === 'win32';
+  const args = [
+    '@context-engine-bridge/context-engine-mcp-bridge',
+    'mcp-serve'
+  ];
+  if (workspacePath) {
+    args.push('--workspace', normalizeWorkspaceForBridge(workspacePath));
+  }
+  if (indexerUrl) {
+    args.push('--indexer-url', indexerUrl);
+  }
+  if (memoryUrl) {
+    args.push('--memory-url', memoryUrl);
+  }
+  if (isWindows) {
+    return {
+      command: 'cmd',
+      args: ['/c', 'npx', ...args],
+      env: {}
+    };
+  }
+  return {
+    command: 'npx',
+    args,
+    env: {}
+  };
+}
+
 async function writeMcpConfig() {
   const settings = vscode.workspace.getConfiguration('contextEngineUploader');
   const claudeEnabled = settings.get('mcpClaudeEnabled', true);
@@ -1034,9 +1098,15 @@ async function writeMcpConfig() {
   }
   const transportModeRaw = (settings.get('mcpTransportMode') || 'sse-remote');
   const transportMode = (typeof transportModeRaw === 'string' ? transportModeRaw.trim() : 'sse-remote') || 'sse-remote';
+  const serverModeRaw = (settings.get('mcpServerMode') || 'bridge');
+  const serverMode = (typeof serverModeRaw === 'string' ? serverModeRaw.trim() : 'bridge') || 'bridge';
 
   let indexerUrl = (settings.get('mcpIndexerUrl') || 'http://localhost:8001/sse').trim();
   let memoryUrl = (settings.get('mcpMemoryUrl') || 'http://localhost:8000/sse').trim();
+  if (serverMode === 'bridge') {
+    indexerUrl = normalizeBridgeUrl(indexerUrl);
+    memoryUrl = normalizeBridgeUrl(memoryUrl);
+  }
   let wroteAny = false;
   let hookWrote = false;
   if (claudeEnabled) {
@@ -1044,14 +1114,15 @@ async function writeMcpConfig() {
     if (!root) {
       vscode.window.showErrorMessage('Context Engine Uploader: open a folder before writing .mcp.json.');
     } else {
-      const result = await writeClaudeMcpServers(root, indexerUrl, memoryUrl, transportMode);
+      const result = await writeClaudeMcpServers(root, indexerUrl, memoryUrl, transportMode, serverMode);
       wroteAny = wroteAny || result;
     }
   }
   if (windsurfEnabled) {
     const customPath = (settings.get('windsurfMcpPath') || '').trim();
     const windsPath = customPath || getDefaultWindsurfMcpPath();
-    const result = await writeWindsurfMcpServers(windsPath, indexerUrl, memoryUrl, transportMode);
+    const workspaceHint = getWorkspaceFolderPath();
+    const result = await writeWindsurfMcpServers(windsPath, indexerUrl, memoryUrl, transportMode, serverMode, workspaceHint);
     wroteAny = wroteAny || result;
   }
   if (claudeHookEnabled) {
@@ -1498,7 +1569,7 @@ function getDefaultWindsurfMcpPath() {
   return path.join(os.homedir(), '.codeium', 'windsurf', 'mcp_config.json');
 }
 
-async function writeClaudeMcpServers(root, indexerUrl, memoryUrl, transportMode) {
+async function writeClaudeMcpServers(root, indexerUrl, memoryUrl, transportMode, serverMode = 'bridge') {
   const configPath = path.join(root, '.mcp.json');
   let config = { mcpServers: {} };
   if (fs.existsSync(configPath)) {
@@ -1521,7 +1592,12 @@ async function writeClaudeMcpServers(root, indexerUrl, memoryUrl, transportMode)
   const servers = config.mcpServers;
   const mode = (typeof transportMode === 'string' ? transportMode.trim() : 'sse-remote') || 'sse-remote';
 
-  if (mode === 'http') {
+  if (serverMode === 'bridge') {
+    const bridgeServer = buildBridgeServerConfig(root, indexerUrl, memoryUrl);
+    servers['context-engine'] = bridgeServer;
+    delete servers['qdrant-indexer'];
+    delete servers.memory;
+  } else if (mode === 'http') {
     // Direct HTTP MCP endpoints for Claude (.mcp.json)
     if (indexerUrl) {
       servers['qdrant-indexer'] = {
@@ -1572,7 +1648,7 @@ async function writeClaudeMcpServers(root, indexerUrl, memoryUrl, transportMode)
   }
 }
 
-async function writeWindsurfMcpServers(configPath, indexerUrl, memoryUrl, transportMode) {
+async function writeWindsurfMcpServers(configPath, indexerUrl, memoryUrl, transportMode, serverMode = 'bridge', workspaceHint) {
   try {
     fs.mkdirSync(path.dirname(configPath), { recursive: true });
   } catch (error) {
@@ -1601,7 +1677,12 @@ async function writeWindsurfMcpServers(configPath, indexerUrl, memoryUrl, transp
   const servers = config.mcpServers;
   const mode = (typeof transportMode === 'string' ? transportMode.trim() : 'sse-remote') || 'sse-remote';
 
-  if (mode === 'http') {
+  if (serverMode === 'bridge') {
+    const bridgeServer = buildBridgeServerConfig(workspaceHint || '', indexerUrl, memoryUrl);
+    servers['context-engine'] = bridgeServer;
+    delete servers['qdrant-indexer'];
+    delete servers.memory;
+  } else if (mode === 'http') {
     // Direct HTTP MCP endpoints for Windsurf mcp_config.json
     if (indexerUrl) {
       servers['qdrant-indexer'] = {

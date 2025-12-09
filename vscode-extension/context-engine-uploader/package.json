@@ -166,15 +166,21 @@
           "default": "http",
           "description": "Transport mode for Claude/Windsurf MCP configs: SSE via mcp-remote (sse-remote) or direct HTTP /mcp endpoints (http)."
         },
+        "contextEngineUploader.mcpServerMode": {
+          "type": "string",
+          "enum": ["bridge", "direct"],
+          "default": "bridge",
+          "description": "Preferred MCP server wiring. \"bridge\" uses the @context-engine-bridge/context-engine-mcp-bridge CLI (recommended). \"direct\" writes separate Qdrant indexer and memory MCP entries like previous versions."
+        },
         "contextEngineUploader.mcpIndexerUrl": {
           "type": "string",
           "default": "http://localhost:8001/sse",
-          "description": "Claude Code MCP server URL for the Qdrant indexer. Used when writing the project-local .mcp.json via 'Write MCP Config'."
+          "description": "Claude Code MCP server URL for the Qdrant indexer. Used when writing MCP configs."
         },
         "contextEngineUploader.mcpMemoryUrl": {
           "type": "string",
           "default": "http://localhost:8000/sse",
-          "description": "Claude Code MCP server URL for the memory/search MCP server. Used when writing the project-local .mcp.json via 'Write MCP Config'."
+          "description": "Claude Code MCP server URL for the memory/search MCP server. Used when writing MCP configs."
         },
         "contextEngineUploader.ctxIndexerUrl": {
           "type": "string",
