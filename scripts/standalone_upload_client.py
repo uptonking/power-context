@@ -147,28 +147,49 @@ class SimpleHashCache:
         self.cache_dir = self.workspace_path / ".context-engine"
         self.cache_file = self.cache_dir / "file_cache.json"
         self.cache_dir.mkdir(exist_ok=True)
+        # In-memory cache to avoid re-reading and re-validating on every access
+        self._cache_loaded = False
+        self._cache: Dict[str, str] = {}
+        self._stale_checked = False
+        self._load_cache()  # Load once on init
 
     def _load_cache(self) -> Dict[str, str]:
         """Load cache from disk."""
+        if self._cache_loaded:
+            return self._cache
+
         if not self.cache_file.exists():
-            return {}
+            self._cache = {}
+            self._cache_loaded = True
+            return self._cache
+
         try:
             with open(self.cache_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
                 file_hashes = data.get("file_hashes", {})
-                if self._cache_seems_stale(file_hashes):
+                # Run stale check only once per process to avoid O(N^2) scans
+                if not self._stale_checked and self._cache_seems_stale(file_hashes):
+                    self._stale_checked = True
                     logger.warning(
                         "[hash_cache] Detected stale cache with missing paths; resetting %s",
                         self.cache_file,
                     )
                     self._save_cache({})
-                    return {}
-                return file_hashes
+                    self._cache = {}
+                else:
+                    self._stale_checked = True
+                    self._cache = file_hashes if isinstance(file_hashes, dict) else {}
         except Exception:
-            return {}
+            self._cache = {}
+
+        self._cache_loaded = True
+        return self._cache
 
     def _save_cache(self, file_hashes: Dict[str, str]):
         """Save cache to disk."""
+        # Keep in-memory view in sync
+        self._cache = file_hashes
+        self._cache_loaded = True
         try:
             data = {
                 "file_hashes": file_hashes,
@@ -190,7 +211,8 @@ class SimpleHashCache:
         file_hashes = self._load_cache()
         abs_path = str(Path(file_path).resolve())
         file_hashes[abs_path] = file_hash
-        self._save_cache(file_hashes)
+        self._cache = file_hashes
+        self._cache_loaded = True
 
     def all_paths(self) -> List[str]:
         """Return all cached absolute file paths."""
@@ -203,7 +225,8 @@ class SimpleHashCache:
         abs_path = str(Path(file_path).resolve())
         if abs_path in file_hashes:
             file_hashes.pop(abs_path, None)
-            self._save_cache(file_hashes)
+            self._cache = file_hashes
+            self._cache_loaded = True
 
     def _cache_seems_stale(self, file_hashes: Dict[str, str]) -> bool:
         """Return True if a large portion of cached paths no longer exist on disk."""
@@ -578,6 +601,9 @@ class RemoteUploadClient:
         global _hash_cache
         _hash_cache = SimpleHashCache(workspace_path, self.repo_name)
 
+        # In-memory stat cache to avoid rehashing unchanged files on every watch iteration
+        self._stat_cache: Dict[str, Tuple[int, int]] = {}
+
         # Setup HTTP session with simple retry
         self.session = requests.Session()
         retry_strategy = Retry(total=max_retries, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
@@ -651,35 +677,69 @@ class RemoteUploadClient:
         }
 
         for path in changed_paths:
-            abs_path = str(path.resolve())
+            try:
+                abs_path = str(path.resolve())
+            except Exception:
+                # Skip paths that cannot be resolved
+                continue
+
             cached_hash = get_cached_file_hash(abs_path, self.repo_name)
 
             if not path.exists():
                 # File was deleted
                 if cached_hash:
                     changes["deleted"].append(path)
-            else:
-                # File exists - calculate current hash
+                # Remove from in-memory stat cache if present
                 try:
-                    with open(path, 'rb') as f:
-                        content = f.read()
-                    current_hash = hashlib.sha1(content).hexdigest()
-
-                    if not cached_hash:
-                        # New file
-                        changes["created"].append(path)
-                    elif cached_hash != current_hash:
-                        # Modified file
-                        changes["updated"].append(path)
-                    else:
-                        # Unchanged (might be a move detection candidate)
-                        changes["unchanged"].append(path)
-
-                    # Update cache
-                    set_cached_file_hash(abs_path, current_hash, self.repo_name)
+                    if abs_path in self._stat_cache:
+                        self._stat_cache.pop(abs_path, None)
                 except Exception:
-                    # Skip files that can't be read
-                    continue
+                    pass
+                continue
+
+            # File exists - use stat to avoid unnecessary re-hashing when possible
+            try:
+                stat = path.stat()
+            except Exception:
+                # Skip files we can't stat
+                continue
+
+            prev_mtime_ns = prev_size = None
+            try:
+                prev_mtime_ns, prev_size = self._stat_cache.get(abs_path, (None, None))
+            except Exception:
+                prev_mtime_ns, prev_size = None, None
+
+            # If mtime and size are unchanged and we have a cached hash, treat as unchanged
+            if prev_mtime_ns == getattr(stat, "st_mtime_ns", None) and prev_size == stat.st_size and cached_hash:
+                changes["unchanged"].append(path)
+                continue
+
+            # Stat changed or no prior entry – hash content to classify change
+            try:
+                with open(path, 'rb') as f:
+                    content = f.read()
+                current_hash = hashlib.sha1(content).hexdigest()
+            except Exception:
+                # Skip files that can't be read
+                continue
+
+            if not cached_hash:
+                # New file
+                changes["created"].append(path)
+            elif cached_hash != current_hash:
+                # Modified file
+                changes["updated"].append(path)
+            else:
+                # Unchanged (content same despite stat change)
+                changes["unchanged"].append(path)
+
+            # Update caches
+            try:
+                self._stat_cache[abs_path] = (getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1e9)), stat.st_size)
+            except Exception:
+                pass
+            set_cached_file_hash(abs_path, current_hash, self.repo_name)
 
         # Detect moves by looking for files with same content hash
         # but different paths (requires additional tracking)
