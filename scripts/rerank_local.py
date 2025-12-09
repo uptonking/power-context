@@ -41,6 +41,8 @@ _RERANK_TOKENIZER = None
 _RERANK_LOCK = threading.Lock()
 
 
+_WARMUP_DONE = False
+
 def _get_rerank_session():
     global _RERANK_SESSION, _RERANK_TOKENIZER
     if not (ort and Tokenizer and RERANKER_ONNX_PATH and RERANKER_TOKENIZER_PATH):
@@ -99,6 +101,33 @@ def _get_rerank_session():
 
 
 from scripts.utils import sanitize_vector_name as _sanitize_vector_name
+
+
+def warmup_reranker():
+    """Background warmup: load ONNX session and run a dummy inference."""
+    global _WARMUP_DONE
+    if _WARMUP_DONE:
+        return
+    sess, tok = _get_rerank_session()
+    if sess and tok:
+        try:
+            # Dummy inference to warm up the session
+            dummy_pairs = [("warmup query", "warmup document")]
+            rerank_local(dummy_pairs)
+        except Exception:
+            pass
+    _WARMUP_DONE = True
+
+
+def _start_background_warmup():
+    """Start background thread to warm up reranker."""
+    if os.environ.get("RERANK_WARMUP", "1") == "1":
+        t = threading.Thread(target=warmup_reranker, daemon=True)
+        t.start()
+
+
+# Auto-start warmup on module import
+_start_background_warmup()
 
 
 def _norm_under(u: str | None) -> str | None:

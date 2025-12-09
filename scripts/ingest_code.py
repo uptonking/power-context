@@ -2782,7 +2782,7 @@ def index_repo(
     batch_meta: list[dict] = []
     batch_ids: list[int] = []
     batch_lex: list[list[float]] = []
-    BATCH_SIZE = int(os.environ.get("INDEX_BATCH_SIZE", "64") or 64)
+    BATCH_SIZE = int(os.environ.get("INDEX_BATCH_SIZE", "256") or 256)
     CHUNK_LINES = int(os.environ.get("INDEX_CHUNK_LINES", "120") or 120)
     CHUNK_OVERLAP = int(os.environ.get("INDEX_CHUNK_OVERLAP", "20") or 20)
     PROGRESS_EVERY = int(os.environ.get("INDEX_PROGRESS_EVERY", "200") or 200)
