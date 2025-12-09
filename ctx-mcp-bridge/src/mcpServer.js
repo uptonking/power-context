@@ -335,6 +335,27 @@ export async function runMcpServer(options) {
   const server = await createBridgeServer(options);
   const transport = new StdioServerTransport();
   await server.connect(transport);
+
+  const exitOnStdinClose = process.env.CTXCE_EXIT_ON_STDIN_CLOSE !== "0";
+  if (exitOnStdinClose) {
+    const handleStdioClosed = () => {
+      try {
+        debugLog("[ctxce] Stdio transport closed; exiting MCP bridge process.");
+      } catch {
+        // ignore
+      }
+      // Allow any in-flight logs to flush, then exit.
+      setTimeout(() => {
+        process.exit(0);
+      }, 10).unref();
+    };
+
+    if (process.stdin && typeof process.stdin.on === "function") {
+      process.stdin.on("end", handleStdioClosed);
+      process.stdin.on("close", handleStdioClosed);
+      process.stdin.on("error", handleStdioClosed);
+    }
+  }
 }
 
 export async function runHttpMcpServer(options) {
