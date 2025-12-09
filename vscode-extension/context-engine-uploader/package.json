@@ -180,10 +180,15 @@
           "default": 30810,
           "description": "Port used for the local ctx-mcp-bridge HTTP server when auto-starting from the VS Code extension. Change if multiple IDE windows need parallel bridges."
         },
+        "contextEngineUploader.mcpBridgeBinPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional path to the ctxce CLI binary/script to use for the MCP bridge in local development. When set and the file exists, the extension runs this path via the current Node executable instead of using CTXCE_BRIDGE_BIN or 'npx @context-engine-bridge/context-engine-mcp-bridge'."
+        },
         "contextEngineUploader.mcpBridgeLocalOnly": {
           "type": "boolean",
           "default": true,
-          "description": "Development toggle. When true (default) the extension only runs the local ctx-mcp-bridge/bin/ctxce.js. Set to false to fall back to published npm builds via npx."
+          "description": "Development toggle. When true (default) the extension prefers local bridge binaries resolved from mcpBridgeBinPath or CTXCE_BRIDGE_BIN before falling back to the published npm build via npx."
         },
         "contextEngineUploader.mcpServerMode": {
           "type": "string",

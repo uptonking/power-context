@@ -127,6 +127,8 @@ function activate(context) {
     if (
       event.affectsConfiguration('contextEngineUploader.autoStartMcpBridge') ||
       event.affectsConfiguration('contextEngineUploader.mcpBridgePort') ||
+      event.affectsConfiguration('contextEngineUploader.mcpBridgeBinPath') ||
+      event.affectsConfiguration('contextEngineUploader.mcpBridgeLocalOnly') ||
       event.affectsConfiguration('contextEngineUploader.mcpIndexerUrl') ||
       event.affectsConfiguration('contextEngineUploader.mcpMemoryUrl') ||
       event.affectsConfiguration('contextEngineUploader.mcpServerMode') ||
@@ -1167,11 +1169,8 @@ function normalizeWorkspaceForBridge(workspacePath) {
 }
 
 function buildBridgeServerConfig(workspacePath, indexerUrl, memoryUrl) {
-  const isWindows = process.platform === 'win32';
-  const args = [
-    '@context-engine-bridge/context-engine-mcp-bridge',
-    'mcp-serve'
-  ];
+  const invocation = resolveBridgeCliInvocation();
+  const args = [...invocation.args, 'mcp-serve'];
   if (workspacePath) {
     args.push('--workspace', normalizeWorkspaceForBridge(workspacePath));
   }
@@ -1181,15 +1180,8 @@ function buildBridgeServerConfig(workspacePath, indexerUrl, memoryUrl) {
   if (memoryUrl) {
     args.push('--memory-url', memoryUrl);
   }
-  if (isWindows) {
-    return {
-      command: 'cmd',
-      args: ['/c', 'npx', ...args],
-      env: {}
-    };
-  }
   return {
-    command: 'npx',
+    command: invocation.command,
     args,
     env: {}
   };
@@ -1851,9 +1843,8 @@ async function handleHttpBridgeSettingsChanged() {
 function resolveBridgeCliInvocation() {
   const binPath = findLocalBridgeBin();
   if (binPath) {
-    const nodeExec = process.execPath || 'node';
     return {
-      command: nodeExec,
+      command: 'node',
       args: [binPath],
       kind: 'local'
     };
@@ -1874,14 +1865,23 @@ function resolveBridgeCliInvocation() {
 }
 
 function findLocalBridgeBin() {
+  let localOnly = true;
+  let configured = '';
   try {
     const settings = vscode.workspace.getConfiguration('contextEngineUploader');
-    const configured = (settings.get('mcpBridgeBinPath') || '').trim();
-    if (configured && fs.existsSync(configured)) {
-      return path.resolve(configured);
-    }
+    localOnly = settings.get('mcpBridgeLocalOnly', true);
+    configured = (settings.get('mcpBridgeBinPath') || '').trim();
   } catch (_) {
-    // ignore config lookup failures
+    // ignore config lookup failures and fall back to env/npx behavior
+  }
+
+  // When local-only is disabled, skip local resolution and always fall back to npx
+  if (localOnly === false) {
+    return undefined;
+  }
+
+  if (configured && fs.existsSync(configured)) {
+    return path.resolve(configured);
   }
 
   const envOverride = (process.env.CTXCE_BRIDGE_BIN || '').trim();
