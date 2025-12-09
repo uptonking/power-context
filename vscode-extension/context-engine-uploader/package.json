@@ -164,13 +164,28 @@
           "type": "string",
           "enum": ["sse-remote", "http"],
           "default": "http",
-          "description": "Transport mode for Claude/Windsurf MCP configs: SSE via mcp-remote (sse-remote) or direct HTTP /mcp endpoints (http)."
+          "description": "Transport mode for MCP wiring. When server mode is \"bridge\", sse-remote starts the stdio ctxce bridge while http points clients at the local HTTP bridge URL."
+        },
+        "contextEngineUploader.autoStartMcpBridge": {
+          "type": "boolean",
+          "default": true,
+          "description": "When enabled, automatically start the local ctx-mcp-bridge HTTP server for the active workspace so IDE clients can connect over HTTP without manual commands."
+        },
+        "contextEngineUploader.mcpBridgePort": {
+          "type": "number",
+          "default": 30810,
+          "description": "Port used for the local ctx-mcp-bridge HTTP server when auto-starting from the VS Code extension. Change if multiple IDE windows need parallel bridges."
+        },
+        "contextEngineUploader.mcpBridgeLocalOnly": {
+          "type": "boolean",
+          "default": true,
+          "description": "Development toggle. When true (default) the extension only runs the local ctx-mcp-bridge/bin/ctxce.js. Set to false to fall back to published npm builds via npx."
         },
         "contextEngineUploader.mcpServerMode": {
           "type": "string",
           "enum": ["bridge", "direct"],
           "default": "bridge",
-          "description": "Preferred MCP server wiring. \"bridge\" uses the @context-engine-bridge/context-engine-mcp-bridge CLI (recommended). \"direct\" writes separate Qdrant indexer and memory MCP entries like previous versions."
+          "description": "MCP wiring style. \"bridge\" uses the ctxce MCP bridge (stdio if transport=sse-remote, HTTP if transport=http). \"direct\" writes separate indexer/memory servers (stdio or HTTP depending on the transport setting)."
         },
         "contextEngineUploader.mcpIndexerUrl": {
           "type": "string",

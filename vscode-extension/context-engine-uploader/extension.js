@@ -17,6 +17,9 @@ let watchedTargetPath;
 let indexedWatchDisposables = [];
 let globalStoragePath;
 let pythonOverridePath;
+let httpBridgeProcess;
+let httpBridgePort;
+let httpBridgeWorkspace;
 const REQUIRED_PYTHON_MODULES = ['requests', 'urllib3', 'charset_normalizer'];
 const DEFAULT_CONTAINER_ROOT = '/work';
 // const CLAUDE_HOOK_COMMAND = '/home/coder/project/Context-Engine/ctx-hook-simple.sh';
@@ -83,6 +86,17 @@ function activate(context) {
   const showLogsDisposable = vscode.commands.registerCommand('contextEngineUploader.showUploadServiceLogs', () => {
     try { openUploadServiceLogsTerminal(); } catch (e) { log(`Show logs failed: ${e && e.message ? e.message : String(e)}`); }
   });
+  const startBridgeDisposable = vscode.commands.registerCommand('contextEngineUploader.startMcpHttpBridge', () => {
+    startHttpBridgeProcess().catch(error => {
+      log(`HTTP MCP bridge start failed: ${error instanceof Error ? error.message : String(error)}`);
+      vscode.window.showErrorMessage('Context Engine Uploader: failed to start HTTP MCP bridge. Check Output for details.');
+    });
+  });
+  const stopBridgeDisposable = vscode.commands.registerCommand('contextEngineUploader.stopMcpHttpBridge', () => {
+    stopHttpBridgeProcess().catch(error => {
+      log(`HTTP MCP bridge stop failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  });
   const promptEnhanceDisposable = vscode.commands.registerCommand('contextEngineUploader.promptEnhance', () => {
     enhanceSelectionWithUnicorn().catch(error => {
       log(`Prompt+ failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -109,6 +123,16 @@ function activate(context) {
       // Best-effort auto-update of MCP + hook configurations when settings change
       writeMcpConfig().catch(error => log(`Auto MCP config write failed: ${error instanceof Error ? error.message : String(error)}`));
     }
+    if (
+      event.affectsConfiguration('contextEngineUploader.autoStartMcpBridge') ||
+      event.affectsConfiguration('contextEngineUploader.mcpBridgePort') ||
+      event.affectsConfiguration('contextEngineUploader.mcpIndexerUrl') ||
+      event.affectsConfiguration('contextEngineUploader.mcpMemoryUrl') ||
+      event.affectsConfiguration('contextEngineUploader.mcpServerMode') ||
+      event.affectsConfiguration('contextEngineUploader.mcpTransportMode')
+    ) {
+      handleHttpBridgeSettingsChanged().catch(error => log(`HTTP MCP bridge restart failed: ${error instanceof Error ? error.message : String(error)}`));
+    }
   });
   const workspaceDisposable = vscode.workspace.onDidChangeWorkspaceFolders(() => {
     ensureTargetPathConfigured();
@@ -127,6 +151,8 @@ function activate(context) {
     uploadGitHistoryDisposable,
     showLogsDisposable,
     promptEnhanceDisposable,
+    startBridgeDisposable,
+    stopBridgeDisposable,
     mcpConfigDisposable,
     ctxConfigDisposable,
     configDisposable,
@@ -145,6 +171,9 @@ function activate(context) {
   } else if (config.get('scaffoldCtxConfig', true)) {
     // Legacy behavior: scaffold ctx_config.json/.env directly when MCP auto-write is disabled
     writeCtxConfig().catch(error => log(`CTX config auto-scaffold on activation failed: ${error instanceof Error ? error.message : String(error)}`));
+  }
+  if (config.get('autoStartMcpBridge', false)) {
+    startHttpBridgeProcess().catch(error => log(`Auto-start HTTP MCP bridge failed: ${error instanceof Error ? error.message : String(error)}`));
   }
 }
 async function runSequence(mode = 'auto') {
@@ -909,7 +938,7 @@ async function stopProcesses() {
     setStatusBarState('idle');
   }
 }
-function terminateProcess(proc, label) {
+function terminateProcess(proc, label, afterStop) {
   if (!proc) {
     return Promise.resolve();
   }
@@ -917,14 +946,17 @@ function terminateProcess(proc, label) {
     let finished = false;
     let termTimer;
     let killTimer;
-    const cleanup = () => {
+    const clearTimers = () => {
       if (termTimer) clearTimeout(termTimer);
       if (killTimer) clearTimeout(killTimer);
     };
     const finalize = (reason) => {
       if (finished) return;
       finished = true;
-      cleanup();
+      clearTimers();
+      if (typeof afterStop === 'function') {
+        afterStop();
+      }
       if (proc === forceProcess) {
         forceProcess = undefined;
       }
@@ -1100,6 +1132,17 @@ async function writeMcpConfig() {
   const transportMode = (typeof transportModeRaw === 'string' ? transportModeRaw.trim() : 'sse-remote') || 'sse-remote';
   const serverModeRaw = (settings.get('mcpServerMode') || 'bridge');
   const serverMode = (typeof serverModeRaw === 'string' ? serverModeRaw.trim() : 'bridge') || 'bridge';
+  const effectiveMode =
+    serverMode === 'bridge'
+      ? (transportMode === 'http' ? 'bridge-http' : 'bridge-stdio')
+      : (transportMode === 'http' ? 'direct-http' : 'direct-sse');
+  log(`Context Engine Uploader: MCP wiring mode=${effectiveMode} (serverMode=${serverMode}, transportMode=${transportMode}).`);
+  if (effectiveMode === 'bridge-http') {
+    const bridgeUrl = resolveBridgeHttpUrl();
+    if (bridgeUrl) {
+      log(`Context Engine Uploader: bridge HTTP endpoint ${bridgeUrl}`);
+    }
+  }
 
   let indexerUrl = (settings.get('mcpIndexerUrl') || 'http://localhost:8001/sse').trim();
   let memoryUrl = (settings.get('mcpMemoryUrl') || 'http://localhost:8000/sse').trim();
@@ -1536,7 +1579,7 @@ async function scaffoldCtxConfigFiles(workspaceDir, collectionName) {
 }
 function deactivate() {
   disposeIndexedWatcher();
-  return stopProcesses();
+  return Promise.all([stopProcesses(), stopHttpBridgeProcess()]);
 }
 module.exports = {
   activate,
@@ -1569,6 +1612,187 @@ function getDefaultWindsurfMcpPath() {
   return path.join(os.homedir(), '.codeium', 'windsurf', 'mcp_config.json');
 }
 
+function resolveHttpBridgeOptions() {
+  try {
+    const settings = vscode.workspace.getConfiguration('contextEngineUploader');
+    const serverModeRaw = settings.get('mcpServerMode') || 'bridge';
+    const transportModeRaw = settings.get('mcpTransportMode') || 'sse-remote';
+    const serverMode = typeof serverModeRaw === 'string' ? serverModeRaw.trim() : 'bridge';
+    const transportMode = typeof transportModeRaw === 'string' ? transportModeRaw.trim() : 'sse-remote';
+    if (serverMode !== 'bridge') {
+      vscode.window.showWarningMessage('Context Engine Uploader: MCP server mode is not "bridge"; HTTP bridge will connect to raw endpoints.');
+    }
+    if (transportMode !== 'http') {
+      log('Context Engine Uploader: MCP transport mode is not "http"; HTTP bridge will still start but downstream configs may expect SSE.');
+    }
+    const workspacePath = getWorkspaceFolderPath() || (settings.get('targetPath') || '').trim();
+    if (!workspacePath) {
+      vscode.window.showErrorMessage('Context Engine Uploader: open a workspace or set contextEngineUploader.targetPath before starting HTTP MCP bridge.');
+      return undefined;
+    }
+    let indexerUrl = (settings.get('mcpIndexerUrl') || 'http://localhost:8001/sse').trim();
+    let memoryUrl = (settings.get('mcpMemoryUrl') || '').trim();
+    indexerUrl = normalizeBridgeUrl(indexerUrl);
+    memoryUrl = normalizeBridgeUrl(memoryUrl);
+    let port = Number(settings.get('mcpBridgePort') || 30810);
+    if (!Number.isFinite(port) || port <= 0) {
+      port = 30810;
+    }
+    return {
+      workspacePath,
+      indexerUrl,
+      memoryUrl,
+      port
+    };
+  } catch (error) {
+    log(`Failed to resolve HTTP bridge options: ${error instanceof Error ? error.message : String(error)}`);
+    return undefined;
+  }
+}
+
+function resolveBridgeHttpUrl() {
+  try {
+    const settings = vscode.workspace.getConfiguration('contextEngineUploader');
+    let port = Number(settings.get('mcpBridgePort') || 30810);
+    if (!Number.isFinite(port) || port <= 0) {
+      port = 30810;
+    }
+    const hostname = '127.0.0.1';
+    return `http://${hostname}:${port}/mcp`;
+  } catch (error) {
+    log(`Failed to resolve bridge HTTP URL: ${error instanceof Error ? error.message : String(error)}`);
+    return undefined;
+  }
+}
+
+async function startHttpBridgeProcess() {
+  if (httpBridgeProcess) {
+    vscode.window.showInformationMessage(`Context Engine HTTP MCP bridge already running on port ${httpBridgePort || 'unknown'}.`);
+    return httpBridgePort;
+  }
+  const options = resolveHttpBridgeOptions();
+  if (!options) {
+    return undefined;
+  }
+  const invocation = resolveBridgeCliInvocation();
+  if (!invocation) {
+    vscode.window.showErrorMessage('Context Engine Uploader: unable to locate ctxce CLI for HTTP bridge.');
+    return undefined;
+  }
+  const cliArgs = ['mcp-http-serve'];
+  if (options.workspacePath) {
+    cliArgs.push('--workspace', normalizeWorkspaceForBridge(options.workspacePath));
+  }
+  if (options.indexerUrl) {
+    cliArgs.push('--indexer-url', options.indexerUrl);
+  }
+  if (options.memoryUrl) {
+    cliArgs.push('--memory-url', options.memoryUrl);
+  }
+  if (options.port) {
+    cliArgs.push('--port', String(options.port));
+  }
+  const finalArgs = [...invocation.args, ...cliArgs];
+  log(`Starting HTTP MCP bridge via ${invocation.command} ${finalArgs.join(' ')}`);
+  const child = spawn(invocation.command, finalArgs, {
+    cwd: options.workspacePath,
+    env: process.env
+  });
+  httpBridgeProcess = child;
+  httpBridgePort = options.port;
+  httpBridgeWorkspace = options.workspacePath;
+  attachOutput(child, 'mcp-http');
+  child.on('exit', (code, signal) => {
+    log(`HTTP MCP bridge exited with code ${code} signal ${signal || ''}`.trim());
+    if (httpBridgeProcess === child) {
+      httpBridgeProcess = undefined;
+      httpBridgePort = undefined;
+      httpBridgeWorkspace = undefined;
+    }
+  });
+  child.on('error', error => {
+    log(`HTTP MCP bridge process error: ${error instanceof Error ? error.message : String(error)}`);
+    if (httpBridgeProcess === child) {
+      httpBridgeProcess = undefined;
+      httpBridgePort = undefined;
+      httpBridgeWorkspace = undefined;
+    }
+  });
+  vscode.window.showInformationMessage(`Context Engine HTTP MCP bridge listening on http://127.0.0.1:${options.port}/mcp`);
+  return options.port;
+}
+
+function stopHttpBridgeProcess() {
+  if (!httpBridgeProcess) {
+    return Promise.resolve();
+  }
+  return terminateProcess(
+    httpBridgeProcess,
+    'mcp-http',
+    () => {
+      httpBridgeProcess = undefined;
+      httpBridgePort = undefined;
+      httpBridgeWorkspace = undefined;
+    }
+  );
+}
+
+async function handleHttpBridgeSettingsChanged() {
+  const config = vscode.workspace.getConfiguration('contextEngineUploader');
+  const shouldRun = !!config.get('autoStartMcpBridge', false);
+  const wasRunning = !!httpBridgeProcess;
+  if (httpBridgeProcess) {
+    await stopHttpBridgeProcess();
+  }
+  if (shouldRun || wasRunning) {
+    await startHttpBridgeProcess();
+  }
+}
+
+function resolveBridgeCliInvocation() {
+  const binPath = findLocalBridgeBin();
+  if (binPath) {
+    const nodeExec = process.execPath || 'node';
+    return {
+      command: nodeExec,
+      args: [binPath],
+      kind: 'local'
+    };
+  }
+  const isWindows = process.platform === 'win32';
+  if (isWindows) {
+    return {
+      command: 'cmd',
+      args: ['/c', 'npx', '@context-engine-bridge/context-engine-mcp-bridge'],
+      kind: 'npx'
+    };
+  }
+  return {
+    command: 'npx',
+    args: ['@context-engine-bridge/context-engine-mcp-bridge'],
+    kind: 'npx'
+  };
+}
+
+function findLocalBridgeBin() {
+  try {
+    const settings = vscode.workspace.getConfiguration('contextEngineUploader');
+    const configured = (settings.get('mcpBridgeBinPath') || '').trim();
+    if (configured && fs.existsSync(configured)) {
+      return path.resolve(configured);
+    }
+  } catch (_) {
+    // ignore config lookup failures
+  }
+
+  const envOverride = (process.env.CTXCE_BRIDGE_BIN || '').trim();
+  if (envOverride && fs.existsSync(envOverride)) {
+    return path.resolve(envOverride);
+  }
+
+  return undefined;
+}
+
 async function writeClaudeMcpServers(root, indexerUrl, memoryUrl, transportMode, serverMode = 'bridge') {
   const configPath = path.join(root, '.mcp.json');
   let config = { mcpServers: {} };
@@ -1593,8 +1817,21 @@ async function writeClaudeMcpServers(root, indexerUrl, memoryUrl, transportMode,
   const mode = (typeof transportMode === 'string' ? transportMode.trim() : 'sse-remote') || 'sse-remote';
 
   if (serverMode === 'bridge') {
-    const bridgeServer = buildBridgeServerConfig(root, indexerUrl, memoryUrl);
-    servers['context-engine'] = bridgeServer;
+    if (mode === 'http') {
+      const bridgeUrl = resolveBridgeHttpUrl();
+      if (bridgeUrl) {
+        servers['context-engine'] = {
+          type: 'http',
+          url: bridgeUrl
+        };
+      } else {
+        const bridgeServer = buildBridgeServerConfig(root, indexerUrl, memoryUrl);
+        servers['context-engine'] = bridgeServer;
+      }
+    } else {
+      const bridgeServer = buildBridgeServerConfig(root, indexerUrl, memoryUrl);
+      servers['context-engine'] = bridgeServer;
+    }
     delete servers['qdrant-indexer'];
     delete servers.memory;
   } else if (mode === 'http') {
@@ -1678,8 +1915,20 @@ async function writeWindsurfMcpServers(configPath, indexerUrl, memoryUrl, transp
   const mode = (typeof transportMode === 'string' ? transportMode.trim() : 'sse-remote') || 'sse-remote';
 
   if (serverMode === 'bridge') {
-    const bridgeServer = buildBridgeServerConfig(workspaceHint || '', indexerUrl, memoryUrl);
-    servers['context-engine'] = bridgeServer;
+    if (mode === 'http') {
+      const bridgeUrl = resolveBridgeHttpUrl();
+      if (bridgeUrl) {
+        servers['context-engine'] = {
+          serverUrl: bridgeUrl
+        };
+      } else {
+        const bridgeServer = buildBridgeServerConfig(workspaceHint || '', indexerUrl, memoryUrl);
+        servers['context-engine'] = bridgeServer;
+      }
+    } else {
+      const bridgeServer = buildBridgeServerConfig(workspaceHint || '', indexerUrl, memoryUrl);
+      servers['context-engine'] = bridgeServer;
+    }
     delete servers['qdrant-indexer'];
     delete servers.memory;
   } else if (mode === 'http') {

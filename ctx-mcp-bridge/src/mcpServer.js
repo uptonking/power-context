@@ -112,13 +112,15 @@ import process from "node:process";
 import fs from "node:fs";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { createServer } from "node:http";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 
-export async function runMcpServer(options) {
+async function createBridgeServer(options) {
   const workspace = options.workspace || process.cwd();
   const indexerUrl = options.indexerUrl;
   const memoryUrl = options.memoryUrl;
@@ -164,7 +166,6 @@ export async function runMcpServer(options) {
     await indexerClient.connect(indexerTransport);
   } catch (err) {
     debugLog("[ctxce] Failed to connect MCP HTTP client to indexer: " + String(err));
-    throw err;
   }
 
   let memoryClient = null;
@@ -306,8 +307,114 @@ export async function runMcpServer(options) {
     return result;
   });
 
+  return server;
+}
+
+export async function runMcpServer(options) {
+  const server = await createBridgeServer(options);
   const transport = new StdioServerTransport();
   await server.connect(transport);
+}
+
+export async function runHttpMcpServer(options) {
+  const server = await createBridgeServer(options);
+  const port =
+    typeof options.port === "number"
+      ? options.port
+      : Number.parseInt(process.env.CTXCE_HTTP_PORT || "30810", 10) || 30810;
+
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: undefined,
+  });
+
+  await server.connect(transport);
+
+  const httpServer = createServer((req, res) => {
+    try {
+      if (!req.url || !req.url.startsWith("/mcp")) {
+        res.statusCode = 404;
+        res.setHeader("Content-Type", "application/json");
+        res.end(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            error: { code: -32000, message: "Not found" },
+            id: null,
+          }),
+        );
+        return;
+      }
+
+      if (req.method !== "POST") {
+        res.statusCode = 405;
+        res.setHeader("Content-Type", "application/json");
+        res.end(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            error: { code: -32000, message: "Method not allowed" },
+            id: null,
+          }),
+        );
+        return;
+      }
+
+      let body = "";
+      req.on("data", (chunk) => {
+        body += chunk;
+      });
+      req.on("end", async () => {
+        let parsed;
+        try {
+          parsed = body ? JSON.parse(body) : {};
+        } catch (err) {
+          debugLog("[ctxce] Failed to parse HTTP MCP request body: " + String(err));
+          res.statusCode = 400;
+          res.setHeader("Content-Type", "application/json");
+          res.end(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              error: { code: -32700, message: "Invalid JSON" },
+              id: null,
+            }),
+          );
+          return;
+        }
+
+        try {
+          await transport.handleRequest(req, res, parsed);
+        } catch (err) {
+          debugLog("[ctxce] Error handling HTTP MCP request: " + String(err));
+          if (!res.headersSent) {
+            res.statusCode = 500;
+            res.setHeader("Content-Type", "application/json");
+            res.end(
+              JSON.stringify({
+                jsonrpc: "2.0",
+                error: { code: -32603, message: "Internal server error" },
+                id: null,
+              }),
+            );
+          }
+        }
+      });
+    } catch (err) {
+      debugLog("[ctxce] Unexpected error in HTTP MCP server: " + String(err));
+      if (!res.headersSent) {
+        res.statusCode = 500;
+        res.setHeader("Content-Type", "application/json");
+        res.end(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            error: { code: -32603, message: "Internal server error" },
+            id: null,
+          }),
+        );
+      }
+    }
+  });
+
+  httpServer.listen(port, () => {
+    debugLog(`[ctxce] HTTP MCP bridge listening on port ${port}`);
+  });
 }
 
 function loadConfig(startDir) {
