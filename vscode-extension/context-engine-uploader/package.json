@@ -164,12 +164,16 @@
           "type": "string",
           "enum": ["sse-remote", "http"],
           "default": "http",
-          "description": "Transport mode for MCP wiring. When server mode is \"bridge\", sse-remote starts the stdio ctxce bridge while http points clients at the local HTTP bridge URL."
+          "description": "Transport layer for MCP servers. 'sse-remote' runs stdio MCP processes behind an SSE tunnel; 'http' uses direct HTTP MCP endpoints. Combined with mcpServerMode this yields four modes: bridge-stdio, bridge-http, direct-sse, direct-http.",
+          "enumDescriptions": [
+            "Use stdio MCP processes behind an SSE tunnel (bridge-stdio / direct-sse).",
+            "Use HTTP MCP endpoints directly (bridge-http / direct-http)."
+          ]
         },
         "contextEngineUploader.autoStartMcpBridge": {
           "type": "boolean",
           "default": true,
-          "description": "When enabled, automatically start the local ctx-mcp-bridge HTTP server for the active workspace so IDE clients can connect over HTTP without manual commands."
+          "description": "When enabled and mcpServerMode='bridge' with mcpTransportMode='http', automatically start the local ctx-mcp-bridge HTTP server for the active workspace so IDE clients can connect over HTTP without manual commands. Has no effect in stdio/direct modes."
         },
         "contextEngineUploader.mcpBridgePort": {
           "type": "number",
@@ -185,7 +189,11 @@
           "type": "string",
           "enum": ["bridge", "direct"],
           "default": "bridge",
-          "description": "MCP wiring style. \"bridge\" uses the ctxce MCP bridge (stdio if transport=sse-remote, HTTP if transport=http). \"direct\" writes separate indexer/memory servers (stdio or HTTP depending on the transport setting)."
+          "description": "MCP wiring style. 'bridge' writes a single 'context-engine' server that uses the ctxce MCP bridge (stdio when mcpTransportMode='sse-remote', HTTP when 'http'). 'direct' writes two servers ('qdrant-indexer' and 'memory'), using stdio when mcpTransportMode='sse-remote' and HTTP when 'http'.",
+          "enumDescriptions": [
+            "Single 'context-engine' server powered by the ctxce bridge (stdio or HTTP depending on mcpTransportMode).",
+            "Two separate servers: 'qdrant-indexer' and 'memory' (stdio or HTTP depending on mcpTransportMode)."
+          ]
         },
         "contextEngineUploader.mcpIndexerUrl": {
           "type": "string",

@@ -20,6 +20,7 @@ let pythonOverridePath;
 let httpBridgeProcess;
 let httpBridgePort;
 let httpBridgeWorkspace;
+let pendingBridgeConfigTimer;
 const REQUIRED_PYTHON_MODULES = ['requests', 'urllib3', 'charset_normalizer'];
 const DEFAULT_CONTAINER_ROOT = '/work';
 // const CLAUDE_HOOK_COMMAND = '/home/coder/project/Context-Engine/ctx-hook-simple.sh';
@@ -173,7 +174,15 @@ function activate(context) {
     writeCtxConfig().catch(error => log(`CTX config auto-scaffold on activation failed: ${error instanceof Error ? error.message : String(error)}`));
   }
   if (config.get('autoStartMcpBridge', false)) {
-    startHttpBridgeProcess().catch(error => log(`Auto-start HTTP MCP bridge failed: ${error instanceof Error ? error.message : String(error)}`));
+    const transportModeRaw = config.get('mcpTransportMode') || 'sse-remote';
+    const serverModeRaw = config.get('mcpServerMode') || 'bridge';
+    const transportMode = (typeof transportModeRaw === 'string' ? transportModeRaw.trim() : 'sse-remote') || 'sse-remote';
+    const serverMode = (typeof serverModeRaw === 'string' ? serverModeRaw.trim() : 'bridge') || 'bridge';
+    if (requiresHttpBridge(serverMode, transportMode)) {
+      startHttpBridgeProcess().catch(error => log(`Auto-start HTTP MCP bridge failed: ${error instanceof Error ? error.message : String(error)}`));
+    } else {
+      log('Context Engine Uploader: autoStartMcpBridge is enabled, but current MCP wiring does not use the HTTP bridge; skipping auto-start.');
+    }
   }
 }
 async function runSequence(mode = 'auto') {
@@ -284,7 +293,7 @@ function resolveOptions() {
     startWatchAfterForce
   };
 }
-function getTargetPath(config) {
+function resolveTargetPathFromConfig(config) {
   let inspected;
   try {
     if (typeof config.inspect === 'function') {
@@ -294,6 +303,22 @@ function getTargetPath(config) {
     inspected = undefined;
   }
   let targetPath = (config.get('targetPath') || '').trim();
+  const metadata = inspected || {};
+  if (targetPath) {
+    return { path: targetPath, inspected: metadata };
+  }
+  const folderPath = getWorkspaceFolderPath();
+  if (!folderPath) {
+    return { path: undefined, inspected: metadata };
+  }
+  const autoTarget = detectDefaultTargetPath(folderPath);
+  return { path: autoTarget, inspected: metadata, inferred: true };
+}
+
+function getTargetPath(config) {
+  const result = resolveTargetPathFromConfig(config);
+  const targetPath = result.path;
+  const inspected = result.inspected;
   if (inspected && targetPath) {
     let sourceLabel = 'default';
     if (inspected.workspaceFolderValue !== undefined) {
@@ -312,15 +337,9 @@ function getTargetPath(config) {
     updateStatusBarTooltip(targetPath);
     return targetPath;
   }
-  const folderPath = getWorkspaceFolderPath();
-  if (!folderPath) {
-    vscode.window.showErrorMessage('Context Engine Uploader: open a folder or set contextEngineUploader.targetPath.');
-    updateStatusBarTooltip();
-    return undefined;
-  }
-  const autoTarget = detectDefaultTargetPath(folderPath);
-  updateStatusBarTooltip(autoTarget);
-  return autoTarget;
+  vscode.window.showErrorMessage('Context Engine Uploader: open a folder or set contextEngineUploader.targetPath.');
+  updateStatusBarTooltip();
+  return undefined;
 }
 function saveTargetPath(config, targetPath) {
   const hasWorkspace = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length;
@@ -396,6 +415,47 @@ function detectDefaultTargetPath(workspaceFolderPath) {
   } catch (error) {
     log(`Auto targetPath discovery failed: ${error instanceof Error ? error.message : String(error)}`);
     return workspaceFolderPath;
+  }
+}
+
+function resolveBridgeWorkspacePath() {
+  try {
+    const settings = vscode.workspace.getConfiguration('contextEngineUploader');
+    const target = getTargetPath(settings);
+    if (target) {
+      return path.resolve(target);
+    }
+  } catch (error) {
+    log(`Context Engine Uploader: failed to resolve bridge workspace path via getTargetPath: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const fallbackFolder = getWorkspaceFolderPath();
+  if (!fallbackFolder) {
+    return undefined;
+  }
+  try {
+    const autoTarget = detectDefaultTargetPath(fallbackFolder);
+    return autoTarget ? path.resolve(autoTarget) : path.resolve(fallbackFolder);
+  } catch (error) {
+    log(`Context Engine Uploader: failed fallback bridge workspace path detection: ${error instanceof Error ? error.message : String(error)}`);
+    return undefined;
+  }
+}
+
+function scheduleMcpConfigRefreshAfterBridge(delayMs = 1500) {
+  try {
+    if (pendingBridgeConfigTimer) {
+      clearTimeout(pendingBridgeConfigTimer);
+      pendingBridgeConfigTimer = undefined;
+    }
+    pendingBridgeConfigTimer = setTimeout(() => {
+      pendingBridgeConfigTimer = undefined;
+      log('Context Engine Uploader: HTTP bridge ready; refreshing MCP configs.');
+      writeMcpConfig().catch(error => {
+        log(`Context Engine Uploader: MCP config refresh after bridge start failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    }, delayMs);
+  } catch (error) {
+    log(`Context Engine Uploader: failed to schedule MCP config refresh: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 function ensureTargetPathConfigured() {
@@ -604,6 +664,23 @@ async function detectSystemPython() {
     }
   }
   return undefined;
+}
+
+function requiresHttpBridge(serverMode, transportMode) {
+  return serverMode === 'bridge' && transportMode === 'http';
+}
+
+async function ensureHttpBridgeReadyForConfigs() {
+  try {
+    if (httpBridgeProcess) {
+      return true;
+    }
+    await startHttpBridgeProcess();
+    return !!httpBridgeProcess;
+  } catch (error) {
+    log(`Failed to ensure HTTP bridge is ready: ${error instanceof Error ? error.message : String(error)}`);
+    return false;
+  }
 }
 function setStatusBarState(mode) {
   if (!statusBarItem) {
@@ -1132,6 +1209,19 @@ async function writeMcpConfig() {
   const transportMode = (typeof transportModeRaw === 'string' ? transportModeRaw.trim() : 'sse-remote') || 'sse-remote';
   const serverModeRaw = (settings.get('mcpServerMode') || 'bridge');
   const serverMode = (typeof serverModeRaw === 'string' ? serverModeRaw.trim() : 'bridge') || 'bridge';
+  const needsHttpBridge = requiresHttpBridge(serverMode, transportMode);
+  const bridgeWasRunning = !!httpBridgeProcess;
+  if (needsHttpBridge) {
+    const ready = await ensureHttpBridgeReadyForConfigs();
+    if (!ready) {
+      vscode.window.showErrorMessage('Context Engine Uploader: HTTP MCP bridge failed to start; MCP config not updated.');
+      return;
+    }
+    if (!bridgeWasRunning && httpBridgeProcess) {
+      log('Context Engine Uploader: HTTP MCP bridge launching; delaying MCP config write until bridge signals ready.');
+      return;
+    }
+  }
   const effectiveMode =
     serverMode === 'bridge'
       ? (transportMode === 'http' ? 'bridge-http' : 'bridge-stdio')
@@ -1625,7 +1715,7 @@ function resolveHttpBridgeOptions() {
     if (transportMode !== 'http') {
       log('Context Engine Uploader: MCP transport mode is not "http"; HTTP bridge will still start but downstream configs may expect SSE.');
     }
-    const workspacePath = getWorkspaceFolderPath() || (settings.get('targetPath') || '').trim();
+    const workspacePath = resolveBridgeWorkspacePath();
     if (!workspacePath) {
       vscode.window.showErrorMessage('Context Engine Uploader: open a workspace or set contextEngineUploader.targetPath before starting HTTP MCP bridge.');
       return undefined;
@@ -1719,6 +1809,7 @@ async function startHttpBridgeProcess() {
     }
   });
   vscode.window.showInformationMessage(`Context Engine HTTP MCP bridge listening on http://127.0.0.1:${options.port}/mcp`);
+  scheduleMcpConfigRefreshAfterBridge();
   return options.port;
 }
 
@@ -1745,7 +1836,15 @@ async function handleHttpBridgeSettingsChanged() {
     await stopHttpBridgeProcess();
   }
   if (shouldRun || wasRunning) {
-    await startHttpBridgeProcess();
+    const transportModeRaw = config.get('mcpTransportMode') || 'sse-remote';
+    const serverModeRaw = config.get('mcpServerMode') || 'bridge';
+    const transportMode = (typeof transportModeRaw === 'string' ? transportModeRaw.trim() : 'sse-remote') || 'sse-remote';
+    const serverMode = (typeof serverModeRaw === 'string' ? serverModeRaw.trim() : 'bridge') || 'bridge';
+    if (requiresHttpBridge(serverMode, transportMode)) {
+      await startHttpBridgeProcess();
+    } else {
+      log('Context Engine Uploader: HTTP bridge settings changed, but current MCP wiring does not use the HTTP bridge; not restarting HTTP bridge.');
+    }
   }
 }
 
@@ -1794,7 +1893,8 @@ function findLocalBridgeBin() {
 }
 
 async function writeClaudeMcpServers(root, indexerUrl, memoryUrl, transportMode, serverMode = 'bridge') {
-  const configPath = path.join(root, '.mcp.json');
+  const bridgeWorkspace = resolveBridgeWorkspacePath();
+  const configPath = path.join(bridgeWorkspace || root, '.mcp.json');
   let config = { mcpServers: {} };
   if (fs.existsSync(configPath)) {
     try {
@@ -1825,11 +1925,11 @@ async function writeClaudeMcpServers(root, indexerUrl, memoryUrl, transportMode,
           url: bridgeUrl
         };
       } else {
-        const bridgeServer = buildBridgeServerConfig(root, indexerUrl, memoryUrl);
+        const bridgeServer = buildBridgeServerConfig(bridgeWorkspace || root, indexerUrl, memoryUrl);
         servers['context-engine'] = bridgeServer;
       }
     } else {
-      const bridgeServer = buildBridgeServerConfig(root, indexerUrl, memoryUrl);
+      const bridgeServer = buildBridgeServerConfig(bridgeWorkspace || root, indexerUrl, memoryUrl);
       servers['context-engine'] = bridgeServer;
     }
     delete servers['qdrant-indexer'];
@@ -1915,6 +2015,7 @@ async function writeWindsurfMcpServers(configPath, indexerUrl, memoryUrl, transp
   const mode = (typeof transportMode === 'string' ? transportMode.trim() : 'sse-remote') || 'sse-remote';
 
   if (serverMode === 'bridge') {
+    const bridgeWorkspace = resolveBridgeWorkspacePath() || workspaceHint || '';
     if (mode === 'http') {
       const bridgeUrl = resolveBridgeHttpUrl();
       if (bridgeUrl) {
@@ -1922,11 +2023,11 @@ async function writeWindsurfMcpServers(configPath, indexerUrl, memoryUrl, transp
           serverUrl: bridgeUrl
         };
       } else {
-        const bridgeServer = buildBridgeServerConfig(workspaceHint || '', indexerUrl, memoryUrl);
+        const bridgeServer = buildBridgeServerConfig(bridgeWorkspace, indexerUrl, memoryUrl);
         servers['context-engine'] = bridgeServer;
       }
     } else {
-      const bridgeServer = buildBridgeServerConfig(workspaceHint || '', indexerUrl, memoryUrl);
+      const bridgeServer = buildBridgeServerConfig(bridgeWorkspace, indexerUrl, memoryUrl);
       servers['context-engine'] = bridgeServer;
     }
     delete servers['qdrant-indexer'];

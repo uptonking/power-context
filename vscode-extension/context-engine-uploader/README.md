@@ -21,9 +21,16 @@ Configuration
 - **Prompt+ decoder:** set `Context Engine Uploader: Decoder Url` (default `http://localhost:8081`, auto-appends `/completion`) to point at your local llama.cpp decoder. For Ollama, set it to `http://localhost:11434/api/chat`. Turn on `Use Gpu Decoder` to set `USE_GPU_DECODER=1` so ctx.py prefers the GPU llama.cpp sidecar. Prompt+ automatically runs the bundled `scripts/ctx.py` when an embedded copy is available, falling back to the workspace version if not.
 - **Claude/Windsurf MCP config:**
   - `MCP Indexer Url` and `MCP Memory Url` control the URLs written into the project-local `.mcp.json` (Claude) and Windsurf `mcp_config.json` when you run the `Write MCP Config` command. These URLs are used **literally** (e.g. `http://localhost:8001/sse` or `http://localhost:8003/mcp`).
-  - `MCP Transport Mode` (`contextEngineUploader.mcpTransportMode`) chooses how those URLs are wrapped:
-    - `sse-remote` (default): emit stdio configs that call `npx mcp-remote <url> --transport sse-only`.
-    - `http`: emit direct HTTP MCP entries of the form `{ "type": "http", "url": "<your-url>" }` for Claude/Windsurf. Use this when pointing at HTTP `/mcp` endpoints exposed by the Context-Engine MCP services.
+  - `MCP Server Mode` (`contextEngineUploader.mcpServerMode`) controls *what* servers are written:
+    - `bridge`: write a single `context-engine` server that talks to the `ctxce` MCP bridge.
+    - `direct`: write two servers, `qdrant-indexer` and `memory`, that talk directly to the configured URLs.
+  - `MCP Transport Mode` (`contextEngineUploader.mcpTransportMode`) controls *how* those servers talk:
+    - `sse-remote` (default): use stdio MCP processes behind an SSE tunnel (`bridge-stdio` / `direct-sse`).
+    - `http`: use HTTP MCP endpoints directly (`bridge-http` / `direct-http`).
+  - Common combinations:
+    - `bridge` + `sse-remote` → **bridge-stdio**: write a single `context-engine` stdio server that runs `ctxce mcp-serve` behind an SSE tunnel.
+    - `bridge` + `http` → **bridge-http**: write a single `context-engine` HTTP server that points at the local `ctxce mcp-http-serve` URL (e.g. `http://127.0.0.1:30810/mcp`).
+    - `direct` + `http` → **direct-http**: write separate HTTP servers for the indexer and memory MCP backends.
 - **MCP config on startup:**
   - `contextEngineUploader.autoWriteMcpConfigOnStartup` (default `false`) controls whether the extension automatically runs the same logic as `Write MCP Config` on activation. When enabled, it refreshes `.mcp.json`, Windsurf `mcp_config.json`, and the Claude hook (`.claude/settings.local.json`) to match your current settings and the installed extension version. If `scaffoldCtxConfig` is also `true`, this startup path will additionally scaffold/update `ctx_config.json` and `.env` as described below.
 - **CTX + GLM settings:**
@@ -36,6 +43,33 @@ Configuration
   - `contextEngineUploader.scaffoldCtxConfig` (default `true`) controls whether the extension keeps a minimal `ctx_config.json` + `.env` in sync with your workspace. When enabled, running `Write MCP Config` or `Write CTX Config` will reuse the workspace’s existing files (if present) and only backfill placeholder or missing values from the bundled `env.example` plus the inferred collection name. Existing custom values are preserved.
   - The scaffolder also enforces CTX defaults (e.g., `MULTI_REPO_MODE=1`, `REFRAG_RUNTIME=glm`, `REFRAG_DECODER=1`) so the embedded `ctx.py` is ready for remote uploads, regardless of the “Use GLM Decoder” toggle.
   - `contextEngineUploader.surfaceQdrantCollectionHint` gates whether the Claude hook adds a hint line with the Qdrant collection ID when ctx is enhancing prompts. This setting is also respected when the extension writes `.claude/settings.local.json`.
+
+MCP bridge (ctx-mcp-bridge) & MCP config lifecycle
+---------------------------------------------------
+- The MCP bridge (`@context-engine-bridge/context-engine-mcp-bridge`, CLI `ctxce`) is a small local MCP server that fans out to two upstream MCP services: the Qdrant indexer and the memory/search backend. The VS Code extension can drive it in two ways:
+  - **Bridge stdio (`bridge-stdio`)** – a stdio MCP server (`ctxce mcp-serve`) wrapped behind an SSE tunnel.
+  - **Bridge HTTP (`bridge-http`)** – an HTTP MCP server (`ctxce mcp-http-serve`) listening on `http://127.0.0.1:<port>/mcp`.
+- Why use the bridge instead of two direct MCP entries?
+  - **Single server entry:** IDEs only need to register one MCP server (`context-engine`) instead of juggling separate `qdrant-indexer` and `memory` entries, avoiding coordination mistakes.
+  - **Shared session defaults:** the bridge loads `ctx_config.json` and injects collection name, repo metadata, and any other ctx defaults so every IDE window talks to the right collection without hand-editing `.mcp.json`.
+  - **Per-user credential isolation:** each IDE maintains its own MCP session while the bridge multiplexes upstream calls, so user preferences (future auth) remain per client even though the backend pair is shared.
+  - **Flexible transport:** stdio mode works everywhere (even when HTTP ports aren’t reachable), while HTTP mode keeps Claude/Windsurf happy when they want direct URLs; the extension automatically writes the right flavor.
+  - **Centralized logging & health:** when the bridge process runs once per workspace you get a single stream of logs (`Context Engine Upload` output) and a single port to probe for health checks instead of multiple MCP child processes per IDE.
+- When you run **`Write MCP Config`**, the extension:
+  - Writes `.mcp.json` in the workspace for Claude Code.
+  - Optionally writes Windsurf’s `mcp_config.json` (when `mcpWindsurfEnabled=true`).
+  - Optionally scaffolds `ctx_config.json` + `.env` (when `scaffoldCtxConfig=true`).
+- The effective wiring mode is determined by the two MCP settings:
+  - `mcpServerMode = bridge`, `mcpTransportMode = sse-remote` → **bridge-stdio**.
+  - `mcpServerMode = bridge`, `mcpTransportMode = http` → **bridge-http**.
+  - `mcpServerMode = direct`, `mcpTransportMode = sse-remote` → **direct-sse** (two stdio `mcp-remote` servers).
+  - `mcpServerMode = direct`, `mcpTransportMode = http` → **direct-http** (two HTTP servers, no bridge).
+- In **bridge-stdio**, the configs run `ctxce mcp-serve` via `npx`, passing the workspace path (auto-detected from the uploader target path) plus `--indexer-url` and `--memory-url` derived from the MCP settings.
+- In **bridge-http**, the extension can also **manage the bridge process**:
+  - `autoStartMcpBridge=true` and `mcpServerMode='bridge'` with `mcpTransportMode='http'` → the extension starts `ctxce mcp-http-serve` in the background for the active workspace using `mcpBridgePort`.
+  - The resulting HTTP URL (`http://127.0.0.1:<mcpBridgePort>/mcp`) is written into `.mcp.json` and Windsurf’s `mcp_config.json` as the `context-engine` server URL.
+  - In **stdio or direct modes**, the HTTP bridge is **not** auto-started; only the explicit `Start MCP HTTP Bridge` command will launch it.
+- Bridge settings are **workspace-scoped**, so different workspaces can choose different modes and ports (e.g., one workspace using stdio bridge, another using HTTP bridge on a different port).
 
 Workspace-level ctx integration
 -------------------------------
@@ -51,9 +85,11 @@ Commands
 --------
 - Command Palette → “Context Engine Uploader” exposes Start/Stop/Restart/Index Codebase and Prompt+ (unicorn) rewrite commands.
 - Status-bar button (`Index Codebase`) mirrors Start/Stop/Restart/Index status, while the `Prompt+` status button runs the ctx rewrite command on the current selection.
-- `Context Engine Uploader: Write MCP Config (.mcp.json)` writes or updates a project-local `.mcp.json` with MCP server entries for the Qdrant indexer and memory/search endpoints, using the configured MCP URLs.
+- `Context Engine Uploader: Write MCP Config (.mcp.json)` writes or updates a project-local `.mcp.json` (plus Windsurf `mcp_config.json` when enabled) using the currently selected bridge/direct + transport modes. If bridge-http is required and not yet running, the extension starts `ctxce mcp-http-serve` before writing configs.
 - `Context Engine Uploader: Write CTX Config (ctx_config.json/.env)` scaffolds the ctx config + env files as described above. This command runs automatically after `Write MCP Config` if scaffolding is enabled, but it is also exposed in the Command Palette for manual use.
 - `Context Engine Uploader: Upload Git History (force sync bundle)` triggers a one-off force sync using the configured git history settings, producing a bundle that includes a `metadata/git_history.json` manifest for remote lineage ingestion.
+- `Context Engine Uploader: Start MCP HTTP Bridge` launches `ctxce mcp-http-serve` using the workspace’s resolved target path, MCP URLs, and configured `mcpBridgePort`. Use this when you want to run the HTTP bridge manually (e.g., testing unpublished builds or sharing a port across IDEs).
+- `Context Engine Uploader: Stop MCP HTTP Bridge` gracefully terminates a running HTTP bridge process.
 
 Logs
 ----
