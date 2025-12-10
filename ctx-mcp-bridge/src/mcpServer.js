@@ -139,6 +139,99 @@ function isSessionError(error) {
     return false;
   }
 }
+
+function getBridgeRetryAttempts() {
+  try {
+    const raw = process.env.CTXCE_TOOL_RETRY_ATTEMPTS;
+    if (!raw) {
+      return 2;
+    }
+    const parsed = Number.parseInt(String(raw), 10);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      return 1;
+    }
+    return parsed;
+  } catch {
+    return 2;
+  }
+}
+
+function getBridgeRetryDelayMs() {
+  try {
+    const raw = process.env.CTXCE_TOOL_RETRY_DELAY_MSEC;
+    if (!raw) {
+      return 200;
+    }
+    const parsed = Number.parseInt(String(raw), 10);
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      return 0;
+    }
+    return parsed;
+  } catch {
+    return 200;
+  }
+}
+
+function isTransientToolError(error) {
+  try {
+    const msg =
+      (error && typeof error.message === "string" && error.message) ||
+      (typeof error === "string" ? error : String(error || ""));
+    if (!msg) {
+      return false;
+    }
+    const lower = msg.toLowerCase();
+
+    if (
+      lower.includes("timed out") ||
+      lower.includes("timeout") ||
+      lower.includes("time-out")
+    ) {
+      return true;
+    }
+
+    if (
+      lower.includes("econnreset") ||
+      lower.includes("econnrefused") ||
+      lower.includes("etimedout") ||
+      lower.includes("enotfound") ||
+      lower.includes("ehostunreach") ||
+      lower.includes("enetunreach")
+    ) {
+      return true;
+    }
+
+    if (
+      lower.includes("bad gateway") ||
+      lower.includes("gateway timeout") ||
+      lower.includes("service unavailable") ||
+      lower.includes(" 502 ") ||
+      lower.includes(" 503 ") ||
+      lower.includes(" 504 ")
+    ) {
+      return true;
+    }
+
+    if (lower.includes("network error")) {
+      return true;
+    }
+
+    if (typeof error.code === "number" && error.code === -32001 && !isSessionError(error)) {
+      return true;
+    }
+    if (
+      typeof error.code === "string" &&
+      error.code.toLowerCase &&
+      error.code.toLowerCase().includes("timeout")
+    ) {
+      return true;
+    }
+
+    return false;
+  } catch {
+    return false;
+  }
+}
 // MCP stdio server implemented using the official MCP TypeScript SDK.
 // Acts as a low-level proxy for tools, forwarding tools/list and tools/call
 // to the remote qdrant-indexer MCP server while adding a local `ping` tool.
@@ -360,34 +453,24 @@ async function createBridgeServer(options) {
 
     await initializeRemoteClients(false);
 
-    let targetClient = selectClientForTool(name, indexerClient, memoryClient);
-    if (!targetClient) {
-      throw new Error(`Tool ${name} not available on any configured MCP server`);
-    }
-
     const timeoutMs = getBridgeToolTimeoutMs();
-    try {
-      const result = await targetClient.callTool(
-        {
-          name,
-          arguments: args,
-        },
-        undefined,
-        { timeout: timeoutMs },
-      );
-      return result;
-    } catch (err) {
-      if (isSessionError(err)) {
-        debugLog(
-          "[ctxce] tools/call: detected remote MCP session error; reinitializing clients and retrying once: " +
-            String(err),
-        );
-        await initializeRemoteClients(true);
-        targetClient = selectClientForTool(name, indexerClient, memoryClient);
-        if (!targetClient) {
-          throw err;
-        }
-        const retryResult = await targetClient.callTool(
+    const maxAttempts = getBridgeRetryAttempts();
+    const retryDelayMs = getBridgeRetryDelayMs();
+    let sessionRetried = false;
+    let lastError;
+
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      if (attempt > 0 && retryDelayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+      }
+
+      const targetClient = selectClientForTool(name, indexerClient, memoryClient);
+      if (!targetClient) {
+        throw new Error(`Tool ${name} not available on any configured MCP server`);
+      }
+
+      try {
+        const result = await targetClient.callTool(
           {
             name,
             arguments: args,
@@ -395,10 +478,33 @@ async function createBridgeServer(options) {
           undefined,
           { timeout: timeoutMs },
         );
-        return retryResult;
+        return result;
+      } catch (err) {
+        lastError = err;
+
+        if (isSessionError(err) && !sessionRetried) {
+          debugLog(
+            "[ctxce] tools/call: detected remote MCP session error; reinitializing clients and retrying once: " +
+              String(err),
+          );
+          await initializeRemoteClients(true);
+          sessionRetried = true;
+          continue;
+        }
+
+        if (!isTransientToolError(err) || attempt === maxAttempts - 1) {
+          throw err;
+        }
+
+        debugLog(
+          `[ctxce] tools/call: transient error (attempt ${attempt + 1}/${maxAttempts}), retrying: ` +
+            String(err),
+        );
+        // Loop will retry
       }
-      throw err;
     }
+
+    throw lastError || new Error("Unknown MCP tools/call error");
   });
 
   return server;
