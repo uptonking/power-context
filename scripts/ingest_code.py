@@ -21,7 +21,7 @@ import re
 import ast
 import time
 from pathlib import Path
-from typing import List, Dict, Iterable
+from typing import List, Dict, Iterable, Any, Optional
 
 try:
     from tqdm import tqdm
@@ -2782,7 +2782,7 @@ def index_repo(
     batch_meta: list[dict] = []
     batch_ids: list[int] = []
     batch_lex: list[list[float]] = []
-    BATCH_SIZE = int(os.environ.get("INDEX_BATCH_SIZE", "64") or 64)
+    BATCH_SIZE = int(os.environ.get("INDEX_BATCH_SIZE", "256") or 256)
     CHUNK_LINES = int(os.environ.get("INDEX_CHUNK_LINES", "120") or 120)
     CHUNK_OVERLAP = int(os.environ.get("INDEX_CHUNK_OVERLAP", "20") or 20)
     PROGRESS_EVERY = int(os.environ.get("INDEX_PROGRESS_EVERY", "200") or 200)
@@ -3286,8 +3286,8 @@ def index_repo(
                             status={
                                 "state": "indexing",
                                 "progress": {
-                                    "files_processed": repo_progress.get(per_file_repo, 0),
-                                    "total_files": repo_total.get(per_file_repo, None),
+                                    "files_processed": files_indexed,
+                                    "total_files": files_seen,
                                     "current_file": str(file_path),
                                 },
                             },
