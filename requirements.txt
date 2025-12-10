@@ -4,6 +4,7 @@ fastembed
 watchdog
 onnxruntime
 tokenizers
+orjson
 tree_sitter>=0.25.2
 tree_sitter_languages; python_version < "3.13"
 mcp==1.17.0

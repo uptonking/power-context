@@ -2,6 +2,8 @@
 import os
 import argparse
 from typing import List, Dict, Any, Tuple
+from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 
 from qdrant_client import QdrantClient, models
 from fastembed import TextEmbedding
@@ -9,8 +11,54 @@ import re
 import json
 import math
 
+# Prefer orjson for faster serialization (2-3x speedup)
+try:
+    import orjson
+    def _json_dumps(obj):
+        return orjson.dumps(obj).decode()
+except ImportError:
+    orjson = None
+    def _json_dumps(obj):
+        return json.dumps(obj)
+
 import logging
 import threading
+
+# Connection pooling imports
+try:
+    from scripts.qdrant_client_manager import get_qdrant_client, return_qdrant_client, pooled_qdrant_client
+    _POOL_AVAILABLE = True
+except ImportError:
+    _POOL_AVAILABLE = False
+    def get_qdrant_client(url=None, api_key=None, force_new=False, use_pool=True):
+        return QdrantClient(url=url or os.environ.get("QDRANT_URL", "http://localhost:6333"),
+                           api_key=api_key or os.environ.get("QDRANT_API_KEY"))
+    def return_qdrant_client(client):
+        pass
+
+# ThreadPoolExecutor for parallel queries (reuse across calls)
+_QUERY_EXECUTOR = None
+_EXECUTOR_LOCK = threading.Lock()
+
+def _get_query_executor(max_workers: int = 4) -> ThreadPoolExecutor:
+    """Get or create a shared ThreadPoolExecutor for parallel queries."""
+    global _QUERY_EXECUTOR
+    if _QUERY_EXECUTOR is None:
+        with _EXECUTOR_LOCK:
+            if _QUERY_EXECUTOR is None:
+                _QUERY_EXECUTOR = ThreadPoolExecutor(max_workers=max_workers)
+    return _QUERY_EXECUTOR
+
+# Filter sanitization cache (avoids repeated deep copies)
+_FILTER_CACHE = {}
+_FILTER_CACHE_LOCK = threading.Lock()
+_FILTER_CACHE_MAX = 256
+
+# Cached regex pattern compilation (avoids recompiling same patterns)
+@lru_cache(maxsize=128)
+def _compile_regex(pattern: str, flags: int = 0):
+    """Cached regex compilation for repeated patterns."""
+    return re.compile(pattern, flags)
 
 # Import unified caching system
 try:
@@ -1272,10 +1320,18 @@ def lex_hash_vector(phrases: List[str], dim: int = LEX_VECTOR_DIM) -> List[float
 
 # Defensive: sanitize Qdrant filter objects so we never send an empty filter {}
 # Qdrant returns 400 if filter has no conditions; return None in that case.
+# Uses caching for repeated filter patterns to avoid redundant validation.
 def _sanitize_filter_obj(flt):
+    if flt is None:
+        return None
+
+    # Try cache first (hash by id for object identity)
+    cache_key = id(flt)
+    with _FILTER_CACHE_LOCK:
+        if cache_key in _FILTER_CACHE:
+            return _FILTER_CACHE[cache_key]
+
     try:
-        if flt is None:
-            return None
         # Try model-style attributes first
         must = getattr(flt, "must", None)
         should = getattr(flt, "should", None)
@@ -1286,17 +1342,24 @@ def _sanitize_filter_obj(flt):
                 m = [c for c in (flt.get("must") or []) if c is not None]
                 s = [c for c in (flt.get("should") or []) if c is not None]
                 mn = [c for c in (flt.get("must_not") or []) if c is not None]
-                return None if (not m and not s and not mn) else flt
-            # Unknown structure -> drop
-            return None
-        m = [c for c in (must or []) if c is not None]
-        s = [c for c in (should or []) if c is not None]
-        mn = [c for c in (must_not or []) if c is not None]
-        if not m and not s and not mn:
-            return None
-        return flt
+                result = None if (not m and not s and not mn) else flt
+            else:
+                # Unknown structure -> drop
+                result = None
+        else:
+            m = [c for c in (must or []) if c is not None]
+            s = [c for c in (should or []) if c is not None]
+            mn = [c for c in (must_not or []) if c is not None]
+            result = None if (not m and not s and not mn) else flt
     except Exception:
-        return None
+        result = None
+
+    # Cache result (with size limit)
+    with _FILTER_CACHE_LOCK:
+        if len(_FILTER_CACHE) < _FILTER_CACHE_MAX:
+            _FILTER_CACHE[cache_key] = result
+
+    return result
 
 
 def lex_query(client: QdrantClient, v: List[float], flt, per_query: int, collection_name: str | None = None) -> List[Any]:
@@ -1984,18 +2047,36 @@ def run_hybrid_search(
 
     flt_gated = _sanitize_filter_obj(flt_gated)
 
-    result_sets: List[List[Any]] = [
-        dense_query(
-            client,
-            vec_name,
-            v,
-            flt_gated,
-            _scaled_per_query,
-            collection,
-            query_text=queries[i] if i < len(queries) else None,
-        )
-        for i, v in enumerate(embedded)
-    ]
+    # Parallel dense query execution for multiple queries
+    if len(embedded) > 1 and os.environ.get("PARALLEL_DENSE_QUERIES", "1") == "1":
+        executor = _get_query_executor()
+        futures = [
+            executor.submit(
+                dense_query,
+                client,
+                vec_name,
+                v,
+                flt_gated,
+                _scaled_per_query,
+                collection,
+                queries[i] if i < len(queries) else None,
+            )
+            for i, v in enumerate(embedded)
+        ]
+        result_sets: List[List[Any]] = [f.result() for f in futures]
+    else:
+        result_sets: List[List[Any]] = [
+            dense_query(
+                client,
+                vec_name,
+                v,
+                flt_gated,
+                _scaled_per_query,
+                collection,
+                query_text=queries[i] if i < len(queries) else None,
+            )
+            for i, v in enumerate(embedded)
+        ]
     if os.environ.get("DEBUG_HYBRID_SEARCH"):
         total_dense_results = sum(len(rs) for rs in result_sets)
         logger.debug(f"Dense query returned {total_dense_results} total results across {len(result_sets)} queries")

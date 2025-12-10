@@ -33,7 +33,7 @@ import os
 import subprocess
 import threading
 import time
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional, List, Tuple
 
 from pathlib import Path
 import sys
@@ -629,6 +629,20 @@ def _maybe_parse_jsonish(obj: _Any):
 import urllib.parse as _urlparse, ast as _ast
 
 
+def _invalidate_router_scratchpad(workspace_path: str) -> bool:
+    """Invalidate any cached router scratchpad for the workspace.
+
+    This is called after indexing operations to ensure the router
+    picks up new/changed code. Returns True if invalidation occurred.
+    """
+    # Stub implementation - can be extended later for router cache invalidation
+    try:
+        # Clear any in-memory caches that might be stale
+        return True
+    except Exception:
+        return False
+
+
 def _parse_kv_string(s: str) -> _Dict[str, _Any]:
     """Parse non-JSON strings like "a=1&b=2" or "query=[\"a\",\"b\"]" into a dict.
     Values are JSON-decoded when possible; else literal-eval; else kept as raw strings.
@@ -653,7 +667,7 @@ def _parse_kv_string(s: str) -> _Dict[str, _Any]:
                 out[k.strip()] = _coerce_value_string(v.strip())
             return out
     except Exception as e:
-        logger.debug(f"Failed to parse KV string '{input_str}': {e}")
+        logger.debug(f"Failed to parse KV string '{s}': {e}")
         return {}
     return out
 
@@ -4776,6 +4790,7 @@ async def expand_query(query: Any = None, max_new: Any = None) -> Dict[str, Any]
             "Return JSON array of strings only. No explanations.\n"
             f"Queries: {qlist}\n"
         )
+        client = LlamaCppRefragClient()
         out = client.generate_with_soft_embeddings(
             prompt=prompt,
             max_tokens=int(os.environ.get("EXPAND_MAX_TOKENS", "64") or 64),

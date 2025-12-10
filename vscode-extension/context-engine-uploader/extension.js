@@ -280,6 +280,11 @@ function getTargetPath(config) {
     }
   }
   if (targetPath) {
+    // Resolve relative paths (like ".") against the workspace folder, not Node cwd
+    const folderPath = getWorkspaceFolderPath();
+    if (folderPath && !path.isAbsolute(targetPath)) {
+      targetPath = path.resolve(folderPath, targetPath);
+    }
     updateStatusBarTooltip(targetPath);
     return targetPath;
   }
