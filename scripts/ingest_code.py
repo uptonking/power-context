@@ -2227,6 +2227,71 @@ def _get_host_path_from_origin(workspace_path: str, repo_name: str = None) -> Op
     return None
 
 
+def _compute_host_and_container_paths(cur_path: str) -> tuple[Optional[str], Optional[str]]:
+    """Compute host_path and container_path for a given absolute path.
+
+    Behavior:
+    - path field in metadata continues to use cur_path as-is (container view).
+    - host_path prefers origin.source_path (client workspace root) when available.
+    - When indexing under /work/<slug>/..., drop the slug when mapping back to host.
+    - HOST_INDEX_PATH is used only as a best-effort fallback and ignored when it
+      looks like a Windows path (contains a drive letter).
+    """
+    _host_root = str(os.environ.get("HOST_INDEX_PATH") or "").strip().rstrip("/")
+    if ":" in _host_root:
+        _host_root = ""
+    _host_path: Optional[str] = None
+    _container_path: Optional[str] = None
+    _origin_client_path: Optional[str] = None
+
+    # Try to get client workspace root from origin metadata first.
+    try:
+        if cur_path.startswith("/work/"):
+            # Extract workspace from container path
+            _parts = cur_path[6:].split("/")  # Remove "/work/" prefix
+            if len(_parts) >= 2:
+                _repo_name = _parts[0]  # First part is repo name / slug
+                _workspace_path = f"/work/{_repo_name}"
+                _origin_client_path = _get_host_path_from_origin(
+                    _workspace_path, _repo_name
+                )
+    except Exception:
+        _origin_client_path = None
+
+    try:
+        if cur_path.startswith("/work/") and (_host_root or _origin_client_path):
+            _rel = cur_path[len("/work/") :]
+            # Prioritize client path from origin metadata over HOST_INDEX_PATH.
+            if _origin_client_path:
+                # Drop the leading repo slug (e.g. Context-Engine-<hash>) when mapping
+                # /work paths back to the client workspace root, so host_path is
+                # /home/.../Context-Engine/<rel-path-inside-repo> instead of including
+                # the slug directory.
+                _parts = _rel.split("/", 1)
+                _tail = _parts[1] if len(_parts) > 1 else ""
+                _base = _origin_client_path.rstrip("/")
+                _host_path = (
+                    os.path.realpath(os.path.join(_base, _tail)) if _tail else _base
+                )
+            else:
+                _host_path = os.path.realpath(os.path.join(_host_root, _rel))
+            _container_path = cur_path
+        else:
+            # Likely indexing on the host directly
+            _host_path = cur_path
+            if (
+                (_host_root or _origin_client_path)
+                and cur_path.startswith(((_origin_client_path or _host_root) + "/"))
+            ):
+                _rel = cur_path[len((_origin_client_path or _host_root)) + 1 :]
+                _container_path = "/work/" + _rel
+    except Exception:
+        _host_path = cur_path
+        _container_path = cur_path if cur_path.startswith("/work/") else None
+
+    return _host_path, _container_path
+
+
 def index_single_file(
     client: QdrantClient,
     model: TextEmbedding,
@@ -2473,53 +2538,9 @@ def index_single_file(
             ch["symbol_path"] = sym_path
         # Track both container path (/work mirror) and original host path for clarity across environments
         _cur_path = str(file_path)
-        _host_root = str(os.environ.get("HOST_INDEX_PATH") or "").strip().rstrip("/")
-        if ":" in _host_root: # Windows drive letter (e.g., "C:")
-            _host_root = ""
-        _host_path = None
-        _container_path = None
-
-        # Try to get client workspace root from origin metadata first.
         # upload_service writes origin.source_path from the client --path flag so we can
         # reconstruct host paths even when indexing inside a slugged /work/<repo-hash> tree.
-        _origin_client_path = None
-        try:
-            # Get workspace path from file path for origin lookup
-            if _cur_path.startswith("/work/"):
-                # Extract workspace from container path
-                _parts = _cur_path[6:].split("/")  # Remove "/work/" prefix
-                if len(_parts) >= 2:
-                    _repo_name = _parts[0]  # First part is repo name
-                    _workspace_path = f"/work/{_repo_name}"
-                    _origin_client_path = _get_host_path_from_origin(_workspace_path, _repo_name)
-        except Exception:
-            pass
-
-        try:
-            if _cur_path.startswith("/work/") and (_host_root or _origin_client_path):
-                _rel = _cur_path[len("/work/"):]
-                # Prioritize client path from origin metadata over HOST_INDEX_PATH.
-                if _origin_client_path:
-                    # Drop the leading repo slug (e.g. Context-Engine-<hash>) when mapping
-                    # /work paths back to the client workspace root, so host_path is
-                    # /home/.../Context-Engine/<rel-path-inside-repo> instead of including
-                    # the slug directory.
-                    _parts = _rel.split("/", 1)
-                    _tail = _parts[1] if len(_parts) > 1 else ""
-                    _base = _origin_client_path.rstrip("/")
-                    _host_path = os.path.realpath(os.path.join(_base, _tail)) if _tail else _base
-                else:
-                    _host_path = os.path.realpath(os.path.join(_host_root, _rel))
-                _container_path = _cur_path
-            else:
-                # Likely indexing on the host directly
-                _host_path = _cur_path
-                if (_host_root or _origin_client_path) and _cur_path.startswith(((_origin_client_path or _host_root) + "/")):
-                    _rel = _cur_path[len((_origin_client_path or _host_root)) + 1 :]
-                    _container_path = "/work/" + _rel
-        except Exception:
-            _host_path = _cur_path
-            _container_path = _cur_path if _cur_path.startswith("/work/") else None
+        _host_path, _container_path = _compute_host_and_container_paths(_cur_path)
 
         payload = {
             "document": info,
@@ -3128,45 +3149,7 @@ def index_repo(
                 ch["symbol_path"] = sym_path
             # Track both container path (/work mirror) and original host path
             _cur_path = str(file_path)
-            _host_root = str(os.environ.get("HOST_INDEX_PATH") or "").strip().rstrip("/")
-            _host_path = None
-            _container_path = None
-
-            # Try to get client path from origin metadata first (from --path upload flag)
-            _origin_client_path = None
-            try:
-                # Get workspace path from file path for origin lookup
-                if _cur_path.startswith("/work/"):
-                    # Extract workspace from container path
-                    _parts = _cur_path[6:].split("/")  # Remove "/work/" prefix
-                    if len(_parts) >= 2:
-                        _repo_name = _parts[0]  # First part is repo name
-                        _workspace_path = f"/work/{_repo_name}"
-                        _origin_client_path = _get_host_path_from_origin(_workspace_path, _repo_name)
-            except Exception:
-                pass
-
-            try:
-                if _cur_path.startswith("/work/") and (_host_root or _origin_client_path):
-                    _rel = _cur_path[len("/work/"):]
-                    # Prioritize client path from origin metadata over HOST_INDEX_PATH
-                    if _origin_client_path:
-                        _parts = _rel.split("/", 1)
-                        _tail = _parts[1] if len(_parts) > 1 else ""
-                        _base = _origin_client_path.rstrip("/")
-                        _host_path = os.path.realpath(os.path.join(_base, _tail)) if _tail else _base
-                    else:
-                        _host_path = os.path.realpath(os.path.join(_host_root, _rel))
-                    _container_path = _cur_path
-                else:
-                    # Likely indexing on the host directly
-                    _host_path = _cur_path
-                    if (_host_root or _origin_client_path) and _cur_path.startswith(((_origin_client_path or _host_root) + "/")):
-                        _rel = _cur_path[len((_origin_client_path or _host_root)) + 1 :]
-                        _container_path = "/work/" + _rel
-            except Exception:
-                _host_path = _cur_path
-                _container_path = _cur_path if _cur_path.startswith("/work/") else None
+            _host_path, _container_path = _compute_host_and_container_paths(_cur_path)
 
             payload = {
                 "document": info,
@@ -3572,48 +3555,7 @@ def process_file_with_smart_reindexing(
 
             # Basic metadata payload
             _cur_path = str(file_path)
-            _host_root = str(os.environ.get("HOST_INDEX_PATH") or "").strip().rstrip("/")
-            _host_path = None
-            _container_path = None
-            _origin_client_path = None
-            try:
-                if _cur_path.startswith("/work/"):
-                    _parts = _cur_path[6:].split("/")
-                    if len(_parts) >= 2:
-                        _repo_name = _parts[0]
-                        _workspace_path = f"/work/{_repo_name}"
-                        _origin_client_path = _get_host_path_from_origin(
-                            _workspace_path, _repo_name
-                        )
-            except Exception:
-                pass
-            try:
-                if _cur_path.startswith("/work/") and (_host_root or _origin_client_path):
-                    _rel = _cur_path[len("/work/") :]
-                    if _origin_client_path:
-                        _host_path = os.path.realpath(
-                            os.path.join(_origin_client_path, _rel)
-                        )
-                    else:
-                        _host_path = os.path.realpath(os.path.join(_host_root, _rel))
-                    _container_path = _cur_path
-                else:
-                    _host_path = _cur_path
-                    if (
-                        (_host_root or _origin_client_path)
-                        and _cur_path.startswith(
-                            ((_origin_client_path or _host_root) + "/")
-                        )
-                    ):
-                        _rel = _cur_path[
-                            len((_origin_client_path or _host_root)) + 1 :
-                        ]
-                        _container_path = "/work/" + _rel
-            except Exception:
-                _host_path = _cur_path
-                _container_path = (
-                    _cur_path if _cur_path.startswith("/work/") else None
-                )
+            _host_path, _container_path = _compute_host_and_container_paths(_cur_path)
 
             payload = {
                 "document": info,
