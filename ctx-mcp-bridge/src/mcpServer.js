@@ -120,6 +120,25 @@ function selectClientForTool(name, indexerClient, memoryClient) {
   }
   return indexerClient;
 }
+
+function isSessionError(error) {
+  try {
+    const msg =
+      (error && typeof error.message === "string" && error.message) ||
+      (typeof error === "string" ? error : String(error || ""));
+    if (!msg) {
+      return false;
+    }
+    return (
+      msg.includes("No valid session ID") ||
+      msg.includes("Mcp-Session-Id header is required") ||
+      msg.includes("Server not initialized") ||
+      msg.includes("Session not found")
+    );
+  } catch {
+    return false;
+  }
+}
 // MCP stdio server implemented using the official MCP TypeScript SDK.
 // Acts as a low-level proxy for tools, forwarding tools/list and tools/call
 // to the remote qdrant-indexer MCP server while adding a local `ping` tool.
@@ -162,52 +181,8 @@ async function createBridgeServer(options) {
     );
   }
 
-  // High-level MCP client for the remote HTTP /mcp indexer
-  const indexerTransport = new StreamableHTTPClientTransport(indexerUrl);
-  const indexerClient = new Client(
-    {
-      name: "ctx-context-engine-bridge-http-client",
-      version: "0.0.1",
-    },
-    {
-      capabilities: {
-        tools: {},
-        resources: {},
-        prompts: {},
-      },
-    },
-  );
-
-  try {
-    await indexerClient.connect(indexerTransport);
-  } catch (err) {
-    debugLog("[ctxce] Failed to connect MCP HTTP client to indexer: " + String(err));
-  }
-
+  let indexerClient = null;
   let memoryClient = null;
-  if (memoryUrl) {
-    try {
-      const memoryTransport = new StreamableHTTPClientTransport(memoryUrl);
-      memoryClient = new Client(
-        {
-          name: "ctx-context-engine-bridge-memory-client",
-          version: "0.0.1",
-        },
-        {
-          capabilities: {
-            tools: {},
-            resources: {},
-            prompts: {},
-          },
-        },
-      );
-      await memoryClient.connect(memoryTransport);
-      debugLog(`[ctxce] Connected memory MCP client: ${memoryUrl}`);
-    } catch (err) {
-      debugLog("[ctxce] Failed to connect memory MCP client: " + String(err));
-      memoryClient = null;
-    }
-  }
 
   // Derive a simple session identifier for this bridge process. In the
   // future this can be made user-aware (e.g. from auth), but for now we
@@ -229,12 +204,80 @@ async function createBridgeServer(options) {
     defaultsPayload.under = defaultUnder;
   }
 
-  if (Object.keys(defaultsPayload).length > 1) {
-    await sendSessionDefaults(indexerClient, defaultsPayload, "indexer");
-    if (memoryClient) {
-      await sendSessionDefaults(memoryClient, defaultsPayload, "memory");
+  async function initializeRemoteClients(forceRecreate = false) {
+    if (!forceRecreate && indexerClient) {
+      return;
+    }
+
+    if (forceRecreate) {
+      try {
+        debugLog("[ctxce] Reinitializing remote MCP clients after session error.");
+      } catch {
+        // ignore logging failures
+      }
+    }
+
+    let nextIndexerClient = null;
+    try {
+      const indexerTransport = new StreamableHTTPClientTransport(indexerUrl);
+      const client = new Client(
+        {
+          name: "ctx-context-engine-bridge-http-client",
+          version: "0.0.1",
+        },
+        {
+          capabilities: {
+            tools: {},
+            resources: {},
+            prompts: {},
+          },
+        },
+      );
+      await client.connect(indexerTransport);
+      nextIndexerClient = client;
+    } catch (err) {
+      debugLog("[ctxce] Failed to connect MCP HTTP client to indexer: " + String(err));
+      nextIndexerClient = null;
+    }
+
+    let nextMemoryClient = null;
+    if (memoryUrl) {
+      try {
+        const memoryTransport = new StreamableHTTPClientTransport(memoryUrl);
+        const client = new Client(
+          {
+            name: "ctx-context-engine-bridge-memory-client",
+            version: "0.0.1",
+          },
+          {
+            capabilities: {
+              tools: {},
+              resources: {},
+              prompts: {},
+            },
+          },
+        );
+        await client.connect(memoryTransport);
+        debugLog(`[ctxce] Connected memory MCP client: ${memoryUrl}`);
+        nextMemoryClient = client;
+      } catch (err) {
+        debugLog("[ctxce] Failed to connect memory MCP client: " + String(err));
+        nextMemoryClient = null;
+      }
+    }
+
+    indexerClient = nextIndexerClient;
+    memoryClient = nextMemoryClient;
+
+    if (Object.keys(defaultsPayload).length > 1 && indexerClient) {
+      await sendSessionDefaults(indexerClient, defaultsPayload, "indexer");
+      if (memoryClient) {
+        await sendSessionDefaults(memoryClient, defaultsPayload, "memory");
+      }
     }
   }
+
+  await initializeRemoteClients(false);
 
   const server = new Server( // TODO: marked as depreciated
     {
@@ -253,6 +296,10 @@ async function createBridgeServer(options) {
     let remote;
     try {
       debugLog("[ctxce] tools/list: fetching tools from indexer");
+      await initializeRemoteClients(false);
+      if (!indexerClient) {
+        throw new Error("Indexer MCP client not initialized");
+      }
       remote = await withTimeout(
         indexerClient.listTools(),
         10000,
@@ -311,21 +358,47 @@ async function createBridgeServer(options) {
       return indexerResult;
     }
 
-    const targetClient = selectClientForTool(name, indexerClient, memoryClient);
+    await initializeRemoteClients(false);
+
+    let targetClient = selectClientForTool(name, indexerClient, memoryClient);
     if (!targetClient) {
       throw new Error(`Tool ${name} not available on any configured MCP server`);
     }
 
     const timeoutMs = getBridgeToolTimeoutMs();
-    const result = await targetClient.callTool(
-      {
-        name,
-        arguments: args,
-      },
-      undefined,
-      { timeout: timeoutMs },
-    );
-    return result;
+    try {
+      const result = await targetClient.callTool(
+        {
+          name,
+          arguments: args,
+        },
+        undefined,
+        { timeout: timeoutMs },
+      );
+      return result;
+    } catch (err) {
+      if (isSessionError(err)) {
+        debugLog(
+          "[ctxce] tools/call: detected remote MCP session error; reinitializing clients and retrying once: " +
+            String(err),
+        );
+        await initializeRemoteClients(true);
+        targetClient = selectClientForTool(name, indexerClient, memoryClient);
+        if (!targetClient) {
+          throw err;
+        }
+        const retryResult = await targetClient.callTool(
+          {
+            name,
+            arguments: args,
+          },
+          undefined,
+          { timeout: timeoutMs },
+        );
+        return retryResult;
+      }
+      throw err;
+    }
   });
 
   return server;
