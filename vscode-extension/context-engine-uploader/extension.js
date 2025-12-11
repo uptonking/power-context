@@ -1299,11 +1299,6 @@ async function writeMcpConfig() {
       }
     }
   }
-  if (!wroteAny && !hookWrote) {
-    log('Context Engine Uploader: MCP config write skipped (no targets succeeded).');
-  }
-
-  // Optionally scaffold ctx_config.json and .env using the inferred collection
   if (settings.get('scaffoldCtxConfig', true)) {
     try {
       await writeCtxConfig();
@@ -1497,6 +1492,12 @@ async function scaffoldCtxConfigFiles(workspaceDir, collectionName) {
         }
       } else if (ctxConfig.glm_api_key === undefined) {
         ctxConfig.glm_api_key = '';
+        ctxChanged = true;
+      }
+    }
+    if (decoderRuntime === 'llamacpp') {
+      if (ctxConfig.llamacpp_model === undefined) {
+        ctxConfig.llamacpp_model = 'llamacpp-4.6';
         ctxChanged = true;
       }
     }
