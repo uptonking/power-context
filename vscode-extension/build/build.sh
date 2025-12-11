@@ -14,6 +14,7 @@ CTX_SRC="$SCRIPT_DIR/../../scripts/ctx.py"
 ROUTER_SRC="$SCRIPT_DIR/../../scripts/mcp_router.py"
 REFRAG_SRC="$SCRIPT_DIR/../../scripts/refrag_glm.py"
 ENV_EXAMPLE_SRC="$SCRIPT_DIR/../../.env.example"
+AUTH_SRC="$SCRIPT_DIR/../../scripts/upload_auth_utils.py"
 
 cleanup() {
     rm -rf "$STAGE_DIR"
@@ -52,6 +53,11 @@ if [[ -f "$ROUTER_SRC" ]]; then
 fi
 if [[ -f "$REFRAG_SRC" ]]; then
     cp "$REFRAG_SRC" "$STAGE_DIR/refrag_glm.py"
+fi
+
+# Bundle auth helper used by standalone_upload_client.py
+if [[ -f "$AUTH_SRC" ]]; then
+    cp "$AUTH_SRC" "$STAGE_DIR/upload_auth_utils.py"
 fi
 
 if [[ -f "$ENV_EXAMPLE_SRC" ]]; then

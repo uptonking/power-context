@@ -27,7 +27,12 @@ from datetime import datetime
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from scripts.upload_auth_utils import get_auth_session
+
+try:
+    from upload_auth_utils import get_auth_session  # type: ignore[import]
+except ImportError:
+    def get_auth_session(upload_endpoint: str) -> str:
+        return ""
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
