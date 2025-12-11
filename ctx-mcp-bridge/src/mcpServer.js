@@ -286,18 +286,20 @@ async function createBridgeServer(options) {
   const authBackendUrl = process.env.CTXCE_AUTH_BACKEND_URL || "";
   let sessionId = explicitSession;
 
-  if (!sessionId) {
+  function resolveSessionId() {
+    const explicit = process.env.CTXCE_SESSION_ID || "";
+    if (explicit) {
+      return explicit;
+    }
     let backendToUse = authBackendUrl;
     let entry = null;
-
     if (backendToUse) {
       try {
         entry = loadAuthEntry(backendToUse);
-      } catch (err) {
+      } catch {
         entry = null;
       }
     }
-
     if (!entry) {
       try {
         const any = loadAnyAuthEntry();
@@ -305,11 +307,10 @@ async function createBridgeServer(options) {
           backendToUse = any.backendUrl;
           entry = any.entry;
         }
-      } catch (err) {
+      } catch {
         entry = null;
       }
     }
-
     if (entry) {
       let expired = false;
       const rawExpires = entry.expiresAt;
@@ -320,11 +321,17 @@ async function createBridgeServer(options) {
         }
       }
       if (!expired && typeof entry.sessionId === "string" && entry.sessionId) {
-        sessionId = entry.sessionId;
-      } else if (expired) {
+        return entry.sessionId;
+      }
+      if (expired) {
         debugLog("[ctxce] Stored auth session appears expired; please run `ctxce auth login` again.");
       }
     }
+    return "";
+  }
+
+  if (!sessionId) {
+    sessionId = resolveSessionId();
   }
 
   if (!sessionId) {
@@ -477,7 +484,16 @@ async function createBridgeServer(options) {
 
     debugLog(`[ctxce] tools/call: ${name || "<no-name>"}`);
 
-    // Attach session id so the target server can apply per-session defaults.
+    // Refresh session before each call; re-init clients if session changes.
+    const freshSession = resolveSessionId() || sessionId;
+    if (freshSession && freshSession !== sessionId) {
+      sessionId = freshSession;
+      try {
+        await initializeRemoteClients(true);
+      } catch (err) {
+        debugLog("[ctxce] Failed to reinitialize clients after session refresh: " + String(err));
+      }
+    }
     if (sessionId && (args === undefined || args === null || typeof args === "object")) {
       const obj = args && typeof args === "object" ? { ...args } : {};
       if (!Object.prototype.hasOwnProperty.call(obj, "session")) {

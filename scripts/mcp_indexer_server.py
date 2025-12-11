@@ -3018,6 +3018,7 @@ async def search_tests_for(
     context_lines: Any = None,
     under: Any = None,
     language: Any = None,
+    session: Any = None,
     compact: Any = None,
     kwargs: Any = None,
 ) -> Dict[str, Any]:
@@ -3056,6 +3057,7 @@ async def search_tests_for(
         under=under,
         language=language,
         path_glob=globs,
+        session=session,
         compact=compact,
         kwargs={k: v for k, v in _kwargs.items() if k not in {"path_glob"}},
     )
@@ -3068,6 +3070,7 @@ async def search_config_for(
     include_snippet: Any = None,
     context_lines: Any = None,
     under: Any = None,
+    session: Any = None,
     compact: Any = None,
     kwargs: Any = None,
 ) -> Dict[str, Any]:
@@ -3109,6 +3112,7 @@ async def search_config_for(
         include_snippet=include_snippet,
         context_lines=context_lines,
         under=under,
+        session=session,
         path_glob=globs,
         compact=compact,
         kwargs={k: v for k, v in _kwargs.items() if k not in {"path_glob"}},
@@ -3120,6 +3124,7 @@ async def search_callers_for(
     query: Any = None,
     limit: Any = None,
     language: Any = None,
+    session: Any = None,
     kwargs: Any = None,
 ) -> Dict[str, Any]:
     """Heuristic search for callers/usages of a symbol.
@@ -3135,6 +3140,7 @@ async def search_callers_for(
         query=query,
         limit=limit,
         language=language,
+        session=session,
         kwargs=kwargs,
     )
 
@@ -3144,6 +3150,7 @@ async def search_importers_for(
     query: Any = None,
     limit: Any = None,
     language: Any = None,
+    session: Any = None,
     kwargs: Any = None,
 ) -> Dict[str, Any]:
     """Find files likely importing or referencing a module/symbol.
@@ -3187,6 +3194,7 @@ async def search_importers_for(
         limit=limit,
         language=language,
         path_glob=globs,
+        session=session,
         kwargs={k: v for k, v in _kwargs.items() if k not in {"path_glob"}},
     )
 
@@ -3657,6 +3665,7 @@ async def context_search(
     ext: Any = None,
     not_: Any = None,
     case: Any = None,
+    session: Any = None,
     compact: Any = None,
     # Repo scoping (cross-codebase isolation)
     repo: Any = None,  # str, list[str], or "*" to search all repos
@@ -4193,6 +4202,7 @@ async def context_search(
         case=case,
         compact=False,
         repo=repo,  # Cross-codebase isolation
+        session=session,
     )
 
     # Optional debug
@@ -7926,6 +7936,7 @@ async def code_search(
     ext: Any = None,
     not_: Any = None,
     case: Any = None,
+    session: Any = None,
     compact: Any = None,
     kwargs: Any = None,
 ) -> Dict[str, Any]:
@@ -7956,6 +7967,7 @@ async def code_search(
         ext=ext,
         not_=not_,
         case=case,
+        session=session,
         compact=compact,
         kwargs=kwargs,
     )
@@ -8108,6 +8120,8 @@ async def info_request(
     include_explanation: bool = None,
     # Relationship mapping
     include_relationships: bool = None,
+    # Auth/session (passed through to repo_search)
+    session: str = None,
     # Optional filters (pass-through to repo_search)
     limit: int = None,
     language: str = None,
@@ -8185,6 +8199,7 @@ async def info_request(
         query=query,
         limit=eff_limit,
         per_path=3,  # Better default for info requests
+        session=session,
         include_snippet=eff_snippet,
         context_lines=eff_context,
         language=language,

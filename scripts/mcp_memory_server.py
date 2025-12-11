@@ -409,6 +409,8 @@ def find(
     Cold-start option: set MEMORY_COLD_SKIP_DENSE=1 to skip dense embedding until the
     model is cached (useful on slow storage).
     """
+    # _require_auth_session(session) # TODO:
+    
     coll = _resolve_collection(collection, session=session, ctx=ctx, extra_kwargs=kwargs)
     _ensure_once(coll)
 
