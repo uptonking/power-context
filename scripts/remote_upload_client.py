@@ -29,6 +29,7 @@ from datetime import datetime
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from scripts.upload_auth_utils import get_auth_session
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)

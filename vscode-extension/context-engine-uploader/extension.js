@@ -3,6 +3,7 @@ const { spawn, spawnSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const { ensureAuthIfRequired, runAuthLoginFlow } = require('./auth_utils');
 let outputChannel;
 let watchProcess;
 let forceProcess;
@@ -104,6 +105,12 @@ function activate(context) {
       vscode.window.showErrorMessage('Prompt+ failed. See Context Engine Upload output.');
     });
   });
+  const authLoginDisposable = vscode.commands.registerCommand('contextEngineUploader.authLogin', () => {
+    runAuthLoginFlow(undefined, buildAuthDeps()).catch(error => {
+      log(`Auth login failed: ${error instanceof Error ? error.message : String(error)}`);
+      vscode.window.showErrorMessage('Context Engine Uploader: auth login failed. See output for details.');
+    });
+  });
   const configDisposable = vscode.workspace.onDidChangeConfiguration(event => {
     if (event.affectsConfiguration('contextEngineUploader') && watchProcess) {
       runSequence('auto').catch(error => log(`Auto-restart failed: ${error instanceof Error ? error.message : String(error)}`));
@@ -154,6 +161,7 @@ function activate(context) {
     uploadGitHistoryDisposable,
     showLogsDisposable,
     promptEnhanceDisposable,
+    authLoginDisposable,
     startBridgeDisposable,
     stopBridgeDisposable,
     mcpConfigDisposable,
@@ -187,17 +195,36 @@ function activate(context) {
     }
   }
 }
+function buildAuthDeps() {
+  return {
+    vscode,
+    spawn,
+    spawnSync,
+    resolveBridgeCliInvocation,
+    getWorkspaceFolderPath,
+    attachOutput,
+    log,
+    fetchGlobal: (typeof fetch === 'function' ? fetch : undefined),
+  };
+}
 async function runSequence(mode = 'auto') {
   const options = resolveOptions();
   if (!options) {
     return;
   }
+
+  try {
+    await ensureAuthIfRequired(options.endpoint, buildAuthDeps());
+  } catch (error) {
+    log(`Auth preflight check failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
   const depsSatisfied = await ensurePythonDependencies(options.pythonPath);
   if (!depsSatisfied) {
     setStatusBarState('idle');
     return;
   }
-  // Re-resolve options in case ensurePythonDependencies switched to a private venv interpreter
+  // Re-resolve options in case ensurePythonDependencies switched to a better interpreter
   const reoptions = resolveOptions();
   if (reoptions) {
     Object.assign(options, reoptions);

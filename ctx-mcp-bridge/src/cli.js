@@ -4,10 +4,18 @@ import process from "node:process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { runMcpServer, runHttpMcpServer } from "./mcpServer.js";
+import { runAuthCommand } from "./authCli.js";
 
 export async function runCli() {
   const argv = process.argv.slice(2);
   const cmd = argv[0];
+
+  if (cmd === "auth") {
+    const sub = argv[1] || "";
+    const args = argv.slice(2);
+    await runAuthCommand(sub, args);
+    return;
+  }
 
   if (cmd === "mcp-http-serve") {
     const args = argv.slice(1);
@@ -109,7 +117,7 @@ export async function runCli() {
 
   // eslint-disable-next-line no-console
   console.error(
-    `Usage: ${binName} mcp-serve [--workspace <path>] [--indexer-url <url>] [--memory-url <url>] | ${binName} mcp-http-serve [--workspace <path>] [--indexer-url <url>] [--memory-url <url>] [--port <port>]`,
+    `Usage: ${binName} mcp-serve [--workspace <path>] [--indexer-url <url>] [--memory-url <url>] | ${binName} mcp-http-serve [--workspace <path>] [--indexer-url <url>] [--memory-url <url>] [--port <port>] | ${binName} auth <login|status|logout> [--backend-url <url>] [--token <token>] [--username <name> --password <pass>]`,
   );
   process.exit(1);
 }

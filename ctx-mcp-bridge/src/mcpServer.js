@@ -247,6 +247,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { loadAnyAuthEntry, loadAuthEntry } from "./authConfig.js";
 
 async function createBridgeServer(options) {
   const workspace = options.workspace || process.cwd();
@@ -281,8 +282,54 @@ async function createBridgeServer(options) {
   // future this can be made user-aware (e.g. from auth), but for now we
   // keep it deterministic per workspace to help the indexer reuse
   // session-scoped defaults.
-  const sessionId =
-    process.env.CTXCE_SESSION_ID || `ctxce-${Buffer.from(workspace).toString("hex").slice(0, 24)}`;
+  const explicitSession = process.env.CTXCE_SESSION_ID || "";
+  const authBackendUrl = process.env.CTXCE_AUTH_BACKEND_URL || "";
+  let sessionId = explicitSession;
+
+  if (!sessionId) {
+    let backendToUse = authBackendUrl;
+    let entry = null;
+
+    if (backendToUse) {
+      try {
+        entry = loadAuthEntry(backendToUse);
+      } catch (err) {
+        entry = null;
+      }
+    }
+
+    if (!entry) {
+      try {
+        const any = loadAnyAuthEntry();
+        if (any && any.entry) {
+          backendToUse = any.backendUrl;
+          entry = any.entry;
+        }
+      } catch (err) {
+        entry = null;
+      }
+    }
+
+    if (entry) {
+      let expired = false;
+      const rawExpires = entry.expiresAt;
+      if (typeof rawExpires === "number" && Number.isFinite(rawExpires) && rawExpires > 0) {
+        const nowSecs = Math.floor(Date.now() / 1000);
+        if (rawExpires < nowSecs) {
+          expired = true;
+        }
+      }
+      if (!expired && typeof entry.sessionId === "string" && entry.sessionId) {
+        sessionId = entry.sessionId;
+      } else if (expired) {
+        debugLog("[ctxce] Stored auth session appears expired; please run `ctxce auth login` again.");
+      }
+    }
+  }
+
+  if (!sessionId) {
+    sessionId = `ctxce-${Buffer.from(workspace).toString("hex").slice(0, 24)}`;
+  }
 
   // Best-effort: inform the indexer of default collection and session.
   // If this fails we still proceed, falling back to per-call injection.

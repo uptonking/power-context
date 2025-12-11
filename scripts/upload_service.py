@@ -22,6 +22,18 @@ from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Request, sta
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from scripts.auth_backend import (
+    AuthDisabledError,
+    AuthInvalidToken,
+    authenticate_user,
+    create_session,
+    create_session_for_token,
+    create_user,
+    has_any_users,
+    validate_session,
+    AUTH_ENABLED,
+    AUTH_SESSION_TTL_SECONDS,
+)
 
 # Import existing workspace state and indexing functions
 try:
@@ -111,6 +123,40 @@ class HealthResponse(BaseModel):
     qdrant_url: str
     work_dir: str
 
+
+class AuthLoginRequest(BaseModel):
+    client: str
+    workspace: Optional[str] = None
+    token: Optional[str] = None
+
+
+class AuthLoginResponse(BaseModel):
+    session_id: str
+    user_id: Optional[str] = None
+    expires_at: Optional[int] = None
+
+
+class AuthStatusResponse(BaseModel):
+    enabled: bool
+    has_users: Optional[bool] = None
+    session_ttl_seconds: int
+
+
+class AuthUserCreateRequest(BaseModel):
+    username: str
+    password: str
+
+
+class AuthUserCreateResponse(BaseModel):
+    user_id: str
+    username: str
+
+
+class PasswordLoginRequest(BaseModel):
+    username: str
+    password: str
+    workspace: Optional[str] = None
+
 def get_workspace_key(workspace_path: str) -> str:
     """Generate 16-char hash for collision avoidance in remote uploads.
 
@@ -192,7 +238,6 @@ def _cleanup_empty_dirs(path: Path, stop_at: Path) -> None:
             path = path.parent
         except Exception:
             break
-
 
 def process_delta_bundle(workspace_path: str, bundle_path: Path, manifest: Dict[str, Any]) -> Dict[str, int]:
     """Process delta bundle and return operation counts."""
@@ -410,6 +455,128 @@ async def _process_bundle_background(
             pass
 
 
+@app.get("/auth/status", response_model=AuthStatusResponse)
+async def auth_status():
+    try:
+        if not AUTH_ENABLED:
+            return AuthStatusResponse(
+                enabled=False,
+                has_users=None,
+                session_ttl_seconds=AUTH_SESSION_TTL_SECONDS,
+            )
+        try:
+            users_exist = has_any_users()
+        except AuthDisabledError:
+            return AuthStatusResponse(
+                enabled=False,
+                has_users=None,
+                session_ttl_seconds=AUTH_SESSION_TTL_SECONDS,
+            )
+        return AuthStatusResponse(
+            enabled=True,
+            has_users=users_exist,
+            session_ttl_seconds=AUTH_SESSION_TTL_SECONDS,
+        )
+    except Exception as e:
+        logger.error(f"[upload_service] Failed to report auth status: {e}")
+        raise HTTPException(status_code=500, detail="Failed to read auth status")
+
+
+@app.post("/auth/login", response_model=AuthLoginResponse)
+async def auth_login(payload: AuthLoginRequest):
+    try:
+        session = create_session_for_token(
+            client=payload.client,
+            workspace=payload.workspace,
+            token=payload.token,
+        )
+    except AuthDisabledError:
+        raise HTTPException(status_code=404, detail="Auth disabled")
+    except AuthInvalidToken:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid auth token")
+    except Exception as e:
+        logger.error(f"[upload_service] Failed to create auth session: {e}")
+        raise HTTPException(status_code=500, detail="Failed to create auth session")
+    return AuthLoginResponse(
+        session_id=session.get("session_id"),
+        user_id=session.get("user_id"),
+        expires_at=session.get("expires_at"),
+    )
+
+
+@app.post("/auth/users", response_model=AuthUserCreateResponse)
+async def auth_create_user(payload: AuthUserCreateRequest, request: Request):
+    try:
+        first_user = not has_any_users()
+    except AuthDisabledError:
+        raise HTTPException(status_code=404, detail="Auth disabled")
+    except Exception as e:
+        logger.error(f"[upload_service] Failed to check user state: {e}")
+        raise HTTPException(status_code=500, detail="Failed to inspect user state")
+
+    admin_token = os.environ.get("CTXCE_AUTH_ADMIN_TOKEN") or os.environ.get("CTXCE_AUTH_SHARED_TOKEN")
+    if not first_user:
+        if not admin_token:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Admin token not configured",
+            )
+        header = request.headers.get("X-Admin-Token")
+        if not header or header != admin_token:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid admin token",
+            )
+
+    try:
+        user = create_user(payload.username, payload.password)
+    except AuthDisabledError:
+        raise HTTPException(status_code=404, detail="Auth disabled")
+    except Exception as e:
+        logger.error(f"[upload_service] Failed to create user: {e}")
+        msg = str(e)
+        if "UNIQUE" in msg or "unique" in msg:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Username already exists",
+            )
+        raise HTTPException(status_code=500, detail="Failed to create user")
+
+    return AuthUserCreateResponse(user_id=user.get("user_id"), username=user.get("username"))
+
+
+@app.post("/auth/login/password", response_model=AuthLoginResponse)
+async def auth_login_password(payload: PasswordLoginRequest):
+    try:
+        user = authenticate_user(payload.username, payload.password)
+    except AuthDisabledError:
+        raise HTTPException(status_code=404, detail="Auth disabled")
+    except Exception as e:
+        logger.error(f"[upload_service] Error authenticating user: {e}")
+        raise HTTPException(status_code=500, detail="Authentication error")
+
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+
+    meta: Optional[Dict[str, Any]] = None
+    if payload.workspace:
+        meta = {"workspace": payload.workspace}
+
+    try:
+        session = create_session(user_id=user.get("id"), metadata=meta)
+    except AuthDisabledError:
+        raise HTTPException(status_code=404, detail="Auth disabled")
+    except Exception as e:
+        logger.error(f"[upload_service] Failed to create session for user: {e}")
+        raise HTTPException(status_code=500, detail="Failed to create auth session")
+
+    return AuthLoginResponse(
+        session_id=session.get("session_id"),
+        user_id=session.get("user_id"),
+        expires_at=session.get("expires_at"),
+    )
+
+
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
     """Health check endpoint."""
@@ -465,6 +632,7 @@ async def upload_delta_bundle(
     force: Optional[bool] = Form(False),
     source_path: Optional[str] = Form(None),
     logical_repo_id: Optional[str] = Form(None),
+    session: Optional[str] = Form(None),
 ):
     """Upload and process delta bundle."""
     start_time = datetime.now()
@@ -472,6 +640,25 @@ async def upload_delta_bundle(
 
     try:
         logger.info(f"[upload_service] Begin processing upload for workspace={workspace_path} from {client_host}")
+
+        if AUTH_ENABLED:
+            session_value = (session or "").strip()
+            try:
+                record = validate_session(session_value)
+            except AuthDisabledError:
+                record = None
+            except Exception as e:
+                logger.error(f"[upload_service] Failed to validate auth session for upload: {e}")
+                raise HTTPException(
+                    status_code=500,
+                    detail="Failed to validate auth session",
+                )
+            if record is None:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid or expired session",
+                )
+
         # Validate workspace path
         workspace = Path(workspace_path)
         if not workspace.is_absolute():

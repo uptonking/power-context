@@ -152,6 +152,26 @@ SESSION_DEFAULTS: Dict[str, Dict[str, Any]] = {}
 _SESSION_CTX_LOCK = threading.Lock()
 SESSION_DEFAULTS_BY_SESSION: "WeakKeyDictionary[Any, Dict[str, Any]]" = WeakKeyDictionary()
 
+try:
+    from scripts.auth_backend import AUTH_ENABLED as AUTH_ENABLED_AUTH, validate_session as _auth_validate_session
+except Exception:
+    AUTH_ENABLED_AUTH = False
+
+    def _auth_validate_session(session_id: str):  # type: ignore[no-redef]
+        return None
+
+
+def _require_auth_session(session: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not AUTH_ENABLED_AUTH:
+        return None
+    sid = (session or "").strip()
+    if not sid:
+        raise Exception("Missing session for authorized operation")
+    info = _auth_validate_session(sid)
+    if not info:
+        raise Exception("Invalid or expired session")
+    return info
+
 
 def _start_readyz_server():
     try:
@@ -354,6 +374,7 @@ def store(
 
     First call may be slower because the embedding model loads lazily.
     """
+    _require_auth_session(session)
     coll = _resolve_collection(collection, session=session, ctx=ctx, extra_kwargs=kwargs)
     _ensure_once(coll)
     model = _get_embedding_model()

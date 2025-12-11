@@ -15,7 +15,8 @@
     "onCommand:contextEngineUploader.start",
     "onCommand:contextEngineUploader.stop",
     "onCommand:contextEngineUploader.restart",
-    "onCommand:contextEngineUploader.promptEnhance"
+    "onCommand:contextEngineUploader.promptEnhance",
+    "onCommand:contextEngineUploader.authLogin"
   ],
   "main": "./extension.js",
   "icon": "assets/icon.png",
@@ -56,6 +57,10 @@
       {
         "command": "contextEngineUploader.promptEnhance",
         "title": "Context Engine Uploader: Prompt+ (Unicorn Mode)"
+      },
+      {
+        "command": "contextEngineUploader.authLogin",
+        "title": "Context Engine Uploader: Sign In (ctxce auth)"
       }
     ],
     "configuration": {

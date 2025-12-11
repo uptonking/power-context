@@ -1,6 +1,10 @@
 Context Engine Uploader
 =======================
 
+Install
+-------
+- Install from the VS Code Marketplace (search for "Context Engine Uploader" or publisher `context-engine`). You can also install it directly from the Extensions view in VS Code.
+
 Features
 --------
 - Runs a force sync (`Index Codebase`) followed by watch mode to keep a remote Context Engine instance in sync with your workspace.
@@ -52,7 +56,7 @@ MCP bridge (ctx-mcp-bridge) & MCP config lifecycle
 - Why use the bridge instead of two direct MCP entries?
   - **Single server entry:** IDEs only need to register one MCP server (`context-engine`) instead of juggling separate `qdrant-indexer` and `memory` entries, avoiding coordination mistakes.
   - **Shared session defaults:** the bridge loads `ctx_config.json` and injects collection name, repo metadata, and any other ctx defaults so every IDE window talks to the right collection without hand-editing `.mcp.json`.
-  - **Per-user credential isolation:** each IDE maintains its own MCP session while the bridge multiplexes upstream calls, so user preferences (future auth) remain per client even though the backend pair is shared.
+  - **Per-user credential isolation:** each IDE maintains its own MCP session while the bridge multiplexes upstream calls. When you enable backend auth (via `CTXCE_AUTH_ENABLED` and `ctxce auth ...` sessions), uploads and MCP calls are gated by per-user sessions, so multiple IDEs can share the same stack while still having isolated access control and preferences. See **Optional auth with the MCP bridge (PoC)** below for details.
   - **Flexible transport:** stdio mode works everywhere (even when HTTP ports aren’t reachable), while HTTP mode keeps Claude/Windsurf happy when they want direct URLs; the extension automatically writes the right flavor.
   - **Centralized logging & health:** when the bridge process runs once per workspace you get a single stream of logs (`Context Engine Upload` output) and a single port to probe for health checks instead of multiple MCP child processes per IDE.
 - When you run **`Write MCP Config`**, the extension:
@@ -64,12 +68,84 @@ MCP bridge (ctx-mcp-bridge) & MCP config lifecycle
   - `mcpServerMode = bridge`, `mcpTransportMode = http` → **bridge-http**.
   - `mcpServerMode = direct`, `mcpTransportMode = sse-remote` → **direct-sse** (two stdio `mcp-remote` servers).
   - `mcpServerMode = direct`, `mcpTransportMode = http` → **direct-http** (two HTTP servers, no bridge).
-- In **bridge-stdio**, the configs run `ctxce mcp-serve` via `npx`, passing the workspace path (auto-detected from the uploader target path) plus `--indexer-url` and `--memory-url` derived from the MCP settings.
+- In **bridge-stdio**, the configs run the `ctxce mcp-serve` CLI via `npx` (for example,
+  `npx @context-engine-bridge/context-engine-mcp-bridge ctxce mcp-serve`), passing the
+  workspace path (auto-detected from the uploader target path) plus `--indexer-url`
+  and `--memory-url` derived from the MCP settings.
 - In **bridge-http**, the extension can also **manage the bridge process**:
   - `autoStartMcpBridge=true` and `mcpServerMode='bridge'` with `mcpTransportMode='http'` → the extension starts `ctxce mcp-http-serve` in the background for the active workspace using `mcpBridgePort`.
   - The resulting HTTP URL (`http://127.0.0.1:<mcpBridgePort>/mcp`) is written into `.mcp.json` and Windsurf’s `mcp_config.json` as the `context-engine` server URL.
   - In **stdio or direct modes**, the HTTP bridge is **not** auto-started; only the explicit `Start MCP HTTP Bridge` command will launch it.
 - Bridge settings are **workspace-scoped**, so different workspaces can choose different modes and ports (e.g., one workspace using stdio bridge, another using HTTP bridge on a different port).
+
+Optional auth with the MCP bridge (PoC)
+--------------------------------------
+
+Auth is **off by default** and fully opt-in. When enabled, the MCP indexer and
+memory servers expect a valid `session` id (issued by the backend) on protected
+tools. The bridge CLI (`ctxce auth ...`) is the primary way to obtain and cache
+that session.
+
+High-level steps:
+
+- Enable auth on the remote stack (e.g. dev-remote compose):
+  - Set `CTXCE_AUTH_ENABLED=1` in the upload/indexer environment.
+  - Optionally set `CTXCE_AUTH_SHARED_TOKEN` for token-based login.
+  - Optional: set `CTXCE_AUTH_ADMIN_TOKEN` for creating additional users via `/auth/users`.
+- Point the bridge at the auth backend:
+  - In your local shell (where you run the `ctxce` CLI via `npx`), set `CTXCE_AUTH_BACKEND_URL`
+    to the upload service URL (e.g. `http://localhost:8004`).
+
+Token-based login:
+
+```bash
+export CTXCE_AUTH_BACKEND_URL=http://localhost:8004
+export CTXCE_AUTH_TOKEN=change-me-dev-token   # must match CTXCE_AUTH_SHARED_TOKEN in the stack
+
+# Obtain a session and cache it under ~/.ctxce/auth.json
+npx @context-engine-bridge/context-engine-mcp-bridge ctxce auth login
+
+# Check status (optional)
+npx @context-engine-bridge/context-engine-mcp-bridge ctxce auth status
+```
+
+Username/password login (when you have real users):
+
+- First, create the initial user (once) via `/auth/users` while the auth DB is
+  empty (no admin token required). This is typically done with a small script
+  or curl call against the upload service, for example:
+
+  ```bash
+  curl -X POST http://localhost:8004/auth/users \
+    -H "Content-Type: application/json" \
+    -d '{"username":"you@example.com","password":"your-password"}'
+  ```
+
+- Then login via the bridge:
+
+```bash
+export CTXCE_AUTH_BACKEND_URL=http://localhost:8004
+
+npx @context-engine-bridge/context-engine-mcp-bridge ctxce auth login \
+  --username you@example.com \
+  --password 'your-password'
+```
+
+In both modes, the bridge stores the returned `session_id` keyed by
+`CTXCE_AUTH_BACKEND_URL` and automatically injects it into all MCP tool calls
+as the `session` field. Once you have at least one entry in `~/.ctxce/auth.json`,
+the MCP bridge used by the extension will discover and reuse that session
+automatically; MCP configs do not need to set `CTXCE_AUTH_BACKEND_URL` in their
+`env` blocks. If `CTXCE_AUTH_ENABLED` is off on the backend, these auth settings
+are ignored and the bridge behaves exactly as before.
+
+Session lifetime:
+
+- By default, issued sessions do **not** expire (`CTXCE_AUTH_SESSION_TTL_SECONDS`
+  defaults to `0`).
+- Operators who want expiry can set `CTXCE_AUTH_SESSION_TTL_SECONDS` (in seconds)
+  on the backend services. Values `> 0` enable a sliding window: active sessions
+  are refreshed when validated; values `<= 0` disable expiry.
 
 Workspace-level ctx integration
 -------------------------------

@@ -123,6 +123,27 @@ except ImportError:
             return default
 
 
+try:
+    from scripts.auth_backend import AUTH_ENABLED as AUTH_ENABLED_AUTH, validate_session as _auth_validate_session
+except Exception:
+    AUTH_ENABLED_AUTH = False
+
+    def _auth_validate_session(session_id: str):  # type: ignore[no-redef]
+        return None
+
+
+def _require_auth_session(session: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not AUTH_ENABLED_AUTH:
+        return None
+    sid = (session or "").strip()
+    if not sid:
+        raise ValidationError("Missing session for authorized operation")
+    info = _auth_validate_session(sid)
+    if not info:
+        raise ValidationError("Invalid or expired session")
+    return info
+
+
 # Global lock to guard temporary env toggles used during ReFRAG retrieval/decoding
 _ENV_LOCK = threading.Lock()
 
@@ -1812,6 +1833,9 @@ async def repo_search(
     - path_glob=["scripts/**","**/*.py"], language="python"
     - symbol="context_answer", under="scripts"
     """
+    # Enforce auth when enabled (no-op when CTXCE_AUTH_ENABLED is false)
+    _require_auth_session(session)
+
     # Handle queries alias (explicit parameter)
     if queries is not None and (query is None or (isinstance(query, str) and str(query).strip() == "")):
         query = queries
