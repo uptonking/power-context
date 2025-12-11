@@ -267,6 +267,7 @@ def process_delta_bundle(workspace_path: str, bundle_path: Path, manifest: Dict[
         workspace_key = get_workspace_key(workspace_path)
         workspace = Path(WORK_DIR) / f"{repo_name}-{workspace_key}"
         workspace.mkdir(parents=True, exist_ok=True)
+        slug_repo_name = f"{repo_name}-{workspace_key}"
 
         with tarfile.open(bundle_path, "r:gz") as tar:
             # Extract operations metadata
@@ -316,6 +317,21 @@ def process_delta_bundle(workspace_path: str, bundle_path: Path, manifest: Dict[
                 if not rel_path:
                     operations_count["skipped"] += 1
                     continue
+
+                # Defensive guard: if rel_path already starts with the slugged
+                # repo name (e.g. "<repo>-<hash>/"), writing to workspace / rel_path
+                # would create a nested slug directory ("slug/slug/..."). This is
+                # almost certainly a misconfigured client using a dev-workspace
+                # mirror as the workspace root. Treat this as a hard error so the
+                # bundle does not silently create recursive structures.
+                # TODO: http error code/msg for extension toast?
+                if rel_path == slug_repo_name or rel_path.startswith(slug_repo_name + "/"):
+                    msg = (
+                        f"[upload_service] Refusing to apply operation {op_type} for suspicious path {rel_path} "
+                        f"which already contains workspace slug {slug_repo_name}"
+                    )
+                    logger.error(msg)
+                    raise ValueError(msg)
 
                 target_path = workspace / rel_path
 

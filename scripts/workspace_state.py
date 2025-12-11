@@ -626,7 +626,6 @@ def _detect_repo_name_from_path(path: Path) -> str:
         os.environ.get("WORKSPACE_PATH"),
         "/work",
         os.environ.get("HOST_ROOT"),
-        "/home/coder/project/Context-Engine/dev-workspace",
     ):
         if not root_str:
             continue
