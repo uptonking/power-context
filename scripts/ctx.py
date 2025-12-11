@@ -276,6 +276,30 @@ def parse_mcp_response(result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return {"raw": text}
 
 
+def _extract_tool_error(result: Dict[str, Any]) -> Optional[str]:
+    """Best-effort extraction of a tool-level error message from MCP response.
+
+    Handles FastMCP-style isError + content.text as well as structuredContent.result.error.
+    Returns a human-readable error string when present, or None when no error detected.
+    """
+    try:
+        res = result.get("result") or {}
+        if isinstance(res, dict) and res.get("isError") is True:
+            content = res.get("content") or []
+            if isinstance(content, list) and content and isinstance(content[0], dict):
+                text = content[0].get("text")
+                if isinstance(text, str) and text.strip():
+                    return text.strip()
+        sc = res.get("structuredContent") or {}
+        rs = sc.get("result") or {}
+        err = rs.get("error")
+        if isinstance(err, str) and err.strip():
+            return err.strip()
+    except Exception:
+        return None
+    return None
+
+
 def _compress_snippet(snippet: str, max_lines: int = 6) -> str:
     """Compact, high-signal subset of a code snippet.
 
@@ -704,6 +728,40 @@ def _generate_plan(enhanced_prompt: str, context: str, note: str) -> str:
         "<|start_of_role|>assistant<|end_of_role|>"
     )
 
+    runtime_kind = str(os.environ.get("REFRAG_RUNTIME", "llamacpp")).strip().lower()
+
+    # GLM path mirrors rewrite_prompt behavior
+    if runtime_kind == "glm":
+        try:
+            from refrag_glm import GLMRefragClient  # type: ignore
+
+            client = GLMRefragClient()
+            response = client.client.chat.completions.create(
+                model=os.environ.get("GLM_MODEL", "glm-4.6"),
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": user_msg},
+                ],
+                max_tokens=200,
+                temperature=0.3,
+                stream=False,
+            )
+            plan = (
+                (response.choices[0].message.content if response and response.choices else "")
+                or ""
+            ).strip()
+            if not plan:
+                # Fall through to llama.cpp path
+                runtime_kind = "llamacpp"
+            else:
+                if "EXECUTION PLAN" not in plan.upper():
+                    plan = "EXECUTION PLAN:\n" + plan
+                return plan
+        except Exception as e:
+            sys.stderr.write(f"[DEBUG] Plan generation (GLM) failed, falling back to llama.cpp: {type(e).__name__}: {e}\n")
+            sys.stderr.flush()
+            runtime_kind = "llamacpp"
+
     decoder_url = DECODER_URL
     # Safety: restrict to local decoder hosts
     parsed = urlparse(decoder_url)
@@ -986,6 +1044,14 @@ def fetch_context(query: str, **filters) -> Tuple[str, str]:
         sys.stderr.write(f"[DEBUG] repo_search error: {error_msg}\n")
         sys.stderr.flush()
         return "", f"Context retrieval failed: {error_msg}"
+
+    # Surface tool-level errors (including auth failures) explicitly instead of
+    # silently treating them as "no context".
+    tool_err = _extract_tool_error(result)
+    if tool_err:
+        sys.stderr.write(f"[DEBUG] repo_search tool error: {tool_err}\n")
+        sys.stderr.flush()
+        return "", f"Context retrieval failed: {tool_err}"
 
     data = parse_mcp_response(result)
     if not data:
