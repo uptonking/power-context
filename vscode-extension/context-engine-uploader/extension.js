@@ -979,6 +979,15 @@ async function enhanceSelectionWithUnicorn() {
   }
   try {
     const cfg = vscode.workspace.getConfiguration('contextEngineUploader');
+    const idxUrlRaw = (cfg.get('ctxIndexerUrl') || cfg.get('mcpIndexerUrl') || '').trim();
+    if (idxUrlRaw) {
+      env.MCP_INDEXER_URL = idxUrlRaw;
+    }
+  } catch (_) {
+    // ignore config read failures; fall back to defaults
+  }
+  try {
+    const cfg = vscode.workspace.getConfiguration('contextEngineUploader');
     const useGpuDecoder = cfg.get('useGpuDecoder', false);
     if (useGpuDecoder) {
       env.USE_GPU_DECODER = '1';
