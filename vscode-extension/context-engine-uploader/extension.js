@@ -1173,15 +1173,6 @@ function normalizeBridgeUrl(url) {
   if (!trimmed) {
     return '';
   }
-  try {
-    const parsed = new URL(trimmed);
-    if (parsed.pathname.endsWith('/sse')) {
-      parsed.pathname = parsed.pathname.replace(/\/sse$/, '/mcp');
-      return parsed.toString();
-    }
-  } catch (_) {
-    // fall through to return trimmed
-  }
   return trimmed;
 }
 
@@ -1258,8 +1249,8 @@ async function writeMcpConfig() {
     }
   }
 
-  let indexerUrl = (settings.get('mcpIndexerUrl') || 'http://localhost:8001/sse').trim();
-  let memoryUrl = (settings.get('mcpMemoryUrl') || 'http://localhost:8000/sse').trim();
+  let indexerUrl = (settings.get('mcpIndexerUrl') || 'http://localhost:8003/mcp').trim();
+  let memoryUrl = (settings.get('mcpMemoryUrl') || 'http://localhost:8002/mcp').trim();
   if (serverMode === 'bridge') {
     indexerUrl = normalizeBridgeUrl(indexerUrl);
     memoryUrl = normalizeBridgeUrl(memoryUrl);
@@ -1745,8 +1736,8 @@ function resolveHttpBridgeOptions() {
       vscode.window.showErrorMessage('Context Engine Uploader: open a workspace or set contextEngineUploader.targetPath before starting HTTP MCP bridge.');
       return undefined;
     }
-    let indexerUrl = (settings.get('mcpIndexerUrl') || 'http://localhost:8001/sse').trim();
-    let memoryUrl = (settings.get('mcpMemoryUrl') || '').trim();
+    let indexerUrl = (settings.get('mcpIndexerUrl') || 'http://localhost:8003/mcp').trim();
+    let memoryUrl = (settings.get('mcpMemoryUrl') || 'http://localhost:8002/mcp').trim();
     indexerUrl = normalizeBridgeUrl(indexerUrl);
     memoryUrl = normalizeBridgeUrl(memoryUrl);
     let port = Number(settings.get('mcpBridgePort') || 30810);

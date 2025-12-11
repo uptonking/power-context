@@ -192,7 +192,7 @@
         },
         "contextEngineUploader.mcpBridgeLocalOnly": {
           "type": "boolean",
-          "default": true,
+          "default": false,
           "description": "Development toggle. When true (default) the extension prefers local bridge binaries resolved from mcpBridgeBinPath or CTXCE_BRIDGE_BIN before falling back to the published npm build via npx."
         },
         "contextEngineUploader.mcpServerMode": {
@@ -207,12 +207,12 @@
         },
         "contextEngineUploader.mcpIndexerUrl": {
           "type": "string",
-          "default": "http://localhost:8001/sse",
+          "default": "http://localhost:8003/mcp",
           "description": "Claude Code MCP server URL for the Qdrant indexer. Used when writing MCP configs."
         },
         "contextEngineUploader.mcpMemoryUrl": {
           "type": "string",
-          "default": "http://localhost:8000/sse",
+          "default": "http://localhost:8002/mcp",
           "description": "Claude Code MCP server URL for the memory/search MCP server. Used when writing MCP configs."
         },
         "contextEngineUploader.ctxIndexerUrl": {
