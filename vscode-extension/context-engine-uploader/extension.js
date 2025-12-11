@@ -481,6 +481,25 @@ function scheduleMcpConfigRefreshAfterBridge(delayMs = 1500) {
       clearTimeout(pendingBridgeConfigTimer);
       pendingBridgeConfigTimer = undefined;
     }
+    // For bridge-http mode started by the extension, Windsurf needs the
+    // "context-engine" MCP server entry removed and then re-added once the
+    // HTTP bridge is ready. Best-effort removal happens immediately here;
+    // writeMcpConfig() below will re-write configs after the bridge comes up.
+    try {
+      const settings = vscode.workspace.getConfiguration('contextEngineUploader');
+      const windsurfEnabled = settings.get('mcpWindsurfEnabled', false);
+      const transportModeRaw = settings.get('mcpTransportMode') || 'sse-remote';
+      const serverModeRaw = settings.get('mcpServerMode') || 'bridge';
+      const transportMode = (typeof transportModeRaw === 'string' ? transportModeRaw.trim() : 'sse-remote') || 'sse-remote';
+      const serverMode = (typeof serverModeRaw === 'string' ? serverModeRaw.trim() : 'bridge') || 'bridge';
+      if (windsurfEnabled && serverMode === 'bridge' && transportMode === 'http') {
+        removeContextEngineFromWindsurfConfig().catch(error => {
+          log(`Context Engine Uploader: failed to remove context-engine from Windsurf MCP config before HTTP bridge restart: ${error instanceof Error ? error.message : String(error)}`);
+        });
+      }
+    } catch (error) {
+      log(`Context Engine Uploader: failed to prepare Windsurf MCP removal before HTTP bridge restart: ${error instanceof Error ? error.message : String(error)}`);
+    }
     pendingBridgeConfigTimer = setTimeout(() => {
       pendingBridgeConfigTimer = undefined;
       log('Context Engine Uploader: HTTP bridge ready; refreshing MCP configs.');
@@ -490,6 +509,48 @@ function scheduleMcpConfigRefreshAfterBridge(delayMs = 1500) {
     }, delayMs);
   } catch (error) {
     log(`Context Engine Uploader: failed to schedule MCP config refresh: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+async function removeContextEngineFromWindsurfConfig() {
+  try {
+    const settings = vscode.workspace.getConfiguration('contextEngineUploader');
+    const customPath = (settings.get('windsurfMcpPath') || '').trim();
+    const configPath = customPath || getDefaultWindsurfMcpPath();
+    if (!configPath) {
+      return;
+    }
+    if (!fs.existsSync(configPath)) {
+      // Nothing to remove yet.
+      return;
+    }
+    let config = { mcpServers: {} };
+    try {
+      const raw = fs.readFileSync(configPath, 'utf8');
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') {
+        config = parsed;
+      }
+    } catch (error) {
+      log(`Context Engine Uploader: failed to parse Windsurf mcp_config.json when removing context-engine: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    if (!config.mcpServers || typeof config.mcpServers !== 'object') {
+      return;
+    }
+    if (!config.mcpServers['context-engine']) {
+      return;
+    }
+    delete config.mcpServers['context-engine'];
+    try {
+      const json = JSON.stringify(config, null, 2) + '\n';
+      fs.writeFileSync(configPath, json, 'utf8');
+      log(`Context Engine Uploader: removed context-engine server from Windsurf MCP config at ${configPath} before HTTP bridge restart.`);
+    } catch (error) {
+      log(`Context Engine Uploader: failed to write Windsurf mcp_config.json when removing context-engine: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  } catch (error) {
+    log(`Context Engine Uploader: error while removing context-engine from Windsurf MCP config: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 function ensureTargetPathConfigured() {
