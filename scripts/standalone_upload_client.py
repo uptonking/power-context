@@ -1119,6 +1119,13 @@ class RemoteUploadClient:
                     error_msg += f": {response.text[:200]}"
                     error_code = "HTTP_ERROR"
 
+                # Special-case 401 to make auth issues obvious to users
+                if response.status_code == 401:
+                    if error_code in {None, "HTTP_ERROR"}:
+                        error_code = "UNAUTHORIZED"
+                    # Always append a clear hint for auth failures
+                    error_msg += " (unauthorized; please log in with `ctxce auth login` and retry)"
+
                 last_error = {"success": False, "error": {"code": error_code, "message": error_msg, "status_code": response.status_code}}
 
                 # Don't retry on client errors (except 429)
