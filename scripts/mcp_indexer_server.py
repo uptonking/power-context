@@ -1710,20 +1710,22 @@ async def set_session_defaults(
         pass
 
     defaults: Dict[str, Any] = {}
-    if isinstance(collection, str) and collection.strip():
-        defaults["collection"] = str(collection).strip()
-    if isinstance(mode, str) and mode.strip():
-        defaults["mode"] = str(mode).strip()
-    if isinstance(under, str) and under.strip():
-        defaults["under"] = str(under).strip()
-    if isinstance(language, str) and language.strip():
-        defaults["language"] = str(language).strip()
+    unset_keys: set[str] = set()
+    for _key, _val in (("collection", collection), ("mode", mode), ("under", under), ("language", language)):
+        if isinstance(_val, str):
+            _s = _val.strip()
+            if _s:
+                defaults[_key] = _s
+            else:
+                unset_keys.add(_key)
 
     # Per-connection storage (preferred)
     try:
-        if ctx is not None and getattr(ctx, "session", None) is not None and defaults:
+        if ctx is not None and getattr(ctx, "session", None) is not None and (defaults or unset_keys):
             with _SESSION_CTX_LOCK:
                 existing2 = SESSION_DEFAULTS_BY_SESSION.get(ctx.session) or {}
+                for _k in unset_keys:
+                    existing2.pop(_k, None)
                 existing2.update(defaults)
                 SESSION_DEFAULTS_BY_SESSION[ctx.session] = existing2
     except Exception:
@@ -1734,9 +1736,11 @@ async def set_session_defaults(
     if not sid:
         sid = uuid.uuid4().hex[:12]
     try:
-        if defaults:
+        if defaults or unset_keys:
             with _SESSION_LOCK:
                 existing = SESSION_DEFAULTS.get(sid) or {}
+                for _k in unset_keys:
+                    existing.pop(_k, None)
                 existing.update(defaults)
                 SESSION_DEFAULTS[sid] = existing
     except Exception:
