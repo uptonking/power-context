@@ -43,6 +43,14 @@
         "title": "Context Engine Uploader: Upload Git History (force sync bundle)"
       },
       {
+        "command": "contextEngineUploader.startMcpHttpBridge",
+        "title": "Context Engine Uploader: Start MCP HTTP Bridge"
+      },
+      {
+        "command": "contextEngineUploader.stopMcpHttpBridge",
+        "title": "Context Engine Uploader: Stop MCP HTTP Bridge"
+      },
+      {
         "command": "contextEngineUploader.writeMcpConfig",
         "title": "Context Engine Uploader: Write MCP Config (.mcp.json)"
       },
