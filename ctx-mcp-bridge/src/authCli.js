@@ -1,5 +1,5 @@
 import process from "node:process";
-import { loadAuthEntry, saveAuthEntry, deleteAuthEntry } from "./authConfig.js";
+import { loadAuthEntry, saveAuthEntry, deleteAuthEntry, loadAnyAuthEntry } from "./authConfig.js";
 
 function parseAuthArgs(args) {
   let backendUrl = process.env.CTXCE_AUTH_BACKEND_URL || "";
@@ -19,9 +19,16 @@ function parseAuthArgs(args) {
       i += 1;
       continue;
     }
-    if ((a === "--username" || a === "--user") && i + 1 < args.length) {
-      username = args[i + 1];
-      i += 1;
+    if (a === "--username" || a === "--user") {
+      const hasNext = i + 1 < args.length;
+      const next = hasNext ? String(args[i + 1]) : "";
+      if (hasNext && !next.startsWith("-")) {
+        username = args[i + 1];
+        i += 1;
+      } else {
+        console.error("[ctxce] Missing value for --username/--user; expected a username.");
+        process.exit(1);
+      }
       continue;
     }
     if ((a === "--password" || a === "--pass") && i + 1 < args.length) {
@@ -39,6 +46,11 @@ function parseAuthArgs(args) {
 
 function getBackendUrl(backendUrl) {
   return (backendUrl || process.env.CTXCE_AUTH_BACKEND_URL || "").trim();
+}
+
+function getDefaultUploadBackend() {
+  // Default to upload service when nothing else is configured
+  return (process.env.CTXCE_UPLOAD_ENDPOINT || process.env.UPLOAD_ENDPOINT || "http://localhost:8004").trim();
 }
 
 function requireBackendUrl(backendUrl) {
@@ -67,7 +79,26 @@ function outputJsonStatus(url, state, entry, rawExpires) {
 
 async function doLogin(args) {
   const { backendUrl, token, username, password } = parseAuthArgs(args);
-  const url = requireBackendUrl(backendUrl);
+  let url = getBackendUrl(backendUrl);
+  if (!url) {
+    // Fallback: use any stored auth entry when no backend is provided
+    const any = loadAnyAuthEntry();
+    if (any && any.backendUrl) {
+      url = any.backendUrl;
+      console.error("[ctxce] Using stored backend for login:", url);
+    }
+  }
+  if (!url) {
+    // Final fallback: default upload endpoint (extension's upload endpoint or localhost:8004)
+    url = getDefaultUploadBackend();
+    if (url) {
+      console.error("[ctxce] Using default upload backend for login:", url);
+    }
+  }
+  if (!url) {
+    console.error("[ctxce] Auth backend URL not configured. Set CTXCE_AUTH_BACKEND_URL or use --backend-url.");
+    process.exit(1);
+  }
   const trimmedUser = (username || "").trim();
   const usePassword = trimmedUser && (password || "").length > 0;
 
@@ -124,13 +155,30 @@ async function doLogin(args) {
 
 async function doStatus(args) {
   const { backendUrl, outputJson } = parseAuthArgs(args);
-  const url = getBackendUrl(backendUrl);
+  let url = getBackendUrl(backendUrl);
+  let usedFallback = false;
+  if (!url) {
+    // Fallback: use any stored auth entry when no backend is provided
+    const any = loadAnyAuthEntry();
+    if (any && any.backendUrl) {
+      url = any.backendUrl;
+      usedFallback = true;
+    }
+  }
+  if (!url) {
+    // Final fallback: default upload endpoint
+    url = getDefaultUploadBackend();
+    if (url) {
+      usedFallback = true;
+      console.error("[ctxce] Using default upload backend for status:", url);
+    }
+  }
   if (!url) {
     if (outputJson) {
       outputJsonStatus("", "missing_backend", null, null);
       process.exit(1);
     }
-    console.error("[ctxce] Auth backend URL not configured. Set CTXCE_AUTH_BACKEND_URL or use --backend-url.");
+    console.error("[ctxce] Auth backend URL not configured and no stored sessions found. Set CTXCE_AUTH_BACKEND_URL or use --backend-url.");
     process.exit(1);
   }
   let entry;
@@ -149,7 +197,11 @@ async function doStatus(args) {
       outputJsonStatus(url, "missing", null, rawExpires);
       process.exit(1);
     }
-    console.error("[ctxce] Not logged in for", url);
+    if (usedFallback) {
+      console.error("[ctxce] Not logged in for stored backend", url);
+    } else {
+      console.error("[ctxce] Not logged in for", url);
+    }
     process.exit(1);
   }
 
@@ -158,7 +210,11 @@ async function doStatus(args) {
       outputJsonStatus(url, "expired", entry, rawExpires);
       process.exit(2);
     }
-    console.error("[ctxce] Stored auth session appears expired for", url);
+    if (usedFallback) {
+      console.error("[ctxce] Stored auth session appears expired for stored backend", url);
+    } else {
+      console.error("[ctxce] Stored auth session appears expired for", url);
+    }
     if (rawExpires) {
       console.error("[ctxce] Session expired at", rawExpires);
     }
@@ -169,6 +225,9 @@ async function doStatus(args) {
     outputJsonStatus(url, "ok", entry, rawExpires);
     return;
   }
+  if (usedFallback) {
+    console.error("[ctxce] Using stored backend for status:", url);
+  }
   console.error("[ctxce] Logged in to", url, "as", entry.userId || "<unknown>");
   if (rawExpires) {
     console.error("[ctxce] Session expires at", rawExpires);
@@ -177,7 +236,26 @@ async function doStatus(args) {
 
 async function doLogout(args) {
   const { backendUrl } = parseAuthArgs(args);
-  const url = requireBackendUrl(backendUrl);
+  let url = getBackendUrl(backendUrl);
+  if (!url) {
+    // Fallback: use any stored auth entry when no backend is provided
+    const any = loadAnyAuthEntry();
+    if (any && any.backendUrl) {
+      url = any.backendUrl;
+      console.error("[ctxce] Using stored backend for logout:", url);
+    }
+  }
+  if (!url) {
+    // Final fallback: default upload endpoint
+    url = getDefaultUploadBackend();
+    if (url) {
+      console.error("[ctxce] Using default upload backend for logout:", url);
+    }
+  }
+  if (!url) {
+    console.error("[ctxce] Auth backend URL not configured and no stored sessions found. Set CTXCE_AUTH_BACKEND_URL or use --backend-url.");
+    process.exit(1);
+  }
   const entry = loadAuthEntry(url);
   if (!entry) {
     console.error("[ctxce] No stored auth session for", url);

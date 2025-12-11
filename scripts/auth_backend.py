@@ -42,6 +42,12 @@ AUTH_ENABLED = (
 _default_auth_db_path = os.path.join(WORK_DIR, ".codebase", "ctxce_auth.sqlite")
 AUTH_DB_URL = os.environ.get("CTXCE_AUTH_DB_URL") or f"sqlite:///{_default_auth_db_path}"
 AUTH_SHARED_TOKEN = os.environ.get("CTXCE_AUTH_SHARED_TOKEN")
+ALLOW_OPEN_TOKEN_LOGIN = (
+    str(os.environ.get("CTXCE_AUTH_ALLOW_OPEN_TOKEN_LOGIN", "0"))
+    .strip()
+    .lower()
+    in {"1", "true", "yes", "on"}
+)
 
 _SESSION_TTL_SECONDS_DEFAULT = 0
 try:
@@ -230,8 +236,17 @@ def create_session_for_token(
     if not AUTH_ENABLED:
         raise AuthDisabledError("Auth not enabled")
     if AUTH_SHARED_TOKEN:
+        # When a shared token is configured, require it for all token-based sessions.
         if not token or token != AUTH_SHARED_TOKEN:
             raise AuthInvalidToken("Invalid auth token")
+    else:
+        # Harden default behavior: when auth is enabled but no shared token is configured,
+        # disable token-based login unless explicitly allowed via env.
+        if not ALLOW_OPEN_TOKEN_LOGIN:
+            raise AuthInvalidToken(
+                "Token-based login disabled (no shared token configured; set CTXCE_AUTH_SHARED_TOKEN "
+                "or CTXCE_AUTH_ALLOW_OPEN_TOKEN_LOGIN=1 to enable)"
+            )
     user_id = client or "ctxce"
     meta: Dict[str, Any] = {}
     if workspace:

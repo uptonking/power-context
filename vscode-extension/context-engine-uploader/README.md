@@ -92,14 +92,21 @@ High-level steps:
   - Set `CTXCE_AUTH_ENABLED=1` in the upload/indexer environment.
   - Optionally set `CTXCE_AUTH_SHARED_TOKEN` for token-based login.
   - Optional: set `CTXCE_AUTH_ADMIN_TOKEN` for creating additional users via `/auth/users`.
+  - Optional (dev-only): set `CTXCE_AUTH_ALLOW_OPEN_TOKEN_LOGIN=1` **only** if you want `/auth/login`
+    to issue sessions even when `CTXCE_AUTH_SHARED_TOKEN` is unset. By default (`0`/unset),
+    token-based login is disabled when no shared token is configured.
 - Point the bridge at the auth backend:
-  - In your local shell (where you run the `ctxce` CLI via `npx`), set `CTXCE_AUTH_BACKEND_URL`
-    to the upload service URL (e.g. `http://localhost:8004`).
+  - In your local shell (where you run the `ctxce` CLI via `npx`), you can either:
+    - Explicitly set `CTXCE_AUTH_BACKEND_URL` to the upload service URL (e.g. `http://localhost:8004`), or
+    - Let the CLI discover the backend URL in this order when you run `ctxce auth login`:
+      `--backend-url` / `--auth-url` → `CTXCE_AUTH_BACKEND_URL` → any stored auth entry →
+      the uploader's `upload_endpoint` (`CTXCE_UPLOAD_ENDPOINT` / `UPLOAD_ENDPOINT`) →
+      `http://localhost:8004`.
 
 Token-based login:
 
 ```bash
-export CTXCE_AUTH_BACKEND_URL=http://localhost:8004
+export CTXCE_AUTH_BACKEND_URL=http://localhost:8004   # optional when using this extension
 export CTXCE_AUTH_TOKEN=change-me-dev-token   # must match CTXCE_AUTH_SHARED_TOKEN in the stack
 
 # Obtain a session and cache it under ~/.ctxce/auth.json
@@ -124,8 +131,6 @@ Username/password login (when you have real users):
 - Then login via the bridge:
 
 ```bash
-export CTXCE_AUTH_BACKEND_URL=http://localhost:8004
-
 npx @context-engine-bridge/context-engine-mcp-bridge ctxce auth login \
   --username you@example.com \
   --password 'your-password'

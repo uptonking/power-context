@@ -979,7 +979,17 @@ async function enhanceSelectionWithUnicorn() {
   }
   try {
     const cfg = vscode.workspace.getConfiguration('contextEngineUploader');
-    const idxUrlRaw = (cfg.get('ctxIndexerUrl') || cfg.get('mcpIndexerUrl') || '').trim();
+    const transportModeRaw = cfg.get('mcpTransportMode') || 'sse-remote';
+    const serverModeRaw = cfg.get('mcpServerMode') || 'bridge';
+    const transportMode = (typeof transportModeRaw === 'string' ? transportModeRaw.trim() : 'sse-remote') || 'sse-remote';
+    const serverMode = (typeof serverModeRaw === 'string' ? serverModeRaw.trim() : 'bridge') || 'bridge';
+    let idxUrlRaw = (cfg.get('ctxIndexerUrl') || cfg.get('mcpIndexerUrl') || '').trim();
+    if (serverMode === 'bridge' && transportMode === 'http') {
+      const bridgeUrl = resolveBridgeHttpUrl();
+      if (bridgeUrl) {
+        idxUrlRaw = bridgeUrl;
+      }
+    }
     if (idxUrlRaw) {
       env.MCP_INDEXER_URL = idxUrlRaw;
     }
@@ -1727,9 +1737,19 @@ async function scaffoldCtxConfigFiles(workspaceDir, collectionName) {
     // Ensure MCP_INDEXER_URL is present based on extension setting (for ctx.py)
     if (uploaderSettings) {
       try {
-        const ctxIndexerUrl = (uploaderSettings.get('ctxIndexerUrl') || 'http://localhost:8003/mcp').trim();
-        if (ctxIndexerUrl) {
-          upsertEnv('MCP_INDEXER_URL', ctxIndexerUrl, { treatEmptyAsUnset: true });
+        const transportModeRaw = uploaderSettings.get('mcpTransportMode') || 'sse-remote';
+        const serverModeRaw = uploaderSettings.get('mcpServerMode') || 'bridge';
+        const transportMode = (typeof transportModeRaw === 'string' ? transportModeRaw.trim() : 'sse-remote') || 'sse-remote';
+        const serverMode = (typeof serverModeRaw === 'string' ? serverModeRaw.trim() : 'bridge') || 'bridge';
+        let targetUrl = (uploaderSettings.get('ctxIndexerUrl') || 'http://localhost:8003/mcp').trim();
+        if (serverMode === 'bridge' && transportMode === 'http') {
+          const bridgeUrl = resolveBridgeHttpUrl();
+          if (bridgeUrl) {
+            targetUrl = bridgeUrl;
+          }
+        }
+        if (targetUrl) {
+          upsertEnv('MCP_INDEXER_URL', targetUrl, { treatEmptyAsUnset: true });
         }
       } catch (error) {
         log(`Failed to read ctxIndexerUrl setting for MCP_INDEXER_URL: ${error instanceof Error ? error.message : String(error)}`);
