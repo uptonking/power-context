@@ -564,9 +564,11 @@ def _mcp_handshake(base_url: str, timeout: float = 30.0) -> Dict[str, str]:
             sid = j.get("sessionId")
         except Exception:
             sid = None
-    if not sid:
-        raise RuntimeError("MCP handshake failed: no session id")
-    headers["Mcp-Session-Id"] = sid
+    # Tolerate servers (e.g., streamable-http bridge) that do not emit a session id header.
+    # In that case, proceed without attaching Mcp-Session-Id; downstream calls will still work
+    # for bridges that manage their own session lifecycle.
+    if sid:
+        headers["Mcp-Session-Id"] = sid
     # Send initialized notification (no id required)
     try:
         _post_raw_retry(base_url, {"jsonrpc": "2.0", "method": "notifications/initialized"}, headers, timeout=timeout)
