@@ -27,7 +27,7 @@ if str(ROOT_DIR) not in sys.path:
 
 try:
     from qdrant_client import QdrantClient
-    from qdrant_client.models import VectorParams, Distance
+    from qdrant_client.models import VectorParams, Distance, HnswConfigDiff
     from fastembed import TextEmbedding
 except ImportError as e:
     print(f"ERROR: Missing required dependency: {e}")
@@ -271,7 +271,7 @@ def restore_memories(
                 error_count += len(batch_points)
 
     # Final statistics
-    print(f"\n✅ Memory restore completed!")
+    print(f"\n Memory restore completed!")
     print(f"   Total memories in backup: {len(memories)}")
     print(f"   Successfully restored: {restored_count}")
     print(f"   Skipped (already exists): {skipped_count}")
@@ -395,13 +395,13 @@ Examples:
         )
 
         if result["success"]:
-            print(f"\n🎉 Memory restoration completed successfully!")
+            print(f"\n  Memory restoration completed successfully!")
         else:
-            print(f"\n❌ Memory restoration failed!")
+            print(f"\n  Memory restoration failed!")
             sys.exit(1)
 
     except Exception as e:
-        print(f"\n❌ Error during restoration: {e}")
+        print(f"\n  Error during restoration: {e}")
         sys.exit(1)
 
 
