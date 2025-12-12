@@ -14,7 +14,6 @@ except Exception:  # pragma: no cover
     ort = None
     Tokenizer = None
 
-COLLECTION = os.environ.get("COLLECTION_NAME", "codebase")
 MODEL_NAME = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
 API_KEY = os.environ.get("QDRANT_API_KEY")
@@ -175,11 +174,12 @@ def dense_results(
     query: str,
     flt,
     topk: int,
+    collection_name: str,
 ) -> List[Any]:
     vec = next(model.embed([query])).tolist()
     try:
         qp = client.query_points(
-            collection_name=COLLECTION,
+            collection_name=collection_name,
             query=vec,
             using=vec_name,
             query_filter=flt,
@@ -190,7 +190,7 @@ def dense_results(
         return getattr(qp, "points", qp)
     except Exception:
         res = client.search(
-            collection_name=COLLECTION,
+            collection_name=collection_name,
             query_vector={"name": vec_name, "vector": vec},
             limit=topk,
             with_payload=True,
@@ -275,11 +275,17 @@ def rerank_in_process(
     language: str | None = None,
     under: str | None = None,
     model: TextEmbedding | None = None,
+    collection: str | None = None,
 ) -> List[Dict[str, Any]]:
+    eff_collection = (
+        str(collection).strip()
+        if isinstance(collection, str) and collection.strip()
+        else (os.environ.get("COLLECTION_NAME") or "codebase")
+    )
     client = QdrantClient(url=QDRANT_URL, api_key=API_KEY or None)
     _model = model or TextEmbedding(model_name=MODEL_NAME)
     dim = len(next(_model.embed(["dimension probe"])))
-    vec_name = _select_dense_vector_name(client, COLLECTION, _model, dim)
+    vec_name = _select_dense_vector_name(client, eff_collection, _model, dim)
 
     must = []
     if language:
@@ -297,9 +303,9 @@ def rerank_in_process(
         )
     flt = models.Filter(must=must) if must else None
 
-    pts = dense_results(client, _model, vec_name, query, flt, topk)
+    pts = dense_results(client, _model, vec_name, query, flt, topk, eff_collection)
     if not pts and flt is not None:
-        pts = dense_results(client, _model, vec_name, query, None, topk)
+        pts = dense_results(client, _model, vec_name, query, None, topk, eff_collection)
     if not pts:
         return []
 
@@ -330,13 +336,19 @@ def main():
     ap.add_argument("--limit", type=int, default=12)
     ap.add_argument("--language", type=str, default=None)
     ap.add_argument("--under", type=str, default=None)
+    ap.add_argument("--collection", type=str, default=None)
     args = ap.parse_args()
 
     client = QdrantClient(url=QDRANT_URL, api_key=API_KEY or None)
     model = TextEmbedding(model_name=MODEL_NAME)
     dim = len(next(model.embed(["dimension probe"])))
 
-    vec_name = _select_dense_vector_name(client, COLLECTION, model, dim)
+    eff_collection = (
+        str(args.collection).strip()
+        if isinstance(args.collection, str) and args.collection.strip()
+        else (os.environ.get("COLLECTION_NAME") or "codebase")
+    )
+    vec_name = _select_dense_vector_name(client, eff_collection, model, dim)
 
     must = []
     if args.language:
@@ -354,10 +366,10 @@ def main():
         )
     flt = models.Filter(must=must) if must else None
 
-    pts = dense_results(client, model, vec_name, args.query, flt, args.topk)
+    pts = dense_results(client, model, vec_name, args.query, flt, args.topk, eff_collection)
     # Fallback: if filtered search yields nothing, retry without filters to avoid empty rerank
     if not pts and flt is not None:
-        pts = dense_results(client, model, vec_name, args.query, None, args.topk)
+        pts = dense_results(client, model, vec_name, args.query, None, args.topk, eff_collection)
     if not pts:
         return
     pairs = prepare_pairs(args.query, pts)

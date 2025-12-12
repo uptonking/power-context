@@ -2515,6 +2515,7 @@ async def repo_search(
                         language=language or None,
                         under=under or None,
                         model=model,
+                        collection=collection,
                     )
                     if items:
                         results = items
@@ -2535,6 +2536,8 @@ async def repo_search(
                         "--limit",
                         str(int(rerank_return_m)),
                     ]
+                    if collection:
+                        rcmd += ["--collection", str(collection)]
                     if language:
                         rcmd += ["--language", language]
                     if under:
