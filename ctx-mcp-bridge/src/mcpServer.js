@@ -1,3 +1,17 @@
+import process from "node:process";
+import fs from "node:fs";
+import path from "node:path";
+import { execSync } from "node:child_process";
+import { createServer } from "node:http";
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { loadAnyAuthEntry, loadAuthEntry } from "./authConfig.js";
+import { maybeRemapToolResult } from "./resultPathMapping.js";
+
 function debugLog(message) {
   try {
     const text = typeof message === "string" ? message : String(message);
@@ -235,19 +249,6 @@ function isTransientToolError(error) {
 // MCP stdio server implemented using the official MCP TypeScript SDK.
 // Acts as a low-level proxy for tools, forwarding tools/list and tools/call
 // to the remote qdrant-indexer MCP server while adding a local `ping` tool.
-
-import process from "node:process";
-import fs from "node:fs";
-import path from "node:path";
-import { execSync } from "node:child_process";
-import { createServer } from "node:http";
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { loadAnyAuthEntry, loadAuthEntry } from "./authConfig.js";
 
 async function createBridgeServer(options) {
   const workspace = options.workspace || process.cwd();
@@ -541,7 +542,7 @@ async function createBridgeServer(options) {
           undefined,
           { timeout: timeoutMs },
         );
-        return result;
+        return maybeRemapToolResult(name, result, workspace);
       } catch (err) {
         lastError = err;
 
