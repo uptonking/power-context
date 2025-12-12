@@ -32,27 +32,8 @@ LEX_VECTOR_DIM = int(os.environ.get("LEX_VECTOR_DIM", "4096") or 4096)
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
 
 # Minimal embedding via fastembed (CPU)
-from fastembed import TextEmbedding
 
 # Single-process embedding model cache (avoid re-initializing fastembed on each call)
-_EMBED_MODEL = None
-_EMBED_LOCK = threading.Lock()
-
-def _get_embedding_model():
-    global _EMBED_MODEL
-    m = _EMBED_MODEL
-    if m is None:
-        with _EMBED_LOCK:
-            m = _EMBED_MODEL
-            if m is None:
-                m = TextEmbedding(model_name=EMBEDDING_MODEL)
-                # Best-effort warmup to load weights once
-                try:
-                    _ = list(m.embed(["memory", "search"]))
-                except Exception:
-                    pass
-                _EMBED_MODEL = m
-    return m
 
 # Ensure repo roots are importable so 'scripts' resolves inside container
 import sys as _sys
@@ -101,6 +82,10 @@ def _get_embedding_model():
             m = _EMBED_MODEL_CACHE.get(EMBEDDING_MODEL)
             if m is None:
                 m = TextEmbedding(model_name=EMBEDDING_MODEL)
+                try:
+                    _ = next(m.embed(["warmup"]))
+                except Exception:
+                    pass
                 _EMBED_MODEL_CACHE[EMBEDDING_MODEL] = m
     return m
 
@@ -157,25 +142,7 @@ SESSION_DEFAULTS: Dict[str, Dict[str, Any]] = {}
 _SESSION_CTX_LOCK = threading.Lock()
 SESSION_DEFAULTS_BY_SESSION: "WeakKeyDictionary[Any, Dict[str, Any]]" = WeakKeyDictionary()
 
-try:
-    from scripts.auth_backend import AUTH_ENABLED as AUTH_ENABLED_AUTH, validate_session as _auth_validate_session
-except Exception:
-    AUTH_ENABLED_AUTH = False
 
-    def _auth_validate_session(session_id: str):  # type: ignore[no-redef]
-        return None
-
-
-def _require_auth_session(session: Optional[str]) -> Optional[Dict[str, Any]]:
-    if not AUTH_ENABLED_AUTH:
-        return None
-    sid = (session or "").strip()
-    if not sid:
-        raise Exception("Missing session for authorized operation")
-    info = _auth_validate_session(sid)
-    if not info:
-        raise Exception("Invalid or expired session")
-    return info
 
 
 def _start_readyz_server():
@@ -243,6 +210,9 @@ def _ensure_collection(name: str):
     # Choose dense dimension based on config: probe (default) vs env-configured
     if MEMORY_PROBE_EMBED_DIM:
         try:
+            # Probe dimension without populating the shared model cache.
+            # This preserves the "cache loads on first tool call" behavior and
+            # keeps MEMORY_COLD_SKIP_DENSE semantics unchanged.
             from fastembed import TextEmbedding
             _model_probe = TextEmbedding(model_name=EMBEDDING_MODEL)
             _dense_vec = next(_model_probe.embed(["probe"]))
