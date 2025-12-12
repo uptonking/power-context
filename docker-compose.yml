@@ -129,7 +129,7 @@ services:
       - ${HOST_INDEX_PATH:-.}:/work
 
   llamacpp:
-    image: ghcr.io/ggerganov/llama.cpp:server
+    image: ghcr.io/ggml-org/llama.cpp:server
     container_name: llama-decoder
     # Optional sidecar providing a text-generation API on :8080
     # No behavior change unless REFRAG_DECODER=1
