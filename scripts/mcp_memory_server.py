@@ -281,7 +281,11 @@ def _ensure_collection(name: str):
     except Exception:
         pass
 
-    client.create_collection(collection_name=name, vectors_config=vectors_cfg)
+    client.create_collection(
+        collection_name=name,
+        vectors_config=vectors_cfg,
+        hnsw_config=models.HnswConfigDiff(m=16, ef_construct=256),
+    )
     vector_names = list(vectors_cfg.keys())
     print(f"[MEMORY_SERVER] Created collection '{name}' with vectors: {vector_names}")
     return True

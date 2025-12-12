@@ -84,9 +84,10 @@ def ensure_collection_exists(
                     size=vector_dimension,
                     distance=Distance.COSINE
                 )
-            }
+            },
+            hnsw_config=HnswConfigDiff(m=16, ef_construct=256),
         )
-        print(f"✅ Created collection '{collection_name}' with {vector_dimension}-dim vectors")
+        print(f"Created collection '{collection_name}' with {vector_dimension}-dim vectors")
     except Exception as e:
         raise RuntimeError(f"Failed to create collection '{collection_name}': {e}")
 
