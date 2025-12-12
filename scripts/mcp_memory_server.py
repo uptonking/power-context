@@ -4,6 +4,17 @@ import json
 import threading
 from weakref import WeakKeyDictionary
 
+# Ensure repo roots are importable so 'scripts' resolves inside container
+import sys as _sys
+_roots_env = os.environ.get("WORK_ROOTS", "")
+_roots = [p.strip() for p in _roots_env.split(",") if p.strip()] or ["/work", "/app"]
+try:
+    for _root in _roots:
+        if _root and _root not in _sys.path:
+            _sys.path.insert(0, _root)
+except Exception:
+    pass
+
 
 # FastMCP server and request Context (ctx) for per-connection state
 try:
@@ -34,20 +45,6 @@ EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
 # Minimal embedding via fastembed (CPU)
 
 # Single-process embedding model cache (avoid re-initializing fastembed on each call)
-
-# Ensure repo roots are importable so 'scripts' resolves inside container
-import sys as _sys
-_roots_env = os.environ.get("WORK_ROOTS", "")
-_roots = [p.strip() for p in _roots_env.split(",") if p.strip()] or ["/work", "/app"]
-try:
-    for _root in _roots:
-        if _root and _root not in _sys.path:
-            _sys.path.insert(0, _root)
-except Exception:
-    pass
-
-# Map model to named vector used in indexer
-
 
 # Use shared utils for consistent vector naming and lexical hashing
 from scripts.utils import sanitize_vector_name as _sanitize_vector_name
