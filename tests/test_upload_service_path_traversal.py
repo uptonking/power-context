@@ -19,7 +19,7 @@ def _write_bundle(tmp_path: Path, operations: list[dict]) -> Path:
 
 
 def test_process_delta_bundle_rejects_traversal_created(tmp_path, monkeypatch):
-    import scripts.upload_service as us
+    import scripts.upload_delta_bundle as us
 
     work_dir = tmp_path / "work"
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -39,7 +39,7 @@ def test_process_delta_bundle_rejects_traversal_created(tmp_path, monkeypatch):
 
 
 def test_process_delta_bundle_rejects_absolute_paths(tmp_path, monkeypatch):
-    import scripts.upload_service as us
+    import scripts.upload_delta_bundle as us
 
     work_dir = tmp_path / "work"
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -59,7 +59,7 @@ def test_process_delta_bundle_rejects_absolute_paths(tmp_path, monkeypatch):
 
 
 def test_process_delta_bundle_rejects_traversal_moved_source(tmp_path, monkeypatch):
-    import scripts.upload_service as us
+    import scripts.upload_delta_bundle as us
 
     work_dir = tmp_path / "work"
     work_dir.mkdir(parents=True, exist_ok=True)
