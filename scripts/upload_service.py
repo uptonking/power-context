@@ -30,9 +30,22 @@ from scripts.auth_backend import (
     create_session_for_token,
     create_user,
     has_any_users,
+    has_collection_access,
     validate_session,
     AUTH_ENABLED,
     AUTH_SESSION_TTL_SECONDS,
+    is_admin_user,
+    list_users,
+    list_collections,
+    list_collection_acl,
+    grant_collection_access,
+    revoke_collection_access,
+)
+from scripts.admin_ui import (
+    render_admin_acl,
+    render_admin_bootstrap,
+    render_admin_error,
+    render_admin_login,
 )
 
 # Import existing workspace state and indexing functions
@@ -930,6 +943,8 @@ async def upload_delta_bundle(
     start_time = datetime.now()
     client_host = request.client.host if hasattr(request, 'client') and request.client else 'unknown'
 
+    record: Optional[Dict[str, Any]] = None
+
     try:
         logger.info(f"[upload_service] Begin processing upload for workspace={workspace_path} from {client_host}")
 
@@ -1012,6 +1027,28 @@ async def upload_delta_bundle(
                 collection_name = get_collection_name(repo_name)
             else:
                 collection_name = DEFAULT_COLLECTION
+
+        # Enforce collection write access for uploads when auth is enabled.
+        # Semantics: "write" is sufficient for uploading/indexing content.
+        if AUTH_ENABLED and CTXCE_MCP_ACL_ENFORCE:
+            uid = str((record or {}).get("user_id") or "").strip()
+            if not uid:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid or expired session",
+                )
+            try:
+                allowed = has_collection_access(uid, str(collection_name), "write")
+            except AuthDisabledError:
+                allowed = True
+            except Exception as e:
+                logger.error(f"[upload_service] Failed to check collection access for upload: {e}")
+                raise HTTPException(status_code=500, detail="Failed to check collection access")
+            if not allowed:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=f"Forbidden: write access to collection '{collection_name}' denied",
+                )
 
         # Persist origin metadata for remote lookups (including client source_path)
         # Use slugged repo name (repo+16) for state so it matches ingest/watch_index usage

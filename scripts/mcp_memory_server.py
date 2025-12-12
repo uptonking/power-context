@@ -353,8 +353,9 @@ def store(
 
     First call may be slower because the embedding model loads lazily.
     """
-    _require_auth_session(session)
+    sess = _require_auth_session(session)
     coll = _resolve_collection(collection, session=session, ctx=ctx, extra_kwargs=kwargs)
+    _require_collection_access((sess or {}).get("user_id"), coll, "write")
     _ensure_once(coll)
     model = _get_embedding_model()
     dense = next(model.embed([str(information)])).tolist()
@@ -388,9 +389,9 @@ def find(
     Cold-start option: set MEMORY_COLD_SKIP_DENSE=1 to skip dense embedding until the
     model is cached (useful on slow storage).
     """
-    # _require_auth_session(session) # TODO:
-    
+    sess = _require_auth_session(session)
     coll = _resolve_collection(collection, session=session, ctx=ctx, extra_kwargs=kwargs)
+    _require_collection_access((sess or {}).get("user_id") if sess else None, coll, "read")
     _ensure_once(coll)
 
     use_dense = True
