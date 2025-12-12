@@ -1831,8 +1831,7 @@ async def repo_search(
     - path_glob=["scripts/**","**/*.py"], language="python"
     - symbol="context_answer", under="scripts"
     """
-    # Enforce auth when enabled (no-op when CTXCE_AUTH_ENABLED is false)
-    _require_auth_session(session)
+    sess = _require_auth_session(session)
 
     # Handle queries alias (explicit parameter)
     if queries is not None and (query is None or (isinstance(query, str) and str(query).strip() == "")):
