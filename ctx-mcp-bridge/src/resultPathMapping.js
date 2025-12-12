@@ -55,6 +55,49 @@ function computeWorkspaceRelativePath(containerPath, hostPath) {
   }
 }
 
+function remapRelatedPathToClient(p, workspaceRoot) {
+  try {
+    const s = typeof p === "string" ? p : "";
+    const root = typeof workspaceRoot === "string" ? workspaceRoot : "";
+    if (!s || !root) {
+      return p;
+    }
+
+    const sNorm = s.replace(/\\/g, path.sep);
+    if (sNorm.startsWith(root + path.sep) || sNorm === root) {
+      return sNorm;
+    }
+
+    if (s.startsWith("/work/")) {
+      const rest = s.slice("/work/".length);
+      const parts = rest.split("/").filter(Boolean);
+      if (parts.length >= 2) {
+        const rel = parts.slice(1).join("/");
+        const relNative = _posixToNative(rel);
+        return path.join(root, relNative);
+      }
+      return p;
+    }
+
+    // If it's already a relative path, join it to the workspace root.
+    if (!s.startsWith("/") && !s.includes(":") && !s.includes("\\")) {
+      const relPosix = s.trim();
+      if (relPosix && relPosix !== "." && !relPosix.startsWith("../") && relPosix !== "..") {
+        const relNative = _posixToNative(relPosix);
+        const joined = path.join(root, relNative);
+        const relCheck = path.relative(root, joined);
+        if (relCheck && !relCheck.startsWith(`..${path.sep}`) && relCheck !== "..") {
+          return joined;
+        }
+      }
+    }
+
+    return p;
+  } catch {
+    return p;
+  }
+}
+
 function remapHitPaths(hit, workspaceRoot) {
   if (!hit || typeof hit !== "object") {
     return hit;
@@ -65,6 +108,14 @@ function remapHitPaths(hit, workspaceRoot) {
   const out = { ...hit };
   if (relPath) {
     out.rel_path = relPath;
+  }
+  // Remap related_paths nested under each hit (repo_search/hybrid_search emit this per result).
+  try {
+    if (Array.isArray(out.related_paths)) {
+      out.related_paths = out.related_paths.map((p) => remapRelatedPathToClient(p, workspaceRoot));
+    }
+  } catch {
+    // ignore
   }
   if (workspaceRoot && relPath) {
     try {
@@ -113,11 +164,31 @@ function remapHitPaths(hit, workspaceRoot) {
   return out;
 }
 
-function remapStringPath(p) {
+function remapStringPath(p, workspaceRoot) {
   try {
     const s = typeof p === "string" ? p : "";
     if (!s) {
       return p;
+    }
+    // If this is already a path within the current client workspace, rewrite to a
+    // workspace-relative string when override is enabled.
+    try {
+      const root = typeof workspaceRoot === "string" ? workspaceRoot : "";
+      if (root) {
+        const sNorm = s.replace(/\\/g, path.sep);
+        if (sNorm.startsWith(root + path.sep) || sNorm === root) {
+          const relNative = path.relative(root, sNorm);
+          const relPosix = String(relNative).split(path.sep).join("/");
+          if (relPosix && !relPosix.startsWith("../") && relPosix !== "..") {
+            const override = envTruthy(process.env.CTXCE_BRIDGE_OVERRIDE_PATH, true);
+            if (override) {
+              return relPosix;
+            }
+          }
+        }
+      }
+    } catch {
+      // ignore
     }
     if (s.startsWith("/work/")) {
       const rest = s.slice("/work/".length);
@@ -191,18 +262,7 @@ function applyPathMappingToPayload(payload, workspaceRoot) {
     out.citations = mapHitsArray(out.citations);
   }
   if (Array.isArray(out.related_paths)) {
-    out.related_paths = out.related_paths.map((p) => remapStringPath(p));
-  }
-
-  // context_search: {results:[{source:"code"|"memory", ...}]}
-  if (Array.isArray(out.results)) {
-    out.results = out.results.map((r) => {
-      if (!r || typeof r !== "object") {
-        return r;
-      }
-      // Only code results have path-like fields
-      return remapHitPaths(r, workspaceRoot);
-    });
+    out.related_paths = out.related_paths.map((p) => remapRelatedPathToClient(p, workspaceRoot));
   }
 
   // Some tools nest under {result:{...}}
