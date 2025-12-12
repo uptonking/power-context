@@ -16,16 +16,29 @@ try:
         validate_session as _auth_validate_session,
         has_collection_access as _has_collection_access,
     )
-except Exception:
-    AUTH_ENABLED_AUTH = False
-    ACL_ALLOW_ALL_AUTH = True
+except Exception as _auth_backend_import_exc:
+    _AUTH_BACKEND_IMPORT_ERROR = repr(_auth_backend_import_exc)
+    AUTH_ENABLED_AUTH = (
+        str(os.environ.get("CTXCE_AUTH_ENABLED", "0")).strip().lower() in {"1", "true", "yes", "on"}
+    )
+    ACL_ALLOW_ALL_AUTH = (
+        str(os.environ.get("CTXCE_ACL_ALLOW_ALL", "0")).strip().lower() in {"1", "true", "yes", "on"}
+    )
 
     def _auth_validate_session(session_id: str):  # type: ignore[no-redef]
+        if AUTH_ENABLED_AUTH:
+            raise ValidationError(
+                f"Auth backend unavailable (import failed): {_AUTH_BACKEND_IMPORT_ERROR}"
+            )
         return None
 
     def _has_collection_access(
         user_id: str, qdrant_collection: str, permission: str = "read"
     ) -> bool:  # type: ignore[no-redef]
+        if AUTH_ENABLED_AUTH:
+            raise ValidationError(
+                f"Auth backend unavailable (import failed): {_AUTH_BACKEND_IMPORT_ERROR}"
+            )
         return True
 
 

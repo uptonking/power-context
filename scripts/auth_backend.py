@@ -258,7 +258,7 @@ def create_session(
 ) -> Dict[str, Any]:
     if not AUTH_ENABLED:
         raise AuthDisabledError("Auth not enabled")
-    _ensure_auth_db()
+    _ensure_db()
     path = _get_auth_db_path()
     now_ts = int(datetime.now().timestamp())
     ttl_val = int(ttl_seconds or 0)
