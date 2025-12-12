@@ -958,7 +958,7 @@ def _detect_current_repo() -> str | None:
 
 @mcp.tool()
 async def qdrant_index_root(
-    recreate: Optional[bool] = None, collection: Optional[str] = None
+    recreate: Optional[bool] = None, collection: Optional[str] = None, session: Optional[str] = None
 ) -> Dict[str, Any]:
     """Initialize or refresh the vector index for the workspace root (/work).
 
@@ -976,6 +976,8 @@ async def qdrant_index_root(
     - Omit fields instead of sending null values.
     - Safe to call repeatedly; unchanged files are skipped by the indexer.
     """
+    sess = _require_auth_session(session)
+
     # Leniency: if clients embed JSON in 'collection' (and include 'recreate'), parse it
     try:
         if _looks_jsonish_string(collection):
@@ -1573,6 +1575,7 @@ async def qdrant_index(
     subdir: Optional[str] = None,
     recreate: Optional[bool] = None,
     collection: Optional[str] = None,
+    session: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Index the workspace (/work) or a specific subdirectory.
 
@@ -1589,6 +1592,8 @@ async def qdrant_index(
     - Paths are sandboxed to /work; attempts to escape will be rejected.
     - Omit fields rather than sending null values.
     """
+    sess = _require_auth_session(session)
+
     # Leniency: parse JSON-ish payloads mistakenly sent in 'collection' or 'subdir'
     try:
         if _looks_jsonish_string(collection):
