@@ -19,7 +19,7 @@ from datetime import datetime
 
 import uvicorn
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Request, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from scripts.auth_backend import (
@@ -160,6 +160,75 @@ class PasswordLoginRequest(BaseModel):
     username: str
     password: str
     workspace: Optional[str] = None
+
+
+ADMIN_SESSION_COOKIE_NAME = "ctxce_session"
+
+
+def _get_session_candidate_from_request(request: Request) -> Dict[str, Any]:
+    sid = (request.cookies.get(ADMIN_SESSION_COOKIE_NAME) or "").strip()
+    if sid:
+        return {"session_id": sid, "source": "cookie"}
+    try:
+        qp = request.query_params
+        sid = (qp.get("session") or qp.get("session_id") or qp.get("sessionId") or "").strip()
+    except Exception:
+        sid = ""
+    if sid:
+        return {"session_id": sid, "source": "query"}
+    sid = (
+        (request.headers.get("X-Session-Id") or "").strip()
+        or (request.headers.get("X-Auth-Session") or "").strip()
+    )
+    if sid:
+        return {"session_id": sid, "source": "header"}
+    return {"session_id": "", "source": ""}
+
+
+def _set_admin_session_cookie(resp: Any, session_id: str) -> Any:
+    sid = (session_id or "").strip()
+    if not sid:
+        return resp
+    try:
+        kwargs: Dict[str, Any] = {
+            "key": ADMIN_SESSION_COOKIE_NAME,
+            "value": sid,
+            "httponly": True,
+            "samesite": "lax",
+            "path": "/",
+        }
+        ttl = int(AUTH_SESSION_TTL_SECONDS or 0)
+        if ttl > 0:
+            kwargs["max_age"] = ttl
+        resp.set_cookie(**kwargs)
+    except Exception:
+        pass
+    return resp
+
+
+def _get_valid_session_record(request: Request) -> Optional[Dict[str, Any]]:
+    sid = (_get_session_candidate_from_request(request).get("session_id") or "").strip()
+    if not sid:
+        return None
+    try:
+        return validate_session(sid)
+    except AuthDisabledError:
+        return None
+    except Exception as e:
+        logger.error(f"[upload_service] Failed to validate session cookie: {e}")
+        raise HTTPException(status_code=500, detail="Failed to validate auth session")
+
+
+def _require_admin_session(request: Request) -> Dict[str, Any]:
+    if not AUTH_ENABLED:
+        raise HTTPException(status_code=404, detail="Auth disabled")
+    record = _get_valid_session_record(request)
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+    user_id = str(record.get("user_id") or "").strip()
+    if not user_id or not is_admin_user(user_id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin required")
+    return record
 
 def get_workspace_key(workspace_path: str) -> str:
     """Generate 16-char hash for collision avoidance in remote uploads.
@@ -522,6 +591,209 @@ async def auth_login(payload: AuthLoginRequest):
         user_id=session.get("user_id"),
         expires_at=session.get("expires_at"),
     )
+
+
+@app.get("/admin")
+async def admin_root(request: Request):
+    if not AUTH_ENABLED:
+        raise HTTPException(status_code=404, detail="Auth disabled")
+    try:
+        users_exist = has_any_users()
+    except AuthDisabledError:
+        raise HTTPException(status_code=404, detail="Auth disabled")
+    except Exception as e:
+        logger.error(f"[upload_service] Failed to inspect user state for admin UI: {e}")
+        raise HTTPException(status_code=500, detail="Failed to inspect user state")
+
+    if not users_exist:
+        return RedirectResponse(url="/admin/bootstrap", status_code=302)
+
+    candidate = _get_session_candidate_from_request(request)
+    record = _get_valid_session_record(request)
+    if record is None:
+        return RedirectResponse(url="/admin/login", status_code=302)
+
+    user_id = str(record.get("user_id") or "").strip()
+    if user_id and is_admin_user(user_id):
+        resp = RedirectResponse(url="/admin/acl", status_code=302)
+        if candidate.get("source") and candidate.get("source") != "cookie":
+            _set_admin_session_cookie(resp, str(candidate.get("session_id") or ""))
+        return resp
+    return RedirectResponse(url="/admin/login", status_code=302)
+
+
+@app.get("/admin/bootstrap")
+async def admin_bootstrap_form(request: Request):
+    if not AUTH_ENABLED:
+        raise HTTPException(status_code=404, detail="Auth disabled")
+    try:
+        users_exist = has_any_users()
+    except AuthDisabledError:
+        raise HTTPException(status_code=404, detail="Auth disabled")
+    except Exception as e:
+        logger.error(f"[upload_service] Failed to inspect user state for bootstrap: {e}")
+        raise HTTPException(status_code=500, detail="Failed to inspect user state")
+    if users_exist:
+        return RedirectResponse(url="/admin/login", status_code=302)
+    return render_admin_bootstrap(request)
+
+
+@app.post("/admin/bootstrap")
+async def admin_bootstrap_submit(
+    request: Request,
+    username: str = Form(...),
+    password: str = Form(...),
+):
+    if not AUTH_ENABLED:
+        raise HTTPException(status_code=404, detail="Auth disabled")
+    try:
+        users_exist = has_any_users()
+    except AuthDisabledError:
+        raise HTTPException(status_code=404, detail="Auth disabled")
+    except Exception as e:
+        logger.error(f"[upload_service] Failed to inspect user state for bootstrap submit: {e}")
+        raise HTTPException(status_code=500, detail="Failed to inspect user state")
+    if users_exist:
+        return RedirectResponse(url="/admin/login", status_code=302)
+
+    try:
+        user = create_user(username, password)
+    except Exception as e:
+        return render_admin_error(
+            request=request,
+            title="Bootstrap Failed",
+            message=str(e),
+            back_href="/admin/bootstrap",
+            status_code=400,
+        )
+
+    try:
+        session = create_session(user_id=user.get("user_id"), metadata={"client": "admin_ui"})
+    except Exception as e:
+        logger.error(f"[upload_service] Failed to create session after bootstrap: {e}")
+        raise HTTPException(status_code=500, detail="Failed to create auth session")
+
+    resp = RedirectResponse(url="/admin/acl", status_code=302)
+    _set_admin_session_cookie(resp, str(session.get("session_id") or ""))
+    return resp
+
+
+@app.get("/admin/login")
+async def admin_login_form(request: Request):
+    if not AUTH_ENABLED:
+        raise HTTPException(status_code=404, detail="Auth disabled")
+    return render_admin_login(request)
+
+
+@app.post("/admin/login")
+async def admin_login_submit(
+    request: Request,
+    username: str = Form(...),
+    password: str = Form(...),
+):
+    if not AUTH_ENABLED:
+        raise HTTPException(status_code=404, detail="Auth disabled")
+    try:
+        user = authenticate_user(username, password)
+    except AuthDisabledError:
+        raise HTTPException(status_code=404, detail="Auth disabled")
+    except Exception as e:
+        logger.error(f"[upload_service] Error authenticating user for admin UI: {e}")
+        raise HTTPException(status_code=500, detail="Authentication error")
+
+    if not user:
+        return render_admin_login(
+            request=request,
+            error="Invalid credentials",
+            status_code=401,
+        )
+
+    try:
+        session = create_session(user_id=user.get("id"), metadata={"client": "admin_ui"})
+    except Exception as e:
+        logger.error(f"[upload_service] Failed to create session for admin UI: {e}")
+        raise HTTPException(status_code=500, detail="Failed to create auth session")
+
+    resp = RedirectResponse(url="/admin/acl", status_code=302)
+    _set_admin_session_cookie(resp, str(session.get("session_id") or ""))
+    return resp
+
+
+@app.post("/admin/logout")
+async def admin_logout():
+    resp = RedirectResponse(url="/admin/login", status_code=302)
+    resp.delete_cookie(key=ADMIN_SESSION_COOKIE_NAME, path="/")
+    return resp
+
+
+@app.get("/admin/acl")
+async def admin_acl_page(request: Request):
+    _require_admin_session(request)
+    try:
+        users = list_users()
+        collections = list_collections(include_deleted=False)
+        grants = list_collection_acl()
+    except AuthDisabledError:
+        raise HTTPException(status_code=404, detail="Auth disabled")
+    except Exception as e:
+        logger.error(f"[upload_service] Failed to load admin UI data: {e}")
+        raise HTTPException(status_code=500, detail="Failed to load admin data")
+
+    resp = render_admin_acl(request, users=users, collections=collections, grants=grants)
+    candidate = _get_session_candidate_from_request(request)
+    if candidate.get("source") and candidate.get("source") != "cookie":
+        _set_admin_session_cookie(resp, str(candidate.get("session_id") or ""))
+    return resp
+
+
+@app.post("/admin/acl/grant")
+async def admin_acl_grant(
+    request: Request,
+    user_id: str = Form(...),
+    collection: str = Form(...),
+    permission: str = Form("read"),
+):
+    _require_admin_session(request)
+    try:
+        grant_collection_access(user_id=user_id, qdrant_collection=collection, permission=permission)
+    except AuthDisabledError:
+        raise HTTPException(status_code=404, detail="Auth disabled")
+    except Exception as e:
+        return render_admin_error(request, title="Grant Failed", message=str(e), back_href="/admin/acl")
+    return RedirectResponse(url="/admin/acl", status_code=302)
+
+
+@app.post("/admin/users")
+async def admin_create_user(
+    request: Request,
+    username: str = Form(...),
+    password: str = Form(...),
+    role: str = Form("user"),
+):
+    _require_admin_session(request)
+    try:
+        create_user(username, password, role=role)
+    except AuthDisabledError:
+        raise HTTPException(status_code=404, detail="Auth disabled")
+    except Exception as e:
+        return render_admin_error(request, title="Create User Failed", message=str(e), back_href="/admin/acl")
+    return RedirectResponse(url="/admin/acl", status_code=302)
+
+
+@app.post("/admin/acl/revoke")
+async def admin_acl_revoke(
+    request: Request,
+    user_id: str = Form(...),
+    collection: str = Form(...),
+):
+    _require_admin_session(request)
+    try:
+        revoke_collection_access(user_id=user_id, qdrant_collection=collection)
+    except AuthDisabledError:
+        raise HTTPException(status_code=404, detail="Auth disabled")
+    except Exception as e:
+        return render_admin_error(request, title="Revoke Failed", message=str(e), back_href="/admin/acl")
+    return RedirectResponse(url="/admin/acl", status_code=302)
 
 
 @app.post("/auth/users", response_model=AuthUserCreateResponse)

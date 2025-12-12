@@ -29,7 +29,7 @@ import sqlite3
 import uuid
 from contextlib import contextmanager
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 
 # Configuration
 WORK_DIR = os.environ.get("WORK_DIR", "/work")
@@ -92,7 +92,7 @@ def _db_connection():
         conn.close()
 
 
-def _ensure_auth_db() -> None:
+def _ensure_db() -> None:
     path = _get_auth_db_path()
     if not path:
         return
@@ -149,11 +149,14 @@ def _verify_password(password: str, encoded: str) -> bool:
 
 
 def create_user(
-    username: str, password: str, metadata: Optional[Dict[str, Any]] = None
+    username: str,
+    password: str,
+    metadata: Optional[Dict[str, Any]] = None,
+    role: Optional[str] = None,
 ) -> Dict[str, Any]:
     if not AUTH_ENABLED:
         raise AuthDisabledError("Auth not enabled")
-    _ensure_auth_db()
+    _ensure_db()
     path = _get_auth_db_path()
     now_ts = int(datetime.now().timestamp())
     password_hash = _hash_password(password)
@@ -166,19 +169,30 @@ def create_user(
     user_id = uuid.uuid4().hex
     with _db_connection() as conn:
         with conn:
+            desired_role = (str(role).strip().lower() if role is not None else "")
+            if desired_role and desired_role not in {"user", "admin"}:
+                raise ValueError("Invalid role")
+            role_val = desired_role or "user"
+            try:
+                cur = conn.cursor()
+                cur.execute("SELECT 1 FROM users LIMIT 1")
+                if not cur.fetchone():
+                    role_val = "admin"
+            except Exception:
+                role_val = "user"
             conn.execute(
-                "INSERT INTO users (id, username, password_hash, created_at, metadata_json) VALUES (?, ?, ?, ?, ?)",
-                (user_id, username, password_hash, now_ts, meta_json),
+                "INSERT INTO users (id, username, password_hash, created_at, metadata_json, role) VALUES (?, ?, ?, ?, ?, ?)",
+                (user_id, username, password_hash, now_ts, meta_json, role_val),
             )
-    return {"user_id": user_id, "username": username}
+    return {"id": user_id, "user_id": user_id, "username": username, "role": role_val}
 
 
 def _get_user_by_username(username: str) -> Optional[Dict[str, Any]]:
-    _ensure_auth_db()
+    _ensure_db()
     with _db_connection() as conn:
         cur = conn.cursor()
         cur.execute(
-            "SELECT id, username, password_hash, created_at, metadata_json FROM users WHERE username = ?",
+            "SELECT id, username, password_hash, created_at, metadata_json, role FROM users WHERE username = ?",
             (username,),
         )
         row = cur.fetchone()
@@ -220,7 +234,7 @@ def has_any_users() -> bool:
     """
     if not AUTH_ENABLED:
         raise AuthDisabledError("Auth not enabled")
-    _ensure_auth_db()
+    _ensure_db()
     with _db_connection() as conn:
         cur = conn.cursor()
         cur.execute("SELECT 1 FROM users LIMIT 1")
@@ -306,7 +320,7 @@ def validate_session(session_id: str) -> Optional[Dict[str, Any]]:
     sid = (session_id or "").strip()
     if not sid:
         return None
-    _ensure_auth_db()
+    _ensure_db()
     with _db_connection() as conn:
         cur = conn.cursor()
         cur.execute(
