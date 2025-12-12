@@ -41,12 +41,22 @@ from scripts.auth_backend import (
     grant_collection_access,
     revoke_collection_access,
 )
-from scripts.admin_ui import (
-    render_admin_acl,
-    render_admin_bootstrap,
-    render_admin_error,
-    render_admin_login,
-)
+try:
+    from scripts.admin_ui import (
+        render_admin_acl,
+        render_admin_bootstrap,
+        render_admin_error,
+        render_admin_login,
+    )
+except Exception:
+
+    def _admin_ui_unavailable(*args, **kwargs):
+        raise HTTPException(status_code=500, detail="Admin UI unavailable")
+
+    render_admin_acl = _admin_ui_unavailable
+    render_admin_bootstrap = _admin_ui_unavailable
+    render_admin_error = _admin_ui_unavailable
+    render_admin_login = _admin_ui_unavailable
 
 # Import existing workspace state and indexing functions
 try:
@@ -355,6 +365,24 @@ def process_delta_bundle(workspace_path: str, bundle_path: Path, manifest: Dict[
         workspace.mkdir(parents=True, exist_ok=True)
         slug_repo_name = f"{repo_name}-{workspace_key}"
 
+        workspace_root = workspace.resolve()
+
+        def _safe_join(base: Path, rel: str) -> Path:
+            rp = Path(str(rel))
+            if str(rp) in {".", ""}:
+                raise ValueError("Invalid operation path")
+            if rp.is_absolute():
+                raise ValueError(f"Absolute paths are not allowed: {rel}")
+            base_resolved = base.resolve()
+            candidate = (base_resolved / rp).resolve()
+            try:
+                ok = candidate.is_relative_to(base_resolved)
+            except Exception:
+                ok = os.path.commonpath([str(base_resolved), str(candidate)]) == str(base_resolved)
+            if not ok:
+                raise ValueError(f"Path escapes workspace: {rel}")
+            return candidate
+
         with tarfile.open(bundle_path, "r:gz") as tar:
             # Extract operations metadata
             ops_member = None
@@ -419,7 +447,16 @@ def process_delta_bundle(workspace_path: str, bundle_path: Path, manifest: Dict[
                     logger.error(msg)
                     raise ValueError(msg)
 
-                target_path = workspace / rel_path
+                target_path = _safe_join(workspace_root, rel_path)
+
+                safe_source_path = None
+                source_rel_path = None
+                if op_type == "moved":
+                    source_rel_path = operation.get("source_path") or operation.get(
+                        "source_relative_path"
+                    )
+                    if source_rel_path:
+                        safe_source_path = _safe_join(workspace_root, source_rel_path)
 
                 try:
                     if op_type == "created":
@@ -480,14 +517,12 @@ def process_delta_bundle(workspace_path: str, bundle_path: Path, manifest: Dict[
                             operations_count["failed"] += 1
 
                         # Remove original source file if provided
-                        source_rel_path = operation.get("source_path") or operation.get("source_relative_path")
-                        if source_rel_path:
-                            source_path = workspace / source_rel_path
-                            if source_path.exists():
+                        if safe_source_path is not None and source_rel_path:
+                            if safe_source_path.exists():
                                 try:
-                                    source_path.unlink()
+                                    safe_source_path.unlink()
                                     operations_count["deleted"] += 1
-                                    _cleanup_empty_dirs(source_path.parent, workspace)
+                                    _cleanup_empty_dirs(safe_source_path.parent, workspace)
                                 except Exception as del_err:
                                     logger.error(f"Error deleting source file for move {source_rel_path}: {del_err}")
 
