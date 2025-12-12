@@ -13,6 +13,11 @@ except Exception:
     from mcp.server.fastmcp import FastMCP  # type: ignore
     Context = Any  # type: ignore
 
+from scripts.mcp_auth import (
+    require_auth_session as _require_auth_session,
+    require_collection_access as _require_collection_access,
+)
+
 from qdrant_client import QdrantClient, models
 
 # Env

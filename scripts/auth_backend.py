@@ -42,6 +42,11 @@ AUTH_ENABLED = (
 _default_auth_db_path = os.path.join(WORK_DIR, ".codebase", "ctxce_auth.sqlite")
 AUTH_DB_URL = os.environ.get("CTXCE_AUTH_DB_URL") or f"sqlite:///{_default_auth_db_path}"
 AUTH_SHARED_TOKEN = os.environ.get("CTXCE_AUTH_SHARED_TOKEN")
+COLLECTION_REGISTRY_ENABLED = AUTH_ENABLED
+ACL_ALLOW_ALL = (
+    str(os.environ.get("CTXCE_ACL_ALLOW_ALL", "0")).strip().lower()
+    in {"1", "true", "yes", "on"}
+)
 ALLOW_OPEN_TOKEN_LOGIN = (
     str(os.environ.get("CTXCE_AUTH_ALLOW_OPEN_TOKEN_LOGIN", "0"))
     .strip()
@@ -101,8 +106,24 @@ def _ensure_auth_db() -> None:
                 "CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, user_id TEXT, created_at INTEGER, expires_at INTEGER, metadata_json TEXT)"
             )
             conn.execute(
-                "CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, created_at INTEGER NOT NULL, metadata_json TEXT)"
+                "CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, created_at INTEGER NOT NULL, metadata_json TEXT, role TEXT NOT NULL DEFAULT 'user')"
             )
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS collections (id TEXT PRIMARY KEY, qdrant_collection TEXT UNIQUE NOT NULL, created_at INTEGER NOT NULL, metadata_json TEXT, is_deleted INTEGER NOT NULL DEFAULT 0)"
+            )
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS collection_acl (collection_id TEXT NOT NULL, user_id TEXT NOT NULL, permission TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (collection_id, user_id))"
+            )
+            try:
+                cur = conn.cursor()
+                cur.execute("PRAGMA table_info(users)")
+                cols = [r[1] for r in cur.fetchall() or []]
+                if "role" not in cols:
+                    conn.execute(
+                        "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'"
+                    )
+            except Exception:
+                pass
 
 
 def _hash_password(password: str) -> str:
@@ -169,7 +190,26 @@ def _get_user_by_username(username: str) -> Optional[Dict[str, Any]]:
         "password_hash": row[2],
         "created_at": row[3],
         "metadata_json": row[4],
+        "role": row[5],
     }
+
+
+def _get_user_role(user_id: str) -> Optional[str]:
+    uid = (user_id or "").strip()
+    if not uid:
+        return None
+    _ensure_db()
+    with _db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT role FROM users WHERE id = ?", (uid,))
+        row = cur.fetchone()
+    if not row:
+        return None
+    return str(row[0] or "").strip() or None
+
+
+def is_admin_user(user_id: str) -> bool:
+    return (_get_user_role(user_id) or "").lower() == "admin"
 
 
 def has_any_users() -> bool:
@@ -310,3 +350,258 @@ def validate_session(session_id: str) -> Optional[Dict[str, Any]]:
         "expires_at": expires_ts,
         "metadata": meta or {},
     }
+
+
+def ensure_collection(qdrant_collection: str, metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    if not COLLECTION_REGISTRY_ENABLED:
+        raise AuthDisabledError("Collection registry not enabled")
+    name = (qdrant_collection or "").strip()
+    if not name:
+        raise ValueError("qdrant_collection is required")
+    _ensure_db()
+    now_ts = int(datetime.now().timestamp())
+    meta_json: Optional[str] = None
+    if metadata:
+        try:
+            meta_json = json.dumps(metadata)
+        except Exception:
+            meta_json = None
+    with _db_connection() as conn:
+        with conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT id, qdrant_collection, created_at, metadata_json, is_deleted FROM collections WHERE qdrant_collection = ?",
+                (name,),
+            )
+            row = cur.fetchone()
+            if row:
+                return {
+                    "id": row[0],
+                    "qdrant_collection": row[1],
+                    "created_at": int(row[2] or 0),
+                    "metadata_json": row[3],
+                    "is_deleted": int(row[4] or 0),
+                }
+
+            coll_id = uuid.uuid4().hex
+            conn.execute(
+                "INSERT INTO collections (id, qdrant_collection, created_at, metadata_json, is_deleted) VALUES (?, ?, ?, ?, 0)",
+                (coll_id, name, now_ts, meta_json),
+            )
+            return {
+                "id": coll_id,
+                "qdrant_collection": name,
+                "created_at": now_ts,
+                "metadata_json": meta_json,
+                "is_deleted": 0,
+            }
+
+
+def ensure_collections(collections: List[str]) -> int:
+    if not COLLECTION_REGISTRY_ENABLED:
+        raise AuthDisabledError("Collection registry not enabled")
+    names = [str(c).strip() for c in (collections or []) if str(c).strip()]
+    if not names:
+        return 0
+    _ensure_db()
+    before_count = 0
+    after_count = 0
+    failures: List[str] = []
+    try:
+        with _db_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(1) FROM collections")
+            row = cur.fetchone()
+            if row:
+                before_count = int(row[0] or 0)
+    except Exception:
+        before_count = 0
+    for name in names:
+        try:
+            ensure_collection(name)
+        except Exception as e:
+            failures.append(f"{name}: {e}")
+            continue
+    try:
+        with _db_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(1) FROM collections")
+            row = cur.fetchone()
+            if row:
+                after_count = int(row[0] or 0)
+    except Exception:
+        after_count = before_count
+
+    delta = max(0, after_count - before_count)
+    if failures and len(failures) >= len(names) and delta == 0:
+        raise RuntimeError("Failed to sync collections registry: " + "; ".join(failures[:3]))
+    return delta
+
+
+def grant_collection_access(user_id: str, qdrant_collection: str, permission: str = "read") -> Dict[str, Any]:
+    if not AUTH_ENABLED:
+        raise AuthDisabledError("Auth not enabled")
+    _ensure_db()
+    uid = (user_id or "").strip()
+    perm = (permission or "read").strip() or "read"
+    if not uid:
+        raise ValueError("user_id is required")
+    coll = ensure_collection(qdrant_collection)
+    now_ts = int(datetime.now().timestamp())
+    with _db_connection() as conn:
+        with conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO collection_acl (collection_id, user_id, permission, created_at) VALUES (?, ?, ?, ?)",
+                (coll.get("id"), uid, perm, now_ts),
+            )
+    return {"collection_id": coll.get("id"), "user_id": uid, "permission": perm}
+
+
+def revoke_collection_access(user_id: str, qdrant_collection: str) -> bool:
+    if not AUTH_ENABLED:
+        raise AuthDisabledError("Auth not enabled")
+    _ensure_db()
+    uid = (user_id or "").strip()
+    name = (qdrant_collection or "").strip()
+    if not uid:
+        raise ValueError("user_id is required")
+    if not name:
+        raise ValueError("qdrant_collection is required")
+    with _db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT c.id FROM collections c WHERE c.qdrant_collection = ? AND c.is_deleted = 0",
+            (name,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return False
+        coll_id = row[0]
+        with conn:
+            cur.execute(
+                "DELETE FROM collection_acl WHERE collection_id = ? AND user_id = ?",
+                (coll_id, uid),
+            )
+            return bool(cur.rowcount and cur.rowcount > 0)
+
+
+def has_collection_access(user_id: str, qdrant_collection: str, permission: str = "read") -> bool:
+    if ACL_ALLOW_ALL:
+        return True
+    if not AUTH_ENABLED:
+        raise AuthDisabledError("Auth not enabled")
+    uid = (user_id or "").strip()
+    if not uid:
+        return False
+    if is_admin_user(uid):
+        return True
+    name = (qdrant_collection or "").strip()
+    if not name:
+        return False
+    _ensure_db()
+    with _db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT c.id FROM collections c WHERE c.qdrant_collection = ? AND c.is_deleted = 0",
+            (name,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return False
+        coll_id = row[0]
+        cur.execute(
+            "SELECT permission FROM collection_acl WHERE collection_id = ? AND user_id = ?",
+            (coll_id, uid),
+        )
+        perm_row = cur.fetchone()
+    if not perm_row:
+        return False
+    granted = str(perm_row[0] or "").strip().lower()
+    want = (permission or "read").strip().lower()
+    if granted == "admin":
+        return True
+    if want == "read":
+        return granted in {"read", "write"}
+    if want == "write":
+        return granted == "write"
+    return granted == want
+
+
+def list_users() -> List[Dict[str, Any]]:
+    if not AUTH_ENABLED:
+        raise AuthDisabledError("Auth not enabled")
+    _ensure_db()
+    with _db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT id, username, created_at, role FROM users ORDER BY created_at ASC")
+        rows = cur.fetchall() or []
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        out.append(
+            {
+                "id": r[0],
+                "username": r[1],
+                "created_at": int(r[2] or 0),
+                "role": r[3],
+            }
+        )
+    return out
+
+
+def list_collections(include_deleted: bool = False) -> List[Dict[str, Any]]:
+    if not AUTH_ENABLED:
+        raise AuthDisabledError("Auth not enabled")
+    _ensure_db()
+    with _db_connection() as conn:
+        cur = conn.cursor()
+        if include_deleted:
+            cur.execute(
+                "SELECT id, qdrant_collection, created_at, is_deleted FROM collections ORDER BY created_at ASC"
+            )
+        else:
+            cur.execute(
+                "SELECT id, qdrant_collection, created_at, is_deleted FROM collections WHERE is_deleted = 0 ORDER BY created_at ASC"
+            )
+        rows = cur.fetchall() or []
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        out.append(
+            {
+                "id": r[0],
+                "qdrant_collection": r[1],
+                "created_at": int(r[2] or 0),
+                "is_deleted": int(r[3] or 0),
+            }
+        )
+    return out
+
+
+def list_collection_acl() -> List[Dict[str, Any]]:
+    if not AUTH_ENABLED:
+        raise AuthDisabledError("Auth not enabled")
+    _ensure_db()
+    with _db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT a.collection_id, c.qdrant_collection, a.user_id, u.username, u.role, a.permission, a.created_at "
+            "FROM collection_acl a "
+            "JOIN collections c ON c.id = a.collection_id "
+            "LEFT JOIN users u ON u.id = a.user_id "
+            "WHERE c.is_deleted = 0 "
+            "ORDER BY c.qdrant_collection ASC, u.username ASC"
+        )
+        rows = cur.fetchall() or []
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        out.append(
+            {
+                "collection_id": r[0],
+                "qdrant_collection": r[1],
+                "user_id": r[2],
+                "username": r[3],
+                "user_role": r[4],
+                "permission": r[5],
+                "created_at": int(r[6] or 0),
+            }
+        )
+    return out

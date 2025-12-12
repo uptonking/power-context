@@ -78,6 +78,10 @@ DEFAULT_COLLECTION = os.environ.get("COLLECTION_NAME", "my-collection")
 WORK_DIR = os.environ.get("WORK_DIR", "/work")
 MAX_BUNDLE_SIZE_MB = int(os.environ.get("MAX_BUNDLE_SIZE_MB", "100"))
 UPLOAD_TIMEOUT_SECS = int(os.environ.get("UPLOAD_TIMEOUT_SECS", "300"))
+CTXCE_MCP_ACL_ENFORCE = (
+    str(os.environ.get("CTXCE_MCP_ACL_ENFORCE", "0")).strip().lower()
+    in {"1", "true", "yes", "on"}
+)
 
 # FastAPI app
 app = FastAPI(

@@ -14,6 +14,7 @@ if str(ROOT_DIR) not in sys.path:
 
 
 from scripts.utils import sanitize_vector_name
+from scripts.auth_backend import ensure_collections, AuthDisabledError
 
 
 def assert_true(cond: bool, msg: str):
@@ -44,6 +45,16 @@ def main():
         collections_response = client.get_collections()
         collections = [c.name for c in collections_response.collections]
         print(f"Found collections: {collections}")
+        try:
+            created = ensure_collections(collections)
+            if created:
+                print(f"[OK] Synced collections registry (new entries: {created})")
+            else:
+                print("[OK] Synced collections registry")
+        except AuthDisabledError:
+            pass
+        except Exception as e:
+            print(f"[WARN] Failed to sync collections registry: {e}")
     except Exception as e:
         print(f"Error getting collections: {e}")
         sys.exit(1)

@@ -123,25 +123,10 @@ except ImportError:
             return default
 
 
-try:
-    from scripts.auth_backend import AUTH_ENABLED as AUTH_ENABLED_AUTH, validate_session as _auth_validate_session
-except Exception:
-    AUTH_ENABLED_AUTH = False
-
-    def _auth_validate_session(session_id: str):  # type: ignore[no-redef]
-        return None
-
-
-def _require_auth_session(session: Optional[str]) -> Optional[Dict[str, Any]]:
-    if not AUTH_ENABLED_AUTH:
-        return None
-    sid = (session or "").strip()
-    if not sid:
-        raise ValidationError("Missing session for authorized operation")
-    info = _auth_validate_session(sid)
-    if not info:
-        raise ValidationError("Invalid or expired session")
-    return info
+from scripts.mcp_auth import (
+    require_auth_session as _require_auth_session,
+    require_collection_access as _require_collection_access,
+)
 
 
 # Global lock to guard temporary env toggles used during ReFRAG retrieval/decoding
@@ -1024,6 +1009,8 @@ async def qdrant_index_root(
         except Exception:
             coll = _default_collection()
 
+    _require_collection_access((sess or {}).get("user_id") if sess else None, coll, "write")
+
     env = os.environ.copy()
     env["QDRANT_URL"] = QDRANT_URL
     env["COLLECTION_NAME"] = coll
@@ -1652,6 +1639,8 @@ async def qdrant_index(
         except Exception:
             coll = _default_collection()
 
+    _require_collection_access((sess or {}).get("user_id") if sess else None, coll, "write")
+
     env = os.environ.copy()
     env["QDRANT_URL"] = QDRANT_URL
     env["COLLECTION_NAME"] = coll
@@ -2078,6 +2067,8 @@ async def repo_search(
     # Final fallback
     env_fallback = (os.environ.get("DEFAULT_COLLECTION") or os.environ.get("COLLECTION_NAME") or "my-collection").strip()
     collection = coll_hint or env_fallback
+
+    _require_collection_access((sess or {}).get("user_id") if sess else None, collection, "read")
 
     # Optional mode knob: "code_first" (default for IDE), "docs_first", "balanced"
     if not mode:
