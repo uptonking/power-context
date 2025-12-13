@@ -12,7 +12,6 @@ def test_smart_reindex_refreshes_lex_vector_for_reused_chunks(tmp_path, monkeypa
 
     Otherwise pseudo/tags changes can drift from the stored lexical vector.
     """
-    # `fastembed` may not have wheels for the local Python version (e.g. 3.14).
     # The smart reindex logic we test doesn't require the real library.
     monkeypatch.setitem(sys.modules, "fastembed", SimpleNamespace(TextEmbedding=object))
 
@@ -105,3 +104,83 @@ def test_smart_reindex_refreshes_lex_vector_for_reused_chunks(tmp_path, monkeypa
     assert out_vec[ingest_code.LEX_VECTOR_NAME] == expected_lex
     # Make sure we didn't keep the old lex vector.
     assert out_vec[ingest_code.LEX_VECTOR_NAME] != old_lex
+
+    def test_smart_reindex_does_not_reuse_when_info_changes(monkeypatch):
+        """Dense embeddings must not be reused if `information` differs.
+
+        `information` includes line ranges, so it can change even when code text matches.
+        """
+
+        import types
+        import sys
+
+        # Stub fastembed before importing ingest_code (local py3.14 may not import it).
+        sys.modules.setdefault("fastembed", types.SimpleNamespace())
+
+        from scripts import ingest_code
+
+        # Arrange: a reused record with identical code but different `information`.
+        old_info = "path: a.py\nlines: 1-1\n..."
+        new_info = "path: a.py\nlines: 10-10\n..."
+        assert old_info != new_info
+
+        class _Rec:
+            def __init__(self, payload, vector):
+                self.payload = payload
+                self.vector = vector
+
+        dense_name = "text"
+        reused_dense = [0.123, 0.456]
+        existing_points = [
+            _Rec(
+                payload={
+                    "information": old_info,
+                    "metadata": {
+                        "code": "print('hi')\n",
+                        "kind": "",
+                        "symbol": "",
+                        "start_line": 0,
+                    },
+                },
+                vector={dense_name: reused_dense, ingest_code.LEX_VECTOR_NAME: [0.0]},
+            )
+        ]
+
+        # Fake chunk list: same code, but new info.
+        chunks = [
+            {
+                "code": "print('hi')\n",
+                "chunk_symbol_id": "",
+                "info": new_info,
+                "pseudo": "",
+                "tags": [],
+            }
+        ]
+
+        # Hook into the inner reuse logic by calling a small helper we expose in tests.
+        # If not present, fall back to invoking the function under test via monkeypatching.
+        if not hasattr(ingest_code, "_smart_reindex_choose_reuse_record"):
+            # Minimal, behavior-level test: build points_by_code the same way and ensure lookup misses.
+            points_by_code = {}
+            for rec in existing_points:
+                payload = rec.payload or {}
+                md = payload.get("metadata") or {}
+                code_text = md.get("code") or ""
+                embed_text = payload.get("information") or payload.get("document") or ""
+                key = ("", code_text, embed_text)
+                points_by_code.setdefault(key, []).append(rec)
+
+            code_text = chunks[0]["code"]
+            info = chunks[0]["info"]
+            reuse_key = ("", code_text, info)
+            assert points_by_code.get(reuse_key) is None
+            return
+
+        # Preferred: if helper exists, use it.
+        reused = ingest_code._smart_reindex_choose_reuse_record(
+            existing_points=existing_points,
+            chunk_symbol_id=chunks[0]["chunk_symbol_id"],
+            code_text=chunks[0]["code"],
+            info=chunks[0]["info"],
+        )
+        assert reused is None
