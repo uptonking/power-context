@@ -255,8 +255,9 @@ spec:
         image: context-engine-indexer-service
         imagePullPolicy: IfNotPresent
         command:
-        - python
-        - /app/scripts/create_indexes.py
+        - /bin/sh
+        - -c
+        - PYTHONPATH=/app python /app/scripts/create_indexes.py && PYTHONPATH=/app python /app/scripts/warm_all_collections.py && PYTHONPATH=/app python /app/scripts/health_check.py
         workingDir: /work
         env:
         - name: QDRANT_URL
