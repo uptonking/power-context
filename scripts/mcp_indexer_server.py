@@ -6787,6 +6787,10 @@ def _ca_decode(
         from scripts.refrag_glm import GLMRefragClient  # type: ignore
 
         client = GLMRefragClient()
+    elif runtime_kind == "minimax":
+        from scripts.refrag_minimax import MiniMaxRefragClient  # type: ignore
+
+        client = MiniMaxRefragClient()
     else:
         from scripts.refrag_llamacpp import LlamaCppRefragClient  # type: ignore
 
@@ -6806,7 +6810,7 @@ def _ca_decode(
                 "top_p": top_p,
                 "stop": stops,
             }
-            if runtime_kind == "glm":
+            if runtime_kind in ("glm", "minimax"):
                 timeout_value: Optional[float] = None
                 if timeout is not None:
                     try:
@@ -6814,7 +6818,9 @@ def _ca_decode(
                     except Exception:
                         timeout_value = None
                 if timeout_value is None:
-                    raw_timeout = os.environ.get("GLM_TIMEOUT_SEC", "").strip()
+                    # Check runtime-specific timeout env var, then fall back to generic
+                    env_key = "MINIMAX_TIMEOUT_SEC" if runtime_kind == "minimax" else "GLM_TIMEOUT_SEC"
+                    raw_timeout = os.environ.get(env_key, "").strip()
                     if raw_timeout:
                         try:
                             timeout_value = float(raw_timeout)
