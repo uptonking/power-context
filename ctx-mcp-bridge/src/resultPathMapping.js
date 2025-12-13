@@ -102,8 +102,15 @@ function remapHitPaths(hit, workspaceRoot) {
   if (!hit || typeof hit !== "object") {
     return hit;
   }
-  const hostPath = typeof hit.host_path === "string" ? hit.host_path : "";
-  const containerPath = typeof hit.container_path === "string" ? hit.container_path : "";
+  const rawPath = typeof hit.path === "string" ? hit.path : "";
+  let hostPath = typeof hit.host_path === "string" ? hit.host_path : "";
+  let containerPath = typeof hit.container_path === "string" ? hit.container_path : "";
+  if (!hostPath && rawPath) {
+    hostPath = rawPath;
+  }
+  if (!containerPath && rawPath) {
+    containerPath = rawPath;
+  }
   const relPath = computeWorkspaceRelativePath(containerPath, hostPath);
   const out = { ...hit };
   if (relPath) {
@@ -158,8 +165,12 @@ function remapHitPaths(hit, workspaceRoot) {
     }
   }
   const overridePath = envTruthy(process.env.CTXCE_BRIDGE_OVERRIDE_PATH, true);
-  if (overridePath && relPath) {
-    out.path = relPath;
+  if (overridePath) {
+    if (typeof out.client_path === "string" && out.client_path) {
+      out.path = out.client_path;
+    } else if (relPath) {
+      out.path = relPath;
+    }
   }
   return out;
 }
@@ -302,24 +313,25 @@ export function maybeRemapToolResult(name, result, workspaceRoot) {
     }
 
     const mapped = applyPathMappingToPayload(parsed.value, workspaceRoot);
+    let outResult = result;
     if (parsed.mode === "structured") {
-      return { ...result, structuredContent: mapped };
+      outResult = { ...result, structuredContent: mapped };
     }
 
     // Replace text payload for clients that only read `content[].text`
     try {
-      const content = Array.isArray(result.content) ? result.content.slice() : [];
+      const content = Array.isArray(outResult.content) ? outResult.content.slice() : [];
       const idx = content.findIndex(
         (c) => c && c.type === "text" && typeof c.text === "string",
       );
       if (idx >= 0) {
         content[idx] = { ...content[idx], text: JSON.stringify(mapped) };
-        return { ...result, content };
+        outResult = { ...outResult, content };
       }
     } catch {
       // ignore
     }
-    return result;
+    return outResult;
   } catch {
     return result;
   }
