@@ -3023,6 +3023,7 @@ async def search_tests_for(
     session: Any = None,
     compact: Any = None,
     kwargs: Any = None,
+    ctx: Context = None,
 ) -> Dict[str, Any]:
     """Find test files related to a query.
 
@@ -3061,6 +3062,7 @@ async def search_tests_for(
         path_glob=globs,
         session=session,
         compact=compact,
+        ctx=ctx,
         kwargs={k: v for k, v in _kwargs.items() if k not in {"path_glob"}},
     )
 
@@ -3075,6 +3077,7 @@ async def search_config_for(
     session: Any = None,
     compact: Any = None,
     kwargs: Any = None,
+    ctx: Context = None,
 ) -> Dict[str, Any]:
     """Find likely configuration files for a service/query.
 
@@ -3117,6 +3120,7 @@ async def search_config_for(
         session=session,
         path_glob=globs,
         compact=compact,
+        ctx=ctx,
         kwargs={k: v for k, v in _kwargs.items() if k not in {"path_glob"}},
     )
 
@@ -3128,6 +3132,7 @@ async def search_callers_for(
     language: Any = None,
     session: Any = None,
     kwargs: Any = None,
+    ctx: Context = None,
 ) -> Dict[str, Any]:
     """Heuristic search for callers/usages of a symbol.
 
@@ -3143,6 +3148,7 @@ async def search_callers_for(
         limit=limit,
         language=language,
         session=session,
+        ctx=ctx,
         kwargs=kwargs,
     )
 
@@ -3154,6 +3160,7 @@ async def search_importers_for(
     language: Any = None,
     session: Any = None,
     kwargs: Any = None,
+    ctx: Context = None,
 ) -> Dict[str, Any]:
     """Find files likely importing or referencing a module/symbol.
 
@@ -3197,6 +3204,7 @@ async def search_importers_for(
         language=language,
         path_glob=globs,
         session=session,
+        ctx=ctx,
         kwargs={k: v for k, v in _kwargs.items() if k not in {"path_glob"}},
     )
 
