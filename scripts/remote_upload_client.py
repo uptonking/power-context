@@ -192,6 +192,7 @@ def _collect_git_history_for_workspace(workspace_path: str) -> Optional[Dict[str
             return None
 
     base_head = ""
+    prev_head = ""
     if not force_full:
         try:
             prev_head = str(cache.get("last_head") or "").strip()
@@ -199,6 +200,24 @@ def _collect_git_history_for_workspace(workspace_path: str) -> Optional[Dict[str
                 base_head = prev_head
         except Exception:
             base_head = ""
+
+    snapshot_mode = bool(force_full)
+    if not snapshot_mode and current_head and prev_head and prev_head != current_head:
+        try:
+            anc = subprocess.run(
+                ["git", "merge-base", "--is-ancestor", prev_head, current_head],
+                cwd=str(root),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            if anc.returncode != 0:
+                snapshot_mode = True
+                base_head = ""
+        except Exception:
+            pass
 
     # Build git rev-list command (simple HEAD-based history)
     cmd: List[str] = ["git", "rev-list", "--no-merges"]
@@ -310,6 +329,10 @@ def _collect_git_history_for_workspace(workspace_path: str) -> Optional[Dict[str
         "version": 1,
         "repo_name": repo_name,
         "generated_at": datetime.now().isoformat(),
+        "head": current_head,
+        "prev_head": prev_head,
+        "base_head": base_head,
+        "mode": "snapshot" if snapshot_mode else "delta",
         "max_commits": max_commits,
         "since": since,
         "commits": records,
