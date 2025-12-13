@@ -208,9 +208,15 @@ async function runAuthLoginFlow(explicitBackendUrl, deps) {
     return;
   }
 
-  const args = [...invocation.args, 'auth', 'login', '--backend-url', backendUrl, '--username', username, '--password', password];
+  const args = [...invocation.args, 'auth', 'login'];
+  const env = {
+    ...process.env,
+    CTXCE_AUTH_BACKEND_URL: backendUrl,
+    CTXCE_AUTH_USERNAME: username,
+    CTXCE_AUTH_PASSWORD: password,
+  };
   await new Promise(resolve => {
-    const child = spawn(invocation.command, args, { cwd, env: process.env });
+    const child = spawn(invocation.command, args, { cwd, env });
     attachOutput(child, 'auth');
     child.on('error', error => {
       log(`ctxce auth login failed to start: ${error instanceof Error ? error.message : String(error)}`);
