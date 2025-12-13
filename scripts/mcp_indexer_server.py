@@ -4878,7 +4878,7 @@ async def expand_query(query: Any = None, max_new: Any = None, session: Optional
 
         print(f"[EXPAND] qlist={qlist!r}, cap={cap}", flush=True)
 
-        from scripts.refrag_llamacpp import LlamaCppRefragClient, is_decoder_enabled  # type: ignore
+        from scripts.refrag_llamacpp import is_decoder_enabled  # type: ignore
 
         decoder_enabled = is_decoder_enabled()
         print(f"[EXPAND] decoder_enabled={decoder_enabled}", flush=True)
@@ -4887,24 +4887,54 @@ async def expand_query(query: Any = None, max_new: Any = None, session: Optional
             print("[EXPAND] returning decoder disabled hint", flush=True)
             return {
                 "alternates": [],
-                "hint": "decoder disabled: set REFRAG_DECODER=1 and start llamacpp (LLAMACPP_URL)",
+                "hint": "decoder disabled: set REFRAG_DECODER=1 and configure runtime",
             }
         if not qlist:
             print("[EXPAND] returning empty qlist", flush=True)
             return {"alternates": []}
         prompt = (
-            "You expand code search queries. Given short queries, propose up to 2 compact alternates.\n"
-            "Return JSON array of strings only. No explanations.\n"
-            f"Queries: {qlist}\n"
+            "You are a code search query expander. Given a search query, propose exactly 2 alternative search queries.\n"
+            "The alternatives should be different from the original but capture similar intent.\n"
+            "Output ONLY a JSON array with double quotes, nothing else.\n"
+            "Example: [\"alternative query 1\", \"alternative query 2\"]\n\n"
+            f"Query: {qlist[0] if qlist else ''}\n"
+            "Output:\n"
         )
-        client = LlamaCppRefragClient()
+        # Select decoder runtime: explicit REFRAG_RUNTIME takes priority,
+        # otherwise auto-detect based on which API keys are configured
+        runtime_kind = str(os.environ.get("REFRAG_RUNTIME", "")).strip().lower()
+        if not runtime_kind:
+            # Auto-detect based on available API keys
+            if os.environ.get("MINIMAX_API_KEY", "").strip():
+                runtime_kind = "minimax"
+            elif os.environ.get("GLM_API_KEY", "").strip():
+                runtime_kind = "glm"
+            else:
+                runtime_kind = "llamacpp"
+        print(f"[EXPAND] runtime_kind={runtime_kind}", flush=True)
+        if runtime_kind == "minimax":
+            from scripts.refrag_minimax import MiniMaxRefragClient  # type: ignore
+            client = MiniMaxRefragClient()
+        elif runtime_kind == "glm":
+            from scripts.refrag_glm import GLMRefragClient  # type: ignore
+            client = GLMRefragClient()
+        else:
+            from scripts.refrag_llamacpp import LlamaCppRefragClient  # type: ignore
+            client = LlamaCppRefragClient()
+        # Neither GLM nor MiniMax support response_format: json_object for expand_query
+        use_force_json = False
+        extra_kwargs = {}
+        if runtime_kind == "glm":
+            extra_kwargs["disable_thinking"] = True  # GLM-4.6: skip deep thinking for expand
         out = client.generate_with_soft_embeddings(
             prompt=prompt,
-            max_tokens=int(os.environ.get("EXPAND_MAX_TOKENS", "64") or 64),
+            max_tokens=int(os.environ.get("EXPAND_MAX_TOKENS", "128") or 128),
             temperature=0.0,
             top_k=int(os.environ.get("EXPAND_TOP_K", "30") or 30),
             top_p=float(os.environ.get("EXPAND_TOP_P", "0.9") or 0.9),
             stop=["\n\n"],
+            force_json=use_force_json,
+            **extra_kwargs,
         )
         import json as _json
         import re as _re
@@ -4924,24 +4954,53 @@ async def expand_query(query: Any = None, max_new: Any = None, session: Optional
                             break
         except Exception as parse_err:
             logger.debug(f"expand_query direct parse failed: {parse_err}")
-            # Fallback: extract JSON array from text (model may prepend text like "Alternates:\n")
+            # Fallback: try Python literal eval for single-quoted lists
             try:
-                # Find first [ and last ] to extract the array
-                match = _re.search(r'\[[\s\S]*\]', out)
-                if match:
-                    arr_text = match.group(0)
-                    logger.debug(f"expand_query found array: {repr(arr_text)}")
-                    parsed = _json.loads(arr_text)
-                    if isinstance(parsed, list):
-                        for s in parsed:
-                            if isinstance(s, str) and s and s not in qlist:
-                                alts.append(s)
-                                if len(alts) >= cap:
-                                    break
-                else:
-                    logger.debug("expand_query no array match found")
-            except Exception as fallback_err:
-                logger.debug(f"expand_query fallback parse failed: {fallback_err}")
+                import ast
+                parsed = ast.literal_eval(out)
+                if isinstance(parsed, list):
+                    for s in parsed:
+                        if isinstance(s, str) and s and s not in qlist:
+                            alts.append(s)
+                            if len(alts) >= cap:
+                                break
+            except Exception:
+                pass
+            # Fallback: extract JSON array from text (model may prepend text like "Alternates:\n")
+            if not alts:
+                try:
+                    # Find first [ and last ] to extract the array
+                    match = _re.search(r'\[[\s\S]*\]', out)
+                    if match:
+                        arr_text = match.group(0)
+                        logger.debug(f"expand_query found array: {repr(arr_text)}")
+                        # Try JSON first, then Python literal eval
+                        try:
+                            parsed = _json.loads(arr_text)
+                        except Exception:
+                            import ast
+                            parsed = ast.literal_eval(arr_text)
+                        if isinstance(parsed, list):
+                            for s in parsed:
+                                if isinstance(s, str) and s and s not in qlist:
+                                    alts.append(s)
+                                    if len(alts) >= cap:
+                                        break
+                    else:
+                        logger.debug("expand_query no array match found")
+                        # Fallback: extract quoted strings from numbered lists
+                        # Pattern matches: 1. "text" or - "text" or * "text"
+                        quoted_matches = _re.findall(r'(?:^|\n)\s*(?:\d+\.|\-|\*)\s*["\']([^"\']+)["\']', out)
+                        if quoted_matches:
+                            logger.debug(f"expand_query found quoted strings: {quoted_matches}")
+                            for s in quoted_matches:
+                                s = s.strip()
+                                if s and s not in qlist:
+                                    alts.append(s)
+                                    if len(alts) >= cap:
+                                        break
+                except Exception as fallback_err:
+                    logger.debug(f"expand_query fallback parse failed: {fallback_err}")
         logger.info(f"expand_query returning alts: {alts}")
         return {"alternates": alts}
     except Exception as e:
@@ -6825,7 +6884,17 @@ def _ca_decode(
     stops: list[str],
     timeout: float | None = None,
 ) -> str:
-    runtime_kind = str(os.environ.get("REFRAG_RUNTIME", "llamacpp")).strip().lower()
+    # Select decoder runtime: explicit REFRAG_RUNTIME takes priority,
+    # otherwise auto-detect based on which API keys are configured
+    runtime_kind = str(os.environ.get("REFRAG_RUNTIME", "")).strip().lower()
+    if not runtime_kind:
+        # Auto-detect based on available API keys
+        if os.environ.get("MINIMAX_API_KEY", "").strip():
+            runtime_kind = "minimax"
+        elif os.environ.get("GLM_API_KEY", "").strip():
+            runtime_kind = "glm"
+        else:
+            runtime_kind = "llamacpp"
     if runtime_kind == "glm":
         from scripts.refrag_glm import GLMRefragClient  # type: ignore
 

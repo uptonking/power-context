@@ -37,56 +37,49 @@ class MiniMaxRefragClient:
         **gen_kwargs: Any,
     ) -> str:
         model = os.environ.get("MINIMAX_MODEL", "MiniMax-M2")
-        # Use DECODER_MAX_TOKENS env var; no hardcoded cap (MiniMax uses thinking tokens)
         if max_tokens is None:
             try:
                 max_tokens = int(os.environ.get("DECODER_MAX_TOKENS", "4096"))
             except ValueError:
                 max_tokens = 4096
-        temperature = float(gen_kwargs.get("temperature", 0.2))
+        # MiniMax M2 API requires temperature in (0.0, 1.0] - exclusive of 0.0
+        # Per docs: "The temperature parameter range is (0.0, 1.0], recommended value: 1.0,
+        # values outside this range will return an error"
+        raw_temp = float(gen_kwargs.get("temperature", 0.2))
+        temperature = max(0.01, raw_temp)  # Ensure never below 0.01
         top_p = float(gen_kwargs.get("top_p", 0.95))
-        stop = gen_kwargs.get("stop")
-        timeout = gen_kwargs.pop("timeout", None)
-        # Optional hint from callers that they want strict JSON output.
-        force_json = bool(gen_kwargs.pop("force_json", False))
-        try:
-            timeout_val = float(timeout) if timeout is not None else None
-        except Exception:
-            timeout_val = None
+        # Ignore stop sequences - MiniMax M2 thinking models can be cut off prematurely
+        gen_kwargs.pop("stop", None)
+        gen_kwargs.pop("timeout", None)
+        gen_kwargs.pop("force_json", None)
 
         try:
-            # Prefer explicit gen_kwargs override, else use computed max_tokens
+            import re
             final_max_tokens = int(gen_kwargs.get("max_tokens", max_tokens))
-            create_kwargs: dict[str, Any] = {
-                "model": model,
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": final_max_tokens,
-                "temperature": temperature,
-                "top_p": top_p,
-                "stop": stop if stop else None,
-                "timeout": timeout_val,
-            }
-            # When explicitly requested and supported by the backend, ask for
-            # JSON-only responses. If the provider rejects this parameter, the
-            # API call will raise and the caller will handle the failure.
-            if force_json:
-                create_kwargs["response_format"] = {"type": "json_object"}
-
-            response = self.client.chat.completions.create(**create_kwargs)
-            msg = response.choices[0].message
-            content = msg.content or ""
-            # MiniMax M2 may return <think>...</think> reasoning tokens; strip them
-            content = self._strip_thinking_tokens(content)
+            # Don't pass stop sequences to MiniMax - they can cut off thinking models
+            # before they output the final answer
+            response = self.client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=final_max_tokens,
+                temperature=temperature,
+                top_p=top_p,
+            )
+            content = response.choices[0].message.content or ""
+            # MiniMax M2 wraps thinking in <think>...</think> blocks
+            # First try to get content after </think>, if empty extract from inside think block
+            after_think = re.sub(r'<think>[\s\S]*?</think>\s*', '', content).strip()
+            if after_think:
+                return after_think
+            # If no content after think block, try to extract JSON from inside it
+            think_match = re.search(r'<think>([\s\S]*?)</think>', content)
+            if think_match:
+                think_content = think_match.group(1)
+                # Look for JSON array in the thinking
+                json_match = re.search(r'\[[\s\S]*?\]', think_content)
+                if json_match:
+                    return json_match.group(0)
             return content.strip()
         except Exception as e:
             raise RuntimeError(f"MiniMax completion failed: {e}")
-
-    def _strip_thinking_tokens(self, text: str) -> str:
-        """Remove <think>...</think> blocks from MiniMax M2 responses."""
-        import re
-        # Remove <think>...</think> blocks (including partial/truncated ones)
-        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
-        # Also handle unclosed <think> tags (truncated responses)
-        text = re.sub(r"<think>.*$", "", text, flags=re.DOTALL)
-        return text.strip()
 

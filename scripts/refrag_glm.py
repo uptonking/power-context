@@ -46,6 +46,8 @@ class GLMRefragClient:
         except Exception:
             timeout_val = None
 
+        # GLM-4.6: optionally disable deep thinking for simple tasks (expand_query)
+        disable_thinking = bool(gen_kwargs.pop("disable_thinking", False))
         try:
             create_kwargs: dict[str, Any] = {
                 "model": model,
@@ -61,11 +63,17 @@ class GLMRefragClient:
             # API call will raise and the caller will handle the failure.
             if force_json:
                 create_kwargs["response_format"] = {"type": "json_object"}
+            # GLM-4.6 thinking models: disable deep thinking for simple JSON tasks
+            if disable_thinking:
+                create_kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
 
             response = self.client.chat.completions.create(**create_kwargs)
             msg = response.choices[0].message
-            # GLM-4.6 uses reasoning_content for thinking models
-            content = getattr(msg, 'reasoning_content', None) or msg.content or ""
+            # GLM models may use either content or reasoning_content
+            content = msg.content or ""
+            # Fallback to reasoning_content if content is empty (some GLM models)
+            if not content.strip():
+                content = getattr(msg, 'reasoning_content', None) or ""
             return content.strip()
         except Exception as e:
             raise RuntimeError(f"GLM completion failed: {e}")
