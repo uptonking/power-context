@@ -28,6 +28,12 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+try:
+    from upload_auth_utils import get_auth_session  # type: ignore[import]
+except ImportError:
+    def get_auth_session(upload_endpoint: str) -> str:
+        return ""
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -656,6 +662,7 @@ class RemoteUploadClient:
         if not self.temp_dir:
             self.temp_dir = tempfile.mkdtemp(prefix="delta_bundle_")
         return Path(self.temp_dir)
+
     # CLI is stateless - sequence tracking is handled by server
 
     def detect_file_changes(self, changed_paths: List[Path]) -> Dict[str, List]:
@@ -981,7 +988,7 @@ class RemoteUploadClient:
                 "workspace_path": self.workspace_path,
                 "collection_name": self.collection_name,
                 "created_at": created_at,
-                # CLI is stateless - server will assign sequence numbers
+                # CLI is stateless - server handles sequence numbers
                 "sequence_number": None,  # Server will assign
                 "parent_sequence": None,   # Server will determine
                 "operations": {
@@ -1031,8 +1038,7 @@ class RemoteUploadClient:
             return str(bundle_path), manifest
 
     def upload_bundle(self, bundle_path: str, manifest: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Upload delta bundle to remote server with exponential backoff retry.
+        """Upload delta bundle to remote server with exponential backoff retry.
 
         Args:
             bundle_path: Path to the bundle tarball
@@ -1058,76 +1064,75 @@ class RemoteUploadClient:
                 # Check bundle size (server-side enforcement)
                 bundle_size = os.path.getsize(bundle_path)
 
-                with open(bundle_path, 'rb') as bundle_file:
-                    files = {
-                        'bundle': (f"{manifest['bundle_id']}.tar.gz", bundle_file, 'application/gzip')
-                    }
+                files = {
+                    "bundle": open(bundle_path, "rb"),
+                }
+                data = {
+                    "workspace_path": self._translate_to_container_path(self.workspace_path),
+                    "collection_name": self.collection_name,
+                    "sequence_number": manifest.get("sequence_number"),
+                    "force": False,
+                    "source_path": self.workspace_path,
+                    "logical_repo_id": _compute_logical_repo_id(self.workspace_path),
+                }
 
-                    data = {
-                        'workspace_path': self._translate_to_container_path(self.workspace_path),
-                        'collection_name': self.collection_name,
-                        # CLI is stateless - server handles sequence numbers
-                        'force': 'false',
-                        'source_path': self.workspace_path,
-                    }
+                sess = get_auth_session(self.upload_endpoint)
+                if sess:
+                    data["session"] = sess
 
-                    if getattr(self, "logical_repo_id", None):
-                        data['logical_repo_id'] = self.logical_repo_id
+                if getattr(self, "logical_repo_id", None):
+                    data['logical_repo_id'] = self.logical_repo_id
 
-                    logger.info(f"[remote_upload] Uploading bundle {manifest['bundle_id']} (size: {bundle_size} bytes)")
+                logger.info(f"[remote_upload] Uploading bundle {manifest['bundle_id']} (size: {bundle_size} bytes)")
 
-                    response = self.session.post(
-                        f"{self.upload_endpoint}/api/v1/delta/upload",
-                        files=files,
-                        data=data,
-                        timeout=(10, self.timeout)
-                    )
+                response = self.session.post(
+                    f"{self.upload_endpoint}/api/v1/delta/upload",
+                    files=files,
+                    data=data,
+                    timeout=(10, self.timeout)
+                )
 
-                    if response.status_code == 200:
-                        result = response.json()
-                        logger.info(f"[remote_upload] Successfully uploaded bundle {manifest['bundle_id']}")
+                result = None
+                try:
+                    result = response.json()
+                except Exception:
+                    result = None
 
-                        seq = None
+                if response.status_code == 200 and isinstance(result, dict) and result.get("success", False):
+                    logger.info(f"[remote_upload] Successfully uploaded bundle {manifest['bundle_id']}")
+                    seq = result.get("sequence_number")
+                    if seq is not None:
                         try:
-                            seq = result.get("sequence_number")
+                            manifest["sequence"] = seq
                         except Exception:
-                            seq = None
-                        if seq is not None:
-                            try:
-                                manifest["sequence"] = seq
-                            except Exception:
-                                pass
+                            pass
+                    return result
 
-                        poll_result = self._poll_after_timeout(manifest)
-                        if poll_result.get("success"):
-                            combined = dict(result)
-                            for k, v in poll_result.items():
-                                if k in ("success", "error"):
-                                    continue
-                                if k not in combined:
-                                    combined[k] = v
-                            return combined
+                # Handle error
+                error_msg = f"Upload failed with status {response.status_code}"
+                try:
+                    error_detail = result if isinstance(result, dict) else response.json()
+                    error_detail_msg = error_detail.get('error', {}).get('message', 'Unknown error')
+                    error_msg += f": {error_detail_msg}"
+                    error_code = error_detail.get('error', {}).get('code', 'HTTP_ERROR')
+                except Exception:
+                    error_msg += f": {response.text[:200]}"
+                    error_code = "HTTP_ERROR"
 
-                        logger.warning("[remote_upload] Upload accepted but polling did not confirm processing; returning original result")
-                        return result
-                    # Handle error
-                    error_msg = f"Upload failed with status {response.status_code}"
-                    try:
-                        error_detail = response.json()
-                        error_detail_msg = error_detail.get('error', {}).get('message', 'Unknown error')
-                        error_msg += f": {error_detail_msg}"
-                        error_code = error_detail.get('error', {}).get('code', 'HTTP_ERROR')
-                    except:
-                        error_msg += f": {response.text[:200]}"
-                        error_code = "HTTP_ERROR"
+                # Special-case 401 to make auth issues obvious to users
+                if response.status_code == 401:
+                    if error_code in {None, "HTTP_ERROR"}:
+                        error_code = "UNAUTHORIZED"
+                    # Always append a clear hint for auth failures
+                    error_msg += " (unauthorized; please log in with `ctxce auth login` and retry)"
 
-                    last_error = {"success": False, "error": {"code": error_code, "message": error_msg, "status_code": response.status_code}}
+                last_error = {"success": False, "error": {"code": error_code, "message": error_msg, "status_code": response.status_code}}
 
-                    # Don't retry on client errors (except 429)
-                    if 400 <= response.status_code < 500 and response.status_code != 429:
-                        return last_error
+                # Don't retry on client errors (except 429)
+                if 400 <= response.status_code < 500 and response.status_code != 429:
+                    return last_error
 
-                    logger.warning(f"[remote_upload] Upload attempt {attempt + 1} failed: {error_msg}")
+                logger.warning(f"[remote_upload] Upload attempt {attempt + 1} failed: {error_msg}")
 
             except requests.exceptions.ConnectTimeout as e:
                 last_error = {"success": False, "error": {"code": "TIMEOUT_ERROR", "message": f"Upload timeout: {str(e)}"}}

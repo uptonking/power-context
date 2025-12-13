@@ -10,7 +10,6 @@ import os
 import json
 import tarfile
 import tempfile
-import hashlib
 import asyncio
 import logging
 from pathlib import Path
@@ -19,9 +18,47 @@ from datetime import datetime
 
 import uvicorn
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Request, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
+
+from scripts.upload_delta_bundle import get_workspace_key, process_delta_bundle
+
 from pydantic import BaseModel, Field
+from scripts.auth_backend import (
+    AuthDisabledError,
+    AuthInvalidToken,
+    authenticate_user,
+    create_session,
+    create_session_for_token,
+    create_user,
+    has_any_users,
+    has_collection_access,
+    validate_session,
+    AUTH_ENABLED,
+    AUTH_SESSION_TTL_SECONDS,
+    is_admin_user,
+    list_users,
+    list_collections,
+    list_collection_acl,
+    grant_collection_access,
+    revoke_collection_access,
+)
+try:
+    from scripts.admin_ui import (
+        render_admin_acl,
+        render_admin_bootstrap,
+        render_admin_error,
+        render_admin_login,
+    )
+except Exception:
+
+    def _admin_ui_unavailable(*args, **kwargs):
+        raise HTTPException(status_code=500, detail="Admin UI unavailable")
+
+    render_admin_acl = _admin_ui_unavailable
+    render_admin_bootstrap = _admin_ui_unavailable
+    render_admin_error = _admin_ui_unavailable
+    render_admin_login = _admin_ui_unavailable
 
 # Import existing workspace state and indexing functions
 try:
@@ -66,6 +103,10 @@ DEFAULT_COLLECTION = os.environ.get("COLLECTION_NAME", "my-collection")
 WORK_DIR = os.environ.get("WORK_DIR", "/work")
 MAX_BUNDLE_SIZE_MB = int(os.environ.get("MAX_BUNDLE_SIZE_MB", "100"))
 UPLOAD_TIMEOUT_SECS = int(os.environ.get("UPLOAD_TIMEOUT_SECS", "300"))
+CTXCE_MCP_ACL_ENFORCE = (
+    str(os.environ.get("CTXCE_MCP_ACL_ENFORCE", "0")).strip().lower()
+    in {"1", "true", "yes", "on"}
+)
 
 # FastAPI app
 app = FastAPI(
@@ -111,17 +152,108 @@ class HealthResponse(BaseModel):
     qdrant_url: str
     work_dir: str
 
-def get_workspace_key(workspace_path: str) -> str:
-    """Generate 16-char hash for collision avoidance in remote uploads.
 
-    Remote uploads may have identical folder names from different users,
-    so uses longer hash than local indexing (8-chars) to ensure uniqueness.
+class AuthLoginRequest(BaseModel):
+    client: str
+    workspace: Optional[str] = None
+    token: Optional[str] = None
 
-    Both host paths (/home/user/project/repo) and container paths (/work/repo)
-    should generate the same key for the same repository.
-    """
-    repo_name = Path(workspace_path).name
-    return hashlib.sha256(repo_name.encode('utf-8')).hexdigest()[:16]
+
+class AuthLoginResponse(BaseModel):
+    session_id: str
+    user_id: Optional[str] = None
+    expires_at: Optional[int] = None
+
+
+class AuthStatusResponse(BaseModel):
+    enabled: bool
+    has_users: Optional[bool] = None
+    session_ttl_seconds: int
+
+
+class AuthUserCreateRequest(BaseModel):
+    username: str
+    password: str
+
+
+class AuthUserCreateResponse(BaseModel):
+    user_id: str
+    username: str
+
+
+class PasswordLoginRequest(BaseModel):
+    username: str
+    password: str
+    workspace: Optional[str] = None
+
+
+ADMIN_SESSION_COOKIE_NAME = "ctxce_session"
+
+
+def _get_session_candidate_from_request(request: Request) -> Dict[str, Any]:
+    sid = (request.cookies.get(ADMIN_SESSION_COOKIE_NAME) or "").strip()
+    if sid:
+        return {"session_id": sid, "source": "cookie"}
+    try:
+        qp = request.query_params
+        sid = (qp.get("session") or qp.get("session_id") or qp.get("sessionId") or "").strip()
+    except Exception:
+        sid = ""
+    if sid:
+        return {"session_id": sid, "source": "query"}
+    sid = (
+        (request.headers.get("X-Session-Id") or "").strip()
+        or (request.headers.get("X-Auth-Session") or "").strip()
+    )
+    if sid:
+        return {"session_id": sid, "source": "header"}
+    return {"session_id": "", "source": ""}
+
+
+def _set_admin_session_cookie(resp: Any, session_id: str) -> Any:
+    sid = (session_id or "").strip()
+    if not sid:
+        return resp
+    try:
+        kwargs: Dict[str, Any] = {
+            "key": ADMIN_SESSION_COOKIE_NAME,
+            "value": sid,
+            "httponly": True,
+            "samesite": "lax",
+            "path": "/",
+        }
+        ttl = int(AUTH_SESSION_TTL_SECONDS or 0)
+        if ttl > 0:
+            kwargs["max_age"] = ttl
+        resp.set_cookie(**kwargs)
+    except Exception:
+        pass
+    return resp
+
+
+def _get_valid_session_record(request: Request) -> Optional[Dict[str, Any]]:
+    sid = (_get_session_candidate_from_request(request).get("session_id") or "").strip()
+    if not sid:
+        return None
+    try:
+        return validate_session(sid)
+    except AuthDisabledError:
+        return None
+    except Exception as e:
+        logger.error(f"[upload_service] Failed to validate session cookie: {e}")
+        raise HTTPException(status_code=500, detail="Failed to validate auth session")
+
+
+def _require_admin_session(request: Request) -> Dict[str, Any]:
+    if not AUTH_ENABLED:
+        raise HTTPException(status_code=404, detail="Auth disabled")
+    record = _get_valid_session_record(request)
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+    user_id = str(record.get("user_id") or "").strip()
+    if not user_id or not is_admin_user(user_id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin required")
+    return record
 
 def get_next_sequence(workspace_path: str) -> int:
     """Get next sequence number for workspace."""
@@ -175,197 +307,6 @@ def validate_bundle_format(bundle_path: Path) -> Dict[str, Any]:
     except Exception as e:
         raise ValueError(f"Invalid bundle format: {str(e)}")
 
-def _cleanup_empty_dirs(path: Path, stop_at: Path) -> None:
-    """Recursively remove empty directories up to stop_at (exclusive)."""
-    try:
-        path = path.resolve()
-        stop_at = stop_at.resolve()
-    except Exception:
-        pass
-    while True:
-        try:
-            if path == stop_at or not path.exists() or not path.is_dir():
-                break
-            if any(path.iterdir()):
-                break
-            path.rmdir()
-            path = path.parent
-        except Exception:
-            break
-
-
-def process_delta_bundle(workspace_path: str, bundle_path: Path, manifest: Dict[str, Any]) -> Dict[str, int]:
-    """Process delta bundle and return operation counts."""
-    operations_count = {
-        "created": 0,
-        "updated": 0,
-        "deleted": 0,
-        "moved": 0,
-        "skipped": 0,
-        "failed": 0
-    }
-
-    try:
-        # CRITICAL FIX: Extract repo name and create workspace under WORK_DIR
-        # Previous bug: used source workspace_path directly, extracting files outside /work
-        # This caused watcher service to never see uploaded files
-        if _extract_repo_name_from_path:
-            repo_name = _extract_repo_name_from_path(workspace_path)
-            # Fallback to directory name if repo detection fails
-            if not repo_name:
-                repo_name = Path(workspace_path).name
-        else:
-            # Fallback: use directory name
-            repo_name = Path(workspace_path).name
-
-        # Generate workspace under WORK_DIR using repo name hash
-        workspace_key = get_workspace_key(workspace_path)
-        workspace = Path(WORK_DIR) / f"{repo_name}-{workspace_key}"
-        workspace.mkdir(parents=True, exist_ok=True)
-
-        with tarfile.open(bundle_path, "r:gz") as tar:
-            # Extract operations metadata
-            ops_member = None
-            for member in tar.getnames():
-                if member.endswith("metadata/operations.json"):
-                    ops_member = member
-                    break
-
-            if not ops_member:
-                raise ValueError("operations.json not found in bundle")
-
-            ops_file = tar.extractfile(ops_member)
-            if not ops_file:
-                raise ValueError("Cannot extract operations.json")
-
-            operations_data = json.loads(ops_file.read().decode('utf-8'))
-            operations = operations_data.get("operations", [])
-
-            # Best-effort: extract git history metadata for watcher to ingest
-            try:
-                git_member = None
-                for member in tar.getnames():
-                    if member.endswith("metadata/git_history.json"):
-                        git_member = member
-                        break
-                if git_member:
-                    git_file = tar.extractfile(git_member)
-                    if git_file:
-                        history_bytes = git_file.read()
-                        history_dir = workspace / ".remote-git"
-                        history_dir.mkdir(parents=True, exist_ok=True)
-                        bundle_id = manifest.get("bundle_id") or "unknown"
-                        history_path = history_dir / f"git_history_{bundle_id}.json"
-                        try:
-                            history_path.write_bytes(history_bytes)
-                        except Exception as write_err:
-                            logger.debug(f"[upload_service] Failed to write git history manifest: {write_err}")
-            except Exception as git_err:
-                logger.debug(f"[upload_service] Error extracting git history metadata: {git_err}")
-
-            # Process each operation
-            for operation in operations:
-                op_type = operation.get("operation")
-                rel_path = operation.get("path")
-
-                if not rel_path:
-                    operations_count["skipped"] += 1
-                    continue
-
-                target_path = workspace / rel_path
-
-                try:
-                    if op_type == "created":
-                        # Extract file from bundle
-                        file_member = None
-                        for member in tar.getnames():
-                            if member.endswith(f"files/created/{rel_path}"):
-                                file_member = member
-                                break
-
-                        if file_member:
-                            file_content = tar.extractfile(file_member)
-                            if file_content:
-                                target_path.parent.mkdir(parents=True, exist_ok=True)
-                                target_path.write_bytes(file_content.read())
-                                operations_count["created"] += 1
-                            else:
-                                operations_count["failed"] += 1
-                        else:
-                            operations_count["failed"] += 1
-
-                    elif op_type == "updated":
-                        # Extract updated file
-                        file_member = None
-                        for member in tar.getnames():
-                            if member.endswith(f"files/updated/{rel_path}"):
-                                file_member = member
-                                break
-
-                        if file_member:
-                            file_content = tar.extractfile(file_member)
-                            if file_content:
-                                target_path.parent.mkdir(parents=True, exist_ok=True)
-                                target_path.write_bytes(file_content.read())
-                                operations_count["updated"] += 1
-                            else:
-                                operations_count["failed"] += 1
-                        else:
-                            operations_count["failed"] += 1
-
-                    elif op_type == "moved":
-                        # Extract moved file to destination
-                        file_member = None
-                        for member in tar.getnames():
-                            if member.endswith(f"files/moved/{rel_path}"):
-                                file_member = member
-                                break
-
-                        if file_member:
-                            file_content = tar.extractfile(file_member)
-                            if file_content:
-                                target_path.parent.mkdir(parents=True, exist_ok=True)
-                                target_path.write_bytes(file_content.read())
-                                operations_count["moved"] += 1
-                            else:
-                                operations_count["failed"] += 1
-                        else:
-                            operations_count["failed"] += 1
-
-                        # Remove original source file if provided
-                        source_rel_path = operation.get("source_path") or operation.get("source_relative_path")
-                        if source_rel_path:
-                            source_path = workspace / source_rel_path
-                            if source_path.exists():
-                                try:
-                                    source_path.unlink()
-                                    operations_count["deleted"] += 1
-                                    _cleanup_empty_dirs(source_path.parent, workspace)
-                                except Exception as del_err:
-                                    logger.error(f"Error deleting source file for move {source_rel_path}: {del_err}")
-
-                    elif op_type == "deleted":
-                        # Delete file
-                        if target_path.exists():
-                            target_path.unlink()
-                            _cleanup_empty_dirs(target_path.parent, workspace)
-                            operations_count["deleted"] += 1
-                        else:
-                            operations_count["skipped"] += 1
-
-                    else:
-                        operations_count["skipped"] += 1
-
-                except Exception as e:
-                    logger.error(f"Error processing operation {op_type} for {rel_path}: {e}")
-                    operations_count["failed"] += 1
-
-        return operations_count
-
-    except Exception as e:
-        logger.error(f"Error processing delta bundle: {e}")
-        raise
-
 
 async def _process_bundle_background(
     workspace_path: str,
@@ -408,6 +349,331 @@ async def _process_bundle_background(
             bundle_path.unlink()
         except Exception:
             pass
+
+
+@app.get("/auth/status", response_model=AuthStatusResponse)
+async def auth_status():
+    try:
+        if not AUTH_ENABLED:
+            return AuthStatusResponse(
+                enabled=False,
+                has_users=None,
+                session_ttl_seconds=AUTH_SESSION_TTL_SECONDS,
+            )
+        try:
+            users_exist = has_any_users()
+        except AuthDisabledError:
+            return AuthStatusResponse(
+                enabled=False,
+                has_users=None,
+                session_ttl_seconds=AUTH_SESSION_TTL_SECONDS,
+            )
+        return AuthStatusResponse(
+            enabled=True,
+            has_users=users_exist,
+            session_ttl_seconds=AUTH_SESSION_TTL_SECONDS,
+        )
+    except Exception as e:
+        logger.error(f"[upload_service] Failed to report auth status: {e}")
+        raise HTTPException(status_code=500, detail="Failed to read auth status")
+
+
+@app.post("/auth/login", response_model=AuthLoginResponse)
+async def auth_login(payload: AuthLoginRequest):
+    try:
+        session = create_session_for_token(
+            client=payload.client,
+            workspace=payload.workspace,
+            token=payload.token,
+        )
+    except AuthDisabledError:
+        raise HTTPException(status_code=404, detail="Auth disabled")
+    except AuthInvalidToken:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid auth token")
+    except Exception as e:
+        logger.error(f"[upload_service] Failed to create auth session: {e}")
+        raise HTTPException(status_code=500, detail="Failed to create auth session")
+    return AuthLoginResponse(
+        session_id=session.get("session_id"),
+        user_id=session.get("user_id"),
+        expires_at=session.get("expires_at"),
+    )
+
+
+@app.get("/admin")
+async def admin_root(request: Request):
+    if not AUTH_ENABLED:
+        raise HTTPException(status_code=404, detail="Auth disabled")
+    try:
+        users_exist = has_any_users()
+    except AuthDisabledError:
+        raise HTTPException(status_code=404, detail="Auth disabled")
+    except Exception as e:
+        logger.error(f"[upload_service] Failed to inspect user state for admin UI: {e}")
+        raise HTTPException(status_code=500, detail="Failed to inspect user state")
+
+    if not users_exist:
+        return RedirectResponse(url="/admin/bootstrap", status_code=302)
+
+    candidate = _get_session_candidate_from_request(request)
+    record = _get_valid_session_record(request)
+    if record is None:
+        return RedirectResponse(url="/admin/login", status_code=302)
+
+    user_id = str(record.get("user_id") or "").strip()
+    if user_id and is_admin_user(user_id):
+        resp = RedirectResponse(url="/admin/acl", status_code=302)
+        if candidate.get("source") and candidate.get("source") != "cookie":
+            _set_admin_session_cookie(resp, str(candidate.get("session_id") or ""))
+        return resp
+    return RedirectResponse(url="/admin/login", status_code=302)
+
+
+@app.get("/admin/bootstrap")
+async def admin_bootstrap_form(request: Request):
+    if not AUTH_ENABLED:
+        raise HTTPException(status_code=404, detail="Auth disabled")
+    try:
+        users_exist = has_any_users()
+    except AuthDisabledError:
+        raise HTTPException(status_code=404, detail="Auth disabled")
+    except Exception as e:
+        logger.error(f"[upload_service] Failed to inspect user state for bootstrap: {e}")
+        raise HTTPException(status_code=500, detail="Failed to inspect user state")
+    if users_exist:
+        return RedirectResponse(url="/admin/login", status_code=302)
+    return render_admin_bootstrap(request)
+
+
+@app.post("/admin/bootstrap")
+async def admin_bootstrap_submit(
+    request: Request,
+    username: str = Form(...),
+    password: str = Form(...),
+):
+    if not AUTH_ENABLED:
+        raise HTTPException(status_code=404, detail="Auth disabled")
+    try:
+        users_exist = has_any_users()
+    except AuthDisabledError:
+        raise HTTPException(status_code=404, detail="Auth disabled")
+    except Exception as e:
+        logger.error(f"[upload_service] Failed to inspect user state for bootstrap submit: {e}")
+        raise HTTPException(status_code=500, detail="Failed to inspect user state")
+    if users_exist:
+        return RedirectResponse(url="/admin/login", status_code=302)
+
+    try:
+        user = create_user(username, password)
+    except Exception as e:
+        return render_admin_error(
+            request=request,
+            title="Bootstrap Failed",
+            message=str(e),
+            back_href="/admin/bootstrap",
+            status_code=400,
+        )
+
+    try:
+        session = create_session(user_id=user.get("user_id"), metadata={"client": "admin_ui"})
+    except Exception as e:
+        logger.error(f"[upload_service] Failed to create session after bootstrap: {e}")
+        raise HTTPException(status_code=500, detail="Failed to create auth session")
+
+    resp = RedirectResponse(url="/admin/acl", status_code=302)
+    _set_admin_session_cookie(resp, str(session.get("session_id") or ""))
+    return resp
+
+
+@app.get("/admin/login")
+async def admin_login_form(request: Request):
+    if not AUTH_ENABLED:
+        raise HTTPException(status_code=404, detail="Auth disabled")
+    return render_admin_login(request)
+
+
+@app.post("/admin/login")
+async def admin_login_submit(
+    request: Request,
+    username: str = Form(...),
+    password: str = Form(...),
+):
+    if not AUTH_ENABLED:
+        raise HTTPException(status_code=404, detail="Auth disabled")
+    try:
+        user = authenticate_user(username, password)
+    except AuthDisabledError:
+        raise HTTPException(status_code=404, detail="Auth disabled")
+    except Exception as e:
+        logger.error(f"[upload_service] Error authenticating user for admin UI: {e}")
+        raise HTTPException(status_code=500, detail="Authentication error")
+
+    if not user:
+        return render_admin_login(
+            request=request,
+            error="Invalid credentials",
+            status_code=401,
+        )
+
+    try:
+        session = create_session(user_id=user.get("id"), metadata={"client": "admin_ui"})
+    except Exception as e:
+        logger.error(f"[upload_service] Failed to create session for admin UI: {e}")
+        raise HTTPException(status_code=500, detail="Failed to create auth session")
+
+    resp = RedirectResponse(url="/admin/acl", status_code=302)
+    _set_admin_session_cookie(resp, str(session.get("session_id") or ""))
+    return resp
+
+
+@app.post("/admin/logout")
+async def admin_logout():
+    resp = RedirectResponse(url="/admin/login", status_code=302)
+    resp.delete_cookie(key=ADMIN_SESSION_COOKIE_NAME, path="/")
+    return resp
+
+
+@app.get("/admin/acl")
+async def admin_acl_page(request: Request):
+    _require_admin_session(request)
+    try:
+        users = list_users()
+        collections = list_collections(include_deleted=False)
+        grants = list_collection_acl()
+    except AuthDisabledError:
+        raise HTTPException(status_code=404, detail="Auth disabled")
+    except Exception as e:
+        logger.error(f"[upload_service] Failed to load admin UI data: {e}")
+        raise HTTPException(status_code=500, detail="Failed to load admin data")
+
+    resp = render_admin_acl(request, users=users, collections=collections, grants=grants)
+    candidate = _get_session_candidate_from_request(request)
+    if candidate.get("source") and candidate.get("source") != "cookie":
+        _set_admin_session_cookie(resp, str(candidate.get("session_id") or ""))
+    return resp
+
+
+@app.post("/admin/acl/grant")
+async def admin_acl_grant(
+    request: Request,
+    user_id: str = Form(...),
+    collection: str = Form(...),
+    permission: str = Form("read"),
+):
+    _require_admin_session(request)
+    try:
+        grant_collection_access(user_id=user_id, qdrant_collection=collection, permission=permission)
+    except AuthDisabledError:
+        raise HTTPException(status_code=404, detail="Auth disabled")
+    except Exception as e:
+        return render_admin_error(request, title="Grant Failed", message=str(e), back_href="/admin/acl")
+    return RedirectResponse(url="/admin/acl", status_code=302)
+
+
+@app.post("/admin/users")
+async def admin_create_user(
+    request: Request,
+    username: str = Form(...),
+    password: str = Form(...),
+    role: str = Form("user"),
+):
+    _require_admin_session(request)
+    try:
+        create_user(username, password, role=role)
+    except AuthDisabledError:
+        raise HTTPException(status_code=404, detail="Auth disabled")
+    except Exception as e:
+        return render_admin_error(request, title="Create User Failed", message=str(e), back_href="/admin/acl")
+    return RedirectResponse(url="/admin/acl", status_code=302)
+
+
+@app.post("/admin/acl/revoke")
+async def admin_acl_revoke(
+    request: Request,
+    user_id: str = Form(...),
+    collection: str = Form(...),
+):
+    _require_admin_session(request)
+    try:
+        revoke_collection_access(user_id=user_id, qdrant_collection=collection)
+    except AuthDisabledError:
+        raise HTTPException(status_code=404, detail="Auth disabled")
+    except Exception as e:
+        return render_admin_error(request, title="Revoke Failed", message=str(e), back_href="/admin/acl")
+    return RedirectResponse(url="/admin/acl", status_code=302)
+
+
+@app.post("/auth/users", response_model=AuthUserCreateResponse)
+async def auth_create_user(payload: AuthUserCreateRequest, request: Request):
+    try:
+        first_user = not has_any_users()
+    except AuthDisabledError:
+        raise HTTPException(status_code=404, detail="Auth disabled")
+    except Exception as e:
+        logger.error(f"[upload_service] Failed to check user state: {e}")
+        raise HTTPException(status_code=500, detail="Failed to inspect user state")
+
+    admin_token = os.environ.get("CTXCE_AUTH_ADMIN_TOKEN") or os.environ.get("CTXCE_AUTH_SHARED_TOKEN")
+    if not first_user:
+        if not admin_token:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Admin token not configured",
+            )
+        header = request.headers.get("X-Admin-Token")
+        if not header or header != admin_token:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid admin token",
+            )
+
+    try:
+        user = create_user(payload.username, payload.password)
+    except AuthDisabledError:
+        raise HTTPException(status_code=404, detail="Auth disabled")
+    except Exception as e:
+        logger.error(f"[upload_service] Failed to create user: {e}")
+        msg = str(e)
+        if "UNIQUE" in msg or "unique" in msg:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Username already exists",
+            )
+        raise HTTPException(status_code=500, detail="Failed to create user")
+
+    return AuthUserCreateResponse(user_id=user.get("user_id"), username=user.get("username"))
+
+
+@app.post("/auth/login/password", response_model=AuthLoginResponse)
+async def auth_login_password(payload: PasswordLoginRequest):
+    try:
+        user = authenticate_user(payload.username, payload.password)
+    except AuthDisabledError:
+        raise HTTPException(status_code=404, detail="Auth disabled")
+    except Exception as e:
+        logger.error(f"[upload_service] Error authenticating user: {e}")
+        raise HTTPException(status_code=500, detail="Authentication error")
+
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+
+    meta: Optional[Dict[str, Any]] = None
+    if payload.workspace:
+        meta = {"workspace": payload.workspace}
+
+    try:
+        session = create_session(user_id=user.get("id"), metadata=meta)
+    except AuthDisabledError:
+        raise HTTPException(status_code=404, detail="Auth disabled")
+    except Exception as e:
+        logger.error(f"[upload_service] Failed to create session for user: {e}")
+        raise HTTPException(status_code=500, detail="Failed to create auth session")
+
+    return AuthLoginResponse(
+        session_id=session.get("session_id"),
+        user_id=session.get("user_id"),
+        expires_at=session.get("expires_at"),
+    )
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -465,13 +731,35 @@ async def upload_delta_bundle(
     force: Optional[bool] = Form(False),
     source_path: Optional[str] = Form(None),
     logical_repo_id: Optional[str] = Form(None),
+    session: Optional[str] = Form(None),
 ):
     """Upload and process delta bundle."""
     start_time = datetime.now()
     client_host = request.client.host if hasattr(request, 'client') and request.client else 'unknown'
 
+    record: Optional[Dict[str, Any]] = None
+
     try:
         logger.info(f"[upload_service] Begin processing upload for workspace={workspace_path} from {client_host}")
+
+        if AUTH_ENABLED:
+            session_value = (session or "").strip()
+            try:
+                record = validate_session(session_value)
+            except AuthDisabledError:
+                record = None
+            except Exception as e:
+                logger.error(f"[upload_service] Failed to validate auth session for upload: {e}")
+                raise HTTPException(
+                    status_code=500,
+                    detail="Failed to validate auth session",
+                )
+            if record is None:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid or expired session",
+                )
+
         # Validate workspace path
         workspace = Path(workspace_path)
         if not workspace.is_absolute():
@@ -533,6 +821,28 @@ async def upload_delta_bundle(
                 collection_name = get_collection_name(repo_name)
             else:
                 collection_name = DEFAULT_COLLECTION
+
+        # Enforce collection write access for uploads when auth is enabled.
+        # Semantics: "write" is sufficient for uploading/indexing content.
+        if AUTH_ENABLED and CTXCE_MCP_ACL_ENFORCE:
+            uid = str((record or {}).get("user_id") or "").strip()
+            if not uid:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid or expired session",
+                )
+            try:
+                allowed = has_collection_access(uid, str(collection_name), "write")
+            except AuthDisabledError:
+                allowed = True
+            except Exception as e:
+                logger.error(f"[upload_service] Failed to check collection access for upload: {e}")
+                raise HTTPException(status_code=500, detail="Failed to check collection access")
+            if not allowed:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=f"Forbidden: write access to collection '{collection_name}' denied",
+                )
 
         # Persist origin metadata for remote lookups (including client source_path)
         # Use slugged repo name (repo+16) for state so it matches ingest/watch_index usage

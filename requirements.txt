@@ -12,6 +12,7 @@ fastmcp==2.12.4
 fastapi
 uvicorn[standard]
 python-multipart
+jinja2
 openai>=1.0
 
 # Test-only

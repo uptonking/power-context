@@ -2,7 +2,7 @@
   "name": "context-engine-uploader",
   "displayName": "Context Engine Uploader",
   "description": "Runs the Context-Engine remote upload client with a force sync on startup followed by watch mode. Requires Python with pip install requests urllib3 charset_normalizer.",
-  "version": "0.1.31",
+  "version": "0.1.32",
   "publisher": "context-engine",
   "engines": {
     "vscode": "^1.85.0"
@@ -15,7 +15,8 @@
     "onCommand:contextEngineUploader.start",
     "onCommand:contextEngineUploader.stop",
     "onCommand:contextEngineUploader.restart",
-    "onCommand:contextEngineUploader.promptEnhance"
+    "onCommand:contextEngineUploader.promptEnhance",
+    "onCommand:contextEngineUploader.authLogin"
   ],
   "main": "./extension.js",
   "icon": "assets/icon.png",
@@ -42,6 +43,14 @@
         "title": "Context Engine Uploader: Upload Git History (force sync bundle)"
       },
       {
+        "command": "contextEngineUploader.startMcpHttpBridge",
+        "title": "Context Engine Uploader: Start MCP HTTP Bridge"
+      },
+      {
+        "command": "contextEngineUploader.stopMcpHttpBridge",
+        "title": "Context Engine Uploader: Stop MCP HTTP Bridge"
+      },
+      {
         "command": "contextEngineUploader.writeMcpConfig",
         "title": "Context Engine Uploader: Write MCP Config (.mcp.json)"
       },
@@ -56,6 +65,10 @@
       {
         "command": "contextEngineUploader.promptEnhance",
         "title": "Context Engine Uploader: Prompt+ (Unicorn Mode)"
+      },
+      {
+        "command": "contextEngineUploader.authLogin",
+        "title": "Context Engine Uploader: Sign In (ctxce auth)"
       }
     ],
     "configuration": {
@@ -164,17 +177,51 @@
           "type": "string",
           "enum": ["sse-remote", "http"],
           "default": "http",
-          "description": "Transport mode for Claude/Windsurf MCP configs: SSE via mcp-remote (sse-remote) or direct HTTP /mcp endpoints (http)."
+          "description": "Transport layer for MCP servers. 'sse-remote' runs stdio MCP processes behind an SSE tunnel; 'http' uses direct HTTP MCP endpoints. Combined with mcpServerMode this yields four modes: bridge-stdio, bridge-http, direct-sse, direct-http.",
+          "enumDescriptions": [
+            "Use stdio MCP processes behind an SSE tunnel (bridge-stdio / direct-sse).",
+            "Use HTTP MCP endpoints directly (bridge-http / direct-http)."
+          ]
+        },
+        "contextEngineUploader.autoStartMcpBridge": {
+          "type": "boolean",
+          "default": true,
+          "description": "When enabled and mcpServerMode='bridge' with mcpTransportMode='http', automatically start the local ctx-mcp-bridge HTTP server for the active workspace so IDE clients can connect over HTTP without manual commands. Has no effect in stdio/direct modes."
+        },
+        "contextEngineUploader.mcpBridgePort": {
+          "type": "number",
+          "default": 30810,
+          "description": "Port used for the local ctx-mcp-bridge HTTP server when auto-starting from the VS Code extension. Change if multiple IDE windows need parallel bridges."
+        },
+        "contextEngineUploader.mcpBridgeBinPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional path to the ctxce CLI binary/script to use for the MCP bridge in local development. When set and the file exists, the extension runs this path via the current Node executable instead of using CTXCE_BRIDGE_BIN or 'npx @context-engine-bridge/context-engine-mcp-bridge'."
+        },
+        "contextEngineUploader.mcpBridgeLocalOnly": {
+          "type": "boolean",
+          "default": false,
+          "description": "Development toggle. When true (default) the extension prefers local bridge binaries resolved from mcpBridgeBinPath or CTXCE_BRIDGE_BIN before falling back to the published npm build via npx."
+        },
+        "contextEngineUploader.mcpServerMode": {
+          "type": "string",
+          "enum": ["bridge", "direct"],
+          "default": "bridge",
+          "description": "MCP wiring style. 'bridge' writes a single 'context-engine' server that uses the ctxce MCP bridge (stdio when mcpTransportMode='sse-remote', HTTP when 'http'). 'direct' writes two servers ('qdrant-indexer' and 'memory'), using stdio when mcpTransportMode='sse-remote' and HTTP when 'http'.",
+          "enumDescriptions": [
+            "Single 'context-engine' server powered by the ctxce bridge (stdio or HTTP depending on mcpTransportMode).",
+            "Two separate servers: 'qdrant-indexer' and 'memory' (stdio or HTTP depending on mcpTransportMode)."
+          ]
         },
         "contextEngineUploader.mcpIndexerUrl": {
           "type": "string",
-          "default": "http://localhost:8001/sse",
-          "description": "Claude Code MCP server URL for the Qdrant indexer. Used when writing the project-local .mcp.json via 'Write MCP Config'."
+          "default": "http://localhost:8003/mcp",
+          "description": "Claude Code MCP server URL for the Qdrant indexer. Used when writing MCP configs."
         },
         "contextEngineUploader.mcpMemoryUrl": {
           "type": "string",
-          "default": "http://localhost:8000/sse",
-          "description": "Claude Code MCP server URL for the memory/search MCP server. Used when writing the project-local .mcp.json via 'Write MCP Config'."
+          "default": "http://localhost:8002/mcp",
+          "description": "Claude Code MCP server URL for the memory/search MCP server. Used when writing MCP configs."
         },
         "contextEngineUploader.ctxIndexerUrl": {
           "type": "string",

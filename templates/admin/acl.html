@@ -1,0 +1,110 @@
+{% extends "admin/base.html" %}
+
+{% block content %}
+  <div class="card">
+    <h2>Users</h2>
+
+    <table>
+      <tr><th>id</th><th>username</th><th>role</th></tr>
+      {% if users and users|length > 0 %}
+        {% for u in users %}
+          <tr>
+            <td>{{ u.id }}</td>
+            <td>{{ u.username }}</td>
+            <td>{{ u.role }}</td>
+          </tr>
+        {% endfor %}
+      {% else %}
+        <tr><td colspan="3">(none)</td></tr>
+      {% endif %}
+    </table>
+
+    <h3>Create User</h3>
+    <form method="post" action="/admin/users">
+      <label>Username<br /><input name="username" /></label><br /><br />
+      <label>Password<br /><input type="password" name="password" /></label><br /><br />
+      <label>
+        Role<br />
+        <select name="role">
+          <option value="user" selected>user</option>
+          <option value="admin">admin</option>
+        </select>
+      </label>
+      <br /><br />
+      <button type="submit">Create User</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <h2>Collections</h2>
+
+    <table>
+      <tr><th>id</th><th>qdrant_collection</th></tr>
+      {% if collections and collections|length > 0 %}
+        {% for c in collections %}
+          <tr>
+            <td>{{ c.id }}</td>
+            <td>{{ c.qdrant_collection }}</td>
+          </tr>
+        {% endfor %}
+      {% else %}
+        <tr><td colspan="2">(none)</td></tr>
+      {% endif %}
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>Grants</h2>
+
+    <table>
+      <tr><th>collection</th><th>username</th><th>user_id</th><th>permission</th><th></th></tr>
+      {% if grants and grants|length > 0 %}
+        {% for g in grants %}
+          <tr>
+            <td>{{ g.qdrant_collection }}</td>
+            <td>{{ g.username }}</td>
+            <td>{{ g.user_id }}</td>
+            <td>{{ g.permission }}</td>
+            <td>
+              <form method="post" action="/admin/acl/revoke">
+                <input type="hidden" name="user_id" value="{{ g.user_id }}" />
+                <input type="hidden" name="collection" value="{{ g.qdrant_collection }}" />
+                <button type="submit">Revoke</button>
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+      {% else %}
+        <tr><td colspan="5">(none)</td></tr>
+      {% endif %}
+    </table>
+
+    <h3>Grant Collection Access</h3>
+    <form method="post" action="/admin/acl/grant">
+      <label>User ID<br /><input name="user_id" /></label><br /><br />
+      <label>
+        Collection<br />
+        <select name="collection">
+          {% if collections and collections|length > 0 %}
+            {% for c in collections %}
+              <option value="{{ c.qdrant_collection }}">{{ c.qdrant_collection }}</option>
+            {% endfor %}
+          {% endif %}
+        </select>
+      </label>
+      <br /><br />
+      <label>
+        Permission<br />
+        <select name="permission">
+          <option value="read" selected>read</option>
+          <option value="write">write</option>
+          <option value="admin">admin</option>
+        </select>
+      </label>
+      <br /><br />
+      <button type="submit">Grant</button>
+    </form>
+
+    <p class="muted">Collection permissions are enforced by MCP servers when CTXCE_MCP_ACL_ENFORCE=1 (and CTXCE_ACL_ALLOW_ALL=0).</p>
+  </div>
+{% endblock %}

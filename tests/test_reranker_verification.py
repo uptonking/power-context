@@ -110,6 +110,45 @@ async def test_rerank_inproc_changes_order(monkeypatch):
 
 @pytest.mark.service
 @pytest.mark.anyio
+async def test_rerank_inproc_dense_respects_collection_argument(monkeypatch):
+    # Drive the in-process dense rerank fallback path by returning no hybrid candidates.
+    monkeypatch.setenv("HYBRID_IN_PROCESS", "1")
+    monkeypatch.setenv("RERANK_IN_PROCESS", "1")
+
+    def fake_run_hybrid_search(**kwargs):
+        return []
+
+    monkeypatch.setitem(sys.modules, "scripts.hybrid_search", _make_hybrid_stub(fake_run_hybrid_search))
+    monkeypatch.delitem(sys.modules, "scripts.mcp_indexer_server", raising=False)
+    server = importlib.import_module("scripts.mcp_indexer_server")
+    monkeypatch.setattr(server, "_get_embedding_model", _fake_embedding_model)
+
+    captured = {}
+
+    def fake_rerank_in_process(**kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(
+        importlib.import_module("scripts.rerank_local"),
+        "rerank_in_process",
+        fake_rerank_in_process,
+    )
+
+    await server.repo_search(
+        query="q",
+        limit=2,
+        per_path=2,
+        rerank_enabled=True,
+        compact=True,
+        collection="other-collection",
+    )
+
+    assert captured.get("collection") == "other-collection"
+
+
+@pytest.mark.service
+@pytest.mark.anyio
 async def test_rerank_subprocess_timeout_fallback(monkeypatch):
     # Force hybrid via subprocess output (doesn't matter which) and disable inproc rerank
     monkeypatch.setenv("HYBRID_IN_PROCESS", "1")
@@ -122,6 +161,10 @@ async def test_rerank_subprocess_timeout_fallback(monkeypatch):
         ]
 
     async def fake_run_async(cmd, env=None, timeout=None):
+        # Ensure explicit collection is forwarded to subprocess reranker
+        assert "--collection" in cmd
+        idx = cmd.index("--collection")
+        assert cmd[idx + 1] == "test-coll"
         # Simulate subprocess reranker timing out
         return {"ok": False, "code": -1, "stdout": "", "stderr": f"Command timed out after {timeout}s"}
 
@@ -137,7 +180,14 @@ async def test_rerank_subprocess_timeout_fallback(monkeypatch):
     monkeypatch.setattr(server, "_get_embedding_model", _fake_embedding_model)
     monkeypatch.setattr(server, "_run_async", fake_run_async)
 
-    rr = await server.repo_search(query="q", limit=2, per_path=2, rerank_enabled=True, compact=True)
+    rr = await server.repo_search(
+        query="q",
+        limit=2,
+        per_path=2,
+        rerank_enabled=True,
+        compact=True,
+        collection="test-coll",
+    )
     # Fallback should keep original order from hybrid; timeout counter incremented
     assert rr.get("used_rerank") is False
     assert rr.get("rerank_counters", {}).get("timeout", 0) >= 1

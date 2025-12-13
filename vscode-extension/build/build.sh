@@ -14,6 +14,7 @@ CTX_SRC="$SCRIPT_DIR/../../scripts/ctx.py"
 ROUTER_SRC="$SCRIPT_DIR/../../scripts/mcp_router.py"
 REFRAG_SRC="$SCRIPT_DIR/../../scripts/refrag_glm.py"
 ENV_EXAMPLE_SRC="$SCRIPT_DIR/../../.env.example"
+AUTH_SRC="$SCRIPT_DIR/../../scripts/upload_auth_utils.py"
 
 cleanup() {
     rm -rf "$STAGE_DIR"
@@ -54,6 +55,11 @@ if [[ -f "$REFRAG_SRC" ]]; then
     cp "$REFRAG_SRC" "$STAGE_DIR/refrag_glm.py"
 fi
 
+# Bundle auth helper used by standalone_upload_client.py
+if [[ -f "$AUTH_SRC" ]]; then
+    cp "$AUTH_SRC" "$STAGE_DIR/upload_auth_utils.py"
+fi
+
 if [[ -f "$ENV_EXAMPLE_SRC" ]]; then
     cp "$ENV_EXAMPLE_SRC" "$STAGE_DIR/env.example"
 fi
@@ -64,9 +70,9 @@ if [[ "$BUNDLE_DEPS" == "--bundle-deps" ]]; then
     # On macOS, urllib3 v2 + system LibreSSL emits NotOpenSSLWarning; pin <2 there.
     if [[ "$(uname -s)" == "Darwin" ]]; then
         echo "Detected macOS; pinning urllib3<2 to avoid LibreSSL/OpenSSL warning."
-        "$PYTHON_BIN" -m pip install -t "$STAGE_DIR/python_libs" "urllib3<2" requests charset_normalizer
+        "$PYTHON_BIN" -m pip install -t "$STAGE_DIR/python_libs" "urllib3<2" requests charset_normalizer "openai>=1.0"
     else
-        "$PYTHON_BIN" -m pip install -t "$STAGE_DIR/python_libs" requests urllib3 charset_normalizer
+        "$PYTHON_BIN" -m pip install -t "$STAGE_DIR/python_libs" requests urllib3 charset_normalizer "openai>=1.0"
     fi
 fi
 

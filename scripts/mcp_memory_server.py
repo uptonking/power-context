@@ -4,6 +4,17 @@ import json
 import threading
 from weakref import WeakKeyDictionary
 
+# Ensure repo roots are importable so 'scripts' resolves inside container
+import sys as _sys
+_roots_env = os.environ.get("WORK_ROOTS", "")
+_roots = [p.strip() for p in _roots_env.split(",") if p.strip()] or ["/work", "/app"]
+try:
+    for _root in _roots:
+        if _root and _root not in _sys.path:
+            _sys.path.insert(0, _root)
+except Exception:
+    pass
+
 
 # FastMCP server and request Context (ctx) for per-connection state
 try:
@@ -12,6 +23,11 @@ except Exception:
     # Fallback: keep FastMCP import; treat Context as Any for type hints
     from mcp.server.fastmcp import FastMCP  # type: ignore
     Context = Any  # type: ignore
+
+from scripts.mcp_auth import (
+    require_auth_session as _require_auth_session,
+    require_collection_access as _require_collection_access,
+)
 
 from qdrant_client import QdrantClient, models
 
@@ -27,41 +43,8 @@ LEX_VECTOR_DIM = int(os.environ.get("LEX_VECTOR_DIM", "4096") or 4096)
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
 
 # Minimal embedding via fastembed (CPU)
-from fastembed import TextEmbedding
 
 # Single-process embedding model cache (avoid re-initializing fastembed on each call)
-_EMBED_MODEL = None
-_EMBED_LOCK = threading.Lock()
-
-def _get_embedding_model():
-    global _EMBED_MODEL
-    m = _EMBED_MODEL
-    if m is None:
-        with _EMBED_LOCK:
-            m = _EMBED_MODEL
-            if m is None:
-                m = TextEmbedding(model_name=EMBEDDING_MODEL)
-                # Best-effort warmup to load weights once
-                try:
-                    _ = list(m.embed(["memory", "search"]))
-                except Exception:
-                    pass
-                _EMBED_MODEL = m
-    return m
-
-# Ensure repo roots are importable so 'scripts' resolves inside container
-import sys as _sys
-_roots_env = os.environ.get("WORK_ROOTS", "")
-_roots = [p.strip() for p in _roots_env.split(",") if p.strip()] or ["/work", "/app"]
-try:
-    for _root in _roots:
-        if _root and _root not in _sys.path:
-            _sys.path.insert(0, _root)
-except Exception:
-    pass
-
-# Map model to named vector used in indexer
-
 
 # Use shared utils for consistent vector naming and lexical hashing
 from scripts.utils import sanitize_vector_name as _sanitize_vector_name
@@ -96,6 +79,10 @@ def _get_embedding_model():
             m = _EMBED_MODEL_CACHE.get(EMBEDDING_MODEL)
             if m is None:
                 m = TextEmbedding(model_name=EMBEDDING_MODEL)
+                try:
+                    _ = next(m.embed(["warmup"]))
+                except Exception:
+                    pass
                 _EMBED_MODEL_CACHE[EMBEDDING_MODEL] = m
     return m
 
@@ -151,6 +138,8 @@ SESSION_DEFAULTS: Dict[str, Dict[str, Any]] = {}
 # In-memory per-connection defaults keyed by ctx.session (no token required)
 _SESSION_CTX_LOCK = threading.Lock()
 SESSION_DEFAULTS_BY_SESSION: "WeakKeyDictionary[Any, Dict[str, Any]]" = WeakKeyDictionary()
+
+
 
 
 def _start_readyz_server():
@@ -218,6 +207,9 @@ def _ensure_collection(name: str):
     # Choose dense dimension based on config: probe (default) vs env-configured
     if MEMORY_PROBE_EMBED_DIM:
         try:
+            # Probe dimension without populating the shared model cache.
+            # This preserves the "cache loads on first tool call" behavior and
+            # keeps MEMORY_COLD_SKIP_DENSE semantics unchanged.
             from fastembed import TextEmbedding
             _model_probe = TextEmbedding(model_name=EMBEDDING_MODEL)
             _dense_vec = next(_model_probe.embed(["probe"]))
@@ -256,7 +248,11 @@ def _ensure_collection(name: str):
     except Exception:
         pass
 
-    client.create_collection(collection_name=name, vectors_config=vectors_cfg)
+    client.create_collection(
+        collection_name=name,
+        vectors_config=vectors_cfg,
+        hnsw_config=models.HnswConfigDiff(m=16, ef_construct=256),
+    )
     vector_names = list(vectors_cfg.keys())
     print(f"[MEMORY_SERVER] Created collection '{name}' with vectors: {vector_names}")
     return True
@@ -354,7 +350,9 @@ def store(
 
     First call may be slower because the embedding model loads lazily.
     """
+    sess = _require_auth_session(session)
     coll = _resolve_collection(collection, session=session, ctx=ctx, extra_kwargs=kwargs)
+    _require_collection_access((sess or {}).get("user_id"), coll, "write")
     _ensure_once(coll)
     model = _get_embedding_model()
     dense = next(model.embed([str(information)])).tolist()
@@ -388,7 +386,9 @@ def find(
     Cold-start option: set MEMORY_COLD_SKIP_DENSE=1 to skip dense embedding until the
     model is cached (useful on slow storage).
     """
+    sess = _require_auth_session(session)
     coll = _resolve_collection(collection, session=session, ctx=ctx, extra_kwargs=kwargs)
+    _require_collection_access((sess or {}).get("user_id") if sess else None, coll, "read")
     _ensure_once(coll)
 
     use_dense = True

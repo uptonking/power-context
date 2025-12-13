@@ -123,6 +123,12 @@ except ImportError:
             return default
 
 
+from scripts.mcp_auth import (
+    require_auth_session as _require_auth_session,
+    require_collection_access as _require_collection_access,
+)
+
+
 # Global lock to guard temporary env toggles used during ReFRAG retrieval/decoding
 _ENV_LOCK = threading.Lock()
 
@@ -952,7 +958,7 @@ def _detect_current_repo() -> str | None:
 
 @mcp.tool()
 async def qdrant_index_root(
-    recreate: Optional[bool] = None, collection: Optional[str] = None
+    recreate: Optional[bool] = None, collection: Optional[str] = None, session: Optional[str] = None
 ) -> Dict[str, Any]:
     """Initialize or refresh the vector index for the workspace root (/work).
 
@@ -970,6 +976,8 @@ async def qdrant_index_root(
     - Omit fields instead of sending null values.
     - Safe to call repeatedly; unchanged files are skipped by the indexer.
     """
+    sess = _require_auth_session(session)
+
     # Leniency: if clients embed JSON in 'collection' (and include 'recreate'), parse it
     try:
         if _looks_jsonish_string(collection):
@@ -1002,6 +1010,8 @@ async def qdrant_index_root(
                 coll = _ws_get_collection_name(None) or _default_collection()
         except Exception:
             coll = _default_collection()
+
+    _require_collection_access((sess or {}).get("user_id") if sess else None, coll, "write")
 
     env = os.environ.copy()
     env["QDRANT_URL"] = QDRANT_URL
@@ -1565,6 +1575,7 @@ async def qdrant_index(
     subdir: Optional[str] = None,
     recreate: Optional[bool] = None,
     collection: Optional[str] = None,
+    session: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Index the workspace (/work) or a specific subdirectory.
 
@@ -1581,6 +1592,8 @@ async def qdrant_index(
     - Paths are sandboxed to /work; attempts to escape will be rejected.
     - Omit fields rather than sending null values.
     """
+    sess = _require_auth_session(session)
+
     # Leniency: parse JSON-ish payloads mistakenly sent in 'collection' or 'subdir'
     try:
         if _looks_jsonish_string(collection):
@@ -1631,6 +1644,8 @@ async def qdrant_index(
         except Exception:
             coll = _default_collection()
 
+    _require_collection_access((sess or {}).get("user_id") if sess else None, coll, "write")
+
     env = os.environ.copy()
     env["QDRANT_URL"] = QDRANT_URL
     env["COLLECTION_NAME"] = coll
@@ -1658,11 +1673,14 @@ async def qdrant_index(
 @mcp.tool()
 async def set_session_defaults(
     collection: Any = None,
+    mode: Any = None,
+    under: Any = None,
+    language: Any = None,
     session: Any = None,
     ctx: Context = None,
     **kwargs,
 ) -> Dict[str, Any]:
-    """Set defaults (e.g., collection) for subsequent calls.
+    """Set defaults (e.g., collection, mode, under) for subsequent calls.
 
     Behavior:
     - If request Context is available, persist defaults per-connection so later calls on
@@ -1674,20 +1692,34 @@ async def set_session_defaults(
         if _extra:
             if (collection is None or (isinstance(collection, str) and collection.strip() == "")) and _extra.get("collection") is not None:
                 collection = _extra.get("collection")
+            if (mode is None or (isinstance(mode, str) and str(mode).strip() == "")) and _extra.get("mode") is not None:
+                mode = _extra.get("mode")
+            if (under is None or (isinstance(under, str) and str(under).strip() == "")) and _extra.get("under") is not None:
+                under = _extra.get("under")
+            if (language is None or (isinstance(language, str) and str(language).strip() == "")) and _extra.get("language") is not None:
+                language = _extra.get("language")
             if (session is None or (isinstance(session, str) and str(session).strip() == "")) and _extra.get("session") is not None:
                 session = _extra.get("session")
     except Exception:
         pass
 
     defaults: Dict[str, Any] = {}
-    if isinstance(collection, str) and collection.strip():
-        defaults["collection"] = str(collection).strip()
+    unset_keys: set[str] = set()
+    for _key, _val in (("collection", collection), ("mode", mode), ("under", under), ("language", language)):
+        if isinstance(_val, str):
+            _s = _val.strip()
+            if _s:
+                defaults[_key] = _s
+            else:
+                unset_keys.add(_key)
 
     # Per-connection storage (preferred)
     try:
-        if ctx is not None and getattr(ctx, "session", None) is not None and defaults:
+        if ctx is not None and getattr(ctx, "session", None) is not None and (defaults or unset_keys):
             with _SESSION_CTX_LOCK:
                 existing2 = SESSION_DEFAULTS_BY_SESSION.get(ctx.session) or {}
+                for _k in unset_keys:
+                    existing2.pop(_k, None)
                 existing2.update(defaults)
                 SESSION_DEFAULTS_BY_SESSION[ctx.session] = existing2
     except Exception:
@@ -1698,9 +1730,11 @@ async def set_session_defaults(
     if not sid:
         sid = uuid.uuid4().hex[:12]
     try:
-        if defaults:
+        if defaults or unset_keys:
             with _SESSION_LOCK:
                 existing = SESSION_DEFAULTS.get(sid) or {}
+                for _k in unset_keys:
+                    existing.pop(_k, None)
                 existing.update(defaults)
                 SESSION_DEFAULTS[sid] = existing
     except Exception:
@@ -1797,6 +1831,8 @@ async def repo_search(
     - path_glob=["scripts/**","**/*.py"], language="python"
     - symbol="context_answer", under="scripts"
     """
+    sess = _require_auth_session(session)
+
     # Handle queries alias (explicit parameter)
     if queries is not None and (query is None or (isinstance(query, str) and str(query).strip() == "")):
         query = queries
@@ -1973,35 +2009,61 @@ async def repo_search(
     )
     highlight_snippet = _to_bool(highlight_snippet, True)
 
-    # Optional mode knob: "code_first" (default for IDE), "docs_first", "balanced"
-    mode_str = _to_str(mode, "").strip().lower()
-
-    # Resolve collection precedence: explicit > per-connection defaults > token defaults > env default
+    # Resolve collection and related hints: explicit > per-connection defaults > token defaults > env
     coll_hint = _to_str(collection, "").strip()
+    mode_hint = _to_str(mode, "").strip()
+    under_hint = _to_str(under, "").strip()
+    lang_hint = _to_str(language, "").strip()
 
     # 1) Per-connection defaults via ctx (no token required)
-    if (not coll_hint) and ctx is not None and getattr(ctx, "session", None) is not None:
+    if ctx is not None and getattr(ctx, "session", None) is not None:
         try:
             with _SESSION_CTX_LOCK:
                 _d2 = SESSION_DEFAULTS_BY_SESSION.get(ctx.session) or {}
-                _sc2 = str((_d2.get("collection") or "")).strip()
-                if _sc2:
-                    coll_hint = _sc2
+                if not coll_hint:
+                    _sc2 = str((_d2.get("collection") or "")).strip()
+                    if _sc2:
+                        coll_hint = _sc2
+                if not mode_hint:
+                    _sm2 = str((_d2.get("mode") or "")).strip()
+                    if _sm2:
+                        mode_hint = _sm2
+                if not under_hint:
+                    _su2 = str((_d2.get("under") or "")).strip()
+                    if _su2:
+                        under_hint = _su2
+                if not lang_hint:
+                    _sl2 = str((_d2.get("language") or "")).strip()
+                    if _sl2:
+                        lang_hint = _sl2
         except Exception:
             pass
 
     # 2) Legacy token-based defaults
-    if (not coll_hint) and sid:
+    if sid:
         try:
             with _SESSION_LOCK:
                 _d = SESSION_DEFAULTS.get(sid) or {}
-                _sc = str((_d.get("collection") or "")).strip()
-                if _sc:
-                    coll_hint = _sc
+                if not coll_hint:
+                    _sc = str((_d.get("collection") or "")).strip()
+                    if _sc:
+                        coll_hint = _sc
+                if not mode_hint:
+                    _sm = str((_d.get("mode") or "")).strip()
+                    if _sm:
+                        mode_hint = _sm
+                if not under_hint:
+                    _su = str((_d.get("under") or "")).strip()
+                    if _su:
+                        under_hint = _su
+                if not lang_hint:
+                    _sl = str((_d.get("language") or "")).strip()
+                    if _sl:
+                        lang_hint = _sl
         except Exception:
             pass
 
-    # 3) Environment default
+    # 3) Environment default (collection only for now)
     env_coll = (os.environ.get("DEFAULT_COLLECTION") or os.environ.get("COLLECTION_NAME") or "").strip()
     if (not coll_hint) and env_coll:
         coll_hint = env_coll
@@ -2009,6 +2071,19 @@ async def repo_search(
     # Final fallback
     env_fallback = (os.environ.get("DEFAULT_COLLECTION") or os.environ.get("COLLECTION_NAME") or "my-collection").strip()
     collection = coll_hint or env_fallback
+
+    _require_collection_access((sess or {}).get("user_id") if sess else None, collection, "read")
+
+    # Optional mode knob: "code_first" (default for IDE), "docs_first", "balanced"
+    if not mode:
+        mode = mode_hint
+    mode_str = _to_str(mode, "").strip().lower()
+
+    # Apply defaults for language / under when explicit args are empty
+    if not language:
+        language = lang_hint
+    if not under:
+        under = under_hint
 
     language = _to_str(language, "").strip()
     under = _to_str(under, "").strip()
@@ -2440,6 +2515,7 @@ async def repo_search(
                         language=language or None,
                         under=under or None,
                         model=model,
+                        collection=collection,
                     )
                     if items:
                         results = items
@@ -2460,6 +2536,8 @@ async def repo_search(
                         "--limit",
                         str(int(rerank_return_m)),
                     ]
+                    if collection:
+                        rcmd += ["--collection", str(collection)]
                     if language:
                         rcmd += ["--language", language]
                     if under:
@@ -2942,6 +3020,7 @@ async def search_tests_for(
     context_lines: Any = None,
     under: Any = None,
     language: Any = None,
+    session: Any = None,
     compact: Any = None,
     kwargs: Any = None,
 ) -> Dict[str, Any]:
@@ -2980,6 +3059,7 @@ async def search_tests_for(
         under=under,
         language=language,
         path_glob=globs,
+        session=session,
         compact=compact,
         kwargs={k: v for k, v in _kwargs.items() if k not in {"path_glob"}},
     )
@@ -2992,6 +3072,7 @@ async def search_config_for(
     include_snippet: Any = None,
     context_lines: Any = None,
     under: Any = None,
+    session: Any = None,
     compact: Any = None,
     kwargs: Any = None,
 ) -> Dict[str, Any]:
@@ -3033,6 +3114,7 @@ async def search_config_for(
         include_snippet=include_snippet,
         context_lines=context_lines,
         under=under,
+        session=session,
         path_glob=globs,
         compact=compact,
         kwargs={k: v for k, v in _kwargs.items() if k not in {"path_glob"}},
@@ -3044,6 +3126,7 @@ async def search_callers_for(
     query: Any = None,
     limit: Any = None,
     language: Any = None,
+    session: Any = None,
     kwargs: Any = None,
 ) -> Dict[str, Any]:
     """Heuristic search for callers/usages of a symbol.
@@ -3059,6 +3142,7 @@ async def search_callers_for(
         query=query,
         limit=limit,
         language=language,
+        session=session,
         kwargs=kwargs,
     )
 
@@ -3068,6 +3152,7 @@ async def search_importers_for(
     query: Any = None,
     limit: Any = None,
     language: Any = None,
+    session: Any = None,
     kwargs: Any = None,
 ) -> Dict[str, Any]:
     """Find files likely importing or referencing a module/symbol.
@@ -3111,6 +3196,7 @@ async def search_importers_for(
         limit=limit,
         language=language,
         path_glob=globs,
+        session=session,
         kwargs={k: v for k, v in _kwargs.items() if k not in {"path_glob"}},
     )
 
@@ -3581,6 +3667,7 @@ async def context_search(
     ext: Any = None,
     not_: Any = None,
     case: Any = None,
+    session: Any = None,
     compact: Any = None,
     # Repo scoping (cross-codebase isolation)
     repo: Any = None,  # str, list[str], or "*" to search all repos
@@ -4117,6 +4204,7 @@ async def context_search(
         case=case,
         compact=False,
         repo=repo,  # Cross-codebase isolation
+        session=session,
     )
 
     # Optional debug
@@ -7850,6 +7938,7 @@ async def code_search(
     ext: Any = None,
     not_: Any = None,
     case: Any = None,
+    session: Any = None,
     compact: Any = None,
     kwargs: Any = None,
 ) -> Dict[str, Any]:
@@ -7880,6 +7969,7 @@ async def code_search(
         ext=ext,
         not_=not_,
         case=case,
+        session=session,
         compact=compact,
         kwargs=kwargs,
     )
@@ -8032,6 +8122,8 @@ async def info_request(
     include_explanation: bool = None,
     # Relationship mapping
     include_relationships: bool = None,
+    # Auth/session (passed through to repo_search)
+    session: str = None,
     # Optional filters (pass-through to repo_search)
     limit: int = None,
     language: str = None,
@@ -8109,6 +8201,7 @@ async def info_request(
         query=query,
         limit=eff_limit,
         per_path=3,  # Better default for info requests
+        session=session,
         include_snippet=eff_snippet,
         context_lines=eff_context,
         language=language,
