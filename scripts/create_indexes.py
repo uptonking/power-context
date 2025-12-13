@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
 import os
+import sys
+from pathlib import Path
+
 from qdrant_client import QdrantClient, models
 
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
 from datetime import datetime
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
 # Import critical functions first
 try:
     from scripts.workspace_state import get_collection_name, is_multi_repo_mode
@@ -21,7 +28,15 @@ COLLECTION = os.environ.get("COLLECTION_NAME", "codebase")
 # Discover workspace path for state updates (allows subdir indexing)
 WS_PATH = os.environ.get("INDEX_ROOT") or os.environ.get("WORKSPACE_PATH") or "/work"
 
-# Skip creating root collection in multi-repo mode when indexing entire /work tree
+# Multi-repo mode note:
+# - When MULTI_REPO_MODE=1 and we are operating at the multi-repo workspace root (/work),
+#   there typically is no single "root" collection that should be created/indexed here.
+# - Instead, per-repo collections are created/ensured by the indexer/watcher as each repo is
+#   discovered, and payload indexes should be created per-collection at that time.
+# - This script is still used in single-repo flows (or when targeting a specific workspace path).
+#
+# IMPORTANT: The broader bootstrap/init job may still run other startup checks (health/ACL/registry
+# sync, etc.) via other scripts; this early-exit only affects the single-collection index creation.
 if is_multi_repo_mode and is_multi_repo_mode() and WS_PATH == "/work":
     print("Multi-repo mode enabled - skipping root collection creation for /work")
     exit(0)
@@ -38,7 +53,12 @@ if 'get_collection_name' in globals() and get_collection_name:
         pass
 
 
-cli = QdrantClient(url=QDRANT_URL)
+try:
+    qdrant_timeout = float(os.environ.get("QDRANT_TIMEOUT", "20") or 20)
+except Exception:
+    qdrant_timeout = 20.0
+
+cli = QdrantClient(url=QDRANT_URL, timeout=qdrant_timeout)
 
 # Create keyword indexes for metadata fields
 cli.create_payload_index(
