@@ -1,4 +1,5 @@
 import os
+import sys
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -11,6 +12,10 @@ def test_smart_reindex_refreshes_lex_vector_for_reused_chunks(tmp_path, monkeypa
 
     Otherwise pseudo/tags changes can drift from the stored lexical vector.
     """
+    # `fastembed` may not have wheels for the local Python version (e.g. 3.14).
+    # The smart reindex logic we test doesn't require the real library.
+    monkeypatch.setitem(sys.modules, "fastembed", SimpleNamespace(TextEmbedding=object))
+
     from scripts import ingest_code
 
     # Deterministic pseudo/tags so we can predict lexical vector.

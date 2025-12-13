@@ -3633,13 +3633,16 @@ def process_file_with_smart_reindexing(
             print(f"[SMART_REINDEX] Failed to load existing points for {file_path}: {e}")
             existing_points = []
 
-        # Index existing points by (symbol_id, code) for reuse
-        points_by_code: dict[tuple[str, str], list[models.Record]] = {}
+        # Index existing points by (symbol_id, code, embedding_text) for reuse.
+        # Important: the dense embedding is computed from `info` (payload['information']).
+        # If line ranges change, `info` changes; reusing an old dense vector would be wrong.
+        points_by_code: dict[tuple[str, str, str], list[models.Record]] = {}
         try:
             for rec in existing_points:
                 payload = rec.payload or {}
                 md = payload.get("metadata") or {}
                 code_text = md.get("code") or ""
+                embed_text = payload.get("information") or payload.get("document") or ""
                 kind = md.get("kind") or ""
                 sym_name = md.get("symbol") or ""
                 start_line = md.get("start_line") or 0
@@ -3648,7 +3651,7 @@ def process_file_with_smart_reindexing(
                     if kind and sym_name and start_line
                     else ""
                 )
-                key = (symbol_id, code_text) if symbol_id else ("", code_text)
+                key = (symbol_id, code_text, embed_text) if symbol_id else ("", code_text, embed_text)
                 points_by_code.setdefault(key, []).append(rec)
         except Exception:
             points_by_code = {}
@@ -3776,23 +3779,33 @@ def process_file_with_smart_reindexing(
             if sym and kind:
                 chunk_symbol_id = f"{kind}_{sym}_{ch['start']}"
 
-            reuse_key = (chunk_symbol_id, code_text)
-            fallback_key = ("", code_text)
+            reuse_key = (chunk_symbol_id, code_text, info)
+            fallback_key = ("", code_text, info)
             reused_rec = None
-            bucket = points_by_code.get(reuse_key) or points_by_code.get(fallback_key)
+            used_key = None
+            bucket = points_by_code.get(reuse_key)
+            if bucket is not None:
+                used_key = reuse_key
+            else:
+                bucket = points_by_code.get(fallback_key)
+                if bucket is not None:
+                    used_key = fallback_key
             if bucket:
                 try:
                     reused_rec = bucket.pop()
                     if not bucket:
                         # Clean up empty bucket
-                        points_by_code.pop(reuse_key, None)
-                        points_by_code.pop(fallback_key, None)
+                        if used_key is not None:
+                            points_by_code.pop(used_key, None)
                 except Exception:
                     reused_rec = None
 
             if reused_rec is not None:
                 try:
                     vec = reused_rec.vector
+                    # Validate vector shape before reuse.
+                    if vector_name and isinstance(vec, dict) and vector_name not in vec:
+                        raise ValueError("reused vector missing dense key")
                     # If we're reusing an existing embedding, we still need to refresh
                     # the lexical vector because it depends on pseudo/tags (and can drift).
                     aug_lex_text = (code_text or "") + (" " + pseudo if pseudo else "") + (
