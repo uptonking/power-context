@@ -4892,14 +4892,7 @@ async def expand_query(query: Any = None, max_new: Any = None, session: Optional
         if not qlist:
             print("[EXPAND] returning empty qlist", flush=True)
             return {"alternates": []}
-        prompt = (
-            "You are a code search query expander. Given a search query, propose exactly 2 alternative search queries.\n"
-            "The alternatives should be different from the original but capture similar intent.\n"
-            "Output ONLY a JSON array with double quotes, nothing else.\n"
-            "Example: [\"alternative query 1\", \"alternative query 2\"]\n\n"
-            f"Query: {qlist[0] if qlist else ''}\n"
-            "Output:\n"
-        )
+        original_q = qlist[0] if qlist else ""
         # Select decoder runtime: explicit REFRAG_RUNTIME takes priority,
         # otherwise auto-detect based on which API keys are configured
         runtime_kind = str(os.environ.get("REFRAG_RUNTIME", "")).strip().lower()
@@ -4912,28 +4905,38 @@ async def expand_query(query: Any = None, max_new: Any = None, session: Optional
             else:
                 runtime_kind = "llamacpp"
         print(f"[EXPAND] runtime_kind={runtime_kind}", flush=True)
+
+        # Build prompt per runtime - each model needs different prompting style
+        extra_kwargs = {}
         if runtime_kind == "minimax":
             from scripts.refrag_minimax import MiniMaxRefragClient  # type: ignore
             client = MiniMaxRefragClient()
+            # MiniMax M2: direct instruction - the model struggles with few-shot
+            extra_kwargs["system"] = "You rewrite search queries using synonyms. Output format: JSON array with exactly 2 strings. No other text."
+            prompt = f'Rewrite "{original_q}" as 2 different search queries using synonyms:'
         elif runtime_kind == "glm":
             from scripts.refrag_glm import GLMRefragClient  # type: ignore
             client = GLMRefragClient()
+            extra_kwargs["disable_thinking"] = True  # GLM-4.6: skip deep thinking for expand
+            # GLM: simple instruction works well
+            prompt = f'Generate 2 alternative search queries for: "{original_q}"\nOutput as JSON array:'
         else:
             from scripts.refrag_llamacpp import LlamaCppRefragClient  # type: ignore
             client = LlamaCppRefragClient()
-        # Neither GLM nor MiniMax support response_format: json_object for expand_query
-        use_force_json = False
-        extra_kwargs = {}
-        if runtime_kind == "glm":
-            extra_kwargs["disable_thinking"] = True  # GLM-4.6: skip deep thinking for expand
+            # Local llama.cpp: original simple prompt
+            prompt = (
+                f"Rewrite this code search query using different words: {original_q}\n"
+                'Give 2 short alternative phrasings as a JSON array. Example: ["alt1", "alt2"]'
+            )
+
         out = client.generate_with_soft_embeddings(
             prompt=prompt,
             max_tokens=int(os.environ.get("EXPAND_MAX_TOKENS", "128") or 128),
-            temperature=0.0,
+            temperature=0.7 if runtime_kind == "llamacpp" else 1.0,
             top_k=int(os.environ.get("EXPAND_TOP_K", "30") or 30),
             top_p=float(os.environ.get("EXPAND_TOP_P", "0.9") or 0.9),
             stop=["\n\n"],
-            force_json=use_force_json,
+            force_json=False,
             **extra_kwargs,
         )
         import json as _json
@@ -5002,7 +5005,13 @@ async def expand_query(query: Any = None, max_new: Any = None, session: Optional
                 except Exception as fallback_err:
                     logger.debug(f"expand_query fallback parse failed: {fallback_err}")
         logger.info(f"expand_query returning alts: {alts}")
-        return {"alternates": alts}
+        return {
+            "ok": True,
+            "original_query": qlist[0] if qlist else "",
+            "alternates": alts,
+            "total_queries": 1 + len(alts),
+            "decoder_used": runtime_kind,
+        }
     except Exception as e:
         fallback_alts: list[str] = []
         for q in qlist:
@@ -5019,10 +5028,21 @@ async def expand_query(query: Any = None, max_new: Any = None, session: Optional
                 break
         if fallback_alts:
             return {
+                "ok": True,
+                "original_query": qlist[0] if qlist else "",
                 "alternates": fallback_alts[:cap],
-                "hint": f"decoder fallback: {e}",
+                "total_queries": 1 + len(fallback_alts[:cap]),
+                "decoder_used": "fallback",
+                "hint": f"decoder error: {e}",
             }
-        return {"alternates": [], "error": str(e)}
+        return {
+            "ok": False,
+            "original_query": qlist[0] if qlist else "",
+            "alternates": [],
+            "total_queries": 1,
+            "decoder_used": "none",
+            "error": str(e),
+        }
 
 
 # Lightweight cleanup to reduce repetition from small models
