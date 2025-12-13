@@ -3845,7 +3845,9 @@ def process_file_with_smart_reindexing(
                                         break
                             except Exception:
                                 dense = None
-                            vec = dense if dense is not None else []
+                            if dense is None:
+                                raise ValueError("reused vector has no dense component")
+                            vec = dense
                     pid = hash_id(code_text, fp, ch["start"], ch["end"])
                     reused_points.append(
                         models.PointStruct(id=pid, vector=vec, payload=payload)

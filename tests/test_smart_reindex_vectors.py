@@ -199,3 +199,91 @@ def test_smart_reindex_does_not_reuse_when_info_changes(tmp_path, monkeypatch):
     out_vec = captured["points"][0].vector
     assert out_vec[dense_key] == embedded_vec
     assert out_vec[dense_key] != reused_dense
+
+
+def test_smart_reindex_unnamed_reuse_requires_dense_vector(tmp_path, monkeypatch):
+    """If an existing unnamed-vector point has only lex/mini, re-embed instead of reusing []."""
+
+    monkeypatch.setitem(sys.modules, "fastembed", SimpleNamespace(TextEmbedding=object))
+
+    from scripts import ingest_code
+
+    # Avoid touching any caches.
+    monkeypatch.setattr(ingest_code, "get_cached_symbols", lambda fp: {})
+    monkeypatch.setattr(ingest_code, "compare_symbol_changes", lambda a, b: ([], []))
+    monkeypatch.setattr(ingest_code, "set_cached_pseudo", None)
+    monkeypatch.setattr(ingest_code, "set_cached_symbols", None)
+    monkeypatch.setattr(ingest_code, "set_cached_file_hash", None)
+
+    # Force simple line chunking.
+    monkeypatch.setenv("INDEX_MICRO_CHUNKS", "0")
+    monkeypatch.setenv("INDEX_SEMANTIC_CHUNKS", "0")
+    monkeypatch.setenv("USE_TREE_SITTER", "0")
+    monkeypatch.setenv("REFRAG_MODE", "0")
+
+    code = "def hi():\n    return 1\n"
+    fp = tmp_path / "x.py"
+    fp.write_text(code, encoding="utf-8")
+
+    chunk = ingest_code.chunk_lines(code, max_lines=120, overlap=20)[0]
+    code_text = chunk["text"]
+    info_text = ingest_code.build_information(
+        "python",
+        Path(fp),
+        chunk["start"],
+        chunk["end"],
+        code_text.splitlines()[0] if code_text else "",
+    )
+
+    existing_record = SimpleNamespace(
+        payload={
+            "document": info_text,
+            "information": info_text,
+            "metadata": {
+                "path": str(fp),
+                "code": code_text,
+                "kind": "function",
+                "symbol": "hi",
+                "start_line": 1,
+            },
+        },
+        # Only lex/mini present: should not be reused as dense.
+        vector={
+            ingest_code.LEX_VECTOR_NAME: [0.0] * ingest_code.LEX_VECTOR_DIM,
+            ingest_code.MINI_VECTOR_NAME: [0.0] * ingest_code.MINI_VEC_DIM,
+        },
+    )
+
+    class FakeClient:
+        def scroll(self, **kwargs):
+            if getattr(self, "_done", False):
+                return ([], None)
+            self._done = True
+            return ([existing_record], None)
+
+    captured = {}
+
+    def fake_upsert_points(_client, _collection, points):
+        captured["points"] = points
+
+    monkeypatch.setattr(ingest_code, "upsert_points", fake_upsert_points)
+    monkeypatch.setattr(ingest_code, "delete_points_by_path", lambda *a, **k: None)
+
+    embedded_vec = [7.7, 6.6]
+    monkeypatch.setattr(ingest_code, "embed_batch", lambda _model, texts: [embedded_vec for _ in texts])
+
+    status = ingest_code.process_file_with_smart_reindexing(
+        file_path=Path(fp),
+        text=code,
+        language="python",
+        client=FakeClient(),
+        current_collection="c",
+        per_file_repo="r",
+        model=object(),
+        vector_name=None,
+    )
+
+    assert status == "success"
+    assert len(captured["points"]) == 1
+    out_vec = captured["points"][0].vector
+    assert out_vec == embedded_vec

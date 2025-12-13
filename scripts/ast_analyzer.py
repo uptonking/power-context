@@ -104,7 +104,7 @@ try:
         _TS_LANGUAGES["sh"] = _TS_LANGUAGES["bash"]
 
     _TS_AVAILABLE = len(_TS_LANGUAGES) > 0
-except ImportError:
+except Exception:
     Parser = None
     Language = None
     _TS_LANGUAGES = {}
