@@ -12,7 +12,7 @@ Complete environment variable reference for Context Engine.
 - [Query Optimization](#query-optimization)
 - [Watcher Settings](#watcher-settings)
 - [Reranker](#reranker)
-- [Decoder (llama.cpp / GLM)](#decoder-llamacpp--glm)
+- [Decoder (llama.cpp / GLM / MiniMax)](#decoder-llamacpp--glm--minimax)
 - [ReFRAG](#refrag)
 - [Ports](#ports)
 - [Search & Expansion](#search--expansion)
@@ -83,18 +83,23 @@ Dynamic HNSW_EF tuning and intelligent query routing for 2x faster simple querie
 | RERANKER_TOKENIZER_PATH | Tokenizer path for reranker | unset |
 | RERANKER_ENABLED | Enable reranker by default | 1 (enabled) |
 
-## Decoder (llama.cpp / GLM)
+## Decoder (llama.cpp / GLM / MiniMax)
 
 | Name | Description | Default |
 |------|-------------|---------|
 | REFRAG_DECODER | Enable decoder for context_answer | 1 (enabled) |
-| REFRAG_RUNTIME | Decoder backend: llamacpp or glm | llamacpp |
+| REFRAG_RUNTIME | Decoder backend: llamacpp, glm, or minimax | llamacpp |
 | LLAMACPP_URL | llama.cpp server endpoint | http://llamacpp:8080 or http://host.docker.internal:8081 |
 | LLAMACPP_TIMEOUT_SEC | Decoder request timeout | 300 |
 | DECODER_MAX_TOKENS | Max tokens for decoder responses | 4000 |
 | REFRAG_DECODER_MODE | prompt or soft (soft requires patched llama.cpp) | prompt |
 | GLM_API_KEY | API key for GLM provider | unset |
 | GLM_MODEL | GLM model name | glm-4.6 |
+| GLM_TIMEOUT_SEC | GLM request timeout in seconds | unset |
+| MINIMAX_API_KEY | API key for MiniMax M2 provider | unset |
+| MINIMAX_MODEL | MiniMax model name | MiniMax-M2 |
+| MINIMAX_API_BASE | MiniMax API base URL | https://api.minimax.io/v1 |
+| MINIMAX_TIMEOUT_SEC | MiniMax request timeout in seconds | unset |
 | USE_GPU_DECODER | Native Metal decoder (1) vs Docker (0) | 0 (docker) |
 | LLAMACPP_GPU_LAYERS | Number of layers to offload to GPU, -1 for all | 32 |
 
