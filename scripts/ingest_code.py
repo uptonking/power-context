@@ -346,6 +346,13 @@ _DEFAULT_EXCLUDE_FILES = [
     "*.tar.gz",
 ]
 
+_ANY_DEPTH_EXCLUDE_DIR_NAMES = {
+    ".git",
+    ".remote-git",
+    ".codebase",
+    "node_modules",
+}
+
 def _should_skip_explicit_file_by_excluder(file_path: Path) -> bool:
     try:
         p = file_path if isinstance(file_path, Path) else Path(str(file_path))
@@ -477,16 +484,8 @@ class _Excluder:
         # "exclude this directory name anywhere". This matters when indexing a
         # workspace root that contains multiple repos, e.g. /work/<repo>/.git.
         try:
-            for pref in self.dir_prefixes:
-                if not str(pref or "").startswith("/"):
-                    continue
-                seg = str(pref or "").strip("/")
-                if not seg or "/" in seg:
-                    continue
-                if not (seg.startswith(".") or seg == "node_modules"):
-                    continue
-                if base == seg:
-                    return True
+            if base in _ANY_DEPTH_EXCLUDE_DIR_NAMES and ("/" + base) in self.dir_prefixes:
+                return True
         except Exception:
             pass
 
