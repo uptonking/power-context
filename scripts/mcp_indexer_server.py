@@ -4847,7 +4847,7 @@ async def context_search(
 
 
 @mcp.tool()
-async def expand_query(query: Any = None, max_new: Any = None) -> Dict[str, Any]:
+async def expand_query(query: Any = None, max_new: Any = None, session: Optional[str] = None) -> Dict[str, Any]:
     """LLM-assisted query expansion (local llama.cpp, if enabled).
 
     When to use:
@@ -4860,6 +4860,9 @@ async def expand_query(query: Any = None, max_new: Any = None) -> Dict[str, Any]
     Returns:
     - {"alternates": list[str]} or {"alternates": [], "hint": "..."} if decoder disabled
     """
+    logger.info(f"expand_query called with query={query!r}, max_new={max_new!r}")
+    print(f"[EXPAND] expand_query called with query={query!r}, max_new={max_new!r}", flush=True)
+    import sys; sys.stderr.write(f"[EXPAND] expand_query called with query={query!r}, max_new={max_new!r}\n"); sys.stderr.flush()
     try:
         qlist: list[str] = []
         if isinstance(query, (list, tuple)):
@@ -4872,14 +4875,22 @@ async def expand_query(query: Any = None, max_new: Any = None) -> Dict[str, Any]
                 cap = max(0, min(2, int(max_new)))
             except (ValueError, TypeError):
                 cap = 2
+
+        print(f"[EXPAND] qlist={qlist!r}, cap={cap}", flush=True)
+
         from scripts.refrag_llamacpp import LlamaCppRefragClient, is_decoder_enabled  # type: ignore
 
-        if not is_decoder_enabled():
+        decoder_enabled = is_decoder_enabled()
+        print(f"[EXPAND] decoder_enabled={decoder_enabled}", flush=True)
+
+        if not decoder_enabled:
+            print("[EXPAND] returning decoder disabled hint", flush=True)
             return {
                 "alternates": [],
                 "hint": "decoder disabled: set REFRAG_DECODER=1 and start llamacpp (LLAMACPP_URL)",
             }
         if not qlist:
+            print("[EXPAND] returning empty qlist", flush=True)
             return {"alternates": []}
         prompt = (
             "You expand code search queries. Given short queries, propose up to 2 compact alternates.\n"
@@ -4896,9 +4907,14 @@ async def expand_query(query: Any = None, max_new: Any = None) -> Dict[str, Any]
             stop=["\n\n"],
         )
         import json as _json
+        import re as _re
+
+        # Debug: log raw output
+        logger.info(f"expand_query raw output: {repr(out)}")
 
         alts: list[str] = []
         try:
+            # First try direct JSON parse
             parsed = _json.loads(out)
             if isinstance(parsed, list):
                 for s in parsed:
@@ -4906,8 +4922,27 @@ async def expand_query(query: Any = None, max_new: Any = None) -> Dict[str, Any]
                         alts.append(s)
                         if len(alts) >= cap:
                             break
-        except Exception:
-            pass
+        except Exception as parse_err:
+            logger.debug(f"expand_query direct parse failed: {parse_err}")
+            # Fallback: extract JSON array from text (model may prepend text like "Alternates:\n")
+            try:
+                # Find first [ and last ] to extract the array
+                match = _re.search(r'\[[\s\S]*\]', out)
+                if match:
+                    arr_text = match.group(0)
+                    logger.debug(f"expand_query found array: {repr(arr_text)}")
+                    parsed = _json.loads(arr_text)
+                    if isinstance(parsed, list):
+                        for s in parsed:
+                            if isinstance(s, str) and s and s not in qlist:
+                                alts.append(s)
+                                if len(alts) >= cap:
+                                    break
+                else:
+                    logger.debug("expand_query no array match found")
+            except Exception as fallback_err:
+                logger.debug(f"expand_query fallback parse failed: {fallback_err}")
+        logger.info(f"expand_query returning alts: {alts}")
         return {"alternates": alts}
     except Exception as e:
         fallback_alts: list[str] = []
