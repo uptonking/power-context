@@ -29,6 +29,8 @@ ENV RERANKER_ONNX_PATH=/app/models/reranker.onnx \
 # Bake scripts into the image so entrypoints don't rely on /work
 COPY scripts /app/scripts
 
+COPY bench /app/bench
+
 # Expose SSE port for this companion server
 EXPOSE 8001
 
