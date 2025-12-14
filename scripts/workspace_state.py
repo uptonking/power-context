@@ -355,6 +355,16 @@ def get_workspace_state(
 
         if is_multi_repo_mode() and repo_name:
             state_dir = _get_repo_state_dir(repo_name)
+            try:
+                ws_root = Path(_resolve_workspace_root())
+                ws_dir = ws_root / repo_name
+            except Exception:
+                ws_dir = None
+            try:
+                if not state_dir.exists() and (ws_dir is None or not ws_dir.exists()):
+                    return {}
+            except Exception:
+                return {}
             state_dir.mkdir(parents=True, exist_ok=True)
             # Ensure repo state dir is group-writable so root upload service and
             # non-root watcher/indexer processes can both write state/cache files.
@@ -427,6 +437,14 @@ def update_workspace_state(
             f"[workspace_state] Multi-repo: Skipping state update for workspace={workspace_path} without repo_name"
         )
         return {}
+
+    if is_multi_repo_mode() and repo_name:
+        try:
+            ws_root = Path(_resolve_workspace_root())
+            if not (ws_root / repo_name).exists():
+                return {}
+        except Exception:
+            return {}
 
     lock = _get_state_lock(workspace_path, repo_name)
     with lock:
@@ -539,6 +557,12 @@ def log_activity(
     resolved_workspace = workspace_path or _resolve_workspace_root()
 
     if is_multi_repo_mode() and repo_name:
+        try:
+            ws_root = Path(_resolve_workspace_root())
+            if not (ws_root / repo_name).exists():
+                return
+        except Exception:
+            return
         state_dir = _get_repo_state_dir(repo_name)
         state_dir.mkdir(parents=True, exist_ok=True)
         state_path = state_dir / STATE_FILENAME
@@ -740,6 +764,12 @@ def set_cached_file_hash(file_path: str, file_hash: str, repo_name: Optional[str
     fp = str(Path(file_path).resolve())
 
     if is_multi_repo_mode() and repo_name:
+        try:
+            ws_root = Path(_resolve_workspace_root())
+            if not (ws_root / repo_name).exists():
+                return
+        except Exception:
+            return
         state_dir = _get_repo_state_dir(repo_name)
         cache_path = state_dir / CACHE_FILENAME
         state_dir.mkdir(parents=True, exist_ok=True)
