@@ -213,6 +213,9 @@ def _embed_queries_cached(
     """Cache dense query embeddings to avoid repeated compute across expansions/retries.
     Optimized: batch-embeds all missing queries in one model call (2-5x faster).
     Thread-safe with bounded cache size.
+
+    When Qwen3 is enabled and QWEN3_QUERY_INSTRUCTION=1, applies instruction
+    prefix to queries before embedding for improved retrieval quality.
     """
     try:
         # Best-effort model name extraction; fall back to env
@@ -221,6 +224,13 @@ def _embed_queries_cached(
         )
     except Exception:
         name = os.environ.get("EMBEDDING_MODEL", MODEL_NAME)
+
+    # Apply Qwen3 instruction prefix if enabled (queries only, not documents)
+    try:
+        from scripts.embedder import prefix_queries
+        queries = prefix_queries(queries, name)
+    except ImportError:
+        pass
 
     if UNIFIED_CACHE_AVAILABLE:
         # Use unified caching system

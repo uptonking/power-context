@@ -588,6 +588,19 @@ _EMBED_MODEL_LOCKS: Dict[str, threading.Lock] = {}
 
 
 def _get_embedding_model(model_name: str):
+    """Get cached embedding model with optional Qwen3 support.
+
+    Uses the centralized embedder factory if available, with fallback
+    to direct fastembed initialization for backwards compatibility.
+    """
+    # Try centralized embedder factory first (supports Qwen3 feature flag)
+    try:
+        from scripts.embedder import get_embedding_model
+        return get_embedding_model(model_name)
+    except ImportError:
+        pass
+
+    # Fallback to original implementation
     try:
         from fastembed import TextEmbedding  # type: ignore
     except Exception:

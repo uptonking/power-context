@@ -2836,9 +2836,15 @@ def index_repo(
         except Exception:
             pass
 
-    model = TextEmbedding(model_name=model_name)
-    # Determine embedding dimension
-    dim = len(next(model.embed(["dimension probe"])))
+    # Use centralized embedder factory if available (supports Qwen3 feature flag)
+    try:
+        from scripts.embedder import get_embedding_model, get_model_dimension
+        model = get_embedding_model(model_name)
+        dim = get_model_dimension(model_name)
+    except ImportError:
+        # Fallback to direct fastembed initialization
+        model = TextEmbedding(model_name=model_name)
+        dim = len(next(model.embed(["dimension probe"])))
 
     client = QdrantClient(
         url=qdrant_url,
