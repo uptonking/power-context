@@ -3329,8 +3329,6 @@ async def search_commits_for(
                 except Exception:
                     _sanitize_vector_name = None  # type: ignore
 
-                from fastembed import TextEmbedding  # type: ignore
-
                 model_name = os.environ.get(
                     "MODEL_NAME", "BAAI/bge-base-en-v1.5"
                 )
@@ -3348,7 +3346,7 @@ async def search_commits_for(
                     # search over the commit collection. We keep the result set
                     # modest and later blend its scores into the lexical
                     # scoring for matching commits.
-                    embed_model = TextEmbedding(model_name=model_name)
+                    embed_model = _get_embedding_model(model_name)
                     qtext = " ".join(q_terms) if q_terms else ""
                     if qtext.strip():
                         qvec = next(embed_model.embed([qtext])).tolist()

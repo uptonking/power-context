@@ -44,7 +44,14 @@ def get_qdrant_client() -> QdrantClient:
 
 
 def get_embedding_model(model_name: str):
-    """Initialize embedding model with the given name."""
+    """Initialize embedding model with Qwen3 support via embedder factory."""
+    # Try centralized embedder factory first (supports Qwen3 feature flag)
+    try:
+        from scripts.embedder import get_embedding_model as _get_model
+        return _get_model(model_name)
+    except ImportError:
+        pass
+    # Fallback to direct fastembed
     try:
         return TextEmbedding(model_name=model_name)
     except Exception as e:

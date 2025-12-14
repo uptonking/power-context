@@ -6,7 +6,14 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 
 from qdrant_client import QdrantClient, models
-from fastembed import TextEmbedding
+
+# Use embedder factory for Qwen3 support; fallback to direct fastembed
+try:
+    from scripts.embedder import get_embedding_model as _get_embedding_model
+    _EMBEDDER_FACTORY = True
+except ImportError:
+    _EMBEDDER_FACTORY = False
+    from fastembed import TextEmbedding
 import re
 import json
 import math
@@ -1551,7 +1558,12 @@ def run_hybrid_search(
 ) -> List[Dict[str, Any]]:
     client = QdrantClient(url=os.environ.get("QDRANT_URL", QDRANT_URL), api_key=API_KEY)
     model_name = os.environ.get("EMBEDDING_MODEL", MODEL_NAME)
-    _model = model or TextEmbedding(model_name=model_name)
+    if model:
+        _model = model
+    elif _EMBEDDER_FACTORY:
+        _model = _get_embedding_model(model_name)
+    else:
+        _model = TextEmbedding(model_name=model_name)
     vec_name = _sanitize_vector_name(model_name)
 
     # Parse Query DSL and merge with explicit args
@@ -3091,7 +3103,11 @@ def main():
     # Resolve effective collection early to avoid variable usage errors
     eff_collection = args.collection or os.environ.get("COLLECTION_NAME", "my-collection")
 
-    model = TextEmbedding(model_name=MODEL_NAME)
+    # Use embedder factory for Qwen3 support
+    if _EMBEDDER_FACTORY:
+        model = _get_embedding_model(MODEL_NAME)
+    else:
+        model = TextEmbedding(model_name=MODEL_NAME)
     vec_name = _sanitize_vector_name(MODEL_NAME)
     client = QdrantClient(url=QDRANT_URL, api_key=API_KEY or None)
 
