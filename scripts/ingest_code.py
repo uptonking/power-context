@@ -35,7 +35,20 @@ if str(ROOT_DIR) not in sys.path:
 
 
 from qdrant_client import QdrantClient, models
-from fastembed import TextEmbedding
+
+# Use embedder factory for Qwen3 support; fallback to direct fastembed
+try:
+    from scripts.embedder import get_embedding_model as _get_embedding_model
+    _EMBEDDER_FACTORY = True
+except ImportError:
+    _EMBEDDER_FACTORY = False
+
+# Import TextEmbedding for type hints and fallback; use TYPE_CHECKING for cleaner type hints
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from fastembed import TextEmbedding
+elif not _EMBEDDER_FACTORY:
+    from fastembed import TextEmbedding
 
 
 from datetime import datetime
@@ -1658,7 +1671,7 @@ def delete_points_by_path(client: QdrantClient, collection: str, file_path: str)
         pass
 
 
-def embed_batch(model: TextEmbedding, texts: List[str]) -> List[List[float]]:
+def embed_batch(model: "TextEmbedding", texts: List[str]) -> List[List[float]]:
     # fastembed returns a generator of numpy arrays
     return [vec.tolist() for vec in model.embed(texts)]
 
@@ -2457,7 +2470,7 @@ def _compute_host_and_container_paths(cur_path: str) -> tuple[Optional[str], Opt
 
 def index_single_file(
     client: QdrantClient,
-    model: TextEmbedding,
+    model: "TextEmbedding",
     collection: str,
     vector_name: str,
     file_path: Path,

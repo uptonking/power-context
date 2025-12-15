@@ -155,7 +155,7 @@ def _norm_under(u: str | None) -> str | None:
 
 
 def _select_dense_vector_name(
-    client: QdrantClient, collection: str, model: TextEmbedding, dim: int
+    client: QdrantClient, collection: str, model: "TextEmbedding", dim: int
 ) -> str:
     try:
         info = client.get_collection(collection)
