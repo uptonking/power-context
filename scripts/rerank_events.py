@@ -16,7 +16,10 @@ import os
 import random
 import time
 import threading
-import fcntl
+try:
+    import fcntl  # type: ignore
+except Exception:  # pragma: no cover
+    fcntl = None
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -129,11 +132,15 @@ def log_training_event(
         with lock:
             # Atomic append with file locking (for cross-process safety)
             with open(events_file, "a") as f:
-                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-                try:
+                if fcntl is not None:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                    try:
+                        f.write(json.dumps(event) + "\n")
+                    finally:
+                        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                else:
+                    # Best-effort fallback (thread lock still prevents intra-process interleaving)
                     f.write(json.dumps(event) + "\n")
-                finally:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
         return True
 

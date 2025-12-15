@@ -960,47 +960,45 @@ def rerank_with_learning(
     reranker = _get_learning_reranker(n_iterations=n_iterations, collection=collection)
     initial_scores = [c.get("score", 0) for c in candidates]
 
-    # Get ONNX teacher scores if learning enabled (for event logging)
-    teacher_scores = None
+    # Log training event for background processing (no inline teacher scoring by default)
+    # If you really want inline teacher scoring, set RERANK_TEACHER_INLINE=1.
     if learn_from_onnx and candidates:
-        try:
-            from scripts.rerank_local import rerank_local
-        except ImportError:
+        teacher_scores = None
+        if str(os.environ.get("RERANK_TEACHER_INLINE", "")).strip().lower() in {"1", "true", "yes", "on"}:
             try:
-                from rerank_local import rerank_local
+                from scripts.rerank_local import rerank_local
             except ImportError:
-                rerank_local = None
+                try:
+                    from rerank_local import rerank_local
+                except ImportError:
+                    rerank_local = None
 
-        if rerank_local is not None:
-            try:
-                # Build query-doc pairs for ONNX scoring
-                pairs = []
-                for c in candidates:
-                    doc = c.get("code") or c.get("snippet") or ""
-                    if not doc:
-                        # Build doc from available fields
-                        parts = []
-                        if c.get("symbol"):
-                            parts.append(str(c["symbol"]))
-                        if c.get("path"):
-                            parts.append(str(c["path"]))
-                        doc = " ".join(parts) if parts else "empty"
-                    pairs.append((query, doc[:1000]))  # Limit doc length
+            if rerank_local is not None:
+                try:
+                    pairs = []
+                    for c in candidates:
+                        doc = c.get("code") or c.get("snippet") or ""
+                        if not doc:
+                            parts = []
+                            if c.get("symbol"):
+                                parts.append(str(c["symbol"]))
+                            if c.get("path"):
+                                parts.append(str(c["path"]))
+                            doc = " ".join(parts) if parts else "empty"
+                        pairs.append((query, doc[:1000]))
+                    teacher_scores = rerank_local(pairs)
+                except Exception:
+                    teacher_scores = None
 
-                teacher_scores = rerank_local(pairs)
-            except Exception:
-                teacher_scores = None
-
-    # Log training event for background processing (instead of inline learning)
-    if teacher_scores is not None and len(teacher_scores) == len(candidates):
         try:
             from scripts.rerank_events import log_training_event
             log_training_event(
                 query=query,
                 candidates=candidates,
                 initial_scores=initial_scores,
-                teacher_scores=list(teacher_scores),
+                teacher_scores=(list(teacher_scores) if teacher_scores is not None else None),
                 collection=collection,
+                metadata={"teacher_inline": bool(teacher_scores is not None)},
             )
         except Exception:
             pass  # Best effort - don't fail the request

@@ -167,6 +167,9 @@ class CollectionLearner:
 
     def _learn_from_batch(self, events: List[Dict[str, Any]]):
         """Learn from a batch of events."""
+        # Fill missing teacher scores in batch (amortizes ONNX overhead)
+        self._maybe_fill_teacher_scores(events)
+
         for event in events:
             try:
                 query = event.get("query", "")
@@ -202,6 +205,59 @@ class CollectionLearner:
 
             except Exception as e:
                 logger.debug(f"Error processing event: {e}")
+                continue
+
+    def _maybe_fill_teacher_scores(self, events: List[Dict[str, Any]]):
+        """Compute teacher scores for events that don't already have them."""
+        try:
+            from scripts.rerank_local import rerank_local
+        except Exception:
+            rerank_local = None
+
+        if rerank_local is None:
+            return
+
+        # Gather pairs across events so we can call rerank_local once.
+        all_pairs: List[tuple] = []
+        slices: List[tuple] = []  # (event_index, start, end)
+
+        for event_index, event in enumerate(events):
+            if event.get("teacher_scores"):
+                continue
+
+            query = event.get("query", "")
+            candidates = event.get("candidates", [])
+            if not query or not candidates:
+                continue
+
+            start = len(all_pairs)
+            for c in candidates:
+                snippet = c.get("snippet") or ""
+                if not snippet:
+                    parts = []
+                    if c.get("symbol"):
+                        parts.append(str(c["symbol"]))
+                    if c.get("path"):
+                        parts.append(str(c["path"]))
+                    snippet = " ".join(parts) if parts else "empty"
+                all_pairs.append((query, str(snippet)[:1000]))
+            end = len(all_pairs)
+            if end > start:
+                slices.append((event_index, start, end))
+
+        if not slices:
+            return
+
+        try:
+            scores = rerank_local(all_pairs)
+        except Exception:
+            return
+
+        # Map scores back to each event.
+        for event_index, start, end in slices:
+            try:
+                events[event_index]["teacher_scores"] = list(scores[start:end])
+            except Exception:
                 continue
 
 
