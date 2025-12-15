@@ -66,6 +66,7 @@ def test_run_hybrid_search_list_globs(monkeypatch):
 
     # Use fake embedder to avoid model init
     monkeypatch.setattr(hyb, "TextEmbedding", lambda *a, **k: FakeEmbed())
+    monkeypatch.setattr(hyb, "_get_embedding_model", lambda *a, **k: FakeEmbed())
 
     # path_glob supports list: keep src/*.py and tests/*, filter out docs/*
     items = hyb.run_hybrid_search(

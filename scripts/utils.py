@@ -17,6 +17,9 @@ def sanitize_vector_name(model_name: str) -> str:
     # Common fastembed alias mapping for BGE base
     if "bge-base-en-v1.5" in name:
         return "fast-bge-base-en-v1.5"
+    # Qwen3-Embedding ONNX model
+    if "qwen3-embedding" in name:
+        return "fast-qwen3-embedding-0.6b"
     # Fallback: compact name
     return name.replace("/", "-").replace("_", "-")[:64]
 

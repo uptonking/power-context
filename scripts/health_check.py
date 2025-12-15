@@ -5,12 +5,19 @@ from pathlib import Path
 from typing import Dict, Any
 
 from qdrant_client import QdrantClient, models
-from fastembed import TextEmbedding
 
 # Ensure /work (repo root) is on sys.path when run from /work/scripts
 ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
+
+# Use embedder factory for Qwen3 support; fallback to direct fastembed
+try:
+    from scripts.embedder import get_embedding_model, get_model_dimension
+    _EMBEDDER_FACTORY = True
+except ImportError:
+    _EMBEDDER_FACTORY = False
+    from fastembed import TextEmbedding
 
 
 from scripts.utils import sanitize_vector_name
@@ -34,8 +41,12 @@ def main():
     print(f"Health check -> {qdrant_url} collection={collection} model={model_name}")
 
     # Init embedding to derive dimension and test embedding
-    model = TextEmbedding(model_name=model_name)
-    dim = len(next(model.embed(["health dim probe"])))
+    if _EMBEDDER_FACTORY:
+        model = get_embedding_model(model_name)
+        dim = get_model_dimension(model_name)
+    else:
+        model = TextEmbedding(model_name=model_name)
+        dim = len(next(model.embed(["health dim probe"])))
     vec_name_expect = sanitize_vector_name(model_name)
 
     client = QdrantClient(url=qdrant_url, api_key=api_key or None)

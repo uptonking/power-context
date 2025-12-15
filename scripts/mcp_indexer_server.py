@@ -588,6 +588,19 @@ _EMBED_MODEL_LOCKS: Dict[str, threading.Lock] = {}
 
 
 def _get_embedding_model(model_name: str):
+    """Get cached embedding model with optional Qwen3 support.
+
+    Uses the centralized embedder factory if available, with fallback
+    to direct fastembed initialization for backwards compatibility.
+    """
+    # Try centralized embedder factory first (supports Qwen3 feature flag)
+    try:
+        from scripts.embedder import get_embedding_model
+        return get_embedding_model(model_name)
+    except ImportError:
+        pass
+
+    # Fallback to original implementation
     try:
         from fastembed import TextEmbedding  # type: ignore
     except Exception:
@@ -2246,6 +2259,7 @@ async def repo_search(
             json_lines = items  # reuse downstream shaping
         except Exception as e:
             # Fallback to subprocess path if in-process fails
+            logger.debug(f"In-process hybrid search failed, falling back to subprocess: {type(e).__name__}: {e}")
             use_hybrid_inproc = False
 
     if not use_hybrid_inproc:
@@ -3316,8 +3330,6 @@ async def search_commits_for(
                 except Exception:
                     _sanitize_vector_name = None  # type: ignore
 
-                from fastembed import TextEmbedding  # type: ignore
-
                 model_name = os.environ.get(
                     "MODEL_NAME", "BAAI/bge-base-en-v1.5"
                 )
@@ -3335,7 +3347,7 @@ async def search_commits_for(
                     # search over the commit collection. We keep the result set
                     # modest and later blend its scores into the lexical
                     # scoring for matching commits.
-                    embed_model = TextEmbedding(model_name=model_name)
+                    embed_model = _get_embedding_model(model_name)
                     qtext = " ".join(q_terms) if q_terms else ""
                     if qtext.strip():
                         qvec = next(embed_model.embed([qtext])).tolist()

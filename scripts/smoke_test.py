@@ -1,7 +1,21 @@
 #!/usr/bin/env python3
 import os
-from fastembed import TextEmbedding
+import sys
+from pathlib import Path
 from qdrant_client import QdrantClient
+
+# Ensure scripts is importable
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+# Use embedder factory for Qwen3 support
+try:
+    from scripts.embedder import get_embedding_model
+    _EMBEDDER_FACTORY = True
+except ImportError:
+    _EMBEDDER_FACTORY = False
+    from fastembed import TextEmbedding
 
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
 COLLECTION = os.environ.get("COLLECTION_NAME", "codebase")
@@ -28,7 +42,10 @@ except Exception:
     count = None
 
 # Prepare query embedding
-model = TextEmbedding(model_name=MODEL)
+if _EMBEDDER_FACTORY:
+    model = get_embedding_model(MODEL)
+else:
+    model = TextEmbedding(model_name=MODEL)
 query = "python code indexer for qdrant"
 vec = next(model.embed([query]))
 
