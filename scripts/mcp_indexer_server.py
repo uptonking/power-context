@@ -2391,7 +2391,8 @@ async def repo_search(
                     # Format results for output
                     tmp = []
                     for obj in reranked:
-                        why_parts = obj.get("why", [])
+                        # Copy the list to avoid mutating the original object
+                        why_parts = list(obj.get("why", []))
                         why_parts.append(f"learning:{obj.get('recursive_iterations', 0)}")
                         why_parts.append(f"score:{float(obj.get('score', 0)):.3f}")
 

@@ -448,17 +448,31 @@ class TinyScorer:
             pass
 
     def _load_weights(self):
-        """Load weights from disk."""
+        """Load weights from disk with dimension validation."""
         data = np.load(self._weights_path, allow_pickle=True)
 
         # Helper to safely get from NpzFile (doesn't have .get())
         def _get(key: str, default):
             return data[key] if key in data.files else default
 
+        # Validate dimensions before loading to prevent shape mismatch crashes
+        # W1 shape should be (dim * 3, hidden_dim), W2 shape should be (hidden_dim, 1)
+        w1_loaded = data["W1"]
+        w2_loaded = data["W2"]
+        expected_w1_shape = (self.dim * 3, self.hidden_dim)
+        expected_w2_shape = (self.hidden_dim, 1)
+
+        if w1_loaded.shape != expected_w1_shape or w2_loaded.shape != expected_w2_shape:
+            # Dimension mismatch: stale weights from different configuration
+            # Fall back to random initialization
+            data.close()
+            self._init_random_weights()
+            return
+
         # Cast to float32 to keep inference dtype stable even if older checkpoints were float64
-        self.W1 = data["W1"].astype(np.float32, copy=False)
+        self.W1 = w1_loaded.astype(np.float32, copy=False)
         self.b1 = data["b1"].astype(np.float32, copy=False)
-        self.W2 = data["W2"].astype(np.float32, copy=False)
+        self.W2 = w2_loaded.astype(np.float32, copy=False)
         self.b2 = data["b2"].astype(np.float32, copy=False)
         self._update_count = int(_get("update_count", 0))
         self._total_samples = int(_get("total_samples", 0))
