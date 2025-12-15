@@ -44,6 +44,8 @@ def render_admin_acl(
     users: Any,
     collections: Any,
     grants: Any,
+    deletion_enabled: bool = False,
+    work_dir: str = "/work",
     status_code: int = 200,
 ) -> Any:
     return _templates.TemplateResponse(
@@ -54,6 +56,8 @@ def render_admin_acl(
             "users": users,
             "collections": collections,
             "grants": grants,
+            "deletion_enabled": bool(deletion_enabled),
+            "work_dir": work_dir,
         },
         status_code=status_code,
     )
