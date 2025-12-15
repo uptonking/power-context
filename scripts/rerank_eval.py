@@ -16,6 +16,7 @@ Metrics reported:
 """
 
 import argparse
+import copy
 import json
 import os
 import sys
@@ -239,12 +240,13 @@ def run_eval(
                 continue
 
             # Use ONNX top-5 as "relevant" ground truth
+            # Deep copy to prevent score mutation from leaking between modes
             reference_paths = []
             if use_onnx_reference:
-                onnx_ranked = rerank_onnx(query, candidates.copy())
+                onnx_ranked = rerank_onnx(query, copy.deepcopy(candidates))
                 reference_paths = [c.get("path", "") for c in onnx_ranked[:5]]
 
-            result = eval_single_query(query, mode, candidates.copy(), reference_paths)
+            result = eval_single_query(query, mode, copy.deepcopy(candidates), reference_paths)
             results.append(result)
             latencies.append(result.latency_ms)
 
