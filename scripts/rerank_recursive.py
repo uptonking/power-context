@@ -204,9 +204,27 @@ class TinyScorer:
             if os.path.exists(self._weights_path):
                 mtime = os.path.getmtime(self._weights_path)
                 if mtime > self._weights_mtime:
-                    self._load_weights()
+                    self._load_weights_safe()
         except Exception:
             pass
+
+    def _load_weights_safe(self):
+        """Load weights with advisory file locking (prevents partial reads during writes)."""
+        import fcntl
+        lock_path = self._weights_path + ".lock"
+        try:
+            # Use same lock file as writer for coordination
+            os.makedirs(os.path.dirname(lock_path) or ".", exist_ok=True)
+            with open(lock_path, "w") as lock_file:
+                # Shared lock for reading (blocks if exclusive lock held by writer)
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_SH)
+                try:
+                    self._load_weights()
+                finally:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        except Exception:
+            # Fallback to direct load if locking fails
+            self._load_weights()
 
     def forward(self, query_emb: np.ndarray, doc_emb: np.ndarray, z: np.ndarray) -> np.ndarray:
         """
@@ -355,9 +373,12 @@ class TinyScorer:
         """
         Save weights to disk atomically (write to .tmp, then rename).
 
+        Uses advisory file locking to coordinate with readers during hot reload.
+
         Args:
             checkpoint: If True, also save a versioned checkpoint
         """
+        import fcntl
         try:
             self._version += 1
             # np.savez automatically adds .npz extension, so use a base path
@@ -377,8 +398,18 @@ class TinyScorer:
             )
             # np.savez writes to tmp_base + ".npz"
             tmp_path = tmp_base + ".npz"
-            # Atomic rename to final path
-            os.replace(tmp_path, self._weights_path)
+
+            # Acquire exclusive lock on target before atomic rename
+            # This blocks any readers currently holding shared locks
+            lock_path = self._weights_path + ".lock"
+            os.makedirs(os.path.dirname(lock_path) or ".", exist_ok=True)
+            with open(lock_path, "w") as lock_file:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                try:
+                    # Atomic rename to final path
+                    os.replace(tmp_path, self._weights_path)
+                finally:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
             # Save versioned checkpoint
             if checkpoint or self._version % 100 == 0:
