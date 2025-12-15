@@ -2617,6 +2617,7 @@ def index_single_file(
     skip_unchanged: bool = True,
     pseudo_mode: str = "full",
     trust_cache: bool | None = None,
+    repo_name_for_cache: str | None = None,
 ) -> bool:
     """Index a single file path. Returns True if indexed, False if skipped.
 
@@ -2653,8 +2654,8 @@ def index_single_file(
     fast_fs = _env_truthy(os.environ.get("INDEX_FS_FASTPATH"), False)
     if skip_unchanged and fast_fs and get_cached_file_meta is not None:
         try:
-            repo_name_for_cache = _detect_repo_name_from_path(file_path)
-            meta = get_cached_file_meta(str(file_path), repo_name_for_cache) or {}
+            repo_for_cache = repo_name_for_cache or _detect_repo_name_from_path(file_path)
+            meta = get_cached_file_meta(str(file_path), repo_for_cache) or {}
             size = meta.get("size")
             mtime = meta.get("mtime")
             if size is not None and mtime is not None:
@@ -2676,7 +2677,7 @@ def index_single_file(
     language = detect_language(file_path)
     file_hash = hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest()
 
-    repo_tag = _detect_repo_name_from_path(file_path)
+    repo_tag = repo_name_for_cache or _detect_repo_name_from_path(file_path)
 
     # Derive logical repo identity and repo-relative path for cross-worktree reuse.
     repo_id: str | None = None
@@ -2951,7 +2952,7 @@ def index_single_file(
         try:
             ws = os.environ.get("WATCH_ROOT") or os.environ.get("WORKSPACE_PATH") or "/work"
             if set_cached_file_hash:
-                file_repo_tag = _detect_repo_name_from_path(file_path)
+                file_repo_tag = repo_tag
                 set_cached_file_hash(str(file_path), file_hash, file_repo_tag)
         except Exception:
             pass
@@ -2976,9 +2977,23 @@ def index_repo(
     fast_fs = _env_truthy(os.environ.get("INDEX_FS_FASTPATH"), False)
     if skip_unchanged and not recreate and fast_fs and get_cached_file_meta is not None:
         try:
+            is_multi_repo = bool(is_multi_repo_mode and is_multi_repo_mode())
+            root_repo_for_cache = (
+                _detect_repo_name_from_path(root)
+                if (not is_multi_repo and _detect_repo_name_from_path)
+                else None
+            )
             all_unchanged = True
             for file_path in iter_files(root):
-                per_file_repo_for_cache = _detect_repo_name_from_path(file_path) if _detect_repo_name_from_path else None
+                per_file_repo_for_cache = (
+                    root_repo_for_cache
+                    if root_repo_for_cache is not None
+                    else (
+                        _detect_repo_name_from_path(file_path)
+                        if _detect_repo_name_from_path
+                        else None
+                    )
+                )
                 meta = get_cached_file_meta(str(file_path), per_file_repo_for_cache) or {}
                 size = meta.get("size")
                 mtime = meta.get("mtime")
@@ -3125,6 +3140,8 @@ def index_repo(
         print("[multi_repo] Skipping single collection setup - will create per-repo collections during indexing")
     # Repo tag for filtering: auto-detect from git or folder name
     repo_tag = _detect_repo_name_from_path(root)
+    # TODO: Long-term, in upload-server mode repo identity should come from workspace metadata
+    # (state.json/origin), but keep bindmount/git fallbacks for back-compat.
     workspace_root = os.environ.get("WATCH_ROOT") or os.environ.get("WORKSPACE_PATH") or "/work"
     touched_repos: set[str] = set()
     repo_roots: dict[str, str] = {}
@@ -3222,7 +3239,11 @@ def index_repo(
         # Optional fs-metadata fast-path: skip files whose size/mtime match cache
         if skip_unchanged and fast_fs and get_cached_file_meta is not None:
             try:
-                per_file_repo_for_cache = _detect_repo_name_from_path(file_path)
+                per_file_repo_for_cache = (
+                    _detect_repo_name_from_path(file_path)
+                    if use_per_repo_collections
+                    else repo_tag
+                )
                 meta = get_cached_file_meta(str(file_path), per_file_repo_for_cache) or {}
                 size = meta.get("size")
                 mtime = meta.get("mtime")
@@ -3249,11 +3270,13 @@ def index_repo(
         language = detect_language(file_path)
         file_hash = hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest()
 
-        per_file_repo = (
-            _detect_repo_name_from_path(file_path)
-            if _detect_repo_name_from_path
-            else repo_tag
-        )
+        per_file_repo = repo_tag
+        if use_per_repo_collections:
+            per_file_repo = (
+                _detect_repo_name_from_path(file_path)
+                if _detect_repo_name_from_path
+                else repo_tag
+            )
         if per_file_repo:
             touched_repos.add(per_file_repo)
             repo_roots.setdefault(
@@ -3571,7 +3594,11 @@ def index_repo(
                         for _p, _h in list(batch_file_hashes.items()):
                             try:
                                 if _p and _h:
-                                    file_repo_tag = _detect_repo_name_from_path(Path(_p))
+                                    file_repo_tag = (
+                                        _detect_repo_name_from_path(Path(_p))
+                                        if use_per_repo_collections
+                                        else repo_tag
+                                    )
                                     repos_touched_name = file_repo_tag or per_file_repo
                                     if repos_touched_name:
                                         touched_repos.add(repos_touched_name)
@@ -3593,7 +3620,13 @@ def index_repo(
             )
             try:
                 if update_indexing_status:
-                    per_file_repo = _detect_repo_name_from_path(file_path) if _detect_repo_name_from_path else repo_tag
+                    per_file_repo = repo_tag
+                    if use_per_repo_collections:
+                        per_file_repo = (
+                            _detect_repo_name_from_path(file_path)
+                            if _detect_repo_name_from_path
+                            else repo_tag
+                        )
                     if per_file_repo:
                         update_indexing_status(
                             workspace_path=str(file_path.parent),
@@ -3632,7 +3665,11 @@ def index_repo(
                 for _p, _h in list(batch_file_hashes.items()):
                     try:
                         if _p and _h:
-                            per_file_repo = _detect_repo_name_from_path(Path(_p))
+                            per_file_repo = (
+                                _detect_repo_name_from_path(Path(_p))
+                                if use_per_repo_collections
+                                else repo_tag
+                            )
                             if per_file_repo:
                                 set_cached_file_hash(_p, _h, per_file_repo)
                     except Exception:
