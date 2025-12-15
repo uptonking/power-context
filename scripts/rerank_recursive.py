@@ -700,12 +700,16 @@ class RecursiveReranker:
             # Fallback for any that failed - use sha256-derived seed for determinism
             if not new_embeddings:
                 import hashlib
+                # Determine target dimension: use cached embedding dim if available, else self.dim
+                fallback_dim = self.dim
+                if cached_results:
+                    fallback_dim = cached_results[0][1].shape[0]
                 for text in texts_to_encode:
                     # Derive deterministic seed from sha256 (process-stable)
                     text_hash = hashlib.sha256(text.encode("utf-8", errors="replace")).digest()
                     seed = int.from_bytes(text_hash[:4], "big")
                     rng = np.random.RandomState(seed)
-                    vec = rng.randn(self.dim).astype(np.float32)
+                    vec = rng.randn(fallback_dim).astype(np.float32)
                     vec = vec / (np.linalg.norm(vec) + 1e-8)
                     _cache_embedding(text, vec)
                     new_embeddings.append(vec)

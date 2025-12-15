@@ -84,9 +84,15 @@ class CollectionLearner:
             blend_with_initial=0.0,
         )
 
+    @staticmethod
+    def _sanitize_collection(collection: str) -> str:
+        """Sanitize collection name to prevent path traversal."""
+        return "".join(c if c.isalnum() or c in "-_" else "_" for c in collection)
+
     def _load_checkpoint(self) -> float:
         """Load last processed timestamp from checkpoint file."""
-        checkpoint_path = Path(TinyScorer.WEIGHTS_DIR) / f"checkpoint_{self.collection}.json"
+        safe_name = self._sanitize_collection(self.collection)
+        checkpoint_path = Path(TinyScorer.WEIGHTS_DIR) / f"checkpoint_{safe_name}.json"
         try:
             if checkpoint_path.exists():
                 with open(checkpoint_path) as f:
@@ -97,7 +103,8 @@ class CollectionLearner:
 
     def _save_checkpoint(self, ts: float):
         """Save last processed timestamp to checkpoint file."""
-        checkpoint_path = Path(TinyScorer.WEIGHTS_DIR) / f"checkpoint_{self.collection}.json"
+        safe_name = self._sanitize_collection(self.collection)
+        checkpoint_path = Path(TinyScorer.WEIGHTS_DIR) / f"checkpoint_{safe_name}.json"
         try:
             checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
             with open(checkpoint_path, "w") as f:

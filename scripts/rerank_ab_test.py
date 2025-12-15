@@ -146,8 +146,11 @@ class ABTestManager:
         self.log_path = Path(log_path)
         self.experiment_id = experiment_id or datetime.now().strftime("%Y%m%d_%H%M%S")
 
-        # Normalize weights
+        # Normalize weights (guard against zero/negative total)
         total_weight = sum(self.weights)
+        if total_weight <= 0:
+            total_weight = len(self.weights)  # Fallback to uniform
+            self.weights = [1.0] * len(self.variants)
         self.cumulative_weights = []
         cumsum = 0.0
         for w in self.weights:
