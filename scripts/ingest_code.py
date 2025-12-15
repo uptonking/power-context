@@ -43,12 +43,16 @@ try:
 except ImportError:
     _EMBEDDER_FACTORY = False
 
-# Import TextEmbedding for type hints and fallback; use TYPE_CHECKING for cleaner type hints
+# Import TextEmbedding for type hints and backward compatibility with tests
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from fastembed import TextEmbedding
-elif not _EMBEDDER_FACTORY:
+
+# Always try to import TextEmbedding for backward compatibility with tests
+try:
     from fastembed import TextEmbedding
+except ImportError:
+    TextEmbedding = None  # type: ignore
 
 
 from datetime import datetime

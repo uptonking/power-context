@@ -15,12 +15,22 @@ if str(_ROOT_DIR) not in sys.path:
 from qdrant_client import QdrantClient, models
 
 # Use embedder factory for Qwen3 support; fallback to direct fastembed
-from fastembed import TextEmbedding  # Always import for type hints
+from typing import TYPE_CHECKING, Any
+
 try:
     from scripts.embedder import get_embedding_model as _get_embedding_model
     _EMBEDDER_FACTORY = True
 except ImportError:
     _EMBEDDER_FACTORY = False
+
+# Always try to import TextEmbedding for backward compatibility with tests
+try:
+    from fastembed import TextEmbedding
+except ImportError:
+    TextEmbedding = None  # type: ignore
+
+# Type alias for embedding model (TextEmbedding or compatible)
+EmbeddingModel = Any if TextEmbedding is None else TextEmbedding
 import re
 import json
 import math
@@ -222,7 +232,7 @@ def _legacy_vector_search(
 
 
 def _embed_queries_cached(
-    model: TextEmbedding, queries: List[str]
+    model: Any, queries: List[str]
 ) -> List[List[float]]:
     """Cache dense query embeddings to avoid repeated compute across expansions/retries.
     Optimized: batch-embeds all missing queries in one model call (2-5x faster).
@@ -856,7 +866,7 @@ def expand_queries_enhanced(
     language: str | None = None,
     max_extra: int = 2,
     client: QdrantClient | None = None,
-    model: TextEmbedding | None = None,
+    model: Any = None,
     collection: str | None = None
 ) -> List[str]:
     """
@@ -867,7 +877,7 @@ def expand_queries_enhanced(
         language: Optional programming language hint
         max_extra: Maximum number of additional expansions per query
         client: QdrantClient instance for semantic expansion
-        model: TextEmbedding instance for semantic analysis
+        model: Embedding model instance for semantic analysis
         collection: Collection name for semantic expansion
 
     Returns:
@@ -1540,7 +1550,7 @@ def dense_query(
 
 
 # In-process API: run hybrid search and return structured items list
-# Optional: pass an existing TextEmbedding instance via model to reuse cache
+# Optional: pass an existing embedding model instance via model to reuse cache
 # Optional: pass mode to adjust implementation/docs weighting (code_first/balanced/docs_first)
 
 def run_hybrid_search(
@@ -1558,7 +1568,7 @@ def run_hybrid_search(
     path_glob: str | list[str] | None = None,
     not_glob: str | list[str] | None = None,
     expand: bool = True,
-    model: TextEmbedding | None = None,
+    model: Any = None,
     collection: str | None = None,
     mode: str | None = None,
     repo: str | list[str] | None = None,  # Filter by repo name(s); "*" to disable auto-filter
