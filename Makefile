@@ -206,9 +206,10 @@ reset-dev-dual: ## bring up BOTH legacy SSE and Streamable HTTP MCPs (dual-compa
 	docker compose build --no-cache indexer mcp mcp_indexer mcp_http mcp_indexer_http watcher llamacpp upload_service
 	docker compose up -d qdrant
 	./scripts/wait-for-qdrant.sh
-	docker compose run --rm init_payload || true
 	$(MAKE) tokenizer
+	# Index first (creates collection), then init_payload (creates indexes on existing collection)
 	docker compose run --rm -e INDEX_MICRO_CHUNKS -e MAX_MICRO_CHUNKS_PER_FILE -e TOKENIZER_PATH -e TOKENIZER_URL indexer --root /work --recreate
+	docker compose run --rm init_payload || true
 	$(MAKE) llama-model
 	docker compose up -d mcp mcp_indexer mcp_http mcp_indexer_http watcher llamacpp upload_service
 	docker compose up -d watcher

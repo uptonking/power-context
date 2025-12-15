@@ -46,7 +46,7 @@ if 'get_collection_name' in globals() and get_collection_name:
     try:
         resolved = get_collection_name(None)
         if resolved:
-            placeholders = {"", "default-collection", "my-collection", "codebase"}
+            placeholders = {"", "codebase"}
             if COLLECTION in placeholders:
                 COLLECTION = resolved
     except Exception:
@@ -60,17 +60,36 @@ except Exception:
 
 cli = QdrantClient(url=QDRANT_URL, timeout=qdrant_timeout)
 
-# Create keyword indexes for metadata fields
-cli.create_payload_index(
-    collection_name=COLLECTION,
-    field_name="metadata.language",
-    field_schema=models.PayloadSchemaType.KEYWORD,
-)
-cli.create_payload_index(
-    collection_name=COLLECTION,
-    field_name="metadata.path_prefix",
-    field_schema=models.PayloadSchemaType.KEYWORD,
-)
+# Check if collection exists first
+try:
+    cli.get_collection(COLLECTION)
+except Exception as e:
+    if "doesn't exist" in str(e) or "Not found" in str(e):
+        print(f"Collection '{COLLECTION}' doesn't exist yet - skipping index creation")
+        print("Indexes will be created when the collection is indexed")
+        exit(0)
+    raise
+
+# Create keyword indexes for metadata fields (idempotent - safe to call if already exists)
+try:
+    cli.create_payload_index(
+        collection_name=COLLECTION,
+        field_name="metadata.language",
+        field_schema=models.PayloadSchemaType.KEYWORD,
+    )
+except Exception as e:
+    if "already exists" not in str(e).lower():
+        print(f"Warning: Could not create language index: {e}")
+
+try:
+    cli.create_payload_index(
+        collection_name=COLLECTION,
+        field_name="metadata.path_prefix",
+        field_schema=models.PayloadSchemaType.KEYWORD,
+    )
+except Exception as e:
+    if "already exists" not in str(e).lower():
+        print(f"Warning: Could not create path_prefix index: {e}")
 
 # Log activity using cleaned workspace_state function
 try:

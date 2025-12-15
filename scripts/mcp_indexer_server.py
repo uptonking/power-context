@@ -2378,12 +2378,13 @@ async def repo_search(
                 rq = queries[0] if queries else ""
                 cand_objs = list(json_lines[: int(rerank_top_n)])
 
-                # Run learning-enabled reranking
+                # Run learning-enabled reranking (collection-aware for weight isolation)
                 reranked = rerank_with_learning(
                     query=rq,
                     candidates=cand_objs,
                     limit=int(rerank_return_m),
                     n_iterations=int(os.environ.get("RERANK_LEARNING_ITERS", "3")),
+                    collection=collection or "default",
                 )
 
                 if reranked:

@@ -51,14 +51,16 @@ class RefinementState:
 
 
 # Global embedding cache for efficiency
-_EMBEDDING_CACHE: Dict[int, np.ndarray] = {}
+# Use (hash, text) tuple as key to avoid hash collisions
+_EMBEDDING_CACHE: Dict[str, np.ndarray] = {}
 _EMBEDDING_CACHE_MAX_SIZE = 10000
 _EMBEDDING_CACHE_LOCK = threading.Lock()
 
 
-def _cache_key(text: str) -> int:
-    """Generate cache key from text."""
-    return hash(text)
+def _cache_key(text: str) -> str:
+    """Generate deterministic cache key from text (process-stable, collision-resistant)."""
+    import hashlib
+    return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
 
 
 def _get_cached_embedding(text: str) -> Optional[np.ndarray]:
@@ -85,17 +87,40 @@ class TinyScorer:
     Tiny 2-layer MLP for scoring query-document pairs.
 
     Inspired by TRM: minimal parameters, maximum iterations.
-    This is a fallback when ONNX cross-encoder isn't available.
-    Supports online learning from ONNX teacher.
+    Production-ready with:
+    - Collection-aware weights with atomic loading
+    - Checkpoint versioning (keep last N versions)
+    - Training metrics (loss, sample count, convergence)
+    - Learning rate decay
+    - Hot reload from background worker updates
     """
+
+    # Class-level configuration
+    WEIGHTS_DIR = os.environ.get("RERANKER_WEIGHTS_DIR", "/tmp/rerank_weights")
+    WEIGHTS_RELOAD_INTERVAL = float(os.environ.get("RERANKER_WEIGHTS_RELOAD_INTERVAL", "60"))
+    MAX_CHECKPOINTS = int(os.environ.get("RERANKER_MAX_CHECKPOINTS", "5"))
+    LR_DECAY_STEPS = int(os.environ.get("RERANKER_LR_DECAY_STEPS", "1000"))
+    LR_DECAY_RATE = float(os.environ.get("RERANKER_LR_DECAY_RATE", "0.95"))
+    MIN_LR = float(os.environ.get("RERANKER_MIN_LR", "0.0001"))
 
     def __init__(self, dim: int = 256, hidden_dim: int = 512, lr: float = 0.001):
         self.dim = dim
         self.hidden_dim = hidden_dim
+        self.base_lr = lr
         self.lr = lr
+        self._collection = "default"
+        self._weights_path = self._get_weights_path("default")
+        self._weights_mtime = 0.0
+        self._last_reload_check = 0.0
+
+        # Training metrics
+        self._update_count = 0
+        self._total_samples = 0
+        self._cumulative_loss = 0.0
+        self._recent_losses: List[float] = []  # Rolling window for convergence detection
+        self._version = 0
 
         # Try to load saved weights, otherwise init random
-        self._weights_path = os.environ.get("RERANKER_WEIGHTS_PATH", "/tmp/tiny_scorer_weights.npz")
         if os.path.exists(self._weights_path):
             try:
                 self._load_weights()
@@ -103,20 +128,85 @@ class TinyScorer:
             except Exception:
                 pass
 
-        # Initialize with He initialization
-        np.random.seed(42)
-        scale = np.sqrt(2.0 / (dim * 3))
-        self.W1 = np.random.randn(dim * 3, hidden_dim).astype(np.float32) * scale
-        self.b1 = np.zeros(hidden_dim, dtype=np.float32)
-        self.W2 = np.random.randn(hidden_dim, 1).astype(np.float32) * np.sqrt(2.0 / hidden_dim)
+        self._init_random_weights()
+
+    def _init_random_weights(self):
+        """Initialize weights randomly using He initialization (local RNG, deterministic)."""
+        # Use local RandomState to avoid polluting global RNG
+        rng = np.random.RandomState(42)
+        scale = np.sqrt(2.0 / (self.dim * 3))
+        self.W1 = rng.randn(self.dim * 3, self.hidden_dim).astype(np.float32) * scale
+        self.b1 = np.zeros(self.hidden_dim, dtype=np.float32)
+        self.W2 = rng.randn(self.hidden_dim, 1).astype(np.float32) * np.sqrt(2.0 / self.hidden_dim)
         self.b2 = np.zeros(1, dtype=np.float32)
 
-        # For online learning
-        self._update_count = 0
+        # Momentum for SGD
         self._momentum_W1 = np.zeros_like(self.W1)
         self._momentum_b1 = np.zeros_like(self.b1)
         self._momentum_W2 = np.zeros_like(self.W2)
         self._momentum_b2 = np.zeros_like(self.b2)
+
+    def _update_learning_rate(self):
+        """Decay learning rate based on update count."""
+        if self._update_count > 0 and self._update_count % self.LR_DECAY_STEPS == 0:
+            self.lr = max(self.MIN_LR, self.lr * self.LR_DECAY_RATE)
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Get current training metrics."""
+        avg_loss = self._cumulative_loss / max(1, self._update_count)
+        recent_avg = np.mean(self._recent_losses) if self._recent_losses else 0.0
+        return {
+            "collection": self._collection,
+            "version": self._version,
+            "update_count": self._update_count,
+            "total_samples": self._total_samples,
+            "cumulative_loss": self._cumulative_loss,
+            "avg_loss": avg_loss,
+            "recent_avg_loss": float(recent_avg),
+            "learning_rate": self.lr,
+            "converged": self._is_converged(),
+        }
+
+    def _is_converged(self, window: int = 100, threshold: float = 0.01) -> bool:
+        """Check if training has converged (loss not improving)."""
+        if len(self._recent_losses) < window:
+            return False
+        recent = self._recent_losses[-window:]
+        first_half = np.mean(recent[:window // 2])
+        second_half = np.mean(recent[window // 2:])
+        # Converged if improvement is less than threshold
+        return abs(first_half - second_half) < threshold * first_half
+
+    def _get_weights_path(self, collection: str) -> str:
+        """Get weights file path for a collection."""
+        os.makedirs(self.WEIGHTS_DIR, exist_ok=True)
+        safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in collection)
+        return os.path.join(self.WEIGHTS_DIR, f"weights_{safe_name}.npz")
+
+    def set_collection(self, collection: str):
+        """Set collection and load corresponding weights."""
+        self._collection = collection
+        self._weights_path = self._get_weights_path(collection)
+        if os.path.exists(self._weights_path):
+            try:
+                self._load_weights()
+            except Exception:
+                pass
+
+    def maybe_reload_weights(self):
+        """Check if weights file changed and reload if needed (hot reload)."""
+        now = time.time()
+        if now - self._last_reload_check < self.WEIGHTS_RELOAD_INTERVAL:
+            return
+        self._last_reload_check = now
+
+        try:
+            if os.path.exists(self._weights_path):
+                mtime = os.path.getmtime(self._weights_path)
+                if mtime > self._weights_mtime:
+                    self._load_weights()
+        except Exception:
+            pass
 
     def forward(self, query_emb: np.ndarray, doc_emb: np.ndarray, z: np.ndarray) -> np.ndarray:
         """
@@ -130,6 +220,9 @@ class TinyScorer:
         Returns:
             scores: (n_docs,) - relevance scores
         """
+        # Check for hot-reloaded weights
+        self.maybe_reload_weights()
+
         n_docs = doc_emb.shape[0]
         # Broadcast query and z across docs
         q_broadcast = np.tile(query_emb, (n_docs, 1))  # (n_docs, dim)
@@ -184,17 +277,20 @@ class TinyScorer:
         z: np.ndarray,
         teacher_scores: np.ndarray,
         margin: float = 0.5,
-    ):
+    ) -> float:
         """
         Online learning: update weights to match ONNX teacher ranking.
 
         Uses pairwise margin ranking loss:
         L = max(0, margin - (s_pos - s_neg))
         where s_pos > s_neg in teacher ranking.
+
+        Returns:
+            Loss value (0.0 if no update needed)
         """
         n_docs = doc_embs.shape[0]
         if n_docs < 2:
-            return
+            return 0.0
 
         # Build input matrix
         q_broadcast = np.tile(query_emb, (n_docs, 1))
@@ -227,6 +323,13 @@ class TinyScorer:
                 dscores[pos_idx] -= 1.0
                 dscores[neg_idx] += 1.0
 
+        # Track metrics
+        self._total_samples += n_docs
+        self._cumulative_loss += total_loss
+        self._recent_losses.append(total_loss)
+        if len(self._recent_losses) > 200:  # Keep last 200 for convergence check
+            self._recent_losses = self._recent_losses[-200:]
+
         if total_loss > 0:
             # Backward pass
             grads = self.backward(dscores, cache)
@@ -244,34 +347,122 @@ class TinyScorer:
             self.b2 += self._momentum_b2
 
             self._update_count += 1
+            self._update_learning_rate()
 
-            # Save weights periodically
-            if self._update_count % 10 == 0:
-                self._save_weights()
+        return total_loss
 
-    def _save_weights(self):
-        """Save weights to disk."""
+    def _save_weights(self, checkpoint: bool = False):
+        """
+        Save weights to disk atomically (write to .tmp, then rename).
+
+        Args:
+            checkpoint: If True, also save a versioned checkpoint
+        """
         try:
+            self._version += 1
+            # np.savez automatically adds .npz extension, so use a base path
+            # that when .npz is added becomes our tmp file
+            tmp_base = self._weights_path.replace(".npz", ".tmp")
             np.savez(
-                self._weights_path,
+                tmp_base,
                 W1=self.W1, b1=self.b1, W2=self.W2, b2=self.b2,
+                momentum_W1=self._momentum_W1, momentum_b1=self._momentum_b1,
+                momentum_W2=self._momentum_W2, momentum_b2=self._momentum_b2,
                 update_count=self._update_count,
+                total_samples=self._total_samples,
+                cumulative_loss=self._cumulative_loss,
+                learning_rate=self.lr,
+                version=self._version,
+                collection=self._collection,
             )
+            # np.savez writes to tmp_base + ".npz"
+            tmp_path = tmp_base + ".npz"
+            # Atomic rename to final path
+            os.replace(tmp_path, self._weights_path)
+
+            # Save versioned checkpoint
+            if checkpoint or self._version % 100 == 0:
+                self._save_checkpoint()
+
+        except Exception:
+            pass
+
+    def _save_checkpoint(self):
+        """Save a versioned checkpoint and prune old ones."""
+        try:
+            checkpoint_path = self._weights_path.replace(".npz", f"_v{self._version}.npz")
+            # Copy current weights to checkpoint
+            import shutil
+            shutil.copy2(self._weights_path, checkpoint_path)
+
+            # Prune old checkpoints (keep last MAX_CHECKPOINTS)
+            self._prune_old_checkpoints()
+        except Exception:
+            pass
+
+    def _prune_old_checkpoints(self):
+        """Remove old checkpoints keeping only the most recent MAX_CHECKPOINTS."""
+        try:
+            import glob
+            pattern = self._weights_path.replace(".npz", "_v*.npz")
+            checkpoints = sorted(glob.glob(pattern))
+            if len(checkpoints) > self.MAX_CHECKPOINTS:
+                for old_cp in checkpoints[:-self.MAX_CHECKPOINTS]:
+                    try:
+                        os.remove(old_cp)
+                    except Exception:
+                        pass
         except Exception:
             pass
 
     def _load_weights(self):
         """Load weights from disk."""
-        data = np.load(self._weights_path)
+        data = np.load(self._weights_path, allow_pickle=True)
+
+        # Helper to safely get from NpzFile (doesn't have .get())
+        def _get(key: str, default):
+            return data[key] if key in data.files else default
+
         self.W1 = data["W1"]
         self.b1 = data["b1"]
         self.W2 = data["W2"]
         self.b2 = data["b2"]
-        self._update_count = int(data.get("update_count", 0))
-        self._momentum_W1 = np.zeros_like(self.W1)
-        self._momentum_b1 = np.zeros_like(self.b1)
-        self._momentum_W2 = np.zeros_like(self.W2)
-        self._momentum_b2 = np.zeros_like(self.b2)
+        self._update_count = int(_get("update_count", 0))
+        self._total_samples = int(_get("total_samples", 0))
+        self._cumulative_loss = float(_get("cumulative_loss", 0.0))
+        self._version = int(_get("version", 0))
+
+        # Restore learning rate if saved
+        if "learning_rate" in data.files:
+            self.lr = float(data["learning_rate"])
+
+        # Restore momentum if saved
+        if "momentum_W1" in data.files:
+            self._momentum_W1 = data["momentum_W1"]
+            self._momentum_b1 = data["momentum_b1"]
+            self._momentum_W2 = data["momentum_W2"]
+            self._momentum_b2 = data["momentum_b2"]
+        else:
+            self._momentum_W1 = np.zeros_like(self.W1)
+            self._momentum_b1 = np.zeros_like(self.b1)
+            self._momentum_W2 = np.zeros_like(self.W2)
+            self._momentum_b2 = np.zeros_like(self.b2)
+
+        self._weights_mtime = os.path.getmtime(self._weights_path)
+        data.close()
+
+    def rollback_to_checkpoint(self, version: int) -> bool:
+        """Rollback to a specific checkpoint version."""
+        try:
+            checkpoint_path = self._weights_path.replace(".npz", f"_v{version}.npz")
+            if os.path.exists(checkpoint_path):
+                import shutil
+                shutil.copy2(checkpoint_path, self._weights_path)
+                self._load_weights()
+                return True
+        except Exception:
+            pass
+        return False
 
 
 class LatentRefiner:
@@ -280,15 +471,19 @@ class LatentRefiner:
 
     From TRM paper: z encodes "what we've learned about the query so far"
     and gets updated based on the current answer (scores).
+
+    Note: This is currently untrained (random weights). Improvements rely
+    on TinyScorer learning. Future work: save/load refiner weights.
     """
 
     def __init__(self, dim: int = 256, hidden_dim: int = 256):
         self.dim = dim
-        np.random.seed(43)
+        # Use local RandomState to avoid polluting global RNG
+        rng = np.random.RandomState(43)
         # Refinement network: [z, query, top_doc_summary] -> z'
-        self.W1 = np.random.randn(dim * 3, hidden_dim).astype(np.float32) * 0.01
+        self.W1 = rng.randn(dim * 3, hidden_dim).astype(np.float32) * 0.01
         self.b1 = np.zeros(hidden_dim, dtype=np.float32)
-        self.W2 = np.random.randn(hidden_dim, dim).astype(np.float32) * 0.01
+        self.W2 = rng.randn(hidden_dim, dim).astype(np.float32) * 0.01
         self.b2 = np.zeros(dim, dtype=np.float32)
 
     def refine(
@@ -645,18 +840,24 @@ def rerank_recursive_inprocess(
     return reranked[:limit]
 
 
-# Global learning reranker (persists across calls for online learning)
-_LEARNING_RERANKER: Optional["RecursiveReranker"] = None
-_LEARNING_RERANKER_LOCK = threading.Lock()
+# Per-collection learning rerankers (isolated weights per collection)
+_LEARNING_RERANKERS: Dict[str, "RecursiveReranker"] = {}
+_LEARNING_RERANKERS_LOCK = threading.Lock()
 
 
-def _get_learning_reranker(n_iterations: int = 3, dim: int = 256) -> "RecursiveReranker":
-    """Get or create the global learning reranker."""
-    global _LEARNING_RERANKER
-    with _LEARNING_RERANKER_LOCK:
-        if _LEARNING_RERANKER is None:
-            _LEARNING_RERANKER = RecursiveReranker(n_iterations=n_iterations, dim=dim)
-        return _LEARNING_RERANKER
+def _get_learning_reranker(
+    n_iterations: int = 3,
+    dim: int = 256,
+    collection: str = "default",
+) -> "RecursiveReranker":
+    """Get or create a learning reranker for a specific collection."""
+    with _LEARNING_RERANKERS_LOCK:
+        if collection not in _LEARNING_RERANKERS:
+            reranker = RecursiveReranker(n_iterations=n_iterations, dim=dim)
+            # Set collection-specific weights path for the scorer
+            reranker.scorer.set_collection(collection)
+            _LEARNING_RERANKERS[collection] = reranker
+        return _LEARNING_RERANKERS[collection]
 
 
 def rerank_with_learning(
@@ -665,27 +866,30 @@ def rerank_with_learning(
     limit: int = 12,
     n_iterations: int = 3,
     learn_from_onnx: bool = True,
+    collection: str = "default",
 ) -> List[Dict[str, Any]]:
     """
     Learning-enabled reranking for MCP server integration.
 
-    Uses a persistent reranker that learns from ONNX teacher signal
-    during inference, improving over time.
+    Uses a persistent reranker with weights loaded per-collection.
+    Training events are logged for background processing rather than
+    inline learning (keeps hot path fast and deterministic).
 
     Args:
         query: Search query
         candidates: List of candidate documents with scores
         limit: Maximum results to return
         n_iterations: Number of refinement iterations
-        learn_from_onnx: Whether to learn from ONNX scores (default True)
+        learn_from_onnx: Whether to log events for learning (default True)
+        collection: Collection name for weight isolation
 
     Returns:
         Reranked candidates with scores
     """
-    reranker = _get_learning_reranker(n_iterations=n_iterations)
+    reranker = _get_learning_reranker(n_iterations=n_iterations, collection=collection)
     initial_scores = [c.get("score", 0) for c in candidates]
 
-    # Get ONNX teacher scores if learning enabled
+    # Get ONNX teacher scores if learning enabled (for event logging)
     teacher_scores = None
     if learn_from_onnx and candidates:
         try:
@@ -716,37 +920,21 @@ def rerank_with_learning(
             except Exception:
                 teacher_scores = None
 
-    # Learn from teacher before inference
+    # Log training event for background processing (instead of inline learning)
     if teacher_scores is not None and len(teacher_scores) == len(candidates):
         try:
-            import numpy as np
-
-            # Encode query and docs
-            doc_texts = []
-            for c in candidates:
-                parts = []
-                if c.get("symbol"):
-                    parts.append(str(c["symbol"]))
-                if c.get("path"):
-                    parts.append(str(c["path"]))
-                code = c.get("code") or c.get("snippet") or ""
-                if code:
-                    parts.append(str(code)[:500])
-                doc_texts.append(" ".join(parts) if parts else "empty")
-
-            query_emb = reranker._encode([query])[0]
-            doc_embs = reranker._encode(doc_texts)
-            query_emb = reranker._project_to_dim(query_emb.reshape(1, -1))[0]
-            doc_embs = reranker._project_to_dim(doc_embs)
-
-            # Learn from teacher
-            teacher_arr = np.array(teacher_scores, dtype=np.float32)
-            z = query_emb.copy()
-            reranker.scorer.learn_from_teacher(query_emb, doc_embs, z, teacher_arr)
+            from scripts.rerank_events import log_training_event
+            log_training_event(
+                query=query,
+                candidates=candidates,
+                initial_scores=initial_scores,
+                teacher_scores=list(teacher_scores),
+                collection=collection,
+            )
         except Exception:
-            pass
+            pass  # Best effort - don't fail the request
 
-    # Now do inference
+    # Inference only (no inline learning)
     reranked = reranker.rerank(query, candidates, initial_scores)
     return reranked[:limit]
 
