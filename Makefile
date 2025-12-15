@@ -243,24 +243,24 @@ tokenizer: ## download tokenizer.json to models/tokenizer.json (override with TO
 dev-remote-up: ## start dev-remote stack with upload service
 	@echo "Starting development remote upload system..."
 	@mkdir -p dev-workspace/.codebase
-	docker compose -f docker-compose.dev-remote.yml up -d --build
+	docker compose -f docker-compose.yml up -d --build
 
 dev-remote-down: ## stop dev-remote stack
 	@echo "Stopping development remote upload system..."
-	docker compose -f docker-compose.dev-remote.yml down
+	docker compose -f docker-compose.yml down
 
 dev-remote-logs: ## follow logs for dev-remote stack
-	docker compose -f docker-compose.dev-remote.yml logs -f --tail=100
+	docker compose -f docker-compose.yml logs -f --tail=100
 
 dev-remote-restart: ## restart dev-remote stack (rebuild)
-	docker compose -f docker-compose.dev-remote.yml down && docker compose -f docker-compose.dev-remote.yml up -d --build
+	docker compose -f docker-compose.yml down && docker compose -f docker-compose.yml up -d --build
 
 dev-remote-bootstrap: env dev-remote-up ## bootstrap dev-remote: up -> wait -> init -> index -> warm
 	@echo "Bootstrapping development remote upload system..."
 	./scripts/wait-for-qdrant.sh
-	docker compose -f docker-compose.dev-remote.yml run --rm init_payload || true
+	docker compose -f docker-compose.yml run --rm init_payload || true
 	$(MAKE) tokenizer
-	docker compose -f docker-compose.dev-remote.yml run --rm indexer --root /work --recreate
+	docker compose -f docker-compose.yml run --rm indexer --root /work --recreate
 	$(MAKE) warm || true
 	$(MAKE) health
 
@@ -273,11 +273,11 @@ dev-remote-test: ## test remote upload workflow
 
 dev-remote-client: ## start remote upload client for testing
 	@echo "Starting remote upload client..."
-	docker compose -f docker-compose.dev-remote.yml --profile client up -d remote_upload_client
+	docker compose -f docker-compose.yml --profile client up -d remote_upload_client
 
 dev-remote-clean: ## clean up dev-remote volumes and containers
 	@echo "Cleaning up development remote upload system..."
-	docker compose -f docker-compose.dev-remote.yml down -v
+	docker compose -f docker-compose.yml down -v
 	docker volume rm context-engine_shared_workspace context-engine_shared_codebase context-engine_upload_temp context-engine_qdrant_storage_dev_remote 2>/dev/null || true
 	rm -rf dev-workspace
 
