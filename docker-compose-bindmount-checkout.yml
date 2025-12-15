@@ -196,6 +196,12 @@ services:
     environment:
       - QDRANT_URL=${QDRANT_URL}
       - COLLECTION_NAME=${COLLECTION_NAME:-codebase}
+      - HF_HOME=/tmp/huggingface
+      - HF_HUB_CACHE=/tmp/huggingface/hub
+      - HUGGINGFACE_HUB_CACHE=/tmp/huggingface/hub
+      - TRANSFORMERS_CACHE=/tmp/huggingface/transformers
+      - FASTEMBED_CACHE_PATH=/tmp/huggingface/fastembed
+      - HF_HUB_DISABLE_XET=1
       - EMBEDDING_MODEL=${EMBEDDING_MODEL}
       - QWEN3_EMBEDDING_ENABLED=${QWEN3_EMBEDDING_ENABLED:-0}
       - QWEN3_QUERY_INSTRUCTION=${QWEN3_QUERY_INSTRUCTION:-1}
@@ -205,7 +211,7 @@ services:
       - ${HOST_INDEX_PATH:-.}:/work:ro
       - ${HOST_INDEX_PATH:-.}/.codebase:/work/.codebase:rw
 
-    entrypoint: ["python", "/app/scripts/ingest_code.py"]
+    entrypoint: ["sh", "-c", "mkdir -p /tmp/huggingface/hub /tmp/huggingface/transformers /tmp/huggingface/fastembed && exec python /app/scripts/ingest_code.py"]
 
   watcher:
     build:
@@ -218,6 +224,12 @@ services:
     environment:
       - QDRANT_URL=${QDRANT_URL}
       - COLLECTION_NAME=${COLLECTION_NAME:-codebase}
+      - HF_HOME=/tmp/huggingface
+      - HF_HUB_CACHE=/tmp/huggingface/hub
+      - HUGGINGFACE_HUB_CACHE=/tmp/huggingface/hub
+      - TRANSFORMERS_CACHE=/tmp/huggingface/transformers
+      - FASTEMBED_CACHE_PATH=/tmp/huggingface/fastembed
+      - HF_HUB_DISABLE_XET=1
       - EMBEDDING_MODEL=${EMBEDDING_MODEL}
       - QWEN3_EMBEDDING_ENABLED=${QWEN3_EMBEDDING_ENABLED:-0}
       - QWEN3_QUERY_INSTRUCTION=${QWEN3_QUERY_INSTRUCTION:-1}
@@ -233,7 +245,7 @@ services:
     volumes:
       - ${HOST_INDEX_PATH:-.}:/work:ro
       - ${HOST_INDEX_PATH:-.}/.codebase:/work/.codebase:rw
-    entrypoint: ["python", "/app/scripts/watch_index.py"]
+    entrypoint: ["sh", "-c", "mkdir -p /tmp/huggingface/hub /tmp/huggingface/transformers /tmp/huggingface/fastembed && exec python /app/scripts/watch_index.py"]
 
 
   upload_service:
