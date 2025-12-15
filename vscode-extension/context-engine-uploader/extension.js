@@ -2,34 +2,203 @@ const vscode = require('vscode');
 const { spawn, spawnSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
-const os = require('os');
 const { ensureAuthIfRequired, runAuthLoginFlow } = require('./auth_utils');
+const profiles = require('./profiles');
+const sidebar = require('./sidebar');
+const { createBridgeManager } = require('./mcp_bridge');
+const { createMcpConfigManager } = require('./mcp_config');
+const { createCtxConfigManager } = require('./ctx_config');
+const { createWorkspacePathUtils } = require('./workspace_paths');
+const { createLogsTerminalManager } = require('./logs_terminal');
+const { createPromptPlusManager } = require('./prompt_plus');
 let outputChannel;
 let watchProcess;
 let forceProcess;
 let extensionRoot;
 let statusBarItem;
 let promptStatusBarItem;
-let logsTerminal;
-let logTailActive = false;
+let logsTerminalManager;
 let statusMode = 'idle';
 let workspaceWatcher;
 let watchedTargetPath;
 let indexedWatchDisposables = [];
 let globalStoragePath;
 let pythonOverridePath;
-let httpBridgeProcess;
-let httpBridgePort;
-let httpBridgeWorkspace;
-let pendingBridgeConfigTimer;
+let bridgeManager;
+let mcpConfigManager;
+let ctxConfigManager;
+let workspacePathUtils;
+let promptPlusManager;
 const REQUIRED_PYTHON_MODULES = ['requests', 'urllib3', 'charset_normalizer'];
 const DEFAULT_CONTAINER_ROOT = '/work';
 // const CLAUDE_HOOK_COMMAND = '/home/coder/project/Context-Engine/ctx-hook-simple.sh';
+
+function getEffectiveConfig() {
+  try {
+    return profiles.getUploaderConfig();
+  } catch (_) {
+    return vscode.workspace.getConfiguration('contextEngineUploader');
+  }
+}
+
+function getResolvedTargetPathForSidebar() {
+  try {
+    const config = getEffectiveConfig();
+    const result = resolveTargetPathFromConfig(config);
+    let target = result && result.path ? result.path : undefined;
+    let source = (result && result.inferred) ? 'inferred' : 'settings';
+    if (!target && watchedTargetPath) {
+      target = watchedTargetPath;
+      source = 'runtime';
+    }
+    return { path: target, source };
+  } catch (_) {
+    return { path: watchedTargetPath, source: watchedTargetPath ? 'runtime' : undefined };
+  }
+}
+
 function activate(context) {
   outputChannel = vscode.window.createOutputChannel('Context Engine Upload');
   context.subscriptions.push(outputChannel);
   extensionRoot = context.extensionPath;
   globalStoragePath = context.globalStorageUri && context.globalStorageUri.fsPath ? context.globalStorageUri.fsPath : undefined;
+  try {
+    profiles.init({
+      vscode,
+      context,
+      log,
+      onProfileChanged: () => {
+        try { ensureTargetPathConfigured(); } catch (_) {}
+      },
+    });
+  } catch (error) {
+    log(`Profiles init failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  try {
+    workspacePathUtils = createWorkspacePathUtils({
+      vscode,
+      path,
+      fs,
+      log,
+      updateStatusBarTooltip,
+    });
+  } catch (error) {
+    workspacePathUtils = undefined;
+    log(`Workspace path utils init failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  try {
+    logsTerminalManager = createLogsTerminalManager({
+      vscode,
+      fs,
+      log,
+      getEffectiveConfig,
+      getWorkspaceFolderPath,
+    });
+  } catch (error) {
+    logsTerminalManager = undefined;
+    log(`Logs terminal manager init failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  try {
+    promptPlusManager = createPromptPlusManager({
+      vscode,
+      spawn,
+      path,
+      fs,
+      log,
+      extensionRoot,
+      getEffectiveConfig,
+      getTargetPath,
+      getWorkspaceFolderPath,
+      detectDefaultTargetPath,
+      resolveBridgeHttpUrl,
+      getPythonOverridePath: () => pythonOverridePath,
+      appendOutput: (text) => {
+        if (outputChannel) {
+          outputChannel.append(text);
+        }
+      },
+    });
+  } catch (error) {
+    promptPlusManager = undefined;
+    log(`Prompt+ manager init failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  try {
+    bridgeManager = createBridgeManager({
+      vscode,
+      spawn,
+      log,
+      getEffectiveConfig,
+      resolveBridgeWorkspacePath,
+      normalizeBridgeUrl,
+      normalizeWorkspaceForBridge,
+      resolveBridgeCliInvocation,
+      attachOutput,
+      terminateProcess,
+      scheduleMcpConfigRefreshAfterBridge,
+    });
+  } catch (error) {
+    bridgeManager = undefined;
+    log(`Bridge manager init failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  try {
+    ctxConfigManager = createCtxConfigManager({
+      vscode,
+      spawnSync,
+      log,
+      extensionRoot,
+      getEffectiveConfig,
+      resolveOptions,
+      ensurePythonDependencies,
+      buildChildEnv,
+      resolveBridgeHttpUrl,
+    });
+  } catch (error) {
+    ctxConfigManager = undefined;
+    log(`CTX config manager init failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  try {
+    mcpConfigManager = createMcpConfigManager({
+      vscode,
+      log,
+      extensionRoot,
+      getEffectiveConfig,
+      getWorkspaceFolderPath,
+      resolveBridgeWorkspacePath,
+      normalizeBridgeUrl,
+      normalizeWorkspaceForBridge,
+      resolveBridgeCliInvocation,
+      resolveBridgeHttpUrl,
+      requiresHttpBridge,
+      ensureHttpBridgeReadyForConfigs,
+      getBridgeIsRunning: () => (bridgeManager && typeof bridgeManager.isRunning === 'function' ? bridgeManager.isRunning() : false),
+      writeCtxConfig,
+    });
+  } catch (error) {
+    mcpConfigManager = undefined;
+    log(`MCP config manager init failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  try {
+    // Ensure manager resources are cleaned up when the extension deactivates.
+    const managerDisposable = {
+      dispose: () => {
+        try { if (mcpConfigManager && typeof mcpConfigManager.dispose === 'function') mcpConfigManager.dispose(); } catch (_) {}
+        try { if (ctxConfigManager && typeof ctxConfigManager.dispose === 'function') ctxConfigManager.dispose(); } catch (_) {}
+        try { if (bridgeManager && typeof bridgeManager.dispose === 'function') bridgeManager.dispose(); } catch (_) {}
+        try { if (logsTerminalManager && typeof logsTerminalManager.dispose === 'function') logsTerminalManager.dispose(); } catch (_) {}
+        try { if (promptPlusManager && typeof promptPlusManager.dispose === 'function') promptPlusManager.dispose(); } catch (_) {}
+      }
+    };
+    context.subscriptions.push(managerDisposable);
+  } catch (_) {
+    // ignore
+  }
   try {
     const venvPy = resolvePrivateVenvPython();
     if (venvPy) {
@@ -50,8 +219,39 @@ function activate(context) {
   context.subscriptions.push(promptStatusBarItem);
   promptStatusBarItem.show();
 
-  // Ensure an output channel is visible early for user feedback
-  if (outputChannel) { outputChannel.show(true); }
+
+  try {
+    const disposables = profiles.registerCommands({
+      resolveTargetPathFromConfig,
+      getWorkspaceFolderPath,
+      detectDefaultTargetPath,
+      normalizeWorkspaceForBridge,
+      runSequence,
+      writeMcpConfig,
+      fetch: (typeof fetch === 'function' ? fetch : undefined),
+    });
+    if (Array.isArray(disposables)) {
+      context.subscriptions.push(...disposables);
+    }
+  } catch (error) {
+    log(`Profiles command registration failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  try {
+    sidebar.register(context, {
+      profiles,
+      getEffectiveConfig,
+      getResolvedTargetPath: getResolvedTargetPathForSidebar,
+      getState: () => ({
+        statusMode,
+        httpBridgeProcess: bridgeManager ? bridgeManager.getState().process : undefined,
+        httpBridgePort: bridgeManager ? bridgeManager.getState().port : undefined,
+      }),
+    });
+  } catch (error) {
+    log(`Sidebar registration failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
   const startDisposable = vscode.commands.registerCommand('contextEngineUploader.start', () => {
     runSequence('auto').catch(error => log(`Start failed: ${error instanceof Error ? error.message : String(error)}`));
   });
@@ -64,18 +264,10 @@ function activate(context) {
   const indexDisposable = vscode.commands.registerCommand('contextEngineUploader.indexCodebase', () => {
     vscode.window.showInformationMessage('Context Engine indexing started.');
     if (outputChannel) { outputChannel.show(true); }
-    try {
-      const cfg = vscode.workspace.getConfiguration('contextEngineUploader');
-      if (cfg.get('autoTailUploadLogs', true)) {
-        openUploadServiceLogsTerminal();
-      }
-    } catch (e) {
-      log(`Auto-tail logs failed: ${e && e.message ? e.message : String(e)}`);
-    }
     runSequence('force').catch(error => log(`Index failed: ${error instanceof Error ? error.message : String(error)}`));
   });
   const uploadGitHistoryDisposable = vscode.commands.registerCommand('contextEngineUploader.uploadGitHistory', () => {
-    vscode.window.showInformationMessage('Context Engine git history upload (force sync) started.');
+    vscode.window.showInformationMessage('Context Engine git history upload (force sync bundle) started.');
     if (outputChannel) { outputChannel.show(true); }
     runSequence('force').catch(error => log(`Git history upload failed: ${error instanceof Error ? error.message : String(error)}`));
   });
@@ -86,7 +278,28 @@ function activate(context) {
     writeMcpConfig().catch(error => log(`MCP config write failed: ${error instanceof Error ? error.message : String(error)}`));
   });
   const showLogsDisposable = vscode.commands.registerCommand('contextEngineUploader.showUploadServiceLogs', () => {
-    try { openUploadServiceLogsTerminal(); } catch (e) { log(`Show logs failed: ${e && e.message ? e.message : String(e)}`); }
+    try {
+      if (outputChannel) {
+        outputChannel.show(true);
+      } else {
+        vscode.window.showErrorMessage('Context Engine Uploader: output channel is unavailable.');
+      }
+    } catch (e) {
+      log(`Show logs failed: ${e && e.message ? e.message : String(e)}`);
+      vscode.window.showErrorMessage('Context Engine Uploader: failed to show logs. See output for details.');
+    }
+  });
+  const tailDockerLogsDisposable = vscode.commands.registerCommand('contextEngineUploader.tailUploadServiceLogs', () => {
+    try {
+      if (logsTerminalManager && typeof logsTerminalManager.open === 'function') {
+        logsTerminalManager.open();
+      } else {
+        vscode.window.showErrorMessage('Context Engine Uploader: log tailing is unavailable (extension failed to initialize logs terminal manager). See output for details.');
+      }
+    } catch (e) {
+      log(`Tail docker logs failed: ${e && e.message ? e.message : String(e)}`);
+      vscode.window.showErrorMessage('Context Engine Uploader: failed to tail upload service logs. See output for details.');
+    }
   });
   const startBridgeDisposable = vscode.commands.registerCommand('contextEngineUploader.startMcpHttpBridge', () => {
     startHttpBridgeProcess().catch(error => {
@@ -100,16 +313,34 @@ function activate(context) {
     });
   });
   const promptEnhanceDisposable = vscode.commands.registerCommand('contextEngineUploader.promptEnhance', () => {
-    enhanceSelectionWithUnicorn().catch(error => {
+    try {
+      if (promptPlusManager && typeof promptPlusManager.enhanceSelectionWithUnicorn === 'function') {
+        promptPlusManager.enhanceSelectionWithUnicorn().catch(error => {
+          log(`Prompt+ failed: ${error instanceof Error ? error.message : String(error)}`);
+          vscode.window.showErrorMessage('Prompt+ failed. See Context Engine Upload output.');
+        });
+      } else {
+        vscode.window.showErrorMessage('Context Engine Uploader: Prompt+ is unavailable (extension failed to initialize Prompt+ manager). See output for details.');
+      }
+    } catch (error) {
       log(`Prompt+ failed: ${error instanceof Error ? error.message : String(error)}`);
       vscode.window.showErrorMessage('Prompt+ failed. See Context Engine Upload output.');
-    });
+    }
   });
   const authLoginDisposable = vscode.commands.registerCommand('contextEngineUploader.authLogin', () => {
-    runAuthLoginFlow(undefined, buildAuthDeps()).catch(error => {
-      log(`Auth login failed: ${error instanceof Error ? error.message : String(error)}`);
-      vscode.window.showErrorMessage('Context Engine Uploader: auth login failed. See output for details.');
-    });
+    try {
+      const cfg = getEffectiveConfig();
+      const endpoint = (cfg.get('endpoint') || '').trim();
+      runAuthLoginFlow(endpoint || undefined, buildAuthDeps()).catch(error => {
+        log(`Auth login failed: ${error instanceof Error ? error.message : String(error)}`);
+        vscode.window.showErrorMessage('Context Engine Uploader: auth login failed. See output for details.');
+      });
+    } catch (error) {
+      runAuthLoginFlow(undefined, buildAuthDeps()).catch(error2 => {
+        log(`Auth login failed: ${error2 instanceof Error ? error2.message : String(error2)}`);
+        vscode.window.showErrorMessage('Context Engine Uploader: auth login failed. See output for details.');
+      });
+    }
   });
   const configDisposable = vscode.workspace.onDidChangeConfiguration(event => {
     if (event.affectsConfiguration('contextEngineUploader') && watchProcess) {
@@ -148,10 +379,11 @@ function activate(context) {
     ensureTargetPathConfigured();
   });
   const terminalCloseDisposable = vscode.window.onDidCloseTerminal(term => {
-    if (term === logsTerminal) {
-      logsTerminal = undefined;
-      logTailActive = false;
-    }
+    try {
+      if (logsTerminalManager && typeof logsTerminalManager.handleDidCloseTerminal === 'function') {
+        logsTerminalManager.handleDidCloseTerminal(term);
+      }
+    } catch (_) {}
   });
   context.subscriptions.push(
     startDisposable,
@@ -160,6 +392,7 @@ function activate(context) {
     indexDisposable,
     uploadGitHistoryDisposable,
     showLogsDisposable,
+    tailDockerLogsDisposable,
     promptEnhanceDisposable,
     authLoginDisposable,
     startBridgeDisposable,
@@ -170,7 +403,7 @@ function activate(context) {
     workspaceDisposable,
     terminalCloseDisposable
   );
-  const config = vscode.workspace.getConfiguration('contextEngineUploader');
+  const config = getEffectiveConfig();
   ensureTargetPathConfigured();
   if (config.get('runOnStartup')) {
     runSequence('auto').catch(error => log(`Startup run failed: ${error instanceof Error ? error.message : String(error)}`));
@@ -204,6 +437,7 @@ function buildAuthDeps() {
     getWorkspaceFolderPath,
     attachOutput,
     log,
+    getEffectiveConfig,
     fetchGlobal: (typeof fetch === 'function' ? fetch : undefined),
   };
 }
@@ -249,7 +483,7 @@ async function runSequence(mode = 'auto') {
   startWatch(options);
 }
 function resolveOptions() {
-  const config = vscode.workspace.getConfiguration('contextEngineUploader');
+  const config = getEffectiveConfig();
   let pythonPath = (config.get('pythonPath') || 'python3').trim();
   if (pythonOverridePath && fs.existsSync(pythonOverridePath)) {
     pythonPath = pythonOverridePath;
@@ -323,138 +557,49 @@ function resolveOptions() {
   };
 }
 function resolveTargetPathFromConfig(config) {
-  let inspected;
-  try {
-    if (typeof config.inspect === 'function') {
-      inspected = config.inspect('targetPath');
-    }
-  } catch (error) {
-    inspected = undefined;
+  if (workspacePathUtils && typeof workspacePathUtils.resolveTargetPathFromConfig === 'function') {
+    return workspacePathUtils.resolveTargetPathFromConfig(config);
   }
-  let targetPath = (config.get('targetPath') || '').trim();
-  const metadata = inspected || {};
-  if (targetPath) {
-    return { path: targetPath, inspected: metadata };
-  }
-  const folderPath = getWorkspaceFolderPath();
-  if (!folderPath) {
-    return { path: undefined, inspected: metadata };
-  }
-  const autoTarget = detectDefaultTargetPath(folderPath);
-  return { path: autoTarget, inspected: metadata, inferred: true };
+  return { path: (config.get('targetPath') || '').trim(), inspected: {}, inferred: false };
 }
 
 function getTargetPath(config) {
-  const result = resolveTargetPathFromConfig(config);
-  const targetPath = result.path;
-  const inspected = result.inspected;
-  if (inspected && targetPath) {
-    let sourceLabel = 'default';
-    if (inspected.workspaceFolderValue !== undefined) {
-      sourceLabel = 'workspaceFolder';
-    } else if (inspected.workspaceValue !== undefined) {
-      sourceLabel = 'workspace';
-    } else if (inspected.globalValue !== undefined) {
-      sourceLabel = 'user';
-    }
-    log(`Target path resolved to ${targetPath} (source: ${sourceLabel} settings)`);
-    if (inspected.globalValue !== undefined && inspected.workspaceValue !== undefined && inspected.globalValue !== inspected.workspaceValue) {
-      log('Target path has different user and workspace values; using workspace value. Update workspace settings (e.g. .vscode/settings.json) to change it.');
-    }
+  if (workspacePathUtils && typeof workspacePathUtils.getTargetPath === 'function') {
+    return workspacePathUtils.getTargetPath(config);
   }
-  if (targetPath) {
-    // Resolve relative paths (like ".") against the workspace folder, not Node cwd
-    const folderPath = getWorkspaceFolderPath();
-    if (folderPath && !path.isAbsolute(targetPath)) {
-      targetPath = path.resolve(folderPath, targetPath);
-    }
-    updateStatusBarTooltip(targetPath);
-    return targetPath;
-  }
-  vscode.window.showErrorMessage('Context Engine Uploader: open a folder or set contextEngineUploader.targetPath.');
-  updateStatusBarTooltip();
   return undefined;
 }
 function saveTargetPath(config, targetPath) {
-  const hasWorkspace = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length;
-  const target = hasWorkspace ? vscode.ConfigurationTarget.Workspace : vscode.ConfigurationTarget.Global;
-  config.update('targetPath', targetPath, target).catch(error => {
-    log(`Target path save failed: ${error instanceof Error ? error.message : String(error)}`);
-  });
+  if (workspacePathUtils && typeof workspacePathUtils.saveTargetPath === 'function') {
+    return workspacePathUtils.saveTargetPath(config, targetPath);
+  }
 }
 function getWorkspaceFolderPath() {
-  const folders = vscode.workspace.workspaceFolders;
-  if (!folders || !folders.length) {
-    return undefined;
+  if (workspacePathUtils && typeof workspacePathUtils.getWorkspaceFolderPath === 'function') {
+    return workspacePathUtils.getWorkspaceFolderPath();
   }
-  return folders[0].uri.fsPath;
+  const folders = vscode.workspace.workspaceFolders;
+  return (folders && folders.length) ? folders[0].uri.fsPath : undefined;
 }
-function looksLikeRepoRoot(dirPath) {
+function scheduleMcpConfigRefreshAfterBridge(delayMs = 1500) {
   try {
-    const codebaseStatePath = path.join(dirPath, '.codebase', 'state.json');
-    const gitDir = path.join(dirPath, '.git');
-    if (fs.existsSync(codebaseStatePath) || fs.existsSync(gitDir)) {
-      return true;
+    if (mcpConfigManager && typeof mcpConfigManager.scheduleMcpConfigRefreshAfterBridge === 'function') {
+      return mcpConfigManager.scheduleMcpConfigRefreshAfterBridge(delayMs);
     }
   } catch (error) {
-    log(`Repo root detection failed for ${dirPath}: ${error instanceof Error ? error.message : String(error)}`);
+    log(`Context Engine Uploader: failed to schedule MCP config refresh: ${error instanceof Error ? error.message : String(error)}`);
   }
-  return false;
 }
 function detectDefaultTargetPath(workspaceFolderPath) {
-  try {
-    const resolved = path.resolve(workspaceFolderPath);
-    if (!fs.existsSync(resolved)) {
-      return workspaceFolderPath;
-    }
-    const rootLooksLikeRepo = looksLikeRepoRoot(resolved);
-    let entries;
-    try {
-      entries = fs.readdirSync(resolved);
-    } catch (error) {
-      log(`Auto targetPath discovery failed to read workspace folder: ${error instanceof Error ? error.message : String(error)}`);
-      return resolved;
-    }
-    const candidates = [];
-    for (const name of entries) {
-      const fullPath = path.join(resolved, name);
-      let stats;
-      try {
-        stats = fs.statSync(fullPath);
-      } catch (_) {
-        continue;
-      }
-      if (!stats.isDirectory()) {
-        continue;
-      }
-      if (looksLikeRepoRoot(fullPath)) {
-        candidates.push(path.resolve(fullPath));
-      }
-    }
-    if (candidates.length === 1) {
-      const detected = candidates[0];
-      log(`Target path auto-detected as ${detected} (under workspace folder).`);
-      return detected;
-    }
-    if (rootLooksLikeRepo) {
-      if (candidates.length > 1) {
-        log('Auto targetPath discovery found multiple candidate repos under workspace; using workspace folder instead.');
-      }
-      return resolved;
-    }
-    if (candidates.length > 1) {
-      log('Auto targetPath discovery found multiple candidate repos under workspace; using workspace folder instead.');
-    }
-    return resolved;
-  } catch (error) {
-    log(`Auto targetPath discovery failed: ${error instanceof Error ? error.message : String(error)}`);
-    return workspaceFolderPath;
+  if (workspacePathUtils && typeof workspacePathUtils.detectDefaultTargetPath === 'function') {
+    return workspacePathUtils.detectDefaultTargetPath(workspaceFolderPath);
   }
+  return workspaceFolderPath;
 }
 
 function resolveBridgeWorkspacePath() {
   try {
-    const settings = vscode.workspace.getConfiguration('contextEngineUploader');
+    const settings = getEffectiveConfig();
     const target = getTargetPath(settings);
     if (target) {
       return path.resolve(target);
@@ -475,86 +620,8 @@ function resolveBridgeWorkspacePath() {
   }
 }
 
-function scheduleMcpConfigRefreshAfterBridge(delayMs = 1500) {
-  try {
-    if (pendingBridgeConfigTimer) {
-      clearTimeout(pendingBridgeConfigTimer);
-      pendingBridgeConfigTimer = undefined;
-    }
-    // For bridge-http mode started by the extension, Windsurf needs the
-    // "context-engine" MCP server entry removed and then re-added once the
-    // HTTP bridge is ready. Best-effort removal happens immediately here;
-    // writeMcpConfig() below will re-write configs after the bridge comes up.
-    try {
-      const settings = vscode.workspace.getConfiguration('contextEngineUploader');
-      const windsurfEnabled = settings.get('mcpWindsurfEnabled', false);
-      const transportModeRaw = settings.get('mcpTransportMode') || 'sse-remote';
-      const serverModeRaw = settings.get('mcpServerMode') || 'bridge';
-      const transportMode = (typeof transportModeRaw === 'string' ? transportModeRaw.trim() : 'sse-remote') || 'sse-remote';
-      const serverMode = (typeof serverModeRaw === 'string' ? serverModeRaw.trim() : 'bridge') || 'bridge';
-      if (windsurfEnabled && serverMode === 'bridge' && transportMode === 'http') {
-        removeContextEngineFromWindsurfConfig().catch(error => {
-          log(`Context Engine Uploader: failed to remove context-engine from Windsurf MCP config before HTTP bridge restart: ${error instanceof Error ? error.message : String(error)}`);
-        });
-      }
-    } catch (error) {
-      log(`Context Engine Uploader: failed to prepare Windsurf MCP removal before HTTP bridge restart: ${error instanceof Error ? error.message : String(error)}`);
-    }
-    pendingBridgeConfigTimer = setTimeout(() => {
-      pendingBridgeConfigTimer = undefined;
-      log('Context Engine Uploader: HTTP bridge ready; refreshing MCP configs.');
-      writeMcpConfig().catch(error => {
-        log(`Context Engine Uploader: MCP config refresh after bridge start failed: ${error instanceof Error ? error.message : String(error)}`);
-      });
-    }, delayMs);
-  } catch (error) {
-    log(`Context Engine Uploader: failed to schedule MCP config refresh: ${error instanceof Error ? error.message : String(error)}`);
-  }
-}
-
-async function removeContextEngineFromWindsurfConfig() {
-  try {
-    const settings = vscode.workspace.getConfiguration('contextEngineUploader');
-    const customPath = (settings.get('windsurfMcpPath') || '').trim();
-    const configPath = customPath || getDefaultWindsurfMcpPath();
-    if (!configPath) {
-      return;
-    }
-    if (!fs.existsSync(configPath)) {
-      // Nothing to remove yet.
-      return;
-    }
-    let config = { mcpServers: {} };
-    try {
-      const raw = fs.readFileSync(configPath, 'utf8');
-      const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === 'object') {
-        config = parsed;
-      }
-    } catch (error) {
-      log(`Context Engine Uploader: failed to parse Windsurf mcp_config.json when removing context-engine: ${error instanceof Error ? error.message : String(error)}`);
-      return;
-    }
-    if (!config.mcpServers || typeof config.mcpServers !== 'object') {
-      return;
-    }
-    if (!config.mcpServers['context-engine']) {
-      return;
-    }
-    delete config.mcpServers['context-engine'];
-    try {
-      const json = JSON.stringify(config, null, 2) + '\n';
-      fs.writeFileSync(configPath, json, 'utf8');
-      log(`Context Engine Uploader: removed context-engine server from Windsurf MCP config at ${configPath} before HTTP bridge restart.`);
-    } catch (error) {
-      log(`Context Engine Uploader: failed to write Windsurf mcp_config.json when removing context-engine: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  } catch (error) {
-    log(`Context Engine Uploader: error while removing context-engine from Windsurf MCP config: ${error instanceof Error ? error.message : String(error)}`);
-  }
-}
 function ensureTargetPathConfigured() {
-  const config = vscode.workspace.getConfiguration('contextEngineUploader');
+  const config = getEffectiveConfig();
   const current = (config.get('targetPath') || '').trim();
   if (current) {
     updateStatusBarTooltip(current);
@@ -740,7 +807,7 @@ async function detectSystemPython() {
   // Try configured pythonPath, then common names
   const candidates = [];
   try {
-    const cfg = vscode.workspace.getConfiguration('contextEngineUploader');
+    const cfg = getEffectiveConfig();
     const configured = (cfg.get('pythonPath') || '').trim();
     if (configured) candidates.push(configured);
   } catch {}
@@ -762,19 +829,55 @@ async function detectSystemPython() {
 }
 
 function requiresHttpBridge(serverMode, transportMode) {
+  try {
+    if (bridgeManager && typeof bridgeManager.requiresHttpBridge === 'function') {
+      return bridgeManager.requiresHttpBridge(serverMode, transportMode);
+    }
+  } catch (_) {
+    // ignore
+  }
   return serverMode === 'bridge' && transportMode === 'http';
 }
 
 async function ensureHttpBridgeReadyForConfigs() {
   try {
-    if (httpBridgeProcess) {
-      return true;
+    if (bridgeManager && typeof bridgeManager.ensureReadyForConfigs === 'function') {
+      return await bridgeManager.ensureReadyForConfigs();
     }
-    await startHttpBridgeProcess();
-    return !!httpBridgeProcess;
   } catch (error) {
     log(`Failed to ensure HTTP bridge is ready: ${error instanceof Error ? error.message : String(error)}`);
-    return false;
+  }
+  return false;
+}
+
+function resolveBridgeHttpUrl() {
+  try {
+    if (bridgeManager && typeof bridgeManager.resolveBridgeHttpUrl === 'function') {
+      return bridgeManager.resolveBridgeHttpUrl();
+    }
+  } catch (_) {
+    // ignore
+  }
+  return undefined;
+}
+
+async function startHttpBridgeProcess() {
+  if (bridgeManager && typeof bridgeManager.start === 'function') {
+    return bridgeManager.start();
+  }
+  return undefined;
+}
+
+function stopHttpBridgeProcess() {
+  if (bridgeManager && typeof bridgeManager.stop === 'function') {
+    return bridgeManager.stop();
+  }
+  return Promise.resolve();
+}
+
+async function handleHttpBridgeSettingsChanged() {
+  if (bridgeManager && typeof bridgeManager.handleSettingsChanged === 'function') {
+    return bridgeManager.handleSettingsChanged();
   }
 }
 function setStatusBarState(mode) {
@@ -877,204 +980,11 @@ function attachOutput(child, label) {
   }
   if (child.stderr) {
     child.stderr.on('data', data => {
-      outputChannel.append(`[${label} err] ${data}`);
+      const chunk = data.toString();
+      outputChannel.append(`[${label} err] ${chunk}`);
     });
   }
 }
-function openUploadServiceLogsTerminal() {
-  try {
-    const cfg = vscode.workspace.getConfiguration('contextEngineUploader');
-    const wsPath = getWorkspaceFolderPath() || (cfg.get('targetPath') || '');
-    const cwd = (wsPath && typeof wsPath === 'string' && fs.existsSync(wsPath)) ? wsPath : undefined;
-    if (logsTerminal && logsTerminal.exitStatus) {
-      logsTerminal = undefined;
-      logTailActive = false;
-    }
-    if (!logsTerminal) {
-      logsTerminal = vscode.window.createTerminal({ name: 'Context Engine Upload Logs', cwd: cwd ? vscode.Uri.file(cwd) : undefined });
-      logTailActive = false;
-    }
-    logsTerminal.show(true);
-    if (!logTailActive) {
-      logsTerminal.sendText('docker compose logs -f upload_service', true);
-      logTailActive = true;
-    }
-  } catch (e) {
-    log(`Unable to open logs terminal: ${e && e.message ? e.message : String(e)}`);
-  }
-}
-
-function getConfiguredPythonPath() {
-  try {
-    const cfg = vscode.workspace.getConfiguration('contextEngineUploader');
-    const configured = (cfg.get('pythonPath') || 'python3').trim();
-    if (pythonOverridePath && fs.existsSync(pythonOverridePath)) {
-      return pythonOverridePath;
-    }
-    return configured || 'python3';
-  } catch (_) {
-    if (pythonOverridePath && fs.existsSync(pythonOverridePath)) {
-      return pythonOverridePath;
-    }
-    return 'python3';
-  }
-}
-
-function getConfiguredDecoderUrl() {
-  try {
-    const cfg = vscode.workspace.getConfiguration('contextEngineUploader');
-    const configured = (cfg.get('decoderUrl') || '').trim();
-    return configured || 'http://localhost:8081';
-  } catch (_) {
-    return 'http://localhost:8081';
-  }
-}
-
-function resolveCtxScriptPath() {
-  const candidates = [];
-  candidates.push(path.join(extensionRoot, 'scripts', 'ctx.py'));
-  candidates.push(path.join(extensionRoot, 'ctx.py'));
-  const wsFolder = getWorkspaceFolderPath();
-  if (wsFolder) {
-    candidates.push(path.join(wsFolder, 'scripts', 'ctx.py'));
-    candidates.push(path.join(wsFolder, 'ctx.py'));
-  }
-  candidates.push(path.resolve(extensionRoot, '..', '..', 'scripts', 'ctx.py'));
-
-  for (const candidate of candidates) {
-    if (candidate && fs.existsSync(candidate)) {
-      return path.resolve(candidate);
-    }
-  }
-
-  vscode.window.showErrorMessage('Context Engine Uploader: ctx.py not found (expected scripts/ctx.py).');
-  return undefined;
-}
-
-async function enhanceSelectionWithUnicorn() {
-  const editor = vscode.window.activeTextEditor;
-  if (!editor) {
-    vscode.window.showWarningMessage('Open a file and select text to enhance with Prompt+.');
-    return;
-  }
-  const selection = editor.selections && editor.selections.length ? editor.selections[0] : editor.selection;
-  const text = selection && !selection.isEmpty ? editor.document.getText(selection) : '';
-  if (!text || !text.trim()) {
-    vscode.window.showWarningMessage('Select text to enhance with Prompt+.');
-    return;
-  }
-
-  const ctxScript = resolveCtxScriptPath();
-  if (!ctxScript) {
-    return;
-  }
-
-  const pythonPath = getConfiguredPythonPath();
-  const projectRoot = path.dirname(path.dirname(ctxScript));
-  const env = { ...process.env };
-  env.PYTHONUNBUFFERED = '1';
-  const decoderUrl = getConfiguredDecoderUrl();
-  if (decoderUrl) {
-    env.DECODER_URL = decoderUrl;
-  }
-  try {
-    const cfg = vscode.workspace.getConfiguration('contextEngineUploader');
-    const transportModeRaw = cfg.get('mcpTransportMode') || 'sse-remote';
-    const serverModeRaw = cfg.get('mcpServerMode') || 'bridge';
-    const transportMode = (typeof transportModeRaw === 'string' ? transportModeRaw.trim() : 'sse-remote') || 'sse-remote';
-    const serverMode = (typeof serverModeRaw === 'string' ? serverModeRaw.trim() : 'bridge') || 'bridge';
-    let idxUrlRaw = (cfg.get('ctxIndexerUrl') || cfg.get('mcpIndexerUrl') || '').trim();
-    if (serverMode === 'bridge' && transportMode === 'http') {
-      const bridgeUrl = resolveBridgeHttpUrl();
-      if (bridgeUrl) {
-        idxUrlRaw = bridgeUrl;
-      }
-    }
-    if (idxUrlRaw) {
-      env.MCP_INDEXER_URL = idxUrlRaw;
-    }
-  } catch (_) {
-    // ignore config read failures; fall back to defaults
-  }
-  try {
-    const cfg = vscode.workspace.getConfiguration('contextEngineUploader');
-    const useGpuDecoder = cfg.get('useGpuDecoder', false);
-    if (useGpuDecoder) {
-      env.USE_GPU_DECODER = '1';
-    }
-    let ctxWorkspaceDir;
-    try {
-      ctxWorkspaceDir = getTargetPath(cfg);
-    } catch (error) {
-      ctxWorkspaceDir = undefined;
-    }
-    if (!ctxWorkspaceDir) {
-      const wsFolder = getWorkspaceFolderPath();
-      if (wsFolder) {
-        ctxWorkspaceDir = detectDefaultTargetPath(wsFolder);
-      }
-    }
-    if (ctxWorkspaceDir && typeof ctxWorkspaceDir === 'string' && fs.existsSync(ctxWorkspaceDir)) {
-      env.CTX_WORKSPACE_DIR = ctxWorkspaceDir;
-    }
-  } catch (_) {
-    // ignore config read failures; fall back to defaults
-  }
-  const existingPyPath = env.PYTHONPATH || '';
-  env.PYTHONPATH = existingPyPath ? `${projectRoot}${path.delimiter}${existingPyPath}` : projectRoot;
-
-  log(`Running Prompt+ via ctx.py at ${ctxScript}`);
-
-  return new Promise((resolve) => {
-    const args = [ctxScript, '--unicorn', text];
-    const child = spawn(pythonPath, args, { cwd: projectRoot, env });
-    let stdout = '';
-    let stderr = '';
-
-    if (child.stdout) {
-      child.stdout.on('data', data => {
-        stdout += data.toString();
-      });
-    }
-    if (child.stderr) {
-      child.stderr.on('data', data => {
-        const chunk = data.toString();
-        stderr += chunk;
-        if (outputChannel) {
-          outputChannel.append(`[prompt+] ${chunk}`);
-        }
-      });
-    }
-
-    child.on('error', error => {
-      log(`Prompt+ spawn failed: ${error instanceof Error ? error.message : String(error)}`);
-      vscode.window.showErrorMessage('Prompt+ failed to start. Check Python path.');
-      resolve();
-    });
-
-    child.on('close', code => {
-      if (code !== 0) {
-        log(`Prompt+ exited with code ${code}${stderr ? `: ${stderr.trim()}` : ''}`);
-        vscode.window.showErrorMessage('Prompt+ failed. See output for details.');
-        return resolve();
-      }
-      const enhanced = (stdout || '').trim();
-      if (!enhanced) {
-        vscode.window.showWarningMessage('Prompt+ returned no output.');
-        return resolve();
-      }
-      editor.edit(editBuilder => editBuilder.replace(selection, enhanced)).then(ok => {
-        if (ok) {
-          vscode.window.showInformationMessage('Prompt+ applied (Unicorn Mode).');
-        } else {
-          vscode.window.showErrorMessage('Prompt+ could not update the selection.');
-        }
-        resolve();
-      });
-    });
-  });
-}
-
 function ensureIndexedWatcher(targetPath) {
   try {
     disposeIndexedWatcher();
@@ -1205,7 +1115,7 @@ function buildChildEnv(options) {
     WATCH_ROOT: options.targetPath
   };
   try {
-    const settings = vscode.workspace.getConfiguration('contextEngineUploader');
+    const settings = getEffectiveConfig();
     const devRemoteMode = settings.get('devRemoteMode', false);
     if (devRemoteMode) {
       // Enable dev-remote upload mode for the standalone upload client.
@@ -1271,688 +1181,25 @@ function normalizeWorkspaceForBridge(workspacePath) {
   }
 }
 
-function buildBridgeServerConfig(workspacePath, indexerUrl, memoryUrl) {
-  const invocation = resolveBridgeCliInvocation();
-  const args = [...invocation.args, 'mcp-serve'];
-  if (workspacePath) {
-    args.push('--workspace', normalizeWorkspaceForBridge(workspacePath));
-  }
-  if (indexerUrl) {
-    args.push('--indexer-url', indexerUrl);
-  }
-  if (memoryUrl) {
-    args.push('--memory-url', memoryUrl);
-  }
-  return {
-    command: invocation.command,
-    args,
-    env: {}
-  };
-}
-
 async function writeMcpConfig() {
-  const settings = vscode.workspace.getConfiguration('contextEngineUploader');
-  const claudeEnabled = settings.get('mcpClaudeEnabled', true);
-  const windsurfEnabled = settings.get('mcpWindsurfEnabled', false);
-  const claudeHookEnabled = settings.get('claudeHookEnabled', false);
-  const isLinux = process.platform === 'linux';
-  if (!claudeEnabled && !windsurfEnabled && !claudeHookEnabled) {
-    vscode.window.showInformationMessage('Context Engine Uploader: MCP config writing is disabled in settings.');
-    return;
-  }
-  const transportModeRaw = (settings.get('mcpTransportMode') || 'sse-remote');
-  const transportMode = (typeof transportModeRaw === 'string' ? transportModeRaw.trim() : 'sse-remote') || 'sse-remote';
-  const serverModeRaw = (settings.get('mcpServerMode') || 'bridge');
-  const serverMode = (typeof serverModeRaw === 'string' ? serverModeRaw.trim() : 'bridge') || 'bridge';
-  const needsHttpBridge = requiresHttpBridge(serverMode, transportMode);
-  const bridgeWasRunning = !!httpBridgeProcess;
-  if (needsHttpBridge) {
-    const ready = await ensureHttpBridgeReadyForConfigs();
-    if (!ready) {
-      vscode.window.showErrorMessage('Context Engine Uploader: HTTP MCP bridge failed to start; MCP config not updated.');
-      return;
-    }
-    if (!bridgeWasRunning && httpBridgeProcess) {
-      log('Context Engine Uploader: HTTP MCP bridge launching; delaying MCP config write until bridge signals ready.');
-      return;
-    }
-  }
-  const effectiveMode =
-    serverMode === 'bridge'
-      ? (transportMode === 'http' ? 'bridge-http' : 'bridge-stdio')
-      : (transportMode === 'http' ? 'direct-http' : 'direct-sse');
-  log(`Context Engine Uploader: MCP wiring mode=${effectiveMode} (serverMode=${serverMode}, transportMode=${transportMode}).`);
-  if (effectiveMode === 'bridge-http') {
-    const bridgeUrl = resolveBridgeHttpUrl();
-    if (bridgeUrl) {
-      log(`Context Engine Uploader: bridge HTTP endpoint ${bridgeUrl}`);
-    }
-  }
-
-  let indexerUrl = (settings.get('mcpIndexerUrl') || 'http://localhost:8003/mcp').trim();
-  let memoryUrl = (settings.get('mcpMemoryUrl') || 'http://localhost:8002/mcp').trim();
-  if (serverMode === 'bridge') {
-    indexerUrl = normalizeBridgeUrl(indexerUrl);
-    memoryUrl = normalizeBridgeUrl(memoryUrl);
-  }
-  let wroteAny = false;
-  let hookWrote = false;
-  if (claudeEnabled) {
-    const root = getWorkspaceFolderPath();
-    if (!root) {
-      vscode.window.showErrorMessage('Context Engine Uploader: open a folder before writing .mcp.json.');
-    } else {
-      const result = await writeClaudeMcpServers(root, indexerUrl, memoryUrl, transportMode, serverMode);
-      wroteAny = wroteAny || result;
-    }
-  }
-  if (windsurfEnabled) {
-    const customPath = (settings.get('windsurfMcpPath') || '').trim();
-    const windsPath = customPath || getDefaultWindsurfMcpPath();
-    const workspaceHint = getWorkspaceFolderPath();
-    const result = await writeWindsurfMcpServers(windsPath, indexerUrl, memoryUrl, transportMode, serverMode, workspaceHint);
-    wroteAny = wroteAny || result;
-  }
-  if (claudeHookEnabled) {
-    const root = getWorkspaceFolderPath();
-    if (!root) {
-      vscode.window.showErrorMessage('Context Engine Uploader: open a folder before writing Claude hook config.');
-    } else if (!isLinux) {
-      vscode.window.showWarningMessage('Context Engine Uploader: Claude hook auto-config is only wired for Linux/dev-remote at this time.');
-    } else {
-      const commandPath = getClaudeHookCommand();
-      if (!commandPath) {
-        vscode.window.showErrorMessage('Context Engine Uploader: embedded Claude hook script not found in extension; .claude/settings.local.json was not updated.');
-        log('Claude hook config skipped because embedded ctx-hook-simple.sh could not be resolved.');
-      } else {
-        const result = await writeClaudeHookConfig(root, commandPath);
-        hookWrote = hookWrote || result;
-      }
-    }
-  }
-  if (settings.get('scaffoldCtxConfig', true)) {
-    try {
-      await writeCtxConfig();
-    } catch (error) {
-      log(`CTX config auto-scaffolding failed: ${error instanceof Error ? error.message : String(error)}`);
-    }
+  if (mcpConfigManager && typeof mcpConfigManager.writeMcpConfig === 'function') {
+    return mcpConfigManager.writeMcpConfig();
   }
 }
 
 async function writeCtxConfig() {
-  const settings = vscode.workspace.getConfiguration('contextEngineUploader');
-  const enabled = settings.get('scaffoldCtxConfig', true);
-  if (!enabled) {
-    vscode.window.showInformationMessage('Context Engine Uploader: ctx_config/.env scaffolding is disabled (contextEngineUploader.scaffoldCtxConfig=false).');
-    log('CTX config scaffolding skipped because scaffoldCtxConfig is false.');
-    return;
-  }
-  let options = resolveOptions();
-  if (!options) {
-    return;
-  }
-  const depsOk = await ensurePythonDependencies(options.pythonPath);
-  if (!depsOk) {
-    return;
-  }
-  // ensurePythonDependencies may switch to a better interpreter (pythonOverridePath),
-  // so re-resolve options to pick up the updated pythonPath and script/working directory.
-  options = resolveOptions() || options;
-  const collectionName = inferCollectionFromUpload(options);
-  if (!collectionName) {
-    vscode.window.showErrorMessage('Context Engine Uploader: failed to infer collection name from upload client. Check the Output panel for details.');
-    return;
-  }
-  await scaffoldCtxConfigFiles(options.targetPath, collectionName);
-}
-
-function inferCollectionFromUpload(options) {
-  try {
-    const args = ['-u', options.scriptPath, '--path', options.targetPath, '--endpoint', options.endpoint, '--show-mapping'];
-    const result = spawnSync(options.pythonPath, args, {
-      cwd: options.workingDirectory,
-      env: buildChildEnv(options),
-      encoding: 'utf8'
-    });
-    if (result.error) {
-      log(`Failed to run standalone_upload_client for collection inference: ${result.error.message || String(result.error)}`);
-      return undefined;
-    }
-    const stdout = result.stdout || '';
-    const stderr = result.stderr || '';
-
-    if (stdout) {
-      log(`[ctx-config] upload client --show-mapping output:\n${stdout}`);
-    }
-    if (stderr) {
-      log(`[ctx-config] upload client stderr:\n${stderr}`);
-    }
-
-    const combined = `${stdout}\n${stderr}`;
-    if (combined.trim()) {
-      const lines = combined.split(/\r?\n/);
-      for (const line of lines) {
-        const m = line.match(/collection_name:\s*(.+)$/);
-        if (m && m[1]) {
-          const name = m[1].trim();
-          if (name) {
-            return name;
-          }
-        }
-      }
-    }
-  } catch (error) {
-    log(`Error inferring collection from upload client: ${error instanceof Error ? error.message : String(error)}`);
-  }
-  return undefined;
-}
-
-async function scaffoldCtxConfigFiles(workspaceDir, collectionName) {
-  try {
-    const placeholders = new Set(['', 'default-collection', 'my-collection', 'codebase']);
-
-    let uploaderSettings;
-    try {
-      uploaderSettings = vscode.workspace.getConfiguration('contextEngineUploader');
-    } catch (error) {
-      log(`Failed to read uploader settings: ${error instanceof Error ? error.message : String(error)}`);
-      uploaderSettings = undefined;
-    }
-
-    // Decoder/runtime settings from configuration
-    let decoderRuntime = 'glm';
-    let useGpuDecoderSetting = false;
-    let glmApiKey = '';
-    let glmApiBase = 'https://api.z.ai/api/coding/paas/v4/';
-    let glmModel = 'glm-4.6';
-    let gitMaxCommits = 500;
-    let gitSince = '';
-    if (uploaderSettings) {
-      try {
-        const runtimeSetting = String(uploaderSettings.get('decoderRuntime') ?? 'glm').trim().toLowerCase();
-        if (runtimeSetting === 'llamacpp') {
-          decoderRuntime = 'llamacpp';
-        }
-        useGpuDecoderSetting = !!uploaderSettings.get('useGpuDecoder', false);
-        const cfgKey = (uploaderSettings.get('glmApiKey') || '').trim();
-        const cfgBase = (uploaderSettings.get('glmApiBase') || '').trim();
-        const cfgModel = (uploaderSettings.get('glmModel') || '').trim();
-        if (cfgKey) {
-          glmApiKey = cfgKey;
-        }
-        if (cfgBase) {
-          glmApiBase = cfgBase;
-        }
-        if (cfgModel) {
-          glmModel = cfgModel;
-        }
-        const maxCommitsSetting = uploaderSettings.get('gitMaxCommits');
-        if (typeof maxCommitsSetting === 'number' && !Number.isNaN(maxCommitsSetting)) {
-          gitMaxCommits = maxCommitsSetting;
-        }
-        const sinceSetting = uploaderSettings.get('gitSince');
-        if (typeof sinceSetting === 'string') {
-          gitSince = sinceSetting.trim();
-        }
-      } catch (error) {
-        log(`Failed to read decoder/GLM settings from configuration: ${error instanceof Error ? error.message : String(error)}`);
-      }
-    }
-
-    // ctx_config.json
-    const ctxConfigPath = path.join(workspaceDir, 'ctx_config.json');
-    let ctxConfig = {};
-    if (fs.existsSync(ctxConfigPath)) {
-      try {
-        const raw = fs.readFileSync(ctxConfigPath, 'utf8');
-        const parsed = JSON.parse(raw);
-        if (parsed && typeof parsed === 'object') {
-          ctxConfig = parsed;
-        }
-      } catch (error) {
-        log(`Failed to parse existing ctx_config.json at ${ctxConfigPath}; overwriting with minimal config. Error: ${error instanceof Error ? error.message : String(error)}`);
-        ctxConfig = {};
-      }
-    }
-    const currentDefault = typeof ctxConfig.default_collection === 'string' ? ctxConfig.default_collection.trim() : '';
-    let ctxChanged = false;
-    let notifiedDefault = false;
-    if (!currentDefault || placeholders.has(currentDefault)) {
-      ctxConfig.default_collection = collectionName;
-      ctxChanged = true;
-      notifiedDefault = true;
-    }
-    if (ctxConfig.default_mode === undefined) {
-      ctxConfig.default_mode = 'default';
-      ctxChanged = true;
-    }
-    if (ctxConfig.require_context === undefined) {
-      ctxConfig.require_context = true;
-      ctxChanged = true;
-    }
-    if (ctxConfig.surface_qdrant_collection_hint === undefined) {
-      let surfaceHintSetting = true;
-      if (uploaderSettings) {
-        try {
-          surfaceHintSetting = !!uploaderSettings.get('surfaceQdrantCollectionHint', true);
-        } catch (error) {
-          log(`Failed to read surfaceQdrantCollectionHint from configuration: ${error instanceof Error ? error.message : String(error)}`);
-        }
-      }
-      ctxConfig.surface_qdrant_collection_hint = surfaceHintSetting;
-      ctxChanged = true;
-    }
-    if (ctxConfig.refrag_runtime !== decoderRuntime) {
-      ctxConfig.refrag_runtime = decoderRuntime;
-      ctxChanged = true;
-    }
-    if (decoderRuntime === 'glm') {
-      if (ctxConfig.glm_api_base === undefined) {
-        ctxConfig.glm_api_base = glmApiBase;
-        ctxChanged = true;
-      }
-      if (ctxConfig.glm_model === undefined) {
-        ctxConfig.glm_model = glmModel;
-        ctxChanged = true;
-      }
-      const existingGlmKey = typeof ctxConfig.glm_api_key === 'string' ? ctxConfig.glm_api_key.trim() : '';
-      if (glmApiKey) {
-        if (!existingGlmKey) {
-          ctxConfig.glm_api_key = glmApiKey;
-          ctxChanged = true;
-        }
-      } else if (ctxConfig.glm_api_key === undefined) {
-        ctxConfig.glm_api_key = '';
-        ctxChanged = true;
-      }
-    }
-    if (decoderRuntime === 'llamacpp') {
-      if (ctxConfig.llamacpp_model === undefined) {
-        ctxConfig.llamacpp_model = 'llamacpp-4.6';
-        ctxChanged = true;
-      }
-    }
-    if (ctxChanged) {
-      fs.writeFileSync(ctxConfigPath, JSON.stringify(ctxConfig, null, 2) + '\n', 'utf8');
-      if (notifiedDefault) {
-        vscode.window.showInformationMessage(`Context Engine Uploader: ctx_config.json updated with default_collection=${collectionName}.`);
-      } else {
-        vscode.window.showInformationMessage('Context Engine Uploader: ctx_config.json refreshed with required defaults.');
-      }
-      log(`Wrote ctx_config.json at ${ctxConfigPath}`);
-    } else {
-      log(`ctx_config.json at ${ctxConfigPath} already satisfied required values; not modified.`);
-    }
-
-    // .env
-    const envPath = path.join(workspaceDir, '.env');
-    let envContent = '';
-
-    // Seed from bundled env.example (extension root) when workspace .env is missing
-    const baseDir = extensionRoot || __dirname;
-    const envExamplePath = path.join(baseDir, 'env.example');
-    if (fs.existsSync(envPath)) {
-      try {
-        envContent = fs.readFileSync(envPath, 'utf8');
-      } catch (error) {
-        log(`Failed to read existing .env at ${envPath}; skipping .env update. Error: ${error instanceof Error ? error.message : String(error)}`);
-        return;
-      }
-    } else if (fs.existsSync(envExamplePath)) {
-      try {
-        envContent = fs.readFileSync(envExamplePath, 'utf8');
-        log(`Seeding new .env for ${workspaceDir} from bundled env.example.`);
-      } catch (error) {
-        log(`Failed to read bundled env.example at ${envExamplePath}; starting with minimal .env. Error: ${error instanceof Error ? error.message : String(error)}`);
-        envContent = '';
-      }
-    }
-    let envLines = envContent ? envContent.split(/\r?\n/) : [];
-    let envChanged = false;
-    let collectionUpdated = false;
-
-    let idx = -1;
-    for (let i = 0; i < envLines.length; i++) {
-      if (envLines[i].trim().startsWith('COLLECTION_NAME=')) {
-        idx = i;
-        break;
-      }
-    }
-    let currentEnvVal = '';
-    if (idx >= 0) {
-      const m = envLines[idx].match(/^COLLECTION_NAME=(.*)$/);
-      if (m) {
-        currentEnvVal = (m[1] || '').trim();
-      }
-    }
-    if (idx === -1 || placeholders.has(currentEnvVal)) {
-      const newLine = `COLLECTION_NAME=${collectionName}`;
-      if (idx === -1) {
-        if (envLines.length && envLines[envLines.length - 1].trim() !== '') {
-          envLines.push('');
-        }
-        envLines.push(newLine);
-      } else {
-        envLines[idx] = newLine;
-      }
-      envChanged = true;
-      collectionUpdated = true;
-      vscode.window.showInformationMessage(`Context Engine Uploader: .env updated with COLLECTION_NAME=${collectionName}.`);
-      log(`Updated .env at ${envPath}`);
-    } else {
-      log(`.env at ${envPath} already has non-placeholder COLLECTION_NAME; not modified.`);
-    }
-
-    function getEnvEntry(key) {
-      for (let i = 0; i < envLines.length; i++) {
-        const line = envLines[i];
-        if (!line || line.trim().startsWith('#')) {
-          continue;
-        }
-        const eqIndex = line.indexOf('=');
-        if (eqIndex === -1) {
-          continue;
-        }
-        const candidate = line.slice(0, eqIndex).trim();
-        if (candidate === key) {
-          return { index: i, value: line.slice(eqIndex + 1) };
-        }
-      }
-      return { index: -1, value: undefined };
-    }
-
-    function upsertEnv(key, desiredValue, options = {}) {
-      const {
-        overwrite = false,
-        treatEmptyAsUnset = false,
-        placeholderValues = [],
-        skipIfDesiredEmpty = false
-      } = options;
-      const desired = desiredValue ?? '';
-      const desiredStr = String(desired);
-      if (!desiredStr && skipIfDesiredEmpty) {
-        return false;
-      }
-      const { index, value } = getEnvEntry(key);
-      const current = typeof value === 'string' ? value.trim() : '';
-      const normalizedDesired = desiredStr.trim();
-      const placeholderSet = new Set((placeholderValues || []).map(val => (val || '').trim().toLowerCase()));
-      let shouldUpdate = false;
-
-      if (index === -1) {
-        shouldUpdate = true;
-      } else if (overwrite) {
-        if (current !== normalizedDesired) {
-          shouldUpdate = true;
-        }
-      } else if (treatEmptyAsUnset && !current) {
-        shouldUpdate = true;
-      } else if (placeholderSet.size && placeholderSet.has(current.toLowerCase())) {
-        shouldUpdate = true;
-      }
-
-      if (!shouldUpdate) {
-        return false;
-      }
-
-      const newLine = `${key}=${desiredStr}`;
-      if (index === -1) {
-        if (envLines.length && envLines[envLines.length - 1].trim() !== '') {
-          envLines.push('');
-        }
-        envLines.push(newLine);
-      } else {
-        envLines[index] = newLine;
-      }
-      envChanged = true;
-      return true;
-    }
-
-    // Force CTX-critical defaults regardless of template values
-    upsertEnv('MULTI_REPO_MODE', '1', { overwrite: true });
-    upsertEnv('REFRAG_MODE', '1', { overwrite: true });
-    upsertEnv('REFRAG_DECODER', '1', { overwrite: true });
-    upsertEnv('REFRAG_RUNTIME', decoderRuntime, { overwrite: true, placeholderValues: ['llamacpp', 'glm'] });
-    upsertEnv('USE_GPU_DECODER', useGpuDecoderSetting ? '1' : '0', { overwrite: true });
-
-    // Ensure decoder/GLM env vars exist with sane defaults
-    upsertEnv('REFRAG_ENCODER_MODEL', 'BAAI/bge-base-en-v1.5', { treatEmptyAsUnset: true });
-    upsertEnv('REFRAG_PHI_PATH', '/work/models/refrag_phi_768_to_dmodel.bin', { treatEmptyAsUnset: true });
-    upsertEnv('REFRAG_SENSE', 'heuristic', { treatEmptyAsUnset: true });
-
-    if (decoderRuntime === 'glm') {
-      const glmKeyPlaceholders = ['YOUR_GLM_API_KEY', '"YOUR_GLM_API_KEY"', "''", '""'];
-      if (glmApiKey) {
-        upsertEnv('GLM_API_KEY', glmApiKey, {
-          treatEmptyAsUnset: true,
-          placeholderValues: glmKeyPlaceholders
-        });
-      } else {
-        upsertEnv('GLM_API_KEY', '', {});
-      }
-      upsertEnv('GLM_API_BASE', glmApiBase, { treatEmptyAsUnset: true });
-      upsertEnv('GLM_MODEL', glmModel, { treatEmptyAsUnset: true });
-    }
-
-    // Ensure MCP_INDEXER_URL is present based on extension setting (for ctx.py)
-    if (uploaderSettings) {
-      try {
-        const transportModeRaw = uploaderSettings.get('mcpTransportMode') || 'sse-remote';
-        const serverModeRaw = uploaderSettings.get('mcpServerMode') || 'bridge';
-        const transportMode = (typeof transportModeRaw === 'string' ? transportModeRaw.trim() : 'sse-remote') || 'sse-remote';
-        const serverMode = (typeof serverModeRaw === 'string' ? serverModeRaw.trim() : 'bridge') || 'bridge';
-        let targetUrl = (uploaderSettings.get('ctxIndexerUrl') || 'http://localhost:8003/mcp').trim();
-        if (serverMode === 'bridge' && transportMode === 'http') {
-          const bridgeUrl = resolveBridgeHttpUrl();
-          if (bridgeUrl) {
-            targetUrl = bridgeUrl;
-          }
-        }
-        if (targetUrl) {
-          upsertEnv('MCP_INDEXER_URL', targetUrl, { treatEmptyAsUnset: true });
-        }
-      } catch (error) {
-        log(`Failed to read ctxIndexerUrl setting for MCP_INDEXER_URL: ${error instanceof Error ? error.message : String(error)}`);
-      }
-    }
-
-    if (typeof gitMaxCommits === 'number' && !Number.isNaN(gitMaxCommits)) {
-      upsertEnv('REMOTE_UPLOAD_GIT_MAX_COMMITS', String(gitMaxCommits), { overwrite: true });
-    }
-    if (gitSince) {
-      upsertEnv('REMOTE_UPLOAD_GIT_SINCE', gitSince, { overwrite: true, skipIfDesiredEmpty: true });
-    }
-
-    if (envChanged) {
-      fs.writeFileSync(envPath, envLines.join('\n') + '\n', 'utf8');
-      log(`Ensured decoder/GLM/MCP settings in .env at ${envPath}`);
-    } else {
-      log(`.env at ${envPath} already satisfied CTX defaults; not modified.`);
-    }
-  } catch (error) {
-    log(`Error scaffolding ctx_config/.env: ${error instanceof Error ? error.message : String(error)}`);
+  if (ctxConfigManager && typeof ctxConfigManager.writeCtxConfig === 'function') {
+    return ctxConfigManager.writeCtxConfig();
   }
 }
 function deactivate() {
   disposeIndexedWatcher();
-  return Promise.all([stopProcesses(), stopHttpBridgeProcess()]);
+  return Promise.all([stopProcesses()]);
 }
 module.exports = {
   activate,
   deactivate
 };
-
-function getClaudeHookCommand() {
-  const isLinux = process.platform === 'linux';
-  if (!isLinux) {
-    return '';
-  }
-  if (!extensionRoot) {
-    log('Claude hook command resolution failed: extensionRoot is undefined.');
-    return '';
-  }
-  try {
-    const embeddedPath = path.join(extensionRoot, 'ctx-hook-simple.sh');
-    if (fs.existsSync(embeddedPath)) {
-      log(`Using embedded Claude hook at ${embeddedPath}`);
-      return embeddedPath;
-    }
-    log(`Claude hook command resolution failed: ctx-hook-simple.sh not found at ${embeddedPath}`);
-  } catch (error) {
-    log(`Failed to resolve embedded Claude hook path: ${error instanceof Error ? error.message : String(error)}`);
-  }
-  return '';
-}
-
-function getDefaultWindsurfMcpPath() {
-  return path.join(os.homedir(), '.codeium', 'windsurf', 'mcp_config.json');
-}
-
-function resolveHttpBridgeOptions() {
-  try {
-    const settings = vscode.workspace.getConfiguration('contextEngineUploader');
-    const serverModeRaw = settings.get('mcpServerMode') || 'bridge';
-    const transportModeRaw = settings.get('mcpTransportMode') || 'sse-remote';
-    const serverMode = typeof serverModeRaw === 'string' ? serverModeRaw.trim() : 'bridge';
-    const transportMode = typeof transportModeRaw === 'string' ? transportModeRaw.trim() : 'sse-remote';
-    if (serverMode !== 'bridge') {
-      vscode.window.showWarningMessage('Context Engine Uploader: MCP server mode is not "bridge"; HTTP bridge will connect to raw endpoints.');
-    }
-    if (transportMode !== 'http') {
-      log('Context Engine Uploader: MCP transport mode is not "http"; HTTP bridge will still start but downstream configs may expect SSE.');
-    }
-    const workspacePath = resolveBridgeWorkspacePath();
-    if (!workspacePath) {
-      vscode.window.showErrorMessage('Context Engine Uploader: open a workspace or set contextEngineUploader.targetPath before starting HTTP MCP bridge.');
-      return undefined;
-    }
-    let indexerUrl = (settings.get('mcpIndexerUrl') || 'http://localhost:8003/mcp').trim();
-    let memoryUrl = (settings.get('mcpMemoryUrl') || 'http://localhost:8002/mcp').trim();
-    indexerUrl = normalizeBridgeUrl(indexerUrl);
-    memoryUrl = normalizeBridgeUrl(memoryUrl);
-    let port = Number(settings.get('mcpBridgePort') || 30810);
-    if (!Number.isFinite(port) || port <= 0) {
-      port = 30810;
-    }
-    return {
-      workspacePath,
-      indexerUrl,
-      memoryUrl,
-      port
-    };
-  } catch (error) {
-    log(`Failed to resolve HTTP bridge options: ${error instanceof Error ? error.message : String(error)}`);
-    return undefined;
-  }
-}
-
-function resolveBridgeHttpUrl() {
-  try {
-    const settings = vscode.workspace.getConfiguration('contextEngineUploader');
-    let port = Number(settings.get('mcpBridgePort') || 30810);
-    if (!Number.isFinite(port) || port <= 0) {
-      port = 30810;
-    }
-    const hostname = '127.0.0.1';
-    return `http://${hostname}:${port}/mcp`;
-  } catch (error) {
-    log(`Failed to resolve bridge HTTP URL: ${error instanceof Error ? error.message : String(error)}`);
-    return undefined;
-  }
-}
-
-async function startHttpBridgeProcess() {
-  if (httpBridgeProcess) {
-    vscode.window.showInformationMessage(`Context Engine HTTP MCP bridge already running on port ${httpBridgePort || 'unknown'}.`);
-    return httpBridgePort;
-  }
-  const options = resolveHttpBridgeOptions();
-  if (!options) {
-    return undefined;
-  }
-  const invocation = resolveBridgeCliInvocation();
-  if (!invocation) {
-    vscode.window.showErrorMessage('Context Engine Uploader: unable to locate ctxce CLI for HTTP bridge.');
-    return undefined;
-  }
-  const cliArgs = ['mcp-http-serve'];
-  if (options.workspacePath) {
-    cliArgs.push('--workspace', normalizeWorkspaceForBridge(options.workspacePath));
-  }
-  if (options.indexerUrl) {
-    cliArgs.push('--indexer-url', options.indexerUrl);
-  }
-  if (options.memoryUrl) {
-    cliArgs.push('--memory-url', options.memoryUrl);
-  }
-  if (options.port) {
-    cliArgs.push('--port', String(options.port));
-  }
-  const finalArgs = [...invocation.args, ...cliArgs];
-  log(`Starting HTTP MCP bridge via ${invocation.command} ${finalArgs.join(' ')}`);
-  const child = spawn(invocation.command, finalArgs, {
-    cwd: options.workspacePath,
-    env: process.env
-  });
-  httpBridgeProcess = child;
-  httpBridgePort = options.port;
-  httpBridgeWorkspace = options.workspacePath;
-  attachOutput(child, 'mcp-http');
-  child.on('exit', (code, signal) => {
-    log(`HTTP MCP bridge exited with code ${code} signal ${signal || ''}`.trim());
-    if (httpBridgeProcess === child) {
-      httpBridgeProcess = undefined;
-      httpBridgePort = undefined;
-      httpBridgeWorkspace = undefined;
-    }
-  });
-  child.on('error', error => {
-    log(`HTTP MCP bridge process error: ${error instanceof Error ? error.message : String(error)}`);
-    if (httpBridgeProcess === child) {
-      httpBridgeProcess = undefined;
-      httpBridgePort = undefined;
-      httpBridgeWorkspace = undefined;
-    }
-  });
-  vscode.window.showInformationMessage(`Context Engine HTTP MCP bridge listening on http://127.0.0.1:${options.port}/mcp`);
-  scheduleMcpConfigRefreshAfterBridge();
-  return options.port;
-}
-
-function stopHttpBridgeProcess() {
-  if (!httpBridgeProcess) {
-    return Promise.resolve();
-  }
-  return terminateProcess(
-    httpBridgeProcess,
-    'mcp-http',
-    () => {
-      httpBridgeProcess = undefined;
-      httpBridgePort = undefined;
-      httpBridgeWorkspace = undefined;
-    }
-  );
-}
-
-async function handleHttpBridgeSettingsChanged() {
-  const config = vscode.workspace.getConfiguration('contextEngineUploader');
-  const shouldRun = !!config.get('autoStartMcpBridge', false);
-  const wasRunning = !!httpBridgeProcess;
-  if (httpBridgeProcess) {
-    await stopHttpBridgeProcess();
-  }
-  if (shouldRun || wasRunning) {
-    const transportModeRaw = config.get('mcpTransportMode') || 'sse-remote';
-    const serverModeRaw = config.get('mcpServerMode') || 'bridge';
-    const transportMode = (typeof transportModeRaw === 'string' ? transportModeRaw.trim() : 'sse-remote') || 'sse-remote';
-    const serverMode = (typeof serverModeRaw === 'string' ? serverModeRaw.trim() : 'bridge') || 'bridge';
-    if (requiresHttpBridge(serverMode, transportMode)) {
-      await startHttpBridgeProcess();
-    } else {
-      log('Context Engine Uploader: HTTP bridge settings changed, but current MCP wiring does not use the HTTP bridge; not restarting HTTP bridge.');
-    }
-  }
-}
 
 function resolveBridgeCliInvocation() {
   const binPath = findLocalBridgeBin();
@@ -1982,7 +1229,7 @@ function findLocalBridgeBin() {
   let localOnly = true;
   let configured = '';
   try {
-    const settings = vscode.workspace.getConfiguration('contextEngineUploader');
+    const settings = getEffectiveConfig();
     localOnly = settings.get('mcpBridgeLocalOnly', true);
     configured = (settings.get('mcpBridgeBinPath') || '').trim();
   } catch (_) {
@@ -2004,329 +1251,4 @@ function findLocalBridgeBin() {
   }
 
   return undefined;
-}
-
-async function writeClaudeMcpServers(root, indexerUrl, memoryUrl, transportMode, serverMode = 'bridge') {
-  const bridgeWorkspace = resolveBridgeWorkspacePath();
-  const configPath = path.join(bridgeWorkspace || root, '.mcp.json');
-  let config = { mcpServers: {} };
-  if (fs.existsSync(configPath)) {
-    try {
-      const raw = fs.readFileSync(configPath, 'utf8');
-      const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === 'object') {
-        config = parsed;
-      }
-    } catch (error) {
-      vscode.window.showErrorMessage('Context Engine Uploader: existing .mcp.json is invalid JSON; not modified.');
-      log(`Failed to parse .mcp.json: ${error instanceof Error ? error.message : String(error)}`);
-      return false;
-    }
-  }
-  if (!config.mcpServers || typeof config.mcpServers !== 'object') {
-    config.mcpServers = {};
-  }
-  log(`Preparing to write .mcp.json at ${configPath} with indexerUrl=${indexerUrl || '""'} memoryUrl=${memoryUrl || '""'}`);
-  const servers = config.mcpServers;
-  const mode = (typeof transportMode === 'string' ? transportMode.trim() : 'sse-remote') || 'sse-remote';
-
-  if (serverMode === 'bridge') {
-    if (mode === 'http') {
-      const bridgeUrl = resolveBridgeHttpUrl();
-      if (bridgeUrl) {
-        servers['context-engine'] = {
-          type: 'http',
-          url: bridgeUrl
-        };
-      } else {
-        const bridgeServer = buildBridgeServerConfig(bridgeWorkspace || root, indexerUrl, memoryUrl);
-        servers['context-engine'] = bridgeServer;
-      }
-    } else {
-      const bridgeServer = buildBridgeServerConfig(bridgeWorkspace || root, indexerUrl, memoryUrl);
-      servers['context-engine'] = bridgeServer;
-    }
-    delete servers['qdrant-indexer'];
-    delete servers.memory;
-  } else if (mode === 'http') {
-    // Direct HTTP MCP endpoints for Claude (.mcp.json)
-    if (indexerUrl) {
-      servers['qdrant-indexer'] = {
-        type: 'http',
-        url: indexerUrl
-      };
-    }
-    if (memoryUrl) {
-      servers.memory = {
-        type: 'http',
-        url: memoryUrl
-      };
-    }
-  } else {
-    // Legacy/default: stdio via mcp-remote SSE bridge
-    const isWindows = process.platform === 'win32';
-    const makeServer = url => {
-      if (isWindows) {
-        return {
-          command: 'cmd',
-          args: ['/c', 'npx', 'mcp-remote', url, '--transport', 'sse-only'],
-          env: {}
-        };
-      }
-      return {
-        command: 'npx',
-        args: ['mcp-remote', url, '--transport', 'sse-only'],
-        env: {}
-      };
-    };
-    if (indexerUrl) {
-      servers['qdrant-indexer'] = makeServer(indexerUrl);
-    }
-    if (memoryUrl) {
-      servers.memory = makeServer(memoryUrl);
-    }
-  }
-  try {
-    const json = JSON.stringify(config, null, 2) + '\n';
-    fs.writeFileSync(configPath, json, 'utf8');
-    vscode.window.showInformationMessage('Context Engine Uploader: .mcp.json updated for Context Engine MCP servers.');
-    log(`Wrote .mcp.json at ${configPath}`);
-    return true;
-  } catch (error) {
-    vscode.window.showErrorMessage('Context Engine Uploader: failed to write .mcp.json.');
-    log(`Failed to write .mcp.json: ${error instanceof Error ? error.message : String(error)}`);
-    return false;
-  }
-}
-
-async function writeWindsurfMcpServers(configPath, indexerUrl, memoryUrl, transportMode, serverMode = 'bridge', workspaceHint) {
-  try {
-    fs.mkdirSync(path.dirname(configPath), { recursive: true });
-  } catch (error) {
-    log(`Failed to ensure Windsurf MCP directory: ${error instanceof Error ? error.message : String(error)}`);
-    vscode.window.showErrorMessage('Context Engine Uploader: failed to prepare Windsurf MCP directory.');
-    return false;
-  }
-  let config = { mcpServers: {} };
-  if (fs.existsSync(configPath)) {
-    try {
-      const raw = fs.readFileSync(configPath, 'utf8');
-      const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === 'object') {
-        config = parsed;
-      }
-    } catch (error) {
-      vscode.window.showErrorMessage('Context Engine Uploader: existing Windsurf mcp_config.json is invalid JSON; not modified.');
-      log(`Failed to parse Windsurf mcp_config.json: ${error instanceof Error ? error.message : String(error)}`);
-      return false;
-    }
-  }
-  if (!config.mcpServers || typeof config.mcpServers !== 'object') {
-    config.mcpServers = {};
-  }
-  log(`Preparing to write Windsurf mcp_config.json at ${configPath} with indexerUrl=${indexerUrl || '""'} memoryUrl=${memoryUrl || '""'}`);
-  const servers = config.mcpServers;
-  const mode = (typeof transportMode === 'string' ? transportMode.trim() : 'sse-remote') || 'sse-remote';
-
-  if (serverMode === 'bridge') {
-    const bridgeWorkspace = resolveBridgeWorkspacePath() || workspaceHint || '';
-    if (mode === 'http') {
-      const bridgeUrl = resolveBridgeHttpUrl();
-      if (bridgeUrl) {
-        servers['context-engine'] = {
-          serverUrl: bridgeUrl
-        };
-      } else {
-        const bridgeServer = buildBridgeServerConfig(bridgeWorkspace, indexerUrl, memoryUrl);
-        servers['context-engine'] = bridgeServer;
-      }
-    } else {
-      const bridgeServer = buildBridgeServerConfig(bridgeWorkspace, indexerUrl, memoryUrl);
-      servers['context-engine'] = bridgeServer;
-    }
-    delete servers['qdrant-indexer'];
-    delete servers.memory;
-  } else if (mode === 'http') {
-    // Direct HTTP MCP endpoints for Windsurf mcp_config.json
-    if (indexerUrl) {
-      servers['qdrant-indexer'] = {
-        type: 'http',
-        url: indexerUrl
-      };
-    }
-    if (memoryUrl) {
-      servers.memory = {
-        type: 'http',
-        url: memoryUrl
-      };
-    }
-  } else {
-    // Legacy/default: use mcp-remote SSE bridge
-    const makeServer = url => {
-      // Default args for local/HTTPS endpoints
-      const args = ['mcp-remote', url, '--transport', 'sse-only'];
-      try {
-        const u = new URL(url);
-        const isLocalHost =
-          u.hostname === 'localhost' ||
-          u.hostname === '127.0.0.1' ||
-          u.hostname === '::1';
-        // For non-local HTTP URLs, mcp-remote requires --allow-http
-        if (u.protocol === 'http:' && !isLocalHost) {
-          args.push('--allow-http');
-        }
-      } catch (e) {
-        // If URL parsing fails, fall back to default args without additional flags
-      }
-      return {
-        command: 'npx',
-        args,
-        env: {}
-      };
-    };
-    if (indexerUrl) {
-      servers['qdrant-indexer'] = makeServer(indexerUrl);
-    }
-    if (memoryUrl) {
-      servers.memory = makeServer(memoryUrl);
-    }
-  }
-  try {
-    const json = JSON.stringify(config, null, 2) + '\n';
-    fs.writeFileSync(configPath, json, 'utf8');
-    vscode.window.showInformationMessage(`Context Engine Uploader: Windsurf MCP config updated at ${configPath}.`);
-    log(`Wrote Windsurf mcp_config.json at ${configPath}`);
-    return true;
-  } catch (error) {
-    vscode.window.showErrorMessage('Context Engine Uploader: failed to write Windsurf mcp_config.json.');
-    log(`Failed to write Windsurf mcp_config.json: ${error instanceof Error ? error.message : String(error)}`);
-    return false;
-  }
-}
-
-async function writeClaudeHookConfig(root, commandPath) {
-  try {
-    const claudeDir = path.join(root, '.claude');
-    fs.mkdirSync(claudeDir, { recursive: true });
-    const settingsPath = path.join(claudeDir, 'settings.local.json');
-    let config = {};
-    if (fs.existsSync(settingsPath)) {
-      try {
-        const raw = fs.readFileSync(settingsPath, 'utf8');
-        const parsed = JSON.parse(raw);
-        if (parsed && typeof parsed === 'object') {
-          config = parsed;
-        }
-      } catch (error) {
-        vscode.window.showErrorMessage('Context Engine Uploader: existing .claude/settings.local.json is invalid JSON; not modified.');
-        log(`Failed to parse .claude/settings.local.json: ${error instanceof Error ? error.message : String(error)}`);
-        return false;
-      }
-    }
-    if (!config.permissions || typeof config.permissions !== 'object') {
-      config.permissions = { allow: [], deny: [], ask: [] };
-    } else {
-      config.permissions.allow = config.permissions.allow || [];
-      config.permissions.deny = config.permissions.deny || [];
-      config.permissions.ask = config.permissions.ask || [];
-    }
-    if (!config.enabledMcpjsonServers) {
-      config.enabledMcpjsonServers = [];
-    }
-    if (!config.hooks || typeof config.hooks !== 'object') {
-      config.hooks = {};
-    }
-    // Derive CTX workspace directory for the hook from extension settings.
-    // Collection hint behavior is now driven by ctx_config.json, not hook env.
-    let hookEnv;
-    try {
-      const uploaderConfig = vscode.workspace.getConfiguration('contextEngineUploader');
-      const targetPath = (uploaderConfig.get('targetPath') || '').trim();
-      if (targetPath) {
-        const resolvedTarget = path.resolve(targetPath);
-        hookEnv = { CTX_WORKSPACE_DIR: resolvedTarget };
-      }
-    } catch (error) {
-      // Best-effort only; if anything fails, fall back to no extra env
-      hookEnv = undefined;
-    }
-
-    const hook = {
-      type: 'command',
-      command: commandPath
-    };
-    if (hookEnv) {
-      hook.env = hookEnv;
-    }
-
-    // Append or update our hook under UserPromptSubmit without clobbering existing hooks
-    let userPromptHooks = config.hooks['UserPromptSubmit'];
-    if (!Array.isArray(userPromptHooks)) {
-      userPromptHooks = [];
-    }
-
-    const normalizeCommand = value => {
-      if (!value) return '';
-      const resolved = path.resolve(value);
-      return resolved.replace(/context-engine\.context-engine-uploader-[0-9.]+/, 'context-engine.context-engine-uploader');
-    };
-
-    const normalizedNewCommand = normalizeCommand(commandPath);
-    let updated = false;
-
-    for (const entry of userPromptHooks) {
-      if (!entry || !Array.isArray(entry.hooks)) {
-        continue;
-      }
-      for (const existing of entry.hooks) {
-        if (!existing || existing.type !== 'command') {
-          continue;
-        }
-        const normalizedExisting = normalizeCommand(existing.command);
-        if (normalizedExisting === normalizedNewCommand) {
-          existing.command = commandPath;
-          if (!existing.env) {
-            existing.env = {};
-          }
-          if (hookEnv) {
-            existing.env = { ...existing.env, ...hookEnv };
-          }
-          updated = true;
-        }
-      }
-    }
-
-    if (!updated) {
-      userPromptHooks.push({ hooks: [hook] });
-    }
-
-    // Deduplicate any accidental double entries for the same command
-    const seenCommands = new Set();
-    for (const entry of userPromptHooks) {
-      if (!entry || !Array.isArray(entry.hooks)) {
-        continue;
-      }
-      entry.hooks = entry.hooks.filter(existing => {
-        if (!existing || existing.type !== 'command') {
-          return true;
-        }
-        const normalized = normalizeCommand(existing.command);
-        if (seenCommands.has(normalized)) {
-          return false;
-        }
-        seenCommands.add(normalized);
-        return true;
-      });
-    }
-
-    config.hooks['UserPromptSubmit'] = userPromptHooks.filter(entry => Array.isArray(entry.hooks) && entry.hooks.length);
-    fs.writeFileSync(settingsPath, JSON.stringify(config, null, 2) + '\n', 'utf8');
-    vscode.window.showInformationMessage('Context Engine Uploader: .claude/settings.local.json updated with Claude hook.');
-    log(`Wrote Claude hook config at ${settingsPath}`);
-    return true;
-  } catch (error) {
-    vscode.window.showErrorMessage('Context Engine Uploader: failed to write .claude/settings.local.json.');
-    log(`Failed to write .claude/settings.local.json: ${error instanceof Error ? error.message : String(error)}`);
-    return false;
-  }
 }

@@ -2,7 +2,7 @@
   "name": "context-engine-uploader",
   "displayName": "Context Engine Uploader",
   "description": "Runs the Context-Engine remote upload client with a force sync on startup followed by watch mode. Requires Python with pip install requests urllib3 charset_normalizer.",
-  "version": "0.1.33",
+  "version": "0.1.34",
   "publisher": "context-engine",
   "engines": {
     "vscode": "^1.85.0"
@@ -15,6 +15,9 @@
     "onCommand:contextEngineUploader.start",
     "onCommand:contextEngineUploader.stop",
     "onCommand:contextEngineUploader.restart",
+    "onView:contextEngineUploaderProfiles",
+    "onView:contextEngineUploaderStatus",
+    "onView:contextEngineUploaderActions",
     "onCommand:contextEngineUploader.promptEnhance",
     "onCommand:contextEngineUploader.authLogin"
   ],
@@ -60,7 +63,11 @@
       },
       {
         "command": "contextEngineUploader.showUploadServiceLogs",
-        "title": "Context Engine Uploader: Show Upload Service Logs"
+        "title": "Context Engine Uploader: Show Extension Output"
+      },
+      {
+        "command": "contextEngineUploader.tailUploadServiceLogs",
+        "title": "Context Engine Uploader: Tail Upload Service Logs (Docker)"
       },
       {
         "command": "contextEngineUploader.promptEnhance",
@@ -71,6 +78,31 @@
         "title": "Context Engine Uploader: Sign In (ctxce auth)"
       }
     ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "contextEngineUploader",
+          "title": "Context Engine",
+          "icon": "assets/activitybar.svg"
+        }
+      ]
+    },
+    "views": {
+      "contextEngineUploader": [
+        {
+          "id": "contextEngineUploaderProfiles",
+          "name": "Profiles"
+        },
+        {
+          "id": "contextEngineUploaderStatus",
+          "name": "Status"
+        },
+        {
+          "id": "contextEngineUploaderActions",
+          "name": "Actions"
+        }
+      ]
+    },
     "configuration": {
       "type": "object",
       "title": "Context Engine Uploader",
@@ -147,11 +179,6 @@
           "type": "string",
           "default": "/work",
           "description": "Container path that mirrors the host root on the upload server."
-        },
-        "contextEngineUploader.autoTailUploadLogs": {
-          "type": "boolean",
-          "default": false,
-          "description": "Automatically open a terminal and tail 'docker compose logs -f upload_service' when indexing starts (for local docker setups)."
         },
         "contextEngineUploader.startWatchAfterForce": {
           "type": "boolean",
