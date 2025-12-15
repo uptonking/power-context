@@ -7,6 +7,7 @@ pytestmark = pytest.mark.integration
 
 ing = importlib.import_module("scripts.ingest_code")
 srv = importlib.import_module("scripts.mcp_indexer_server")
+embedder = importlib.import_module("scripts.embedder")
 
 
 class FakeEmbedder:
@@ -91,6 +92,7 @@ async def test_tier2_fallback_unconditional_with_language_filter(tmp_path, monke
 
     # Stub embeddings everywhere
     monkeypatch.setattr(ing, "TextEmbedding", lambda *a, **k: FakeEmbedder("fake"))
+    monkeypatch.setattr(embedder, "get_embedding_model", lambda *a, **k: FakeEmbedder("fake"))
     monkeypatch.setattr(srv, "_get_embedding_model", lambda *a, **k: FakeEmbedder("fake"))
 
     # Create tiny repo

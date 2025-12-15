@@ -72,6 +72,7 @@ def test_results_cache_hit_is_deterministic_and_avoids_second_backend_call(monke
     # Monkeypatch backends and model
     monkeypatch.setattr(hyb, "QdrantClient", lambda *a, **k: backend)
     monkeypatch.setattr(hyb, "TextEmbedding", lambda *a, **k: _FakeEmbed())
+    monkeypatch.setattr(hyb, "_get_embedding_model", lambda *a, **k: _FakeEmbed())
     monkeypatch.setenv("EMBEDDING_MODEL", "unit-test")
     monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
 

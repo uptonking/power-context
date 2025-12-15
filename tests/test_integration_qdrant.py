@@ -8,6 +8,7 @@ pytestmark = pytest.mark.integration
 
 ing = importlib.import_module("scripts.ingest_code")
 srv = importlib.import_module("scripts.mcp_indexer_server")
+embedder = importlib.import_module("scripts.embedder")
 
 
 class FakeEmbedder:
@@ -96,6 +97,7 @@ def test_index_and_search_minirepo(tmp_path, monkeypatch, qdrant_container):
 
     # Stub embeddings everywhere
     monkeypatch.setattr(ing, "TextEmbedding", lambda *a, **k: FakeEmbedder("fake"))
+    monkeypatch.setattr(embedder, "get_embedding_model", lambda *a, **k: FakeEmbedder("fake"))
     monkeypatch.setattr(
         srv, "_get_embedding_model", lambda *a, **k: FakeEmbedder("fake")
     )
@@ -143,6 +145,7 @@ def test_filters_language_and_path(tmp_path, monkeypatch, qdrant_container):
 
     # Stub embeddings
     monkeypatch.setattr(ing, "TextEmbedding", lambda *a, **k: FakeEmbedder("fake"))
+    monkeypatch.setattr(embedder, "get_embedding_model", lambda *a, **k: FakeEmbedder("fake"))
     monkeypatch.setattr(
         srv, "_get_embedding_model", lambda *a, **k: FakeEmbedder("fake")
     )
