@@ -45,7 +45,7 @@ from scripts.rerank_events import (
     list_event_files,
     cleanup_old_events,
 )
-from scripts.rerank_recursive import TinyScorer
+from scripts.rerank_recursive import TinyScorer, RecursiveReranker
 
 # Configuration
 BATCH_SIZE = int(os.environ.get("RERANK_LEARNING_BATCH_SIZE", "32"))
@@ -75,7 +75,14 @@ class CollectionLearner:
         self.scorer = TinyScorer(lr=LEARNING_RATE)
         self.scorer.set_collection(collection)
         self._last_processed_ts = self._load_checkpoint()
-        self._embedder = None
+        # Reuse the serving reranker's embed + project code path 1:1.
+        # We only use its private feature helpers, not its scoring loop.
+        self._feature_reranker = RecursiveReranker(
+            n_iterations=1,
+            dim=self.scorer.dim,
+            early_stop=False,
+            blend_with_initial=0.0,
+        )
 
     def _load_checkpoint(self) -> float:
         """Load last processed timestamp from checkpoint file."""
@@ -98,34 +105,10 @@ class CollectionLearner:
         except Exception:
             pass
 
-    def _get_embedder(self):
-        """Get embedding model (lazy load)."""
-        if self._embedder is None:
-            try:
-                from scripts.embedder import get_model
-                self._embedder = get_model()
-            except Exception:
-                pass
-        return self._embedder
-
-    def _encode(self, texts: List[str]) -> np.ndarray:
-        """Encode texts to embeddings."""
-        embedder = self._get_embedder()
-        if embedder is None:
-            # Fallback: random embeddings (not ideal but allows testing)
-            return np.random.randn(len(texts), 768).astype(np.float32)
-        return embedder.encode(texts)
-
-    def _project_to_dim(self, embs: np.ndarray, target_dim: int = 256) -> np.ndarray:
-        """Project embeddings to target dimension."""
-        if embs.shape[-1] == target_dim:
-            return embs
-        # Simple truncation/padding
-        if embs.shape[-1] > target_dim:
-            return embs[..., :target_dim]
-        # Pad with zeros
-        pad_width = [(0, 0)] * (len(embs.shape) - 1) + [(0, target_dim - embs.shape[-1])]
-        return np.pad(embs, pad_width)
+    def _encode_project(self, texts: List[str]) -> np.ndarray:
+        """Encode + project via the serving reranker code path."""
+        embs = self._feature_reranker._encode(texts)
+        return self._feature_reranker._project_to_dim(embs)
 
     def process_events(self, limit: int = 1000) -> int:
         """Process pending events and return count processed."""
@@ -182,21 +165,19 @@ class CollectionLearner:
                 # Build doc texts from candidates
                 doc_texts = []
                 for c in candidates:
-                    parts = []
+                    text_parts = []
                     if c.get("symbol"):
-                        parts.append(str(c["symbol"]))
+                        text_parts.append(str(c["symbol"]))
                     if c.get("path"):
-                        parts.append(str(c["path"]))
-                    snippet = c.get("snippet", "")
-                    if snippet:
-                        parts.append(str(snippet)[:500])
-                    doc_texts.append(" ".join(parts) if parts else "empty")
+                        text_parts.append(str(c["path"]))
+                    code = c.get("code") or c.get("snippet") or c.get("text") or ""
+                    if code:
+                        text_parts.append(str(code)[:500])
+                    doc_texts.append(" ".join(text_parts) if text_parts else "empty")
 
-                # Encode query and docs
-                query_emb = self._encode([query])[0]
-                doc_embs = self._encode(doc_texts)
-                query_emb = self._project_to_dim(query_emb.reshape(1, -1), self.scorer.dim)[0]
-                doc_embs = self._project_to_dim(doc_embs, self.scorer.dim)
+                # Encode query and docs (1:1 with serving embed+project)
+                query_emb = self._encode_project([query])[0]
+                doc_embs = self._encode_project(doc_texts)
 
                 # Learn from teacher
                 teacher_arr = np.array(teacher_scores, dtype=np.float32)
