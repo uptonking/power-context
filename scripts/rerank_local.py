@@ -1,10 +1,21 @@
 #!/usr/bin/env python3
 import os
 import argparse
-from typing import List, Dict, Any
+from typing import List, Dict, Any, TYPE_CHECKING
 
 from qdrant_client import QdrantClient, models
-from fastembed import TextEmbedding
+
+# Import TextEmbedding for type hints (may not be available at runtime with embedder factory)
+if TYPE_CHECKING:
+    from fastembed import TextEmbedding
+
+# Use embedder factory for Qwen3 support; fallback to direct fastembed
+try:
+    from scripts.embedder import get_embedding_model as _get_embedding_model
+    _EMBEDDER_FACTORY = True
+except ImportError:
+    _EMBEDDER_FACTORY = False
+    from fastembed import TextEmbedding
 
 # Optional imports for local ONNX reranker
 try:
@@ -144,7 +155,7 @@ def _norm_under(u: str | None) -> str | None:
 
 
 def _select_dense_vector_name(
-    client: QdrantClient, collection: str, model: TextEmbedding, dim: int
+    client: QdrantClient, collection: str, model: "TextEmbedding", dim: int
 ) -> str:
     try:
         info = client.get_collection(collection)
@@ -169,7 +180,7 @@ def _select_dense_vector_name(
 
 def dense_results(
     client: QdrantClient,
-    model: TextEmbedding,
+    model: "TextEmbedding",
     vec_name: str,
     query: str,
     flt,
@@ -274,7 +285,7 @@ def rerank_in_process(
     limit: int = 12,
     language: str | None = None,
     under: str | None = None,
-    model: TextEmbedding | None = None,
+    model: "TextEmbedding | None" = None,
     collection: str | None = None,
 ) -> List[Dict[str, Any]]:
     eff_collection = (
@@ -283,7 +294,12 @@ def rerank_in_process(
         else (os.environ.get("COLLECTION_NAME") or "codebase")
     )
     client = QdrantClient(url=QDRANT_URL, api_key=API_KEY or None)
-    _model = model or TextEmbedding(model_name=MODEL_NAME)
+    if model:
+        _model = model
+    elif _EMBEDDER_FACTORY:
+        _model = _get_embedding_model(MODEL_NAME)
+    else:
+        _model = TextEmbedding(model_name=MODEL_NAME)
     dim = len(next(_model.embed(["dimension probe"])))
     vec_name = _select_dense_vector_name(client, eff_collection, _model, dim)
 
@@ -340,7 +356,10 @@ def main():
     args = ap.parse_args()
 
     client = QdrantClient(url=QDRANT_URL, api_key=API_KEY or None)
-    model = TextEmbedding(model_name=MODEL_NAME)
+    if _EMBEDDER_FACTORY:
+        model = _get_embedding_model(MODEL_NAME)
+    else:
+        model = TextEmbedding(model_name=MODEL_NAME)
     dim = len(next(model.embed(["dimension probe"])))
 
     eff_collection = (

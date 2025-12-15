@@ -5,8 +5,15 @@ from collections import defaultdict
 from typing import List, Dict, Any
 
 from qdrant_client import QdrantClient, models
-from fastembed import TextEmbedding
 import re
+
+# Use embedder factory for Qwen3 support; fallback to direct fastembed
+try:
+    from scripts.embedder import get_embedding_model as _get_embedding_model
+    _EMBEDDER_FACTORY = True
+except ImportError:
+    _EMBEDDER_FACTORY = False
+    from fastembed import TextEmbedding
 
 
 # Env configuration
@@ -130,7 +137,10 @@ def main():
     args = parser.parse_args()
 
     client = QdrantClient(url=QDRANT_URL)
-    model = TextEmbedding(model_name=MODEL)
+    if _EMBEDDER_FACTORY:
+        model = _get_embedding_model(MODEL)
+    else:
+        model = TextEmbedding(model_name=MODEL)
     vec_name = derive_vector_name(MODEL)
 
     # Build query list (optionally expanded)

@@ -15,13 +15,19 @@ import logging
 
 logger = logging.getLogger("semantic_expansion")
 
-# Import embedding functionality
+# Import embedding functionality (prefer embedder factory for Qwen3 support)
 try:
-    from fastembed import TextEmbedding
+    from scripts.embedder import get_embedding_model as _get_embedding_model
+    _EMBEDDER_FACTORY = True
     FASTEMBED_AVAILABLE = True
 except ImportError:
-    FASTEMBED_AVAILABLE = False
-    TextEmbedding = None
+    _EMBEDDER_FACTORY = False
+    try:
+        from fastembed import TextEmbedding
+        FASTEMBED_AVAILABLE = True
+    except ImportError:
+        FASTEMBED_AVAILABLE = False
+        TextEmbedding = None
 
 # Import Qdrant client for vector operations
 try:
@@ -226,7 +232,10 @@ def expand_queries_semantically(
         
         if model is None and FASTEMBED_AVAILABLE:
             model_name = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
-            model = TextEmbedding(model_name=model_name)
+            if _EMBEDDER_FACTORY:
+                model = _get_embedding_model(model_name)
+            else:
+                model = TextEmbedding(model_name=model_name)
         
         if collection is None:
             collection = os.environ.get("COLLECTION_NAME", "codebase")

@@ -63,6 +63,7 @@ def test_run_hybrid_search_relations_and_related_paths(monkeypatch):
 
     monkeypatch.setattr(hyb, "QdrantClient", lambda *a, **k: FakeQdrant(pts))
     monkeypatch.setattr(hyb, "TextEmbedding", lambda *a, **k: FakeEmbed())
+    monkeypatch.setattr(hyb, "_get_embedding_model", lambda *a, **k: FakeEmbed())
     monkeypatch.setenv("EMBEDDING_MODEL", "unit-test")
     monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
 

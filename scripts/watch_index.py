@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Optional, Set, Dict, List, Any
 
 from qdrant_client import QdrantClient, models
-from fastembed import TextEmbedding
 
 # watcher
 from watchdog.observers import Observer
@@ -852,8 +851,16 @@ def main():
         url=QDRANT_URL, timeout=int(os.environ.get("QDRANT_TIMEOUT", "20") or 20)
     )
 
-    model = TextEmbedding(model_name=MODEL)
-    model_dim = len(next(model.embed(["dimension probe"])))
+    # Use centralized embedder factory if available (supports Qwen3 feature flag)
+    try:
+        from scripts.embedder import get_embedding_model, get_model_dimension
+        model = get_embedding_model(MODEL)
+        model_dim = get_model_dimension(MODEL)
+    except ImportError:
+        # Fallback to direct fastembed initialization
+        from fastembed import TextEmbedding
+        model = TextEmbedding(model_name=MODEL)
+        model_dim = len(next(model.embed(["dimension probe"])))
 
     try:
         info = client.get_collection(default_collection)

@@ -35,7 +35,24 @@ if str(ROOT_DIR) not in sys.path:
 
 
 from qdrant_client import QdrantClient, models
-from fastembed import TextEmbedding
+
+# Use embedder factory for Qwen3 support; fallback to direct fastembed
+try:
+    from scripts.embedder import get_embedding_model as _get_embedding_model
+    _EMBEDDER_FACTORY = True
+except ImportError:
+    _EMBEDDER_FACTORY = False
+
+# Import TextEmbedding for type hints and backward compatibility with tests
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from fastembed import TextEmbedding
+
+# Always try to import TextEmbedding for backward compatibility with tests
+try:
+    from fastembed import TextEmbedding
+except ImportError:
+    TextEmbedding = None  # type: ignore
 
 
 from datetime import datetime
@@ -417,6 +434,10 @@ _DEFAULT_EXCLUDE_DIRS = [
     "TestResults",
     "/.git",
 ]
+# Glob patterns for directories (matched against basename)
+_DEFAULT_EXCLUDE_DIR_GLOBS = [
+    ".venv*",  # .venv, .venv311, .venv39, etc.
+]
 _DEFAULT_EXCLUDE_FILES = [
     "*.onnx",
     "*.bin",
@@ -517,12 +538,14 @@ class _Excluder:
     def __init__(self, root: Path):
         self.root = root
         self.dir_prefixes = []  # absolute like /path/sub
+        self.dir_globs = []  # fnmatch patterns for directory names
         self.file_globs = []  # fnmatch patterns
 
         # Defaults
         use_defaults = _env_truthy(os.environ.get("QDRANT_DEFAULT_EXCLUDES"), True)
         if use_defaults:
             self.dir_prefixes.extend(_DEFAULT_EXCLUDE_DIRS)
+            self.dir_globs.extend(_DEFAULT_EXCLUDE_DIR_GLOBS)
             self.file_globs.extend(_DEFAULT_EXCLUDE_FILES)
 
         # .qdrantignore
@@ -554,11 +577,19 @@ class _Excluder:
             self.file_globs.append(pat.lstrip("/"))
 
     def exclude_dir(self, rel: str) -> bool:
+        import fnmatch
+
         # rel like /a/b
         for pref in self.dir_prefixes:
             if rel == pref or rel.startswith(pref + "/"):
                 return True
+
         base = rel.rsplit("/", 1)[-1]
+
+        # Match directory name against dir_globs (e.g., .venv*)
+        for g in self.dir_globs:
+            if fnmatch.fnmatch(base, g):
+                return True
 
         # Treat single-segment dir prefixes (e.g. "/.git", "/node_modules") as
         # "exclude this directory name anywhere". This matters when indexing a
@@ -1742,7 +1773,7 @@ def delete_points_by_path(client: QdrantClient, collection: str, file_path: str)
         pass
 
 
-def embed_batch(model: TextEmbedding, texts: List[str]) -> List[List[float]]:
+def embed_batch(model: "TextEmbedding", texts: List[str]) -> List[List[float]]:
     # fastembed returns a generator of numpy arrays
     return [vec.tolist() for vec in model.embed(texts)]
 
@@ -2210,6 +2241,24 @@ def _ts_extract_symbols_js(text: str) -> List[_Sym]:
             end = n.end_point[0] + 1
             path = f"{class_stack[-1]}.{m}" if class_stack else m
             syms.append(_Sym(kind="method", name=m, path=path, start=start, end=end))
+        # Handle variable declarations with function expressions or arrow functions
+        # e.g., const g = function() {}, const h = () => {}, var j = function() {}
+        if t == "variable_declarator":
+            # Check if the value is a function expression or arrow function
+            name_node = None
+            value_node = None
+            for c in n.children:
+                if c.type == "identifier" and name_node is None:
+                    name_node = c
+                elif c.type in ("function_expression", "arrow_function"):
+                    value_node = c
+            if name_node and value_node:
+                fn = node_text(name_node)
+                start = n.start_point[0] + 1
+                end = n.end_point[0] + 1
+                syms.append(_Sym(kind="function", name=fn, start=start, end=end))
+                # Don't recurse into the function expression to avoid duplicates
+                return
         for c in n.children:
             walk(c)
 
@@ -2271,6 +2320,24 @@ def _ts_extract_symbols(language: str, text: str) -> List[_Sym]:
                         end = n.end_point[0] + 1
                         path = f"{class_stack[-1]}.{m}" if class_stack else m
                         syms.append(_Sym(kind="method", name=m, path=path, start=start, end=end))
+                    # Handle variable declarations with function expressions or arrow functions
+                    # e.g., const g = function() {}, const h = () => {}, var j = function() {}
+                    if t == "variable_declarator":
+                        # Check if the value is a function expression or arrow function
+                        name_node = None
+                        value_node = None
+                        for c in n.children:
+                            if c.type == "identifier" and name_node is None:
+                                name_node = c
+                            elif c.type in ("function_expression", "arrow_function"):
+                                value_node = c
+                        if name_node and value_node:
+                            fn = node_text(name_node)
+                            start = n.start_point[0] + 1
+                            end = n.end_point[0] + 1
+                            syms.append(_Sym(kind="function", name=fn, start=start, end=end))
+                            # Don't recurse into the function expression to avoid duplicates
+                            return
                     for c in n.children:
                         walk(c)
 
@@ -2541,7 +2608,7 @@ def _compute_host_and_container_paths(cur_path: str) -> tuple[Optional[str], Opt
 
 def index_single_file(
     client: QdrantClient,
-    model: TextEmbedding,
+    model: "TextEmbedding",
     collection: str,
     vector_name: str,
     file_path: Path,
@@ -2931,9 +2998,15 @@ def index_repo(
         except Exception:
             pass
 
-    model = TextEmbedding(model_name=model_name)
-    # Determine embedding dimension
-    dim = len(next(model.embed(["dimension probe"])))
+    # Use centralized embedder factory if available (supports Qwen3 feature flag)
+    try:
+        from scripts.embedder import get_embedding_model, get_model_dimension
+        model = get_embedding_model(model_name)
+        dim = get_model_dimension(model_name)
+    except ImportError:
+        # Fallback to direct fastembed initialization
+        model = TextEmbedding(model_name=model_name)
+        dim = len(next(model.embed(["dimension probe"])))
 
     client = QdrantClient(
         url=qdrant_url,
@@ -3643,7 +3716,7 @@ def process_file_with_smart_reindexing(
     client: QdrantClient,
     current_collection: str,
     per_file_repo,
-    model: TextEmbedding,
+    model: "TextEmbedding",
     vector_name: str | None,
 ) -> str:
     """Smart, chunk-level reindexing for a single file.
