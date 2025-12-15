@@ -111,7 +111,7 @@ def benchmark_baseline(query: str, candidates: List[Dict[str, Any]]) -> RealBenc
         reranker="baseline",
         latency_ms=latency,
         num_results=len(sorted_cands),
-        top_5_paths=[c.get("path", "")[-50:] for c in sorted_cands[:5]],
+        top_5_paths=[c.get("path", "") for c in sorted_cands[:5]],
         top_5_scores=[float(c.get("score", 0)) for c in sorted_cands[:5]],
     )
 
@@ -135,7 +135,7 @@ def benchmark_recursive(query: str, candidates: List[Dict[str, Any]], n_iters: i
         reranker=f"recursive_{n_iters}",
         latency_ms=latency,
         num_results=len(reranked),
-        top_5_paths=[c.get("path", "")[-50:] for c in reranked[:5]],
+        top_5_paths=[c.get("path", "") for c in reranked[:5]],
         top_5_scores=[float(c.get("score", 0)) for c in reranked[:5]],
     )
 
@@ -168,7 +168,7 @@ def benchmark_onnx(query: str, candidates: List[Dict[str, Any]]) -> Optional[Rea
             reranker="onnx",
             latency_ms=latency,
             num_results=len(reranked),
-            top_5_paths=[c.get("path", "")[-50:] for c in reranked[:5]],
+            top_5_paths=[c.get("path", "") for c in reranked[:5]],
             top_5_scores=[float(c.get("score", 0)) for c in reranked[:5]],
         )
     except Exception as e:
@@ -195,7 +195,7 @@ def benchmark_session_aware(query: str, candidates: List[Dict[str, Any]], sessio
         reranker="session_aware",
         latency_ms=latency,
         num_results=len(reranked),
-        top_5_paths=[c.get("path", "")[-50:] for c in reranked[:5]],
+        top_5_paths=[c.get("path", "") for c in reranked[:5]],
         top_5_scores=[float(c.get("score", 0)) for c in reranked[:5]],
     )
 
@@ -264,7 +264,7 @@ def benchmark_with_learning(
         reranker="learning",
         latency_ms=latency,
         num_results=len(reranked),
-        top_5_paths=[c.get("path", "")[-50:] for c in reranked[:5]],
+        top_5_paths=[c.get("path", "") for c in reranked[:5]],
         top_5_scores=[float(c.get("score", 0)) for c in reranked[:5]],
     )
 
@@ -444,7 +444,7 @@ def run_real_benchmark():
             results_by_reranker["baseline"][0].top_5_paths,
             results_by_reranker["baseline"][0].top_5_scores
         )):
-            print(f"  {i+1}. {path} (score: {score:.3f})")
+            print(f"  {i+1}. {path[-50:]} (score: {score:.3f})")
 
         if results_by_reranker["recursive_3"]:
             print("\nRecursive(3) Top-5:")
@@ -452,7 +452,7 @@ def run_real_benchmark():
                 results_by_reranker["recursive_3"][0].top_5_paths,
                 results_by_reranker["recursive_3"][0].top_5_scores
             )):
-                print(f"  {i+1}. {path} (score: {score:.3f})")
+                print(f"  {i+1}. {path[-50:]} (score: {score:.3f})")
 
         if results_by_reranker["learning"]:
             print("\nLearning Top-5 (after training on ONNX):")
@@ -460,7 +460,7 @@ def run_real_benchmark():
                 results_by_reranker["learning"][0].top_5_paths,
                 results_by_reranker["learning"][0].top_5_scores
             )):
-                print(f"  {i+1}. {path} (score: {score:.3f})")
+                print(f"  {i+1}. {path[-50:]} (score: {score:.3f})")
 
         if results_by_reranker["onnx"]:
             print("\nONNX Top-5 (teacher/ground truth):")
@@ -468,7 +468,7 @@ def run_real_benchmark():
                 results_by_reranker["onnx"][0].top_5_paths,
                 results_by_reranker["onnx"][0].top_5_scores
             )):
-                print(f"  {i+1}. {path} (score: {score:.3f})")
+                print(f"  {i+1}. {path[-50:]} (score: {score:.3f})")
 
     # Show learning progress
     if results_by_reranker["learning"]:

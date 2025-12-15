@@ -134,10 +134,11 @@ class TinyScorer:
         """Initialize weights randomly using He initialization (local RNG, deterministic)."""
         # Use local RandomState to avoid polluting global RNG
         rng = np.random.RandomState(42)
-        scale = np.sqrt(2.0 / (self.dim * 3))
+        scale = np.float32(np.sqrt(2.0 / (self.dim * 3)))
         self.W1 = rng.randn(self.dim * 3, self.hidden_dim).astype(np.float32) * scale
         self.b1 = np.zeros(self.hidden_dim, dtype=np.float32)
-        self.W2 = rng.randn(self.hidden_dim, 1).astype(np.float32) * np.sqrt(2.0 / self.hidden_dim)
+        w2_scale = np.float32(np.sqrt(2.0 / self.hidden_dim))
+        self.W2 = rng.randn(self.hidden_dim, 1).astype(np.float32) * w2_scale
         self.b2 = np.zeros(1, dtype=np.float32)
 
         # Momentum for SGD
@@ -454,10 +455,11 @@ class TinyScorer:
         def _get(key: str, default):
             return data[key] if key in data.files else default
 
-        self.W1 = data["W1"]
-        self.b1 = data["b1"]
-        self.W2 = data["W2"]
-        self.b2 = data["b2"]
+        # Cast to float32 to keep inference dtype stable even if older checkpoints were float64
+        self.W1 = data["W1"].astype(np.float32, copy=False)
+        self.b1 = data["b1"].astype(np.float32, copy=False)
+        self.W2 = data["W2"].astype(np.float32, copy=False)
+        self.b2 = data["b2"].astype(np.float32, copy=False)
         self._update_count = int(_get("update_count", 0))
         self._total_samples = int(_get("total_samples", 0))
         self._cumulative_loss = float(_get("cumulative_loss", 0.0))
@@ -469,10 +471,10 @@ class TinyScorer:
 
         # Restore momentum if saved
         if "momentum_W1" in data.files:
-            self._momentum_W1 = data["momentum_W1"]
-            self._momentum_b1 = data["momentum_b1"]
-            self._momentum_W2 = data["momentum_W2"]
-            self._momentum_b2 = data["momentum_b2"]
+            self._momentum_W1 = data["momentum_W1"].astype(np.float32, copy=False)
+            self._momentum_b1 = data["momentum_b1"].astype(np.float32, copy=False)
+            self._momentum_W2 = data["momentum_W2"].astype(np.float32, copy=False)
+            self._momentum_b2 = data["momentum_b2"].astype(np.float32, copy=False)
         else:
             self._momentum_W1 = np.zeros_like(self.W1)
             self._momentum_b1 = np.zeros_like(self.b1)
@@ -512,9 +514,9 @@ class LatentRefiner:
         # Use local RandomState to avoid polluting global RNG
         rng = np.random.RandomState(43)
         # Refinement network: [z, query, top_doc_summary] -> z'
-        self.W1 = rng.randn(dim * 3, hidden_dim).astype(np.float32) * 0.01
+        self.W1 = rng.randn(dim * 3, hidden_dim).astype(np.float32) * np.float32(0.01)
         self.b1 = np.zeros(hidden_dim, dtype=np.float32)
-        self.W2 = rng.randn(hidden_dim, dim).astype(np.float32) * 0.01
+        self.W2 = rng.randn(hidden_dim, dim).astype(np.float32) * np.float32(0.01)
         self.b2 = np.zeros(dim, dtype=np.float32)
 
     def refine(
@@ -556,11 +558,17 @@ class ConfidenceEstimator:
     Estimates confidence to enable early stopping.
 
     From TRM: Q-learning inspired halting - stop when improvement is minimal.
+    Uses patience to avoid stopping on noisy single-step improvements.
     """
 
-    def __init__(self, patience: int = 2, min_improvement: float = 0.01):
+    def __init__(self, patience: int = 1, min_improvement: float = 0.01):
         self.patience = patience
         self.min_improvement = min_improvement
+        self._stable_count = 0  # Track consecutive stable iterations
+
+    def reset(self):
+        """Reset state for a new query."""
+        self._stable_count = 0
 
     def should_stop(self, state: RefinementState) -> bool:
         """Check if we should stop refining based on score stability."""
@@ -575,15 +583,26 @@ class ConfidenceEstimator:
         prev_order = np.argsort(-prev_scores)
         curr_order = np.argsort(-curr_scores)
 
-        # If top-k rankings are identical, we've converged
+        # Check if this iteration is "stable" (minimal change)
+        is_stable = False
+
+        # If top-k rankings are identical, consider stable
         k = min(5, len(prev_order))
         if np.array_equal(prev_order[:k], curr_order[:k]):
-            return True
+            is_stable = True
 
         # Check score improvement
         improvement = np.abs(curr_scores - prev_scores).mean()
         if improvement < self.min_improvement:
-            return True
+            is_stable = True
+
+        # Update stable count and check patience
+        if is_stable:
+            self._stable_count += 1
+            if self._stable_count >= self.patience:
+                return True
+        else:
+            self._stable_count = 0  # Reset on meaningful change
 
         return False
 
@@ -644,7 +663,8 @@ class RecursiveReranker:
                 self._embedder = get_embedding_model(model_name)
             except Exception:
                 self._embedder = None
-
+            self._stable_count = 0
+            self._previous_scores = None  # Store previous scores for comparison
             return self._embedder
 
     def _encode(self, texts: List[str]) -> np.ndarray:
@@ -711,7 +731,7 @@ class RecursiveReranker:
             if input_dim not in self._proj_cache:
                 # Use local RNG for deterministic, process-stable projection
                 rng = np.random.RandomState(44)
-                proj_matrix = rng.randn(input_dim, self.dim).astype(np.float32) * 0.01
+                proj_matrix = rng.randn(input_dim, self.dim).astype(np.float32) * np.float32(0.01)
                 self._proj_cache[input_dim] = proj_matrix
 
             proj_matrix = self._proj_cache[input_dim]
@@ -740,6 +760,9 @@ class RecursiveReranker:
         """
         if not candidates:
             return []
+
+        # Reset confidence estimator state for new query
+        self.confidence.reset()
 
         n_docs = len(candidates)
 
@@ -1041,7 +1064,7 @@ class ONNXRecursiveReranker(RecursiveReranker):
 
             return self._session, self._tokenizer
 
-    def _onnx_score(self, query: str, docs: List[str]) -> np.ndarray:
+    def _onnx_score(self, query: str, docs: List[str]) -> Optional[np.ndarray]:
         """Score query-document pairs using ONNX cross-encoder."""
         sess, tok = self._get_onnx_session()
 
@@ -1049,44 +1072,65 @@ class ONNXRecursiveReranker(RecursiveReranker):
             # Fall back to parent's tiny scorer
             return None
 
-        pairs = [(query, doc) for doc in docs]
-        enc = tok.encode_batch(pairs)
+        try:
+            pairs = [(query, doc) for doc in docs]
+            enc = tok.encode_batch(pairs)
 
-        input_ids = [e.ids for e in enc]
-        attn = [e.attention_mask for e in enc]
-        max_len = max((len(ids) for ids in input_ids), default=0)
+            input_ids = [e.ids for e in enc]
+            attn = [e.attention_mask for e in enc]
+            max_len = max((len(ids) for ids in input_ids), default=0)
 
-        def pad(seq, pad_id=0):
-            return seq + [pad_id] * (max_len - len(seq))
+            if max_len == 0:
+                return None
 
-        input_ids = [pad(s) for s in input_ids]
-        attn = [pad(s) for s in attn]
-
-        input_names = [i.name for i in sess.get_inputs()]
-        feeds = {}
-        if "input_ids" in input_names:
-            feeds["input_ids"] = input_ids
-        if "attention_mask" in input_names:
-            feeds["attention_mask"] = attn
-        if "token_type_ids" in input_names:
-            feeds["token_type_ids"] = [[0] * max_len for _ in input_ids]
-
-        out = sess.run(None, feeds)
-        logits = out[0]
-
-        scores = []
-        for row in logits:
+            # Get pad token id from tokenizer if available, else use 0
+            pad_id = 0
             try:
-                if hasattr(row, "__len__") and len(row) >= 2:
-                    scores.append(float(row[1]))
-                elif hasattr(row, "__len__") and len(row) == 1:
-                    scores.append(float(row[0]))
-                else:
-                    scores.append(float(row))
+                pad_token_id = tok.token_to_id("[PAD]")
+                if pad_token_id is not None:
+                    pad_id = int(pad_token_id)
             except Exception:
-                scores.append(0.0)
+                pad_id = 0
 
-        return np.array(scores, dtype=np.float32)
+            def pad(seq, pad_val):
+                return seq + [pad_val] * (max_len - len(seq))
+
+            input_ids_padded = [pad(s, pad_id) for s in input_ids]
+            attn_padded = [pad(s, 0) for s in attn]
+
+            # Convert to numpy arrays with proper dtype (required by many ONNX models)
+            input_ids_arr = np.array(input_ids_padded, dtype=np.int64)
+            attn_arr = np.array(attn_padded, dtype=np.int64)
+
+            input_names = [i.name for i in sess.get_inputs()]
+            feeds = {}
+            if "input_ids" in input_names:
+                feeds["input_ids"] = input_ids_arr
+            if "attention_mask" in input_names:
+                feeds["attention_mask"] = attn_arr
+            if "token_type_ids" in input_names:
+                token_type_arr = np.zeros((len(input_ids_padded), max_len), dtype=np.int64)
+                feeds["token_type_ids"] = token_type_arr
+
+            out = sess.run(None, feeds)
+            logits = out[0]
+
+            scores = []
+            for row in logits:
+                try:
+                    if hasattr(row, "__len__") and len(row) >= 2:
+                        scores.append(float(row[1]))
+                    elif hasattr(row, "__len__") and len(row) == 1:
+                        scores.append(float(row[0]))
+                    else:
+                        scores.append(float(row))
+                except Exception:
+                    scores.append(0.0)
+
+            return np.array(scores, dtype=np.float32)
+
+        except Exception:
+            return None
 
     def rerank(
         self,
@@ -1102,6 +1146,12 @@ class ONNXRecursiveReranker(RecursiveReranker):
         """
         if not candidates:
             return []
+
+        # Reset confidence estimator state for new query
+        try:
+            self.confidence.reset()
+        except Exception:
+            pass
 
         # Build document texts
         doc_texts = []

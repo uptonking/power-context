@@ -211,12 +211,24 @@ def discover_collections() -> List[str]:
     if not events_dir.exists():
         return []
 
-    collections = []
+    import re
+
+    collections: List[str] = []
+    seen = set()
     for f in events_dir.glob("events_*.ndjson"):
-        # Extract collection name from filename
-        name = f.stem.replace("events_", "")
-        if name:
+        stem = f.stem  # events_<collection>_<YYYYMMDDHH>
+        if not stem.startswith("events_"):
+            continue
+
+        rest = stem[len("events_") :]
+        # Strip the hour suffix if present (10 digits)
+        m = re.match(r"^(?P<name>.+)_(?P<hour>\d{10})$", rest)
+        name = m.group("name") if m else rest
+
+        if name and name not in seen:
+            seen.add(name)
             collections.append(name)
+
     return collections
 
 
