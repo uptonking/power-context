@@ -307,14 +307,18 @@ class IndexHandler(FileSystemEventHandler):
 
         if any(part == ".codebase" for part in p.parts):
             return
+
+        # Git history manifests are handled by a separate ingestion pipeline and should still
+        # be processed even when .remote-git is excluded from code indexing.
+        if any(part == ".remote-git" for part in p.parts) and p.suffix.lower() == ".json":
+            self.queue.add(p)
+            return
+
         # directory-level excludes (parent dir)
         rel_dir = "/" + str(rel.parent).replace(os.sep, "/")
         if rel_dir == "/.":
             rel_dir = "/"
         if self.excl.exclude_dir(rel_dir):
-            return
-        if any(part == ".remote-git" for part in p.parts) and p.suffix.lower() == ".json":
-            self.queue.add(p)
             return
         # only code files
         if p.suffix.lower() not in idx.CODE_EXTS:

@@ -85,3 +85,20 @@ def test_ignore_reload_rebuilds_excluder(monkeypatch, tmp_path):
 
     assert handler.excl is not old, "excluder should be rebuilt after ignore file change"
 
+
+@pytest.mark.unit
+def test_remote_git_manifest_is_enqueued_even_if_excluded(monkeypatch, tmp_path):
+    q = FakeQueue()
+    handler = wi.IndexHandler(root=tmp_path, queue=q, client=FakeClient(), collection="c")
+
+    # .remote-git should be excluded by default excluder rules for code indexing
+    assert handler.excl.exclude_dir("/.remote-git")
+
+    manifest_dir = tmp_path / ".remote-git"
+    manifest_dir.mkdir(parents=True, exist_ok=True)
+    manifest = manifest_dir / "git_history_test.json"
+    manifest.write_text("{}\n")
+
+    handler.on_created(E(manifest))
+    assert any(p.endswith("/.remote-git/git_history_test.json") for p in q.added)
+
