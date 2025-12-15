@@ -110,6 +110,19 @@ class CollectionLearner:
         embs = self._feature_reranker._encode(texts)
         return self._feature_reranker._project_to_dim(embs)
 
+    @staticmethod
+    def _pack_doc(candidate: Dict[str, Any], max_chars: int = 500) -> str:
+        """Pack candidate into doc text (shared by learning and teacher scoring)."""
+        parts = []
+        if candidate.get("symbol"):
+            parts.append(str(candidate["symbol"]))
+        if candidate.get("path"):
+            parts.append(str(candidate["path"]))
+        code = candidate.get("code") or candidate.get("snippet") or candidate.get("text") or ""
+        if code:
+            parts.append(str(code)[:max_chars])
+        return " ".join(parts) if parts else "empty"
+
     def process_events(self, limit: int = 1000) -> int:
         """Process pending events and return count processed."""
         events = read_events(self.collection, since_ts=self._last_processed_ts, limit=limit)
@@ -162,18 +175,8 @@ class CollectionLearner:
                 if not query or not candidates or not teacher_scores:
                     continue
 
-                # Build doc texts from candidates
-                doc_texts = []
-                for c in candidates:
-                    text_parts = []
-                    if c.get("symbol"):
-                        text_parts.append(str(c["symbol"]))
-                    if c.get("path"):
-                        text_parts.append(str(c["path"]))
-                    code = c.get("code") or c.get("snippet") or c.get("text") or ""
-                    if code:
-                        text_parts.append(str(code)[:500])
-                    doc_texts.append(" ".join(text_parts) if text_parts else "empty")
+                # Build doc texts from candidates (same packing as teacher scoring)
+                doc_texts = [self._pack_doc(c) for c in candidates]
 
                 # Encode query and docs (1:1 with serving embed+project)
                 query_emb = self._encode_project([query])[0]
@@ -213,15 +216,8 @@ class CollectionLearner:
 
             start = len(all_pairs)
             for c in candidates:
-                snippet = c.get("snippet") or ""
-                if not snippet:
-                    parts = []
-                    if c.get("symbol"):
-                        parts.append(str(c["symbol"]))
-                    if c.get("path"):
-                        parts.append(str(c["path"]))
-                    snippet = " ".join(parts) if parts else "empty"
-                all_pairs.append((query, str(snippet)[:1000]))
+                doc_text = self._pack_doc(c)  # Same packing as learning path
+                all_pairs.append((query, doc_text))
             end = len(all_pairs)
             if end > start:
                 slices.append((event_index, start, end))
