@@ -1325,7 +1325,19 @@ _embedder_singleton = {"model": None}
 def _embed_texts(texts: list[str]) -> list[list[float]]:
     if not texts:
         return []
-    # Try dense embedding (fastembed) first
+
+    # Try centralized embedder factory first (supports Qwen3 feature flag)
+    try:
+        from scripts.embedder import get_embedding_model
+        model_name = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
+        em = get_embedding_model(model_name)
+        raw = list(em.embed(texts))
+        vecs = [v.tolist() if hasattr(v, "tolist") else list(v) for v in raw]
+        return vecs
+    except ImportError:
+        pass
+
+    # Try dense embedding (fastembed) directly as fallback
     if _FE_Embedding is not None:
         try:
             model_name = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")

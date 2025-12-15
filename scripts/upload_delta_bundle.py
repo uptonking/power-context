@@ -2,6 +2,7 @@ import os
 import json
 import tarfile
 import hashlib
+import re
 import logging
 from pathlib import Path
 from typing import Dict, Any
@@ -15,7 +16,8 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-WORK_DIR = os.environ.get("WORK_DIR", "/work")
+WORK_DIR = os.environ.get("WORK_DIR") or os.environ.get("WORKDIR") or "/work"
+_SLUGGED_REPO_RE = re.compile(r"^.+-[0-9a-f]{16}$")
 
 
 def get_workspace_key(workspace_path: str) -> str:
@@ -28,6 +30,8 @@ def get_workspace_key(workspace_path: str) -> str:
     should generate the same key for the same repository.
     """
     repo_name = Path(workspace_path).name
+    if _SLUGGED_REPO_RE.match(repo_name):
+        return repo_name[-16:]
     return hashlib.sha256(repo_name.encode("utf-8")).hexdigest()[:16]
 
 
@@ -65,19 +69,36 @@ def process_delta_bundle(workspace_path: str, bundle_path: Path, manifest: Dict[
         # CRITICAL: Always materialize writes under WORK_DIR using a slugged repo directory.
         # Do NOT write directly into the client-supplied workspace_path, since that may be a host
         # path (e.g. /home/user/repo) that is not mounted/visible to the watcher/indexer.
-        if _extract_repo_name_from_path:
-            repo_name = _extract_repo_name_from_path(workspace_path)
-            if not repo_name:
-                repo_name = Path(workspace_path).name
-        else:
-            repo_name = Path(workspace_path).name
+        workspace_leaf = Path(workspace_path).name
 
-        # Workspace slug: <repo_name>-<16charhash>. This ensures uniqueness across users/workspaces
-        # that may share the same leaf folder name.
-        workspace_key = get_workspace_key(workspace_path)
-        workspace = Path(WORK_DIR) / f"{repo_name}-{workspace_key}"
-        workspace.mkdir(parents=True, exist_ok=True)
-        slug_repo_name = f"{repo_name}-{workspace_key}"
+        if _SLUGGED_REPO_RE.match(workspace_leaf):
+            slug_repo_name = workspace_leaf
+            workspace = Path(WORK_DIR) / slug_repo_name
+            workspace.mkdir(parents=True, exist_ok=True)
+        else:
+            if _extract_repo_name_from_path:
+                repo_name = _extract_repo_name_from_path(workspace_path)
+                if not repo_name:
+                    repo_name = workspace_leaf
+            else:
+                repo_name = workspace_leaf
+
+            # Workspace slug: <repo_name>-<16charhash>. This ensures uniqueness across users/workspaces
+            # that may share the same leaf folder name.
+            workspace_key = get_workspace_key(workspace_path)
+            slug_repo_name = f"{repo_name}-{workspace_key}"
+            workspace = Path(WORK_DIR) / slug_repo_name
+            workspace.mkdir(parents=True, exist_ok=True)
+
+        # Server-side marker for admin cleanup: stored with metadata (not inside repo tree)
+        # so admin delete actions don't risk deleting bind-mounted /work repos in non-remote
+        # docker-compose setups.
+        try:
+            marker_dir = Path(WORK_DIR) / ".codebase" / "repos" / slug_repo_name
+            marker_dir.mkdir(parents=True, exist_ok=True)
+            (marker_dir / ".ctxce_managed_upload").write_text("1\n")
+        except Exception:
+            pass
 
         workspace_root = workspace.resolve()
 

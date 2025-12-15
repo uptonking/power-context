@@ -35,7 +35,24 @@ if str(ROOT_DIR) not in sys.path:
 
 
 from qdrant_client import QdrantClient, models
-from fastembed import TextEmbedding
+
+# Use embedder factory for Qwen3 support; fallback to direct fastembed
+try:
+    from scripts.embedder import get_embedding_model as _get_embedding_model
+    _EMBEDDER_FACTORY = True
+except ImportError:
+    _EMBEDDER_FACTORY = False
+
+# Import TextEmbedding for type hints and backward compatibility with tests
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from fastembed import TextEmbedding
+
+# Always try to import TextEmbedding for backward compatibility with tests
+try:
+    from fastembed import TextEmbedding
+except ImportError:
+    TextEmbedding = None  # type: ignore
 
 
 from datetime import datetime
@@ -403,6 +420,7 @@ _DEFAULT_EXCLUDE_DIRS = [
     "/.vscode",
     "/.cache",
     "/.codebase",
+    "/.remote-git",
     "/node_modules",
     "/dist",
     "/build",
@@ -416,6 +434,10 @@ _DEFAULT_EXCLUDE_DIRS = [
     "TestResults",
     "/.git",
 ]
+# Glob patterns for directories (matched against basename)
+_DEFAULT_EXCLUDE_DIR_GLOBS = [
+    ".venv*",  # .venv, .venv311, .venv39, etc.
+]
 _DEFAULT_EXCLUDE_FILES = [
     "*.onnx",
     "*.bin",
@@ -424,6 +446,79 @@ _DEFAULT_EXCLUDE_FILES = [
     "*.whl",
     "*.tar.gz",
 ]
+
+_ANY_DEPTH_EXCLUDE_DIR_NAMES = {
+    ".git",
+    ".remote-git",
+    ".codebase",
+    "node_modules",
+}
+
+def _should_skip_explicit_file_by_excluder(file_path: Path) -> bool:
+    try:
+        p = file_path if isinstance(file_path, Path) else Path(str(file_path))
+    except Exception:
+        return False
+
+    root = None
+    try:
+        parts = list(p.parts)
+        if ".remote-git" in parts:
+            i = parts.index(".remote-git")
+            root = Path(*parts[:i]) if i > 0 else Path("/")
+    except Exception:
+        root = None
+
+    if root is None:
+        try:
+            s = str(p)
+            if s.startswith("/work/"):
+                slug = s[len("/work/") :].split("/", 1)[0]
+                root = (Path("/work") / slug) if slug else None
+        except Exception:
+            root = None
+
+    if root is None:
+        try:
+            ws = (os.environ.get("WATCH_ROOT") or os.environ.get("WORKSPACE_PATH") or "").strip()
+            if ws:
+                ws_path = Path(ws).resolve()
+                pr = p.resolve()
+                if pr == ws_path or ws_path in pr.parents:
+                    root = ws_path
+        except Exception:
+            root = None
+
+    if root is None:
+        try:
+            pr = p.resolve()
+            for anc in [pr.parent] + list(pr.parents):
+                if (anc / ".codebase").exists():
+                    root = anc
+                    break
+        except Exception:
+            root = None
+
+    if not root or str(root) == "/":
+        return False
+
+    try:
+        rel = p.resolve().relative_to(root.resolve()).as_posix().lstrip("/")
+    except Exception:
+        return False
+    if not rel:
+        return False
+
+    try:
+        excl = _Excluder(root)
+        cur = ""
+        for seg in [x for x in rel.split("/") if x][:-1]:
+            cur = cur + "/" + seg
+            if excl.exclude_dir(cur):
+                return True
+        return excl.exclude_file(rel)
+    except Exception:
+        return False
 
 
 def _env_truthy(val: str | None, default: bool) -> bool:
@@ -443,12 +538,14 @@ class _Excluder:
     def __init__(self, root: Path):
         self.root = root
         self.dir_prefixes = []  # absolute like /path/sub
+        self.dir_globs = []  # fnmatch patterns for directory names
         self.file_globs = []  # fnmatch patterns
 
         # Defaults
         use_defaults = _env_truthy(os.environ.get("QDRANT_DEFAULT_EXCLUDES"), True)
         if use_defaults:
             self.dir_prefixes.extend(_DEFAULT_EXCLUDE_DIRS)
+            self.dir_globs.extend(_DEFAULT_EXCLUDE_DIR_GLOBS)
             self.file_globs.extend(_DEFAULT_EXCLUDE_FILES)
 
         # .qdrantignore
@@ -480,12 +577,30 @@ class _Excluder:
             self.file_globs.append(pat.lstrip("/"))
 
     def exclude_dir(self, rel: str) -> bool:
+        import fnmatch
+
         # rel like /a/b
         for pref in self.dir_prefixes:
             if rel == pref or rel.startswith(pref + "/"):
                 return True
-        # Also allow dir name-only patterns in file_globs (e.g., node_modules)
+
         base = rel.rsplit("/", 1)[-1]
+
+        # Match directory name against dir_globs (e.g., .venv*)
+        for g in self.dir_globs:
+            if fnmatch.fnmatch(base, g):
+                return True
+
+        # Treat single-segment dir prefixes (e.g. "/.git", "/node_modules") as
+        # "exclude this directory name anywhere". This matters when indexing a
+        # workspace root that contains multiple repos, e.g. /work/<repo>/.git.
+        try:
+            if base in _ANY_DEPTH_EXCLUDE_DIR_NAMES and ("/" + base) in self.dir_prefixes:
+                return True
+        except Exception:
+            pass
+
+        # Also allow dir name-only patterns in file_globs (e.g., node_modules)
         for g in self.file_globs:
             # Match bare dir names without wildcards
             if g and all(ch not in g for ch in "*?[") and base == g:
@@ -506,7 +621,7 @@ class _Excluder:
 def iter_files(root: Path) -> Iterable[Path]:
     # Allow passing a single file
     if root.is_file():
-        if root.suffix.lower() in CODE_EXTS:
+        if root.suffix.lower() in CODE_EXTS and not _should_skip_explicit_file_by_excluder(root):
             yield root
         return
 
@@ -1658,7 +1773,7 @@ def delete_points_by_path(client: QdrantClient, collection: str, file_path: str)
         pass
 
 
-def embed_batch(model: TextEmbedding, texts: List[str]) -> List[List[float]]:
+def embed_batch(model: "TextEmbedding", texts: List[str]) -> List[List[float]]:
     # fastembed returns a generator of numpy arrays
     return [vec.tolist() for vec in model.embed(texts)]
 
@@ -2126,6 +2241,24 @@ def _ts_extract_symbols_js(text: str) -> List[_Sym]:
             end = n.end_point[0] + 1
             path = f"{class_stack[-1]}.{m}" if class_stack else m
             syms.append(_Sym(kind="method", name=m, path=path, start=start, end=end))
+        # Handle variable declarations with function expressions or arrow functions
+        # e.g., const g = function() {}, const h = () => {}, var j = function() {}
+        if t == "variable_declarator":
+            # Check if the value is a function expression or arrow function
+            name_node = None
+            value_node = None
+            for c in n.children:
+                if c.type == "identifier" and name_node is None:
+                    name_node = c
+                elif c.type in ("function_expression", "arrow_function"):
+                    value_node = c
+            if name_node and value_node:
+                fn = node_text(name_node)
+                start = n.start_point[0] + 1
+                end = n.end_point[0] + 1
+                syms.append(_Sym(kind="function", name=fn, start=start, end=end))
+                # Don't recurse into the function expression to avoid duplicates
+                return
         for c in n.children:
             walk(c)
 
@@ -2187,6 +2320,24 @@ def _ts_extract_symbols(language: str, text: str) -> List[_Sym]:
                         end = n.end_point[0] + 1
                         path = f"{class_stack[-1]}.{m}" if class_stack else m
                         syms.append(_Sym(kind="method", name=m, path=path, start=start, end=end))
+                    # Handle variable declarations with function expressions or arrow functions
+                    # e.g., const g = function() {}, const h = () => {}, var j = function() {}
+                    if t == "variable_declarator":
+                        # Check if the value is a function expression or arrow function
+                        name_node = None
+                        value_node = None
+                        for c in n.children:
+                            if c.type == "identifier" and name_node is None:
+                                name_node = c
+                            elif c.type in ("function_expression", "arrow_function"):
+                                value_node = c
+                        if name_node and value_node:
+                            fn = node_text(name_node)
+                            start = n.start_point[0] + 1
+                            end = n.end_point[0] + 1
+                            syms.append(_Sym(kind="function", name=fn, start=start, end=end))
+                            # Don't recurse into the function expression to avoid duplicates
+                            return
                     for c in n.children:
                         walk(c)
 
@@ -2457,7 +2608,7 @@ def _compute_host_and_container_paths(cur_path: str) -> tuple[Optional[str], Opt
 
 def index_single_file(
     client: QdrantClient,
-    model: TextEmbedding,
+    model: "TextEmbedding",
     collection: str,
     vector_name: str,
     file_path: Path,
@@ -2474,6 +2625,17 @@ def index_single_file(
     This is a debug-only escape hatch and is unsafe for normal operation: enabling it may
     hide index/cache drift, especially with git worktree reuse or collection rebuilds.
     """
+
+    try:
+        if _should_skip_explicit_file_by_excluder(file_path):
+            try:
+                delete_points_by_path(client, collection, str(file_path))
+            except Exception:
+                pass
+            print(f"Skipping excluded file: {file_path}")
+            return False
+    except Exception:
+        return False
 
     # Resolve trust_cache from env when not explicitly provided. INDEX_TRUST_CACHE is intended
     # for debugging only and should not be enabled in normal indexing runs.
@@ -2836,9 +2998,15 @@ def index_repo(
         except Exception:
             pass
 
-    model = TextEmbedding(model_name=model_name)
-    # Determine embedding dimension
-    dim = len(next(model.embed(["dimension probe"])))
+    # Use centralized embedder factory if available (supports Qwen3 feature flag)
+    try:
+        from scripts.embedder import get_embedding_model, get_model_dimension
+        model = get_embedding_model(model_name)
+        dim = get_model_dimension(model_name)
+    except ImportError:
+        # Fallback to direct fastembed initialization
+        model = TextEmbedding(model_name=model_name)
+        dim = len(next(model.embed(["dimension probe"])))
 
     client = QdrantClient(
         url=qdrant_url,
@@ -3548,7 +3716,7 @@ def process_file_with_smart_reindexing(
     client: QdrantClient,
     current_collection: str,
     per_file_repo,
-    model: TextEmbedding,
+    model: "TextEmbedding",
     vector_name: str | None,
 ) -> str:
     """Smart, chunk-level reindexing for a single file.
@@ -3565,6 +3733,18 @@ def process_file_with_smart_reindexing(
     sharing a repo can reuse embeddings across slugs, not just per-path.
     """
     try:
+        try:
+            p = Path(str(file_path))
+            if _should_skip_explicit_file_by_excluder(p):
+                try:
+                    delete_points_by_path(client, current_collection, str(p))
+                except Exception:
+                    pass
+                print(f"[SMART_REINDEX] Skipping excluded file: {file_path}")
+                return "skipped"
+        except Exception:
+            return "skipped"
+
         print(f"[SMART_REINDEX] Processing {file_path} with chunk-level reindexing")
 
         # Normalize path / types

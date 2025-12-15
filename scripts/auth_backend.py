@@ -372,6 +372,10 @@ def ensure_collection(qdrant_collection: str, metadata: Optional[Dict[str, Any]]
     name = (qdrant_collection or "").strip()
     if not name:
         raise ValueError("qdrant_collection is required")
+    undelete_on_discovery = (
+        str(os.environ.get("CTXCE_COLLECTION_REGISTRY_UNDELETE_ON_DISCOVERY", "0")).strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
     _ensure_db()
     now_ts = int(datetime.now().timestamp())
     meta_json: Optional[str] = None
@@ -389,12 +393,22 @@ def ensure_collection(qdrant_collection: str, metadata: Optional[Dict[str, Any]]
             )
             row = cur.fetchone()
             if row:
+                is_deleted = int(row[4] or 0)
+                if undelete_on_discovery and is_deleted != 0:
+                    try:
+                        conn.execute(
+                            "UPDATE collections SET is_deleted = 0 WHERE id = ?",
+                            (row[0],),
+                        )
+                        is_deleted = 0
+                    except Exception:
+                        pass
                 return {
                     "id": row[0],
                     "qdrant_collection": row[1],
                     "created_at": int(row[2] or 0),
                     "metadata_json": row[3],
-                    "is_deleted": int(row[4] or 0),
+                    "is_deleted": is_deleted,
                 }
 
             coll_id = uuid.uuid4().hex
@@ -539,6 +553,35 @@ def has_collection_access(user_id: str, qdrant_collection: str, permission: str 
     if want == "write":
         return granted == "write"
     return granted == want
+
+
+def mark_collection_deleted(qdrant_collection: str) -> bool:
+    if not AUTH_ENABLED:
+        raise AuthDisabledError("Auth not enabled")
+    name = (qdrant_collection or "").strip()
+    if not name:
+        raise ValueError("qdrant_collection is required")
+    _ensure_db()
+    with _db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id FROM collections WHERE qdrant_collection = ?",
+            (name,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return False
+        coll_id = row[0]
+        with conn:
+            conn.execute(
+                "UPDATE collections SET is_deleted = 1 WHERE id = ?",
+                (coll_id,),
+            )
+            conn.execute(
+                "DELETE FROM collection_acl WHERE collection_id = ?",
+                (coll_id,),
+            )
+    return True
 
 
 def list_users() -> List[Dict[str, Any]]:

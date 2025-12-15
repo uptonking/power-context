@@ -28,14 +28,18 @@ def test_main_resolves_collection_from_state(monkeypatch, tmp_path):
             raise RuntimeError("not available in unit test")
     monkeypatch.setattr(wi, "QdrantClient", FakeQdrant, raising=True)
 
-    # Fake TextEmbedding: just yield a fixed-dim vector on probe
-    class FakeTE:
-        def __init__(self, model_name: str):
+    # Fake embedding model: just yield a fixed-dim vector on probe
+    class FakeModel:
+        def __init__(self, model_name: str = "fake"):
             self.model_name = model_name
         def embed(self, texts):
             # Next() will take the first yielded item and len() is the dim
             yield [0.0] * 32
-    monkeypatch.setattr(wi, "TextEmbedding", FakeTE, raising=True)
+
+    # Patch the embedder module that watch_index imports from at runtime
+    embedder = importlib.import_module("scripts.embedder")
+    monkeypatch.setattr(embedder, "get_embedding_model", lambda m: FakeModel(m), raising=True)
+    monkeypatch.setattr(embedder, "get_model_dimension", lambda m: 32, raising=True)
 
     # No-op ensure calls
     idx = importlib.import_module("scripts.ingest_code")

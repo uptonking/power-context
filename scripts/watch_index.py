@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Optional, Set, Dict, List, Any
 
 from qdrant_client import QdrantClient, models
-from fastembed import TextEmbedding
 
 # watcher
 from watchdog.observers import Observer
@@ -307,14 +306,18 @@ class IndexHandler(FileSystemEventHandler):
 
         if any(part == ".codebase" for part in p.parts):
             return
+
+        # Git history manifests are handled by a separate ingestion pipeline and should still
+        # be processed even when .remote-git is excluded from code indexing.
+        if any(part == ".remote-git" for part in p.parts) and p.suffix.lower() == ".json":
+            self.queue.add(p)
+            return
+
         # directory-level excludes (parent dir)
         rel_dir = "/" + str(rel.parent).replace(os.sep, "/")
         if rel_dir == "/.":
             rel_dir = "/"
         if self.excl.exclude_dir(rel_dir):
-            return
-        if any(part == ".remote-git" for part in p.parts) and p.suffix.lower() == ".json":
-            self.queue.add(p)
             return
         # only code files
         if p.suffix.lower() not in idx.CODE_EXTS:
@@ -848,8 +851,16 @@ def main():
         url=QDRANT_URL, timeout=int(os.environ.get("QDRANT_TIMEOUT", "20") or 20)
     )
 
-    model = TextEmbedding(model_name=MODEL)
-    model_dim = len(next(model.embed(["dimension probe"])))
+    # Use centralized embedder factory if available (supports Qwen3 feature flag)
+    try:
+        from scripts.embedder import get_embedding_model, get_model_dimension
+        model = get_embedding_model(MODEL)
+        model_dim = get_model_dimension(MODEL)
+    except ImportError:
+        # Fallback to direct fastembed initialization
+        from fastembed import TextEmbedding
+        model = TextEmbedding(model_name=MODEL)
+        model_dim = len(next(model.embed(["dimension probe"])))
 
     try:
         info = client.get_collection(default_collection)

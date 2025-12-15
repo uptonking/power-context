@@ -8,6 +8,7 @@ Complete environment variable reference for Context Engine.
 
 **On this page:**
 - [Core Settings](#core-settings)
+- [Embedding Models](#embedding-models)
 - [Indexing & Micro-Chunks](#indexing--micro-chunks)
 - [Query Optimization](#query-optimization)
 - [Watcher Settings](#watcher-settings)
@@ -28,6 +29,50 @@ Complete environment variable reference for Context Engine.
 | REPO_NAME | Logical repo tag stored in payload for filtering | auto-detect from git/folder |
 | HOST_INDEX_PATH | Host path mounted at /work in containers | current repo (.) |
 | QDRANT_URL | Qdrant base URL | container: http://qdrant:6333; local: http://localhost:6333 |
+
+## Embedding Models
+
+Context Engine supports multiple embedding models via the `EMBEDDING_MODEL` and `EMBEDDING_PROVIDER` settings.
+
+### Default (BGE-base)
+
+The default configuration uses `BAAI/bge-base-en-v1.5` via fastembed:
+
+| Name | Description | Default |
+|------|-------------|---------|
+| EMBEDDING_MODEL | Model name for dense embeddings | BAAI/bge-base-en-v1.5 |
+| EMBEDDING_PROVIDER | Backend provider | fastembed |
+
+### Qwen3-Embedding (Experimental)
+
+Qwen3-Embedding-0.6B offers improved semantic understanding with instruction-aware encoding. Enable via feature flag:
+
+| Name | Description | Default |
+|------|-------------|---------|
+| QWEN3_EMBEDDING_ENABLED | Enable Qwen3 embedding support | 0 (disabled) |
+| QWEN3_QUERY_INSTRUCTION | Add instruction prefix to search queries | 1 (enabled when Qwen3 active) |
+| QWEN3_INSTRUCTION_TEXT | Custom instruction prefix | `Instruct: Given a code search query, retrieve relevant code snippets\nQuery:` |
+
+**Setup:**
+```bash
+# In .env
+QWEN3_EMBEDDING_ENABLED=1
+EMBEDDING_MODEL=electroglyph/Qwen3-Embedding-0.6B-onnx-uint8
+QWEN3_QUERY_INSTRUCTION=1
+# Optional: customize instruction
+# QWEN3_INSTRUCTION_TEXT=Instruct: Find code implementing this feature\nQuery:
+```
+
+**Important:** Switching embedding models requires a full reindex:
+```bash
+make reset-dev-dual  # Recreates collection and reindexes
+```
+
+**Dimension comparison:**
+| Model | Dimensions | Notes |
+|-------|-----------|-------|
+| BGE-base-en-v1.5 | 768 | Default, well-tested |
+| Qwen3-Embedding-0.6B | 1024 | Instruction-aware, experimental |
 
 ## Indexing & Micro-Chunks
 

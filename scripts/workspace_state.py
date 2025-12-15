@@ -283,10 +283,59 @@ def _cross_process_lock(lock_path: Path):
                 pass
 
 def _detect_repo_name_from_path(path: Path) -> str:
+    """Detect repository name from path using git remote origin URL.
+
+    This ensures consistency with how the MCP server detects repos during search.
+    Priority:
+    1. Git remote origin URL (canonical repo name like 'Context-Engine')
+    2. Git toplevel directory name (folder name like 'Context-Engine-hash')
+    3. Walk up to find .git and return that folder name
+    4. Return parent folder name as fallback
+    """
+    # Fast-path for managed upload workspaces (typically mounted at /work):
+    # derive the repo name from the first path segment relative to the workspace
+    # root instead of spawning git processes or falling back to "work".
+    try:
+        ws_root = Path(_resolve_workspace_root()).resolve()
+    except Exception:
+        ws_root = Path(_resolve_workspace_root())
+
+    try:
+        resolved = path.resolve()
+    except Exception:
+        resolved = path if path.is_dir() else path.parent
+
+    try:
+        rel = resolved.relative_to(ws_root)
+        if rel.parts:
+            candidate = rel.parts[0]
+            if candidate not in {".codebase", ".git", "__pycache__"}:
+                return candidate
+    except Exception:
+        pass
+
     try:
         base = path if path.is_dir() else path.parent
+        # First try: get repo name from git remote origin URL (canonical name)
+        try:
+            r = subprocess.run(
+                ["git", "-C", str(base), "config", "--get", "remote.origin.url"],
+                capture_output=True, text=True, timeout=5
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                url = r.stdout.strip()
+                # Extract repo name from URL (e.g., git@github.com:user/repo.git -> repo)
+                name = url.rstrip("/").rsplit("/", 1)[-1]
+                if name.endswith(".git"):
+                    name = name[:-4]
+                if name:
+                    return name
+        except Exception:
+            pass
+
+        # Second try: get git toplevel directory name
         r = subprocess.run(["git", "-C", str(base), "rev-parse", "--show-toplevel"],
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, timeout=5)
         top = (r.stdout or "").strip()
         if r.returncode == 0 and top:
             return Path(top).name
@@ -303,6 +352,14 @@ def _detect_repo_name_from_path(path: Path) -> str:
                 continue
     except Exception:
         pass
+
+    try:
+        structure_name = _detect_repo_name_from_path_by_structure(path)
+        if structure_name:
+            return structure_name
+    except Exception:
+        pass
+
     return (path if path.is_dir() else path.parent).name or "workspace"
 
 
@@ -355,6 +412,16 @@ def get_workspace_state(
 
         if is_multi_repo_mode() and repo_name:
             state_dir = _get_repo_state_dir(repo_name)
+            try:
+                ws_root = Path(_resolve_workspace_root())
+                ws_dir = ws_root / repo_name
+            except Exception:
+                ws_dir = None
+            try:
+                if not state_dir.exists() and (ws_dir is None or not ws_dir.exists()):
+                    return {}
+            except Exception:
+                return {}
             state_dir.mkdir(parents=True, exist_ok=True)
             # Ensure repo state dir is group-writable so root upload service and
             # non-root watcher/indexer processes can both write state/cache files.
@@ -427,6 +494,14 @@ def update_workspace_state(
             f"[workspace_state] Multi-repo: Skipping state update for workspace={workspace_path} without repo_name"
         )
         return {}
+
+    if is_multi_repo_mode() and repo_name:
+        try:
+            ws_root = Path(_resolve_workspace_root())
+            if not (ws_root / repo_name).exists():
+                return {}
+        except Exception:
+            return {}
 
     lock = _get_state_lock(workspace_path, repo_name)
     with lock:
@@ -539,6 +614,12 @@ def log_activity(
     resolved_workspace = workspace_path or _resolve_workspace_root()
 
     if is_multi_repo_mode() and repo_name:
+        try:
+            ws_root = Path(_resolve_workspace_root())
+            if not (ws_root / repo_name).exists():
+                return
+        except Exception:
+            return
         state_dir = _get_repo_state_dir(repo_name)
         state_dir.mkdir(parents=True, exist_ok=True)
         state_path = state_dir / STATE_FILENAME
@@ -613,8 +694,8 @@ def get_collection_name(repo_name: Optional[str] = None) -> str:
     # Default fallback
     return "global-collection"
 
-def _detect_repo_name_from_path(path: Path) -> str:
-    """Detect repository name from path. Clean, robust implementation."""
+def _detect_repo_name_from_path_by_structure(path: Path) -> str:
+    """Detect repository name from path structure (fallback when git is unavailable)."""
     try:
         resolved_path = path.resolve()
     except Exception:
@@ -650,14 +731,38 @@ def _detect_repo_name_from_path(path: Path) -> str:
             continue
 
         repo_path = base / repo_name
-        if repo_path.exists() or str(resolved_path).startswith(str(repo_path) + os.sep):
+        if repo_path.exists() or resolved_path == repo_path or str(resolved_path).startswith(str(repo_path) + os.sep):
             return repo_name
 
     return None
 
 def _extract_repo_name_from_path(workspace_path: str) -> str:
-    """Extract repository name from workspace path."""
-    return _detect_repo_name_from_path(Path(workspace_path))
+    """Extract repository name from workspace path.
+
+    Uses git-based detection first (canonical repo name from remote origin URL),
+    falls back to folder structure detection when git is unavailable.
+    """
+    path = Path(workspace_path)
+
+    # First try git-based detection (uses remote origin URL for canonical name)
+    git_name = _detect_repo_name_from_path(path)
+    if git_name:
+        try:
+            ws_root = Path(_resolve_workspace_root()).resolve()
+        except Exception:
+            ws_root = Path(_resolve_workspace_root())
+        if ws_root.name and git_name == ws_root.name:
+            git_name = None
+    if git_name and git_name != "workspace":
+        return git_name
+
+    # Fallback to structure-based detection when git is unavailable
+    structure_name = _detect_repo_name_from_path_by_structure(path)
+    if structure_name:
+        return structure_name
+
+    # Final fallback
+    return git_name or "workspace"
 
 # Cache functions for file hash tracking
 def _get_cache_path(workspace_path: str) -> Path:
@@ -740,6 +845,12 @@ def set_cached_file_hash(file_path: str, file_hash: str, repo_name: Optional[str
     fp = str(Path(file_path).resolve())
 
     if is_multi_repo_mode() and repo_name:
+        try:
+            ws_root = Path(_resolve_workspace_root())
+            if not (ws_root / repo_name).exists():
+                return
+        except Exception:
+            return
         state_dir = _get_repo_state_dir(repo_name)
         cache_path = state_dir / CACHE_FILENAME
         state_dir.mkdir(parents=True, exist_ok=True)
