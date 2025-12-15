@@ -51,7 +51,7 @@ class RefinementState:
 
 
 # Global embedding cache for efficiency
-# Use (hash, text) tuple as key to avoid hash collisions
+# Key is sha256 hex digest (deterministic, collision-resistant)
 _EMBEDDING_CACHE: Dict[str, np.ndarray] = {}
 _EMBEDDING_CACHE_MAX_SIZE = 10000
 _EMBEDDING_CACHE_LOCK = threading.Lock()
@@ -594,6 +594,10 @@ class RecursiveReranker:
         self._embedder = None
         self._embedder_lock = threading.Lock()
 
+        # Cached projection matrices: input_dim -> projection_matrix
+        self._proj_cache: Dict[int, np.ndarray] = {}
+        self._proj_cache_lock = threading.Lock()
+
     def _get_embedder(self):
         """Lazy load embedder for encoding queries and documents."""
         if self._embedder is not None:
@@ -642,11 +646,15 @@ class RecursiveReranker:
                 except Exception:
                     new_embeddings = []
 
-            # Fallback for any that failed
+            # Fallback for any that failed - use sha256-derived seed for determinism
             if not new_embeddings:
+                import hashlib
                 for text in texts_to_encode:
-                    np.random.seed(hash(text) % (2**32))
-                    vec = np.random.randn(self.dim).astype(np.float32)
+                    # Derive deterministic seed from sha256 (process-stable)
+                    text_hash = hashlib.sha256(text.encode("utf-8", errors="replace")).digest()
+                    seed = int.from_bytes(text_hash[:4], "big")
+                    rng = np.random.RandomState(seed)
+                    vec = rng.randn(self.dim).astype(np.float32)
                     vec = vec / (np.linalg.norm(vec) + 1e-8)
                     _cache_embedding(text, vec)
                     new_embeddings.append(vec)
