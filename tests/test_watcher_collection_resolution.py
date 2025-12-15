@@ -36,13 +36,10 @@ def test_main_resolves_collection_from_state(monkeypatch, tmp_path):
             # Next() will take the first yielded item and len() is the dim
             yield [0.0] * 32
 
-    # Patch the embedder module that watch_index imports from
+    # Patch the embedder module that watch_index imports from at runtime
     embedder = importlib.import_module("scripts.embedder")
     monkeypatch.setattr(embedder, "get_embedding_model", lambda m: FakeModel(m), raising=True)
     monkeypatch.setattr(embedder, "get_model_dimension", lambda m: 32, raising=True)
-    # Also patch in watch_index directly if it imported these
-    monkeypatch.setattr(wi, "get_embedding_model", lambda m: FakeModel(m), raising=True)
-    monkeypatch.setattr(wi, "get_model_dimension", lambda m: 32, raising=True)
 
     # No-op ensure calls
     idx = importlib.import_module("scripts.ingest_code")

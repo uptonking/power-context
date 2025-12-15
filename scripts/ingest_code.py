@@ -3567,7 +3567,7 @@ def process_file_with_smart_reindexing(
     client: QdrantClient,
     current_collection: str,
     per_file_repo,
-    model: TextEmbedding,
+    model: "TextEmbedding",
     vector_name: str | None,
 ) -> str:
     """Smart, chunk-level reindexing for a single file.
