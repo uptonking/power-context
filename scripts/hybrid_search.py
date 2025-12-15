@@ -1,19 +1,26 @@
 #!/usr/bin/env python3
 import os
+import sys
 import argparse
 from typing import List, Dict, Any, Tuple
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
+from pathlib import Path
+
+# Ensure /work or repo root is in sys.path for scripts imports
+_ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(_ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(_ROOT_DIR))
 
 from qdrant_client import QdrantClient, models
 
 # Use embedder factory for Qwen3 support; fallback to direct fastembed
+from fastembed import TextEmbedding  # Always import for type hints
 try:
     from scripts.embedder import get_embedding_model as _get_embedding_model
     _EMBEDDER_FACTORY = True
 except ImportError:
     _EMBEDDER_FACTORY = False
-    from fastembed import TextEmbedding
 import re
 import json
 import math
@@ -3101,7 +3108,7 @@ def main():
     args = ap.parse_args()
 
     # Resolve effective collection early to avoid variable usage errors
-    eff_collection = args.collection or os.environ.get("COLLECTION_NAME", "my-collection")
+    eff_collection = args.collection or os.environ.get("COLLECTION_NAME", "codebase")
 
     # Use embedder factory for Qwen3 support
     if _EMBEDDER_FACTORY:
