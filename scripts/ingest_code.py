@@ -420,6 +420,7 @@ _DEFAULT_EXCLUDE_DIRS = [
     "/.vscode",
     "/.cache",
     "/.codebase",
+    "/.remote-git",
     "/node_modules",
     "/dist",
     "/build",
@@ -445,6 +446,79 @@ _DEFAULT_EXCLUDE_FILES = [
     "*.whl",
     "*.tar.gz",
 ]
+
+_ANY_DEPTH_EXCLUDE_DIR_NAMES = {
+    ".git",
+    ".remote-git",
+    ".codebase",
+    "node_modules",
+}
+
+def _should_skip_explicit_file_by_excluder(file_path: Path) -> bool:
+    try:
+        p = file_path if isinstance(file_path, Path) else Path(str(file_path))
+    except Exception:
+        return False
+
+    root = None
+    try:
+        parts = list(p.parts)
+        if ".remote-git" in parts:
+            i = parts.index(".remote-git")
+            root = Path(*parts[:i]) if i > 0 else Path("/")
+    except Exception:
+        root = None
+
+    if root is None:
+        try:
+            s = str(p)
+            if s.startswith("/work/"):
+                slug = s[len("/work/") :].split("/", 1)[0]
+                root = (Path("/work") / slug) if slug else None
+        except Exception:
+            root = None
+
+    if root is None:
+        try:
+            ws = (os.environ.get("WATCH_ROOT") or os.environ.get("WORKSPACE_PATH") or "").strip()
+            if ws:
+                ws_path = Path(ws).resolve()
+                pr = p.resolve()
+                if pr == ws_path or ws_path in pr.parents:
+                    root = ws_path
+        except Exception:
+            root = None
+
+    if root is None:
+        try:
+            pr = p.resolve()
+            for anc in [pr.parent] + list(pr.parents):
+                if (anc / ".codebase").exists():
+                    root = anc
+                    break
+        except Exception:
+            root = None
+
+    if not root or str(root) == "/":
+        return False
+
+    try:
+        rel = p.resolve().relative_to(root.resolve()).as_posix().lstrip("/")
+    except Exception:
+        return False
+    if not rel:
+        return False
+
+    try:
+        excl = _Excluder(root)
+        cur = ""
+        for seg in [x for x in rel.split("/") if x][:-1]:
+            cur = cur + "/" + seg
+            if excl.exclude_dir(cur):
+                return True
+        return excl.exclude_file(rel)
+    except Exception:
+        return False
 
 
 def _env_truthy(val: str | None, default: bool) -> bool:
@@ -509,11 +583,23 @@ class _Excluder:
         for pref in self.dir_prefixes:
             if rel == pref or rel.startswith(pref + "/"):
                 return True
-        # Match directory name against dir_globs (e.g., .venv*)
+
         base = rel.rsplit("/", 1)[-1]
+
+        # Match directory name against dir_globs (e.g., .venv*)
         for g in self.dir_globs:
             if fnmatch.fnmatch(base, g):
                 return True
+
+        # Treat single-segment dir prefixes (e.g. "/.git", "/node_modules") as
+        # "exclude this directory name anywhere". This matters when indexing a
+        # workspace root that contains multiple repos, e.g. /work/<repo>/.git.
+        try:
+            if base in _ANY_DEPTH_EXCLUDE_DIR_NAMES and ("/" + base) in self.dir_prefixes:
+                return True
+        except Exception:
+            pass
+
         # Also allow dir name-only patterns in file_globs (e.g., node_modules)
         for g in self.file_globs:
             # Match bare dir names without wildcards
@@ -535,7 +621,7 @@ class _Excluder:
 def iter_files(root: Path) -> Iterable[Path]:
     # Allow passing a single file
     if root.is_file():
-        if root.suffix.lower() in CODE_EXTS:
+        if root.suffix.lower() in CODE_EXTS and not _should_skip_explicit_file_by_excluder(root):
             yield root
         return
 
@@ -2540,6 +2626,17 @@ def index_single_file(
     hide index/cache drift, especially with git worktree reuse or collection rebuilds.
     """
 
+    try:
+        if _should_skip_explicit_file_by_excluder(file_path):
+            try:
+                delete_points_by_path(client, collection, str(file_path))
+            except Exception:
+                pass
+            print(f"Skipping excluded file: {file_path}")
+            return False
+    except Exception:
+        return False
+
     # Resolve trust_cache from env when not explicitly provided. INDEX_TRUST_CACHE is intended
     # for debugging only and should not be enabled in normal indexing runs.
     if trust_cache is None:
@@ -3636,6 +3733,18 @@ def process_file_with_smart_reindexing(
     sharing a repo can reuse embeddings across slugs, not just per-path.
     """
     try:
+        try:
+            p = Path(str(file_path))
+            if _should_skip_explicit_file_by_excluder(p):
+                try:
+                    delete_points_by_path(client, current_collection, str(p))
+                except Exception:
+                    pass
+                print(f"[SMART_REINDEX] Skipping excluded file: {file_path}")
+                return "skipped"
+        except Exception:
+            return "skipped"
+
         print(f"[SMART_REINDEX] Processing {file_path} with chunk-level reindexing")
 
         # Normalize path / types

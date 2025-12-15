@@ -38,17 +38,38 @@
   <div class="card">
     <h2>Collections</h2>
 
+    {% if deletion_enabled %}
+      <p class="error">
+        WARNING: Collection deletion is enabled on this server. Deleting a collection can remove server-side files under {{ work_dir }}.
+        If {{ work_dir }} is a bind mount of your only copy of code, you can lose data. Practical guidance: Standard compose: treat /work as “possibly my real repo”. Keep CTXCE_ADMIN_COLLECTION_DELETE_ENABLED=0 unless you really mean it.
+      </p>
+    {% else %}
+      <p class="muted">Collection deletion is disabled by server configuration.</p>
+    {% endif %}
+
     <table>
-      <tr><th>id</th><th>qdrant_collection</th></tr>
+      <tr><th>id</th><th>qdrant_collection</th><th></th></tr>
       {% if collections and collections|length > 0 %}
         {% for c in collections %}
           <tr>
             <td>{{ c.id }}</td>
             <td>{{ c.qdrant_collection }}</td>
+            <td>
+              {% if deletion_enabled %}
+                <form method="post" action="/admin/collections/delete" onsubmit="return confirm('Delete collection ' + '{{ c.qdrant_collection }}' + '? This may delete server-side files under {{ work_dir }} if filesystem cleanup is selected.');">
+                  <input type="hidden" name="collection" value="{{ c.qdrant_collection }}" />
+                  <label class="muted" style="display:block; margin-bottom:6px;">
+                    <input type="checkbox" name="delete_fs" value="1" />
+                    Also delete filesystem (dangerous)
+                  </label>
+                  <button type="submit">Delete</button>
+                </form>
+              {% endif %}
+            </td>
           </tr>
         {% endfor %}
       {% else %}
-        <tr><td colspan="2">(none)</td></tr>
+        <tr><td colspan="3">(none)</td></tr>
       {% endif %}
     </table>
   </div>
