@@ -165,12 +165,38 @@ def get_model_dimension(model_name: Optional[str] = None) -> int:
         model_name: Model name override. If None, uses EMBEDDING_MODEL env var.
 
     Returns:
-        Embedding dimension (768 for BGE-base, 1024 for Qwen3).
+        Embedding dimension for the model.
     """
     if model_name is None:
         model_name = os.environ.get("EMBEDDING_MODEL", DEFAULT_MODEL)
+
+    # Qwen3 models: 1024 dimensions
     if is_qwen3_model(model_name):
         return QWEN3_DIM
-    # Default BGE-base dimension
+
+    # Known model dimensions (case-insensitive matching)
+    model_lower = model_name.lower()
+
+    # MiniLM models: 384 dimensions
+    if "minilm" in model_lower or "all-minilm" in model_lower:
+        return 384
+
+    # BGE-small: 384 dimensions
+    if "bge-small" in model_lower:
+        return 384
+
+    # BGE-large: 1024 dimensions
+    if "bge-large" in model_lower:
+        return 1024
+
+    # E5 models
+    if "e5-small" in model_lower:
+        return 384
+    if "e5-large" in model_lower:
+        return 1024
+    if "e5-base" in model_lower:
+        return 768
+
+    # Default: BGE-base and similar 768-dimension models
     return 768
 
