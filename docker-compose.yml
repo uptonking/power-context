@@ -59,11 +59,18 @@ services:
       - TOOL_STORE_DESCRIPTION=${TOOL_STORE_DESCRIPTION}
       - TOOL_FIND_DESCRIPTION=${TOOL_FIND_DESCRIPTION}
       - FASTMCP_HEALTH_PORT=18000
+      # Learning reranker configuration
+      - RERANK_LEARNING=${RERANK_LEARNING:-1}
+      - RERANKER_WEIGHTS_DIR=/tmp/rerank_weights
+      - RERANK_EVENTS_DIR=/tmp/rerank_events
+      - RERANK_EVENTS_ENABLED=${RERANK_EVENTS_ENABLED:-1}
     ports:
       - "18000:18000"
       - "8000:8000"
     volumes:
       - workspace_pvc:/work:ro
+      - rerank_data:/tmp/rerank_weights:rw
+      - rerank_events:/tmp/rerank_events:rw
     networks:
       - dev-remote-network
 
@@ -120,14 +127,56 @@ services:
       - INDEX_UPSERT_BATCH=${INDEX_UPSERT_BATCH:-512}
       - INDEX_UPSERT_RETRIES=${INDEX_UPSERT_RETRIES:-5}
       - MAX_MICRO_CHUNKS_PER_FILE=${MAX_MICRO_CHUNKS_PER_FILE:-200}
+      # Learning reranker configuration
+      - RERANK_LEARNING=${RERANK_LEARNING:-1}
+      - RERANKER_WEIGHTS_DIR=/tmp/rerank_weights
+      - RERANK_EVENTS_DIR=/tmp/rerank_events
+      - RERANK_EVENTS_ENABLED=${RERANK_EVENTS_ENABLED:-1}
     ports:
       - "${FASTMCP_INDEXER_PORT:-8001}:8001"
       - "18001:18001"
     volumes:
       - workspace_pvc:/work:rw
       - codebase_pvc:/work/.codebase:rw
+      - rerank_data:/tmp/rerank_weights:rw
+      - rerank_events:/tmp/rerank_events:rw
     networks:
       - dev-remote-network
+
+  # Learning reranker worker - processes training events in background
+  learning_worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.mcp-indexer
+    container_name: learning-worker-dev-remote
+    user: "1000:1000"
+    command: ["sh", "-c", "mkdir -p /tmp/huggingface/hub /tmp/huggingface/transformers /tmp/huggingface/fastembed && exec python /app/scripts/learning_reranker_worker.py --daemon"]
+    depends_on:
+      - qdrant
+      - mcp_indexer
+    env_file:
+      - .env
+    environment:
+      - QDRANT_URL=${QDRANT_URL}
+      - COLLECTION_NAME=${COLLECTION_NAME}
+      - HF_HOME=/tmp/huggingface
+      - HF_HUB_CACHE=/tmp/huggingface/hub
+      - TRANSFORMERS_CACHE=/tmp/huggingface/transformers
+      - FASTEMBED_CACHE_PATH=/tmp/huggingface/fastembed
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL}
+      - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER}
+      - RERANK_EVENTS_DIR=/tmp/rerank_events
+      - RERANKER_WEIGHTS_DIR=/tmp/rerank_weights
+      - RERANK_LEARNING_BATCH_SIZE=${RERANK_LEARNING_BATCH_SIZE:-32}
+      - RERANK_LEARNING_POLL_INTERVAL=${RERANK_LEARNING_POLL_INTERVAL:-30}
+      - RERANK_LEARNING_RATE=${RERANK_LEARNING_RATE:-0.001}
+    volumes:
+      - workspace_pvc:/work:rw
+      - rerank_data:/tmp/rerank_weights:rw
+      - rerank_events:/tmp/rerank_events:rw
+    networks:
+      - dev-remote-network
+    restart: unless-stopped
 
   # MCP HTTP search service - same as base compose
   mcp_http:
@@ -171,11 +220,18 @@ services:
       - TOOL_STORE_DESCRIPTION=${TOOL_STORE_DESCRIPTION}
       - TOOL_FIND_DESCRIPTION=${TOOL_FIND_DESCRIPTION}
       - FASTMCP_HEALTH_PORT=18000
+      # Learning reranker configuration
+      - RERANK_LEARNING=${RERANK_LEARNING:-1}
+      - RERANKER_WEIGHTS_DIR=/tmp/rerank_weights
+      - RERANK_EVENTS_DIR=/tmp/rerank_events
+      - RERANK_EVENTS_ENABLED=${RERANK_EVENTS_ENABLED:-1}
     ports:
       - "${FASTMCP_HTTP_HEALTH_PORT:-18002}:18000"
       - "${FASTMCP_HTTP_PORT:-8002}:8000"
     volumes:
       - workspace_pvc:/work:ro
+      - rerank_data:/tmp/rerank_weights:rw
+      - rerank_events:/tmp/rerank_events:rw
     networks:
       - dev-remote-network
 
@@ -233,12 +289,19 @@ services:
       - INDEX_UPSERT_BATCH=${INDEX_UPSERT_BATCH:-512}
       - INDEX_UPSERT_RETRIES=${INDEX_UPSERT_RETRIES:-5}
       - MAX_MICRO_CHUNKS_PER_FILE=${MAX_MICRO_CHUNKS_PER_FILE:-200}
+      # Learning reranker configuration
+      - RERANK_LEARNING=${RERANK_LEARNING:-1}
+      - RERANKER_WEIGHTS_DIR=/tmp/rerank_weights
+      - RERANK_EVENTS_DIR=/tmp/rerank_events
+      - RERANK_EVENTS_ENABLED=${RERANK_EVENTS_ENABLED:-1}
     ports:
       - "${FASTMCP_INDEXER_HTTP_PORT:-8003}:8001"
       - "${FASTMCP_INDEXER_HTTP_HEALTH_PORT:-18003}:18001"
     volumes:
       - workspace_pvc:/work:rw
       - codebase_pvc:/work/.codebase:rw
+      - rerank_data:/tmp/rerank_weights:rw
+      - rerank_events:/tmp/rerank_events:rw
     networks:
       - dev-remote-network
 
@@ -492,6 +555,14 @@ volumes:
   
   # Qdrant storage - separate from base compose to avoid conflicts
   qdrant_storage_dev_remote:
+    driver: local
+
+  # Learning reranker weights storage (shared between indexer and worker)
+  rerank_data:
+    driver: local
+
+  # Learning reranker events storage (shared between indexer and worker)
+  rerank_events:
     driver: local
 
 # Custom network for service discovery
