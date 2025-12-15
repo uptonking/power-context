@@ -44,9 +44,13 @@ services:
       - CTXCE_AUTH_ALLOW_OPEN_TOKEN_LOGIN=${CTXCE_AUTH_ALLOW_OPEN_TOKEN_LOGIN:-0}
       - COLLECTION_NAME=${COLLECTION_NAME}
       - PATH_EMIT_MODE=auto
-      - HF_HOME=/work/.cache/huggingface
-      - TRANSFORMERS_CACHE=/work/.cache/huggingface
-      - HUGGINGFACE_HUB_CACHE=/work/.cache/huggingface
+      # Use /tmp for HF caches to avoid root-owned docker volume permissions
+      - HF_HOME=/tmp/huggingface
+      - HF_HUB_CACHE=/tmp/huggingface/hub
+      - HUGGINGFACE_HUB_CACHE=/tmp/huggingface/hub
+      - TRANSFORMERS_CACHE=/tmp/huggingface/transformers
+      - FASTEMBED_CACHE_PATH=/tmp/huggingface/fastembed
+      - HF_HUB_DISABLE_XET=1
       - EMBEDDING_MODEL=${EMBEDDING_MODEL}
       - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER}
       - QWEN3_EMBEDDING_ENABLED=${QWEN3_EMBEDDING_ENABLED:-0}
@@ -55,14 +59,11 @@ services:
       - TOOL_STORE_DESCRIPTION=${TOOL_STORE_DESCRIPTION}
       - TOOL_FIND_DESCRIPTION=${TOOL_FIND_DESCRIPTION}
       - FASTMCP_HEALTH_PORT=18000
-      - HF_HOME=/home/user/.cache
-      - TRANSFORMERS_CACHE=/home/user/.cache
     ports:
       - "18000:18000"
       - "8000:8000"
     volumes:
       - workspace_pvc:/work:ro
-      - huggingface_cache:/home/user/.cache
     networks:
       - dev-remote-network
 
@@ -155,9 +156,13 @@ services:
       - CTXCE_AUTH_ALLOW_OPEN_TOKEN_LOGIN=${CTXCE_AUTH_ALLOW_OPEN_TOKEN_LOGIN:-0}
       - COLLECTION_NAME=${COLLECTION_NAME}
       - PATH_EMIT_MODE=auto
-      - HF_HOME=/work/.cache/huggingface
-      - TRANSFORMERS_CACHE=/work/.cache/huggingface
-      - HUGGINGFACE_HUB_CACHE=/work/.cache/huggingface
+      # Use /tmp for HF caches to avoid root-owned docker volume permissions
+      - HF_HOME=/tmp/huggingface
+      - HF_HUB_CACHE=/tmp/huggingface/hub
+      - HUGGINGFACE_HUB_CACHE=/tmp/huggingface/hub
+      - TRANSFORMERS_CACHE=/tmp/huggingface/transformers
+      - FASTEMBED_CACHE_PATH=/tmp/huggingface/fastembed
+      - HF_HUB_DISABLE_XET=1
       - EMBEDDING_MODEL=${EMBEDDING_MODEL}
       - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER}
       - QWEN3_EMBEDDING_ENABLED=${QWEN3_EMBEDDING_ENABLED:-0}
@@ -166,14 +171,11 @@ services:
       - TOOL_STORE_DESCRIPTION=${TOOL_STORE_DESCRIPTION}
       - TOOL_FIND_DESCRIPTION=${TOOL_FIND_DESCRIPTION}
       - FASTMCP_HEALTH_PORT=18000
-      - HF_HOME=/home/user/.cache
-      - TRANSFORMERS_CACHE=/home/user/.cache
     ports:
       - "${FASTMCP_HTTP_HEALTH_PORT:-18002}:18000"
       - "${FASTMCP_HTTP_PORT:-8002}:8000"
     volumes:
       - workspace_pvc:/work:ro
-      - huggingface_cache:/home/user/.cache
     networks:
       - dev-remote-network
 
@@ -271,16 +273,18 @@ services:
     environment:
       - QDRANT_URL=${QDRANT_URL}
       - COLLECTION_NAME=${COLLECTION_NAME}
-      - HF_HOME=/work/.cache/huggingface
-      - TRANSFORMERS_CACHE=/work/.cache/huggingface
-      - HUGGINGFACE_HUB_CACHE=/work/.cache/huggingface
+      # Use /tmp for HF caches to avoid permission issues during model download
+      - HF_HOME=/tmp/huggingface
+      - HF_HUB_CACHE=/tmp/huggingface/hub
+      - HUGGINGFACE_HUB_CACHE=/tmp/huggingface/hub
+      - TRANSFORMERS_CACHE=/tmp/huggingface/transformers
+      - FASTEMBED_CACHE_PATH=/tmp/huggingface/fastembed
+      - HF_HUB_DISABLE_XET=1
       - EMBEDDING_MODEL=${EMBEDDING_MODEL}
       - QWEN3_EMBEDDING_ENABLED=${QWEN3_EMBEDDING_ENABLED:-0}
       - QWEN3_QUERY_INSTRUCTION=${QWEN3_QUERY_INSTRUCTION:-1}
       - QWEN3_INSTRUCTION_TEXT=${QWEN3_INSTRUCTION_TEXT}
-      - HF_HOME=/home/user/.cache
       - HOST_INDEX_PATH=/work
-      - TRANSFORMERS_CACHE=/home/user/.cache
       - QDRANT_TIMEOUT=${QDRANT_TIMEOUT:-60}
       - INDEX_SEMANTIC_CHUNKS=${INDEX_SEMANTIC_CHUNKS:-0}
       - INDEX_MICRO_CHUNKS=${INDEX_MICRO_CHUNKS:-0}
@@ -290,8 +294,7 @@ services:
     volumes:
       - workspace_pvc:/work:rw
       - codebase_pvc:/work/.codebase:rw
-      - huggingface_cache:/home/user/.cache
-    entrypoint: ["sh", "-c", "mkdir -p /tmp/logs && /app/scripts/wait-for-qdrant.sh && cd /app && python /app/scripts/ingest_code.py --root /work"]
+    entrypoint: ["sh", "-c", "mkdir -p /tmp/logs /tmp/huggingface/hub /tmp/huggingface/transformers /tmp/huggingface/fastembed && /app/scripts/wait-for-qdrant.sh && cd /app && python /app/scripts/ingest_code.py --root /work"]
     restart: "no"  # Run once on startup, do not restart after completion
     networks:
       - dev-remote-network
