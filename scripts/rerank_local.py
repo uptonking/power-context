@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 import os
 import argparse
-from typing import List, Dict, Any
+from typing import List, Dict, Any, TYPE_CHECKING
 
 from qdrant_client import QdrantClient, models
+
+# Import TextEmbedding for type hints (may not be available at runtime with embedder factory)
+if TYPE_CHECKING:
+    from fastembed import TextEmbedding
 
 # Use embedder factory for Qwen3 support; fallback to direct fastembed
 try:
@@ -176,7 +180,7 @@ def _select_dense_vector_name(
 
 def dense_results(
     client: QdrantClient,
-    model: TextEmbedding,
+    model: "TextEmbedding",
     vec_name: str,
     query: str,
     flt,
@@ -281,7 +285,7 @@ def rerank_in_process(
     limit: int = 12,
     language: str | None = None,
     under: str | None = None,
-    model: TextEmbedding | None = None,
+    model: "TextEmbedding | None" = None,
     collection: str | None = None,
 ) -> List[Dict[str, Any]]:
     eff_collection = (
