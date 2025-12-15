@@ -679,11 +679,16 @@ Store memory entry (alias for Memory Server's `store()` tool).
 
 ### expand_query()
 
-Generate alternative query variations using local LLM (requires decoder enabled).
+Generate alternative query variations using LLM decoder (requires `REFRAG_DECODER=1`).
+
+Supports three runtime backends via `REFRAG_RUNTIME`:
+- `llamacpp` (default): Local llama.cpp server
+- `glm`: ZhipuAI GLM-4 API (disables deep thinking for fast JSON output)
+- `minimax`: MiniMax M2 API
 
 **Parameters:**
 - `query` (str or list[str], required): Original query or queries to expand
-- `max_new` (int, default 2): Maximum number of alternative queries to generate
+- `max_new` (int, default 2): Maximum number of alternative queries to generate (0-2)
 
 **Returns:**
 ```json
@@ -692,12 +697,15 @@ Generate alternative query variations using local LLM (requires decoder enabled)
   "original_query": "python asyncio subprocess",
   "alternates": [
     "python asynchronous process management",
-    "asyncio subprocess handling in python"
+    "asyncio subprocess handling"
   ],
   "total_queries": 3,
-  "decoder_used": "llamacpp"
+  "decoder_used": "minimax"
 }
 ```
+
+On decoder error, falls back to suffix-based expansion with `"decoder_used": "fallback"`.
+If expansion fails entirely, returns `"ok": false` with an error message.
 
 ### code_search()
 

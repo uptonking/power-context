@@ -71,7 +71,19 @@ _EMBED_MODEL_CACHE: Dict[str, Any] = {}
 _EMBED_MODEL_LOCK = threading.Lock()
 
 def _get_embedding_model():
-    """Lazily load and cache the embedding model to avoid startup I/O."""
+    """Lazily load and cache the embedding model to avoid startup I/O.
+
+    Uses the centralized embedder factory if available, with fallback
+    to direct fastembed initialization for backwards compatibility.
+    """
+    # Try centralized embedder factory first (supports Qwen3 feature flag)
+    try:
+        from scripts.embedder import get_embedding_model
+        return get_embedding_model(EMBEDDING_MODEL)
+    except ImportError:
+        pass
+
+    # Fallback to original implementation
     from fastembed import TextEmbedding
     m = _EMBED_MODEL_CACHE.get(EMBEDDING_MODEL)
     if m is None:

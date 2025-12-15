@@ -87,6 +87,7 @@ Replace `localhost` with your server IP/hostname for remote setups.
 
 ### Augment
 
+**Option 1: Direct SSE connection** (requires Context-Engine running locally):
 ```json
 {
   "mcpServers": {
@@ -95,6 +96,36 @@ Replace `localhost` with your server IP/hostname for remote setups.
   }
 }
 ```
+
+**Option 2: MCP Bridge** (recommended - unified server with workspace awareness):
+```json
+{
+  "mcpServers": {
+    "context-engine": {
+      "command": "npx",
+      "args": [
+        "@context-engine-bridge/context-engine-mcp-bridge",
+        "mcp-serve",
+        "--workspace",
+        "/path/to/your/project",
+        "--indexer-url",
+        "http://localhost:8003/mcp",
+        "--memory-url",
+        "http://localhost:8002/mcp"
+      ],
+      "env": {
+        "COLLECTION_NAME": "codebase"
+      }
+    }
+  }
+}
+```
+
+**Notes:**
+- Replace `/path/to/your/project` with your actual workspace path
+- The `COLLECTION_NAME` env var ensures searches use the correct Qdrant collection
+- The bridge provides a unified MCP server combining both indexer and memory tools
+- Use `http://localhost:8003/mcp` and `http://localhost:8002/mcp` for HTTP transport (recommended)
 
 ### Kiro
 
@@ -266,6 +297,34 @@ After configuring, you should see tools from both servers:
 
 Test connectivity:
 - Call `qdrant_list` to confirm Qdrant connectivity
+- Call `qdrant_status` to check collection point count and last indexed time
 - Call `qdrant_index` with `{ "subdir": "scripts", "recreate": true }` to test indexing
 - Call `context_search` with `{ "include_memories": true }` to test memory blending
+
+---
+
+## Troubleshooting
+
+### Search returns empty results
+
+If `repo_search` or `context_search` returns no results but `qdrant_status` shows points exist:
+
+1. **Check the collection name** - The search may be using a different collection than expected
+2. **Set the collection explicitly** via `COLLECTION_NAME` env var or `--collection` flag
+3. **Use `set_session_defaults`** - Call `set_session_defaults(collection="codebase")` to set the default for your session
+4. **Verify with `qdrant_list`** - Lists all available collections to confirm the correct name
+
+### MCP Bridge not finding collection
+
+When using `@context-engine-bridge/context-engine-mcp-bridge`, ensure you set `COLLECTION_NAME`:
+
+```json
+{
+  "env": {
+    "COLLECTION_NAME": "codebase"
+  }
+}
+```
+
+The default collection name is `codebase` unless you've configured a different one during indexing.
 

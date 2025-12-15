@@ -12,6 +12,7 @@ import tarfile
 import tempfile
 import asyncio
 import logging
+import re
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 from datetime import datetime
@@ -43,6 +44,11 @@ from scripts.auth_backend import (
     grant_collection_access,
     revoke_collection_access,
 )
+
+try:
+    from scripts.collection_admin import delete_collection_everywhere
+except Exception:
+    delete_collection_everywhere = None
 try:
     from scripts.admin_ui import (
         render_admin_acl,
@@ -100,9 +106,14 @@ logger = logging.getLogger(__name__)
 # Configuration from environment
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
 DEFAULT_COLLECTION = os.environ.get("COLLECTION_NAME", "my-collection")
-WORK_DIR = os.environ.get("WORK_DIR", "/work")
+WORK_DIR = os.environ.get("WORK_DIR") or os.environ.get("WORKDIR") or "/work"
 MAX_BUNDLE_SIZE_MB = int(os.environ.get("MAX_BUNDLE_SIZE_MB", "100"))
 UPLOAD_TIMEOUT_SECS = int(os.environ.get("UPLOAD_TIMEOUT_SECS", "300"))
+ADMIN_COLLECTION_DELETE_ENABLED = (
+    str(os.environ.get("CTXCE_ADMIN_COLLECTION_DELETE_ENABLED", "0")).strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+_SLUGGED_REPO_RE = re.compile(r"^.+-[0-9a-f]{16}$")
 CTXCE_MCP_ACL_ENFORCE = (
     str(os.environ.get("CTXCE_MCP_ACL_ENFORCE", "0")).strip().lower()
     in {"1", "true", "yes", "on"}
@@ -546,7 +557,14 @@ async def admin_acl_page(request: Request):
         logger.error(f"[upload_service] Failed to load admin UI data: {e}")
         raise HTTPException(status_code=500, detail="Failed to load admin data")
 
-    resp = render_admin_acl(request, users=users, collections=collections, grants=grants)
+    resp = render_admin_acl(
+        request,
+        users=users,
+        collections=collections,
+        grants=grants,
+        deletion_enabled=ADMIN_COLLECTION_DELETE_ENABLED,
+        work_dir=WORK_DIR,
+    )
     candidate = _get_session_candidate_from_request(request)
     if candidate.get("source") and candidate.get("source") != "cookie":
         _set_admin_session_cookie(resp, str(candidate.get("session_id") or ""))
@@ -567,6 +585,68 @@ async def admin_acl_grant(
         raise HTTPException(status_code=404, detail="Auth disabled")
     except Exception as e:
         return render_admin_error(request, title="Grant Failed", message=str(e), back_href="/admin/acl")
+    return RedirectResponse(url="/admin/acl", status_code=302)
+
+
+@app.post("/admin/collections/delete")
+async def admin_delete_collection(
+    request: Request,
+    collection: str = Form(...),
+    delete_fs: str = Form(""),
+):
+    _require_admin_session(request)
+    if not ADMIN_COLLECTION_DELETE_ENABLED:
+        try:
+            return render_admin_error(
+                request,
+                title="Delete Collection Disabled",
+                message="Collection deletion is disabled by server configuration",
+                back_href="/admin/acl",
+                status_code=403,
+            )
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Collection deletion is disabled by server configuration",
+            )
+    name = (collection or "").strip()
+    if not name:
+        return render_admin_error(
+            request,
+            title="Delete Collection Failed",
+            message="collection is required",
+            back_href="/admin/acl",
+        )
+
+    if delete_collection_everywhere is None:
+        return render_admin_error(
+            request,
+            title="Delete Collection Failed",
+            message="Collection delete helper unavailable",
+            back_href="/admin/acl",
+        )
+
+    # Default is Qdrant-only (no filesystem cleanup). Users must explicitly opt in.
+    try:
+        cleanup_fs = (delete_fs or "").strip().lower() in {"1", "true", "yes", "on"}
+    except Exception:
+        cleanup_fs = False
+
+    try:
+        delete_collection_everywhere(
+            collection=name,
+            work_dir=WORK_DIR,
+            qdrant_url=QDRANT_URL,
+            cleanup_fs=cleanup_fs,
+        )
+    except Exception as e:
+        return render_admin_error(
+            request,
+            title="Delete Collection Failed",
+            message=str(e),
+            back_href="/admin/acl",
+        )
+
     return RedirectResponse(url="/admin/acl", status_code=302)
 
 
@@ -848,9 +928,20 @@ async def upload_delta_bundle(
         # Use slugged repo name (repo+16) for state so it matches ingest/watch_index usage
         try:
             if repo_name:
-                workspace_key = get_workspace_key(workspace_path)
-                slug_repo_name = f"{repo_name}-{workspace_key}"
+                workspace_leaf = Path(workspace_path).name
+                if _SLUGGED_REPO_RE.match(workspace_leaf or ""):
+                    slug_repo_name = workspace_leaf
+                else:
+                    workspace_key = get_workspace_key(workspace_path)
+                    slug_repo_name = f"{repo_name}-{workspace_key}"
                 container_workspace = str(Path(WORK_DIR) / slug_repo_name)
+
+                try:
+                    marker_dir = Path(WORK_DIR) / ".codebase" / "repos" / slug_repo_name
+                    marker_dir.mkdir(parents=True, exist_ok=True)
+                    (marker_dir / ".ctxce_managed_upload").write_text("1\n")
+                except Exception:
+                    pass
 
                 # Persist logical_repo_id mapping for this slug/workspace when provided (feature-gated)
                 if logical_repo_reuse_enabled() and logical_repo_id and update_workspace_state:

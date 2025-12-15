@@ -35,7 +35,24 @@ if str(ROOT_DIR) not in sys.path:
 
 
 from qdrant_client import QdrantClient, models
-from fastembed import TextEmbedding
+
+# Use embedder factory for Qwen3 support; fallback to direct fastembed
+try:
+    from scripts.embedder import get_embedding_model as _get_embedding_model
+    _EMBEDDER_FACTORY = True
+except ImportError:
+    _EMBEDDER_FACTORY = False
+
+# Import TextEmbedding for type hints and backward compatibility with tests
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from fastembed import TextEmbedding
+
+# Always try to import TextEmbedding for backward compatibility with tests
+try:
+    from fastembed import TextEmbedding
+except ImportError:
+    TextEmbedding = None  # type: ignore
 
 
 from datetime import datetime
@@ -98,15 +115,92 @@ except ImportError:
     get_workspace_state = None  # type: ignore
     get_cached_file_meta = None  # type: ignore
 
-# Optional Tree-sitter import (graceful fallback)
+# Optional Tree-sitter import (graceful fallback) - tree-sitter 0.25+ API
+_TS_LANGUAGES: Dict[str, Any] = {}
+_TS_AVAILABLE = False
 try:
-    from tree_sitter import Parser  # type: ignore
-    from tree_sitter_languages import get_language  # type: ignore
+    from tree_sitter import Parser, Language  # type: ignore
 
-    _TS_AVAILABLE = True
+    def _load_ts_language(mod: Any, *, preferred: list[str] | None = None) -> Any | None:
+        """Return a tree-sitter Language instance from a per-language package.
+
+        Different packages expose different entrypoints (e.g. language(),
+        language_typescript(), language_tsx()).
+        """
+        preferred = preferred or []
+        candidates: list[Any] = []
+        if getattr(mod, "language", None) is not None and callable(getattr(mod, "language")):
+            candidates.append(getattr(mod, "language"))
+        for name in preferred:
+            fn = getattr(mod, name, None)
+            if fn is not None and callable(fn):
+                candidates.append(fn)
+        # Last resort: scan for any callable language* attribute
+        for name in dir(mod):
+            if not name.startswith("language"):
+                continue
+            fn = getattr(mod, name, None)
+            if fn is not None and callable(fn):
+                candidates.append(fn)
+
+        for fn in candidates:
+            try:
+                raw_lang = fn()
+                return raw_lang if isinstance(raw_lang, Language) else Language(raw_lang)
+            except Exception:
+                continue
+        return None
+
+    # Import all available language packages
+    for lang_name, pkg_name in [
+        ("python", "tree_sitter_python"),
+        ("javascript", "tree_sitter_javascript"),
+        ("typescript", "tree_sitter_typescript"),
+        ("go", "tree_sitter_go"),
+        ("rust", "tree_sitter_rust"),
+        ("java", "tree_sitter_java"),
+        ("c", "tree_sitter_c"),
+        ("cpp", "tree_sitter_cpp"),
+        ("ruby", "tree_sitter_ruby"),
+        ("c_sharp", "tree_sitter_c_sharp"),
+        ("bash", "tree_sitter_bash"),
+        ("json", "tree_sitter_json"),
+        ("yaml", "tree_sitter_yaml"),
+        ("html", "tree_sitter_html"),
+        ("css", "tree_sitter_css"),
+    ]:
+        try:
+            mod = __import__(pkg_name)
+            preferred: list[str] = []
+            if lang_name == "typescript":
+                preferred = ["language_typescript"]
+            elif lang_name == "c_sharp":
+                preferred = ["language_c_sharp", "language_csharp"]
+            lang = _load_ts_language(mod, preferred=preferred)
+            if lang is not None:
+                _TS_LANGUAGES[lang_name] = lang
+                # Also load TSX if provided by the typescript package
+                if lang_name == "typescript":
+                    tsx_lang = _load_ts_language(mod, preferred=["language_tsx"])
+                    if tsx_lang is not None:
+                        _TS_LANGUAGES["tsx"] = tsx_lang
+        except Exception:
+            pass  # Language package not installed
+
+    # Add aliases
+    if "javascript" in _TS_LANGUAGES:
+        _TS_LANGUAGES["jsx"] = _TS_LANGUAGES["javascript"]
+    if "c_sharp" in _TS_LANGUAGES:
+        _TS_LANGUAGES["csharp"] = _TS_LANGUAGES["c_sharp"]
+    if "bash" in _TS_LANGUAGES:
+        _TS_LANGUAGES["shell"] = _TS_LANGUAGES["bash"]
+        _TS_LANGUAGES["sh"] = _TS_LANGUAGES["bash"]
+
+    _TS_AVAILABLE = len(_TS_LANGUAGES) > 0
 except Exception:  # pragma: no cover
     Parser = None  # type: ignore
-    get_language = None  # type: ignore
+    Language = None  # type: ignore
+    _TS_LANGUAGES = {}
     _TS_AVAILABLE = False
 
 # Import AST analyzer for enhanced semantic chunking
@@ -326,6 +420,7 @@ _DEFAULT_EXCLUDE_DIRS = [
     "/.vscode",
     "/.cache",
     "/.codebase",
+    "/.remote-git",
     "/node_modules",
     "/dist",
     "/build",
@@ -339,6 +434,10 @@ _DEFAULT_EXCLUDE_DIRS = [
     "TestResults",
     "/.git",
 ]
+# Glob patterns for directories (matched against basename)
+_DEFAULT_EXCLUDE_DIR_GLOBS = [
+    ".venv*",  # .venv, .venv311, .venv39, etc.
+]
 _DEFAULT_EXCLUDE_FILES = [
     "*.onnx",
     "*.bin",
@@ -347,6 +446,79 @@ _DEFAULT_EXCLUDE_FILES = [
     "*.whl",
     "*.tar.gz",
 ]
+
+_ANY_DEPTH_EXCLUDE_DIR_NAMES = {
+    ".git",
+    ".remote-git",
+    ".codebase",
+    "node_modules",
+}
+
+def _should_skip_explicit_file_by_excluder(file_path: Path) -> bool:
+    try:
+        p = file_path if isinstance(file_path, Path) else Path(str(file_path))
+    except Exception:
+        return False
+
+    root = None
+    try:
+        parts = list(p.parts)
+        if ".remote-git" in parts:
+            i = parts.index(".remote-git")
+            root = Path(*parts[:i]) if i > 0 else Path("/")
+    except Exception:
+        root = None
+
+    if root is None:
+        try:
+            s = str(p)
+            if s.startswith("/work/"):
+                slug = s[len("/work/") :].split("/", 1)[0]
+                root = (Path("/work") / slug) if slug else None
+        except Exception:
+            root = None
+
+    if root is None:
+        try:
+            ws = (os.environ.get("WATCH_ROOT") or os.environ.get("WORKSPACE_PATH") or "").strip()
+            if ws:
+                ws_path = Path(ws).resolve()
+                pr = p.resolve()
+                if pr == ws_path or ws_path in pr.parents:
+                    root = ws_path
+        except Exception:
+            root = None
+
+    if root is None:
+        try:
+            pr = p.resolve()
+            for anc in [pr.parent] + list(pr.parents):
+                if (anc / ".codebase").exists():
+                    root = anc
+                    break
+        except Exception:
+            root = None
+
+    if not root or str(root) == "/":
+        return False
+
+    try:
+        rel = p.resolve().relative_to(root.resolve()).as_posix().lstrip("/")
+    except Exception:
+        return False
+    if not rel:
+        return False
+
+    try:
+        excl = _Excluder(root)
+        cur = ""
+        for seg in [x for x in rel.split("/") if x][:-1]:
+            cur = cur + "/" + seg
+            if excl.exclude_dir(cur):
+                return True
+        return excl.exclude_file(rel)
+    except Exception:
+        return False
 
 
 def _env_truthy(val: str | None, default: bool) -> bool:
@@ -366,12 +538,14 @@ class _Excluder:
     def __init__(self, root: Path):
         self.root = root
         self.dir_prefixes = []  # absolute like /path/sub
+        self.dir_globs = []  # fnmatch patterns for directory names
         self.file_globs = []  # fnmatch patterns
 
         # Defaults
         use_defaults = _env_truthy(os.environ.get("QDRANT_DEFAULT_EXCLUDES"), True)
         if use_defaults:
             self.dir_prefixes.extend(_DEFAULT_EXCLUDE_DIRS)
+            self.dir_globs.extend(_DEFAULT_EXCLUDE_DIR_GLOBS)
             self.file_globs.extend(_DEFAULT_EXCLUDE_FILES)
 
         # .qdrantignore
@@ -403,12 +577,30 @@ class _Excluder:
             self.file_globs.append(pat.lstrip("/"))
 
     def exclude_dir(self, rel: str) -> bool:
+        import fnmatch
+
         # rel like /a/b
         for pref in self.dir_prefixes:
             if rel == pref or rel.startswith(pref + "/"):
                 return True
-        # Also allow dir name-only patterns in file_globs (e.g., node_modules)
+
         base = rel.rsplit("/", 1)[-1]
+
+        # Match directory name against dir_globs (e.g., .venv*)
+        for g in self.dir_globs:
+            if fnmatch.fnmatch(base, g):
+                return True
+
+        # Treat single-segment dir prefixes (e.g. "/.git", "/node_modules") as
+        # "exclude this directory name anywhere". This matters when indexing a
+        # workspace root that contains multiple repos, e.g. /work/<repo>/.git.
+        try:
+            if base in _ANY_DEPTH_EXCLUDE_DIR_NAMES and ("/" + base) in self.dir_prefixes:
+                return True
+        except Exception:
+            pass
+
+        # Also allow dir name-only patterns in file_globs (e.g., node_modules)
         for g in self.file_globs:
             # Match bare dir names without wildcards
             if g and all(ch not in g for ch in "*?[") and base == g:
@@ -429,7 +621,7 @@ class _Excluder:
 def iter_files(root: Path) -> Iterable[Path]:
     # Allow passing a single file
     if root.is_file():
-        if root.suffix.lower() in CODE_EXTS:
+        if root.suffix.lower() in CODE_EXTS and not _should_skip_explicit_file_by_excluder(root):
             yield root
         return
 
@@ -1581,7 +1773,7 @@ def delete_points_by_path(client: QdrantClient, collection: str, file_path: str)
         pass
 
 
-def embed_batch(model: TextEmbedding, texts: List[str]) -> List[List[float]]:
+def embed_batch(model: "TextEmbedding", texts: List[str]) -> List[List[float]]:
     # fastembed returns a generator of numpy arrays
     return [vec.tolist() for vec in model.embed(texts)]
 
@@ -1928,12 +2120,19 @@ def _extract_symbols_rust(text: str) -> List[_Sym]:
 
 # ----- Tree-sitter based extraction (currently Python, JS/TS) -----
 def _ts_parser(lang_key: str):
+    """Return a tree-sitter Parser for the given language key.
+
+    Uses tree-sitter 0.25+ API with pre-loaded Language objects.
+    """
     if not _use_tree_sitter():
         return None
+
+    if Parser is None or lang_key not in _TS_LANGUAGES:
+        return None
+
     try:
-        p = Parser()
-        p.set_language(get_language(lang_key))
-        return p
+        lang = _TS_LANGUAGES[lang_key]
+        return Parser(lang)
     except Exception:
         return None
 
@@ -1942,8 +2141,15 @@ def _ts_extract_symbols_python(text: str) -> List[_Sym]:
     parser = _ts_parser("python")
     if not parser:
         return []
-    tree = parser.parse(text.encode("utf-8"))
-    root = tree.root_node
+    try:
+        tree = parser.parse(text.encode("utf-8"))
+        if tree is None:
+            return []
+        root = tree.root_node
+    except (ValueError, Exception) as e:
+        # Parsing can fail on malformed code - fallback to empty symbols
+        print(f"[WARN] Tree-sitter parse failed for Python: {e}")
+        return []
     syms: List[_Sym] = []
 
     def node_text(n):
@@ -1987,12 +2193,19 @@ def _ts_extract_symbols_python(text: str) -> List[_Sym]:
 
 
 def _ts_extract_symbols_js(text: str) -> List[_Sym]:
-    # Works for javascript/typescript using a generic JS parser
+    # Works for javascript/typescript using the most-specific available grammar
     parser = _ts_parser("javascript")
     if not parser:
         return []
-    tree = parser.parse(text.encode("utf-8"))
-    root = tree.root_node
+    try:
+        tree = parser.parse(text.encode("utf-8"))
+        if tree is None:
+            return []
+        root = tree.root_node
+    except (ValueError, Exception) as e:
+        # Parsing can fail on malformed code - fallback to empty symbols
+        print(f"[WARN] Tree-sitter parse failed for JavaScript/TypeScript: {e}")
+        return []
     syms: List[_Sym] = []
 
     def node_text(n):
@@ -2028,6 +2241,24 @@ def _ts_extract_symbols_js(text: str) -> List[_Sym]:
             end = n.end_point[0] + 1
             path = f"{class_stack[-1]}.{m}" if class_stack else m
             syms.append(_Sym(kind="method", name=m, path=path, start=start, end=end))
+        # Handle variable declarations with function expressions or arrow functions
+        # e.g., const g = function() {}, const h = () => {}, var j = function() {}
+        if t == "variable_declarator":
+            # Check if the value is a function expression or arrow function
+            name_node = None
+            value_node = None
+            for c in n.children:
+                if c.type == "identifier" and name_node is None:
+                    name_node = c
+                elif c.type in ("function_expression", "arrow_function"):
+                    value_node = c
+            if name_node and value_node:
+                fn = node_text(name_node)
+                start = n.start_point[0] + 1
+                end = n.end_point[0] + 1
+                syms.append(_Sym(kind="function", name=fn, start=start, end=end))
+                # Don't recurse into the function expression to avoid duplicates
+                return
         for c in n.children:
             walk(c)
 
@@ -2038,8 +2269,83 @@ def _ts_extract_symbols_js(text: str) -> List[_Sym]:
 def _ts_extract_symbols(language: str, text: str) -> List[_Sym]:
     if language == "python":
         return _ts_extract_symbols_python(text)
-    if language in ("javascript", "typescript"):
+    if language == "javascript":
         return _ts_extract_symbols_js(text)
+    if language == "typescript":
+        # Prefer TypeScript grammar when available; otherwise fall back to JS grammar.
+        if "typescript" in _TS_LANGUAGES:
+            parser = _ts_parser("typescript")
+            if parser:
+                try:
+                    tree = parser.parse(text.encode("utf-8"))
+                    if tree is None:
+                        return []
+                    root = tree.root_node
+                except (ValueError, Exception) as e:
+                    print(f"[WARN] Tree-sitter parse failed for TypeScript: {e}")
+                    return []
+
+                syms: List[_Sym] = []
+
+                def node_text(n):
+                    return text.encode("utf-8")[n.start_byte : n.end_byte].decode(
+                        "utf-8", errors="ignore"
+                    )
+
+                class_stack: List[str] = []
+
+                def walk(n):
+                    t = n.type
+                    if t == "class_declaration":
+                        name_node = n.child_by_field_name("name")
+                        cls = node_text(name_node) if name_node else ""
+                        start = n.start_point[0] + 1
+                        end = n.end_point[0] + 1
+                        syms.append(_Sym(kind="class", name=cls, start=start, end=end))
+                        class_stack.append(cls)
+                        for c in n.children:
+                            walk(c)
+                        class_stack.pop()
+                        return
+                    if t in ("function_declaration",):
+                        name_node = n.child_by_field_name("name")
+                        fn = node_text(name_node) if name_node else ""
+                        start = n.start_point[0] + 1
+                        end = n.end_point[0] + 1
+                        syms.append(_Sym(kind="function", name=fn, start=start, end=end))
+                    if t == "method_definition":
+                        name_node = n.child_by_field_name("name")
+                        m = node_text(name_node) if name_node else ""
+                        start = n.start_point[0] + 1
+                        end = n.end_point[0] + 1
+                        path = f"{class_stack[-1]}.{m}" if class_stack else m
+                        syms.append(_Sym(kind="method", name=m, path=path, start=start, end=end))
+                    # Handle variable declarations with function expressions or arrow functions
+                    # e.g., const g = function() {}, const h = () => {}, var j = function() {}
+                    if t == "variable_declarator":
+                        # Check if the value is a function expression or arrow function
+                        name_node = None
+                        value_node = None
+                        for c in n.children:
+                            if c.type == "identifier" and name_node is None:
+                                name_node = c
+                            elif c.type in ("function_expression", "arrow_function"):
+                                value_node = c
+                        if name_node and value_node:
+                            fn = node_text(name_node)
+                            start = n.start_point[0] + 1
+                            end = n.end_point[0] + 1
+                            syms.append(_Sym(kind="function", name=fn, start=start, end=end))
+                            # Don't recurse into the function expression to avoid duplicates
+                            return
+                    for c in n.children:
+                        walk(c)
+
+                walk(root)
+                return syms
+
+        return _ts_extract_symbols_js(text)
+
     return []
 
 
@@ -2048,8 +2354,13 @@ def _ts_extract_imports_calls_python(text: str):
     if not parser:
         return [], []
     data = text.encode("utf-8")
-    tree = parser.parse(data)
-    root = tree.root_node
+    try:
+        tree = parser.parse(data)
+        if tree is None:
+            return [], []
+        root = tree.root_node
+    except (ValueError, Exception):
+        return [], []
 
     def node_text(n):
         return data[n.start_byte : n.end_byte].decode("utf-8", errors="ignore")
@@ -2297,7 +2608,7 @@ def _compute_host_and_container_paths(cur_path: str) -> tuple[Optional[str], Opt
 
 def index_single_file(
     client: QdrantClient,
-    model: TextEmbedding,
+    model: "TextEmbedding",
     collection: str,
     vector_name: str,
     file_path: Path,
@@ -2314,6 +2625,17 @@ def index_single_file(
     This is a debug-only escape hatch and is unsafe for normal operation: enabling it may
     hide index/cache drift, especially with git worktree reuse or collection rebuilds.
     """
+
+    try:
+        if _should_skip_explicit_file_by_excluder(file_path):
+            try:
+                delete_points_by_path(client, collection, str(file_path))
+            except Exception:
+                pass
+            print(f"Skipping excluded file: {file_path}")
+            return False
+    except Exception:
+        return False
 
     # Resolve trust_cache from env when not explicitly provided. INDEX_TRUST_CACHE is intended
     # for debugging only and should not be enabled in normal indexing runs.
@@ -2676,9 +2998,15 @@ def index_repo(
         except Exception:
             pass
 
-    model = TextEmbedding(model_name=model_name)
-    # Determine embedding dimension
-    dim = len(next(model.embed(["dimension probe"])))
+    # Use centralized embedder factory if available (supports Qwen3 feature flag)
+    try:
+        from scripts.embedder import get_embedding_model, get_model_dimension
+        model = get_embedding_model(model_name)
+        dim = get_model_dimension(model_name)
+    except ImportError:
+        # Fallback to direct fastembed initialization
+        model = TextEmbedding(model_name=model_name)
+        dim = len(next(model.embed(["dimension probe"])))
 
     client = QdrantClient(
         url=qdrant_url,
@@ -3388,7 +3716,7 @@ def process_file_with_smart_reindexing(
     client: QdrantClient,
     current_collection: str,
     per_file_repo,
-    model: TextEmbedding,
+    model: "TextEmbedding",
     vector_name: str | None,
 ) -> str:
     """Smart, chunk-level reindexing for a single file.
@@ -3405,6 +3733,18 @@ def process_file_with_smart_reindexing(
     sharing a repo can reuse embeddings across slugs, not just per-path.
     """
     try:
+        try:
+            p = Path(str(file_path))
+            if _should_skip_explicit_file_by_excluder(p):
+                try:
+                    delete_points_by_path(client, current_collection, str(p))
+                except Exception:
+                    pass
+                print(f"[SMART_REINDEX] Skipping excluded file: {file_path}")
+                return "skipped"
+        except Exception:
+            return "skipped"
+
         print(f"[SMART_REINDEX] Processing {file_path} with chunk-level reindexing")
 
         # Normalize path / types
@@ -3473,13 +3813,16 @@ def process_file_with_smart_reindexing(
             print(f"[SMART_REINDEX] Failed to load existing points for {file_path}: {e}")
             existing_points = []
 
-        # Index existing points by (symbol_id, code) for reuse
-        points_by_code: dict[tuple[str, str], list[models.Record]] = {}
+        # Index existing points by (symbol_id, code, embedding_text) for reuse.
+        # Important: the dense embedding is computed from `info` (payload['information']).
+        # If line ranges change, `info` changes; reusing an old dense vector would be wrong.
+        points_by_code: dict[tuple[str, str, str], list[models.Record]] = {}
         try:
             for rec in existing_points:
                 payload = rec.payload or {}
                 md = payload.get("metadata") or {}
                 code_text = md.get("code") or ""
+                embed_text = payload.get("information") or payload.get("document") or ""
                 kind = md.get("kind") or ""
                 sym_name = md.get("symbol") or ""
                 start_line = md.get("start_line") or 0
@@ -3488,7 +3831,7 @@ def process_file_with_smart_reindexing(
                     if kind and sym_name and start_line
                     else ""
                 )
-                key = (symbol_id, code_text) if symbol_id else ("", code_text)
+                key = (symbol_id, code_text, embed_text) if symbol_id else ("", code_text, embed_text)
                 points_by_code.setdefault(key, []).append(rec)
         except Exception:
             points_by_code = {}
@@ -3616,23 +3959,75 @@ def process_file_with_smart_reindexing(
             if sym and kind:
                 chunk_symbol_id = f"{kind}_{sym}_{ch['start']}"
 
-            reuse_key = (chunk_symbol_id, code_text)
-            fallback_key = ("", code_text)
+            reuse_key = (chunk_symbol_id, code_text, info)
+            fallback_key = ("", code_text, info)
             reused_rec = None
-            bucket = points_by_code.get(reuse_key) or points_by_code.get(fallback_key)
+            used_key = None
+            bucket = points_by_code.get(reuse_key)
+            if bucket is not None:
+                used_key = reuse_key
+            else:
+                bucket = points_by_code.get(fallback_key)
+                if bucket is not None:
+                    used_key = fallback_key
             if bucket:
                 try:
                     reused_rec = bucket.pop()
                     if not bucket:
                         # Clean up empty bucket
-                        points_by_code.pop(reuse_key, None)
-                        points_by_code.pop(fallback_key, None)
+                        if used_key is not None:
+                            points_by_code.pop(used_key, None)
                 except Exception:
                     reused_rec = None
 
             if reused_rec is not None:
                 try:
                     vec = reused_rec.vector
+                    # Validate vector shape before reuse.
+                    if vector_name and isinstance(vec, dict) and vector_name not in vec:
+                        raise ValueError("reused vector missing dense key")
+                    # If we're reusing an existing embedding, we still need to refresh
+                    # the lexical vector because it depends on pseudo/tags (and can drift).
+                    aug_lex_text = (code_text or "") + (" " + pseudo if pseudo else "") + (
+                        " " + " ".join(tags) if tags else ""
+                    )
+                    refreshed_lex = _lex_hash_vector_text(aug_lex_text)
+                    if vector_name:
+                        if isinstance(vec, dict):
+                            # Named vectors: keep dense/mini as-is, overwrite lex.
+                            vec = dict(vec)
+                            vec[LEX_VECTOR_NAME] = refreshed_lex
+                        else:
+                            # Unexpected shape: treat as dense and rebuild named vectors.
+                            vecs = {vector_name: vec, LEX_VECTOR_NAME: refreshed_lex}
+                            try:
+                                if os.environ.get("REFRAG_MODE", "").strip().lower() in {
+                                    "1",
+                                    "true",
+                                    "yes",
+                                    "on",
+                                }:
+                                    vecs[MINI_VECTOR_NAME] = project_mini(
+                                        list(vec), MINI_VEC_DIM
+                                    )
+                            except Exception:
+                                pass
+                            vec = vecs
+                    else:
+                        # Unnamed vectors collection: ensure we pass dense-only vector.
+                        if isinstance(vec, dict):
+                            # Prefer any non-lex/non-mini vector as dense.
+                            dense = None
+                            try:
+                                for k, v in vec.items():
+                                    if k not in {LEX_VECTOR_NAME, MINI_VECTOR_NAME}:
+                                        dense = v
+                                        break
+                            except Exception:
+                                dense = None
+                            if dense is None:
+                                raise ValueError("reused vector has no dense component")
+                            vec = dense
                     pid = hash_id(code_text, fp, ch["start"], ch["end"])
                     reused_points.append(
                         models.PointStruct(id=pid, vector=vec, payload=payload)

@@ -12,7 +12,6 @@ import sys
 from pathlib import Path
 
 from qdrant_client import QdrantClient, models
-from fastembed import TextEmbedding
 
 COLLECTION = os.environ.get("COLLECTION_NAME", "codebase")
 MODEL_NAME = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
@@ -23,6 +22,14 @@ REPO_NAME = os.environ.get("REPO_NAME", "workspace")
 ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
+
+# Use embedder factory for Qwen3 support; fallback to direct fastembed
+try:
+    from scripts.embedder import get_embedding_model as _get_embedding_model
+    _EMBEDDER_FACTORY = True
+except ImportError:
+    _EMBEDDER_FACTORY = False
+    from fastembed import TextEmbedding
 
 from scripts.utils import sanitize_vector_name as _sanitize_vector_name
 
@@ -502,7 +509,11 @@ def main():
     )
     args = ap.parse_args()
 
-    model = TextEmbedding(model_name=MODEL_NAME)
+    # Use embedder factory for Qwen3 support
+    if _EMBEDDER_FACTORY:
+        model = _get_embedding_model(MODEL_NAME)
+    else:
+        model = TextEmbedding(model_name=MODEL_NAME)
     vec_name = _sanitize_vector_name(MODEL_NAME)
     client = QdrantClient(url=QDRANT_URL, api_key=API_KEY or None)
 

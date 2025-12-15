@@ -588,6 +588,19 @@ _EMBED_MODEL_LOCKS: Dict[str, threading.Lock] = {}
 
 
 def _get_embedding_model(model_name: str):
+    """Get cached embedding model with optional Qwen3 support.
+
+    Uses the centralized embedder factory if available, with fallback
+    to direct fastembed initialization for backwards compatibility.
+    """
+    # Try centralized embedder factory first (supports Qwen3 feature flag)
+    try:
+        from scripts.embedder import get_embedding_model
+        return get_embedding_model(model_name)
+    except ImportError:
+        pass
+
+    # Fallback to original implementation
     try:
         from fastembed import TextEmbedding  # type: ignore
     except Exception:
@@ -2246,6 +2259,7 @@ async def repo_search(
             json_lines = items  # reuse downstream shaping
         except Exception as e:
             # Fallback to subprocess path if in-process fails
+            logger.debug(f"In-process hybrid search failed, falling back to subprocess: {type(e).__name__}: {e}")
             use_hybrid_inproc = False
 
     if not use_hybrid_inproc:
@@ -3023,6 +3037,7 @@ async def search_tests_for(
     session: Any = None,
     compact: Any = None,
     kwargs: Any = None,
+    ctx: Context = None,
 ) -> Dict[str, Any]:
     """Find test files related to a query.
 
@@ -3061,6 +3076,7 @@ async def search_tests_for(
         path_glob=globs,
         session=session,
         compact=compact,
+        ctx=ctx,
         kwargs={k: v for k, v in _kwargs.items() if k not in {"path_glob"}},
     )
 
@@ -3075,6 +3091,7 @@ async def search_config_for(
     session: Any = None,
     compact: Any = None,
     kwargs: Any = None,
+    ctx: Context = None,
 ) -> Dict[str, Any]:
     """Find likely configuration files for a service/query.
 
@@ -3117,6 +3134,7 @@ async def search_config_for(
         session=session,
         path_glob=globs,
         compact=compact,
+        ctx=ctx,
         kwargs={k: v for k, v in _kwargs.items() if k not in {"path_glob"}},
     )
 
@@ -3128,6 +3146,7 @@ async def search_callers_for(
     language: Any = None,
     session: Any = None,
     kwargs: Any = None,
+    ctx: Context = None,
 ) -> Dict[str, Any]:
     """Heuristic search for callers/usages of a symbol.
 
@@ -3143,6 +3162,7 @@ async def search_callers_for(
         limit=limit,
         language=language,
         session=session,
+        ctx=ctx,
         kwargs=kwargs,
     )
 
@@ -3154,6 +3174,7 @@ async def search_importers_for(
     language: Any = None,
     session: Any = None,
     kwargs: Any = None,
+    ctx: Context = None,
 ) -> Dict[str, Any]:
     """Find files likely importing or referencing a module/symbol.
 
@@ -3197,6 +3218,7 @@ async def search_importers_for(
         language=language,
         path_glob=globs,
         session=session,
+        ctx=ctx,
         kwargs={k: v for k, v in _kwargs.items() if k not in {"path_glob"}},
     )
 
@@ -3308,8 +3330,6 @@ async def search_commits_for(
                 except Exception:
                     _sanitize_vector_name = None  # type: ignore
 
-                from fastembed import TextEmbedding  # type: ignore
-
                 model_name = os.environ.get(
                     "MODEL_NAME", "BAAI/bge-base-en-v1.5"
                 )
@@ -3327,7 +3347,7 @@ async def search_commits_for(
                     # search over the commit collection. We keep the result set
                     # modest and later blend its scores into the lexical
                     # scoring for matching commits.
-                    embed_model = TextEmbedding(model_name=model_name)
+                    embed_model = _get_embedding_model(model_name)
                     qtext = " ".join(q_terms) if q_terms else ""
                     if qtext.strip():
                         qvec = next(embed_model.embed([qtext])).tolist()
@@ -4839,7 +4859,7 @@ async def context_search(
 
 
 @mcp.tool()
-async def expand_query(query: Any = None, max_new: Any = None) -> Dict[str, Any]:
+async def expand_query(query: Any = None, max_new: Any = None, session: Optional[str] = None) -> Dict[str, Any]:
     """LLM-assisted query expansion (local llama.cpp, if enabled).
 
     When to use:
@@ -4852,6 +4872,9 @@ async def expand_query(query: Any = None, max_new: Any = None) -> Dict[str, Any]
     Returns:
     - {"alternates": list[str]} or {"alternates": [], "hint": "..."} if decoder disabled
     """
+    logger.info(f"expand_query called with query={query!r}, max_new={max_new!r}")
+    print(f"[EXPAND] expand_query called with query={query!r}, max_new={max_new!r}", flush=True)
+    import sys; sys.stderr.write(f"[EXPAND] expand_query called with query={query!r}, max_new={max_new!r}\n"); sys.stderr.flush()
     try:
         qlist: list[str] = []
         if isinstance(query, (list, tuple)):
@@ -4864,33 +4887,79 @@ async def expand_query(query: Any = None, max_new: Any = None) -> Dict[str, Any]
                 cap = max(0, min(2, int(max_new)))
             except (ValueError, TypeError):
                 cap = 2
-        from scripts.refrag_llamacpp import LlamaCppRefragClient, is_decoder_enabled  # type: ignore
 
-        if not is_decoder_enabled():
+        print(f"[EXPAND] qlist={qlist!r}, cap={cap}", flush=True)
+
+        from scripts.refrag_llamacpp import is_decoder_enabled  # type: ignore
+
+        decoder_enabled = is_decoder_enabled()
+        print(f"[EXPAND] decoder_enabled={decoder_enabled}", flush=True)
+
+        if not decoder_enabled:
+            print("[EXPAND] returning decoder disabled hint", flush=True)
             return {
                 "alternates": [],
-                "hint": "decoder disabled: set REFRAG_DECODER=1 and start llamacpp (LLAMACPP_URL)",
+                "hint": "decoder disabled: set REFRAG_DECODER=1 and configure runtime",
             }
         if not qlist:
+            print("[EXPAND] returning empty qlist", flush=True)
             return {"alternates": []}
-        prompt = (
-            "You expand code search queries. Given short queries, propose up to 2 compact alternates.\n"
-            "Return JSON array of strings only. No explanations.\n"
-            f"Queries: {qlist}\n"
-        )
-        client = LlamaCppRefragClient()
+        original_q = qlist[0] if qlist else ""
+        # Select decoder runtime: explicit REFRAG_RUNTIME takes priority,
+        # otherwise auto-detect based on which API keys are configured
+        runtime_kind = str(os.environ.get("REFRAG_RUNTIME", "")).strip().lower()
+        if not runtime_kind:
+            # Auto-detect based on available API keys
+            if os.environ.get("MINIMAX_API_KEY", "").strip():
+                runtime_kind = "minimax"
+            elif os.environ.get("GLM_API_KEY", "").strip():
+                runtime_kind = "glm"
+            else:
+                runtime_kind = "llamacpp"
+        print(f"[EXPAND] runtime_kind={runtime_kind}", flush=True)
+
+        # Build prompt per runtime - each model needs different prompting style
+        extra_kwargs = {}
+        if runtime_kind == "minimax":
+            from scripts.refrag_minimax import MiniMaxRefragClient  # type: ignore
+            client = MiniMaxRefragClient()
+            # MiniMax M2: direct instruction - the model struggles with few-shot
+            extra_kwargs["system"] = "You rewrite search queries using synonyms. Output format: JSON array with exactly 2 strings. No other text."
+            prompt = f'Rewrite "{original_q}" as 2 different search queries using synonyms:'
+        elif runtime_kind == "glm":
+            from scripts.refrag_glm import GLMRefragClient  # type: ignore
+            client = GLMRefragClient()
+            extra_kwargs["disable_thinking"] = True  # GLM-4.6: skip deep thinking for expand
+            # GLM: simple instruction works well
+            prompt = f'Generate 2 alternative search queries for: "{original_q}"\nOutput as JSON array:'
+        else:
+            from scripts.refrag_llamacpp import LlamaCppRefragClient  # type: ignore
+            client = LlamaCppRefragClient()
+            # Local llama.cpp: original simple prompt
+            prompt = (
+                f"Rewrite this code search query using different words: {original_q}\n"
+                'Give 2 short alternative phrasings as a JSON array. Example: ["alt1", "alt2"]'
+            )
+
         out = client.generate_with_soft_embeddings(
             prompt=prompt,
-            max_tokens=int(os.environ.get("EXPAND_MAX_TOKENS", "64") or 64),
-            temperature=0.0,
+            max_tokens=int(os.environ.get("EXPAND_MAX_TOKENS", "128") or 128),
+            temperature=0.7 if runtime_kind == "llamacpp" else 1.0,
             top_k=int(os.environ.get("EXPAND_TOP_K", "30") or 30),
             top_p=float(os.environ.get("EXPAND_TOP_P", "0.9") or 0.9),
             stop=["\n\n"],
+            force_json=False,
+            **extra_kwargs,
         )
         import json as _json
+        import re as _re
+
+        # Debug: log raw output
+        logger.info(f"expand_query raw output: {repr(out)}")
 
         alts: list[str] = []
         try:
+            # First try direct JSON parse
             parsed = _json.loads(out)
             if isinstance(parsed, list):
                 for s in parsed:
@@ -4898,9 +4967,63 @@ async def expand_query(query: Any = None, max_new: Any = None) -> Dict[str, Any]
                         alts.append(s)
                         if len(alts) >= cap:
                             break
-        except Exception:
-            pass
-        return {"alternates": alts}
+        except Exception as parse_err:
+            logger.debug(f"expand_query direct parse failed: {parse_err}")
+            # Fallback: try Python literal eval for single-quoted lists
+            try:
+                import ast
+                parsed = ast.literal_eval(out)
+                if isinstance(parsed, list):
+                    for s in parsed:
+                        if isinstance(s, str) and s and s not in qlist:
+                            alts.append(s)
+                            if len(alts) >= cap:
+                                break
+            except Exception:
+                pass
+            # Fallback: extract JSON array from text (model may prepend text like "Alternates:\n")
+            if not alts:
+                try:
+                    # Find first [ and last ] to extract the array
+                    match = _re.search(r'\[[\s\S]*\]', out)
+                    if match:
+                        arr_text = match.group(0)
+                        logger.debug(f"expand_query found array: {repr(arr_text)}")
+                        # Try JSON first, then Python literal eval
+                        try:
+                            parsed = _json.loads(arr_text)
+                        except Exception:
+                            import ast
+                            parsed = ast.literal_eval(arr_text)
+                        if isinstance(parsed, list):
+                            for s in parsed:
+                                if isinstance(s, str) and s and s not in qlist:
+                                    alts.append(s)
+                                    if len(alts) >= cap:
+                                        break
+                    else:
+                        logger.debug("expand_query no array match found")
+                        # Fallback: extract quoted strings from numbered lists
+                        # Pattern matches: 1. "text" or - "text" or * "text"
+                        quoted_matches = _re.findall(r'(?:^|\n)\s*(?:\d+\.|\-|\*)\s*["\']([^"\']+)["\']', out)
+                        if quoted_matches:
+                            logger.debug(f"expand_query found quoted strings: {quoted_matches}")
+                            for s in quoted_matches:
+                                s = s.strip()
+                                if s and s not in qlist:
+                                    alts.append(s)
+                                    if len(alts) >= cap:
+                                        break
+                except Exception as fallback_err:
+                    logger.debug(f"expand_query fallback parse failed: {fallback_err}")
+        logger.info(f"expand_query returning alts: {alts}")
+        return {
+            "ok": True,
+            "original_query": qlist[0] if qlist else "",
+            "alternates": alts,
+            "total_queries": 1 + len(alts),
+            "decoder_used": runtime_kind,
+        }
     except Exception as e:
         fallback_alts: list[str] = []
         for q in qlist:
@@ -4917,10 +5040,21 @@ async def expand_query(query: Any = None, max_new: Any = None) -> Dict[str, Any]
                 break
         if fallback_alts:
             return {
+                "ok": True,
+                "original_query": qlist[0] if qlist else "",
                 "alternates": fallback_alts[:cap],
-                "hint": f"decoder fallback: {e}",
+                "total_queries": 1 + len(fallback_alts[:cap]),
+                "decoder_used": "fallback",
+                "hint": f"decoder error: {e}",
             }
-        return {"alternates": [], "error": str(e)}
+        return {
+            "ok": False,
+            "original_query": qlist[0] if qlist else "",
+            "alternates": [],
+            "total_queries": 1,
+            "decoder_used": "none",
+            "error": str(e),
+        }
 
 
 # Lightweight cleanup to reduce repetition from small models
@@ -6782,7 +6916,17 @@ def _ca_decode(
     stops: list[str],
     timeout: float | None = None,
 ) -> str:
-    runtime_kind = str(os.environ.get("REFRAG_RUNTIME", "llamacpp")).strip().lower()
+    # Select decoder runtime: explicit REFRAG_RUNTIME takes priority,
+    # otherwise auto-detect based on which API keys are configured
+    runtime_kind = str(os.environ.get("REFRAG_RUNTIME", "")).strip().lower()
+    if not runtime_kind:
+        # Auto-detect based on available API keys
+        if os.environ.get("MINIMAX_API_KEY", "").strip():
+            runtime_kind = "minimax"
+        elif os.environ.get("GLM_API_KEY", "").strip():
+            runtime_kind = "glm"
+        else:
+            runtime_kind = "llamacpp"
     if runtime_kind == "glm":
         from scripts.refrag_glm import GLMRefragClient  # type: ignore
 

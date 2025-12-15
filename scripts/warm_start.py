@@ -2,7 +2,6 @@
 import os
 import argparse
 from qdrant_client import QdrantClient, models
-from fastembed import TextEmbedding
 
 # Warm start: load embedding model and warm Qdrant HNSW search path with a small query
 # Useful to reduce first-query latency and set a higher runtime ef for quality
@@ -14,11 +13,26 @@ def derive_vector_name(model_name: str) -> str:
         return "fast-bge-base-en-v1.5"
     if "minilm" in name:
         return "fast-all-minilm-l6-v2"
+    # Qwen3-Embedding ONNX model
+    if "qwen3-embedding" in name:
+        return "fast-qwen3-embedding-0.6b"
     for ch in ["/", ".", " ", "_"]:
         name = name.replace(ch, "-")
     while "--" in name:
         name = name.replace("--", "-")
     return name
+
+
+def get_embedding_model(model_name: str):
+    """Get embedding model with Qwen3 support via embedder factory."""
+    try:
+        from scripts.embedder import get_embedding_model as _get_model
+        return _get_model(model_name)
+    except ImportError:
+        pass
+    # Fallback to direct fastembed
+    from fastembed import TextEmbedding
+    return TextEmbedding(model_name=model_name)
 
 
 def main():
@@ -46,7 +60,7 @@ def main():
     )
 
     client = QdrantClient(url=QDRANT_URL)
-    model = TextEmbedding(model_name=MODEL)
+    model = get_embedding_model(MODEL)
     vec_name = derive_vector_name(MODEL)
 
     # Trigger model download/init

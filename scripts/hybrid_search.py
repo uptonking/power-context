@@ -1,12 +1,36 @@
 #!/usr/bin/env python3
 import os
+import sys
 import argparse
 from typing import List, Dict, Any, Tuple
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
+from pathlib import Path
+
+# Ensure /work or repo root is in sys.path for scripts imports
+_ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(_ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(_ROOT_DIR))
 
 from qdrant_client import QdrantClient, models
-from fastembed import TextEmbedding
+
+# Use embedder factory for Qwen3 support; fallback to direct fastembed
+from typing import TYPE_CHECKING, Any
+
+try:
+    from scripts.embedder import get_embedding_model as _get_embedding_model
+    _EMBEDDER_FACTORY = True
+except ImportError:
+    _EMBEDDER_FACTORY = False
+
+# Always try to import TextEmbedding for backward compatibility with tests
+try:
+    from fastembed import TextEmbedding
+except ImportError:
+    TextEmbedding = None  # type: ignore
+
+# Type alias for embedding model (TextEmbedding or compatible)
+EmbeddingModel = Any if TextEmbedding is None else TextEmbedding
 import re
 import json
 import math
@@ -208,11 +232,14 @@ def _legacy_vector_search(
 
 
 def _embed_queries_cached(
-    model: TextEmbedding, queries: List[str]
+    model: Any, queries: List[str]
 ) -> List[List[float]]:
     """Cache dense query embeddings to avoid repeated compute across expansions/retries.
     Optimized: batch-embeds all missing queries in one model call (2-5x faster).
     Thread-safe with bounded cache size.
+
+    When Qwen3 is enabled and QWEN3_QUERY_INSTRUCTION=1, applies instruction
+    prefix to queries before embedding for improved retrieval quality.
     """
     try:
         # Best-effort model name extraction; fall back to env
@@ -221,6 +248,13 @@ def _embed_queries_cached(
         )
     except Exception:
         name = os.environ.get("EMBEDDING_MODEL", MODEL_NAME)
+
+    # Apply Qwen3 instruction prefix if enabled (queries only, not documents)
+    try:
+        from scripts.embedder import prefix_queries
+        queries = prefix_queries(queries, name)
+    except ImportError:
+        pass
 
     if UNIFIED_CACHE_AVAILABLE:
         # Use unified caching system
@@ -832,7 +866,7 @@ def expand_queries_enhanced(
     language: str | None = None,
     max_extra: int = 2,
     client: QdrantClient | None = None,
-    model: TextEmbedding | None = None,
+    model: Any = None,
     collection: str | None = None
 ) -> List[str]:
     """
@@ -843,7 +877,7 @@ def expand_queries_enhanced(
         language: Optional programming language hint
         max_extra: Maximum number of additional expansions per query
         client: QdrantClient instance for semantic expansion
-        model: TextEmbedding instance for semantic analysis
+        model: Embedding model instance for semantic analysis
         collection: Collection name for semantic expansion
 
     Returns:
@@ -1516,7 +1550,7 @@ def dense_query(
 
 
 # In-process API: run hybrid search and return structured items list
-# Optional: pass an existing TextEmbedding instance via model to reuse cache
+# Optional: pass an existing embedding model instance via model to reuse cache
 # Optional: pass mode to adjust implementation/docs weighting (code_first/balanced/docs_first)
 
 def run_hybrid_search(
@@ -1534,14 +1568,19 @@ def run_hybrid_search(
     path_glob: str | list[str] | None = None,
     not_glob: str | list[str] | None = None,
     expand: bool = True,
-    model: TextEmbedding | None = None,
+    model: Any = None,
     collection: str | None = None,
     mode: str | None = None,
     repo: str | list[str] | None = None,  # Filter by repo name(s); "*" to disable auto-filter
 ) -> List[Dict[str, Any]]:
     client = QdrantClient(url=os.environ.get("QDRANT_URL", QDRANT_URL), api_key=API_KEY)
     model_name = os.environ.get("EMBEDDING_MODEL", MODEL_NAME)
-    _model = model or TextEmbedding(model_name=model_name)
+    if model:
+        _model = model
+    elif _EMBEDDER_FACTORY:
+        _model = _get_embedding_model(model_name)
+    else:
+        _model = TextEmbedding(model_name=model_name)
     vec_name = _sanitize_vector_name(model_name)
 
     # Parse Query DSL and merge with explicit args
@@ -3079,9 +3118,13 @@ def main():
     args = ap.parse_args()
 
     # Resolve effective collection early to avoid variable usage errors
-    eff_collection = args.collection or os.environ.get("COLLECTION_NAME", "my-collection")
+    eff_collection = args.collection or os.environ.get("COLLECTION_NAME", "codebase")
 
-    model = TextEmbedding(model_name=MODEL_NAME)
+    # Use embedder factory for Qwen3 support
+    if _EMBEDDER_FACTORY:
+        model = _get_embedding_model(MODEL_NAME)
+    else:
+        model = TextEmbedding(model_name=MODEL_NAME)
     vec_name = _sanitize_vector_name(MODEL_NAME)
     client = QdrantClient(url=QDRANT_URL, api_key=API_KEY or None)
 

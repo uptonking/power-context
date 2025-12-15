@@ -7,6 +7,7 @@ import importlib
 
 def test_hybrid_cli_json_output(monkeypatch, capsys):
     hy = importlib.import_module("scripts.hybrid_search")
+    embedder = importlib.import_module("scripts.embedder")
 
     class DummyVec:
         def __init__(self):
@@ -46,6 +47,8 @@ def test_hybrid_cli_json_output(monkeypatch, capsys):
     monkeypatch.setenv("QDRANT_URL", "http://example.invalid:6333")
     monkeypatch.setenv("EMBEDDING_MODEL", "stub-model")
     monkeypatch.setattr(hy, "TextEmbedding", DummyEmbedding)
+    monkeypatch.setattr(hy, "_get_embedding_model", lambda *a, **k: DummyEmbedding("stub-model"))
+    monkeypatch.setattr(embedder, "get_embedding_model", lambda *a, **k: DummyEmbedding("stub-model"))
     monkeypatch.setattr(hy, "QdrantClient", DummyClient)
     monkeypatch.setattr(hy, "_ensure_collection", lambda *a, **k: None)
     monkeypatch.setattr(hy, "lex_hash_vector", lambda *a, **k: [])

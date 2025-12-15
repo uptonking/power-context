@@ -1,3 +1,14 @@
+# Context Engine Docker Compose - Local Simulation Stack
+#
+# This configuration simulates K8s/remote deployment semantics locally:
+# - Code is uploaded to ./dev-workspace (not bindmounted from checkout)
+# - Safe for collection deletion and repo management
+# - Uses PVC-like volumes to simulate CephFS RWX behavior
+#
+# Workflow: docker-compose up → install VSCode extension → upload code → /dev-workspace
+#
+# To use: docker-compose up -d
+
 services:
   qdrant:
     image: qdrant/qdrant:latest
@@ -27,6 +38,9 @@ services:
       - COLLECTION_NAME=${COLLECTION_NAME:-codebase}
       - EMBEDDING_MODEL=${EMBEDDING_MODEL}
       - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER}
+      - QWEN3_EMBEDDING_ENABLED=${QWEN3_EMBEDDING_ENABLED:-0}
+      - QWEN3_QUERY_INSTRUCTION=${QWEN3_QUERY_INSTRUCTION:-1}
+      - QWEN3_INSTRUCTION_TEXT=${QWEN3_INSTRUCTION_TEXT}
       - TOOL_STORE_DESCRIPTION=${TOOL_STORE_DESCRIPTION}
       - TOOL_FIND_DESCRIPTION=${TOOL_FIND_DESCRIPTION}
       - FASTMCP_HEALTH_PORT=18000
@@ -38,7 +52,7 @@ services:
       - "8000:8000"
 
     volumes:
-      - ${HOST_INDEX_PATH:-.}:/work:ro
+      - workspace_pvc:/work:ro
 
   mcp_indexer:
     build:
@@ -62,13 +76,16 @@ services:
       - CTX_REQUIRE_IDENTIFIER=${CTX_REQUIRE_IDENTIFIER:-0}
       - COLLECTION_NAME=${COLLECTION_NAME:-codebase}
       - EMBEDDING_MODEL=${EMBEDDING_MODEL}
+      - QWEN3_EMBEDDING_ENABLED=${QWEN3_EMBEDDING_ENABLED:-0}
+      - QWEN3_QUERY_INSTRUCTION=${QWEN3_QUERY_INSTRUCTION:-1}
+      - QWEN3_INSTRUCTION_TEXT=${QWEN3_INSTRUCTION_TEXT}
     # SSE endpoint for IDE agents at http://localhost:${FASTMCP_INDEXER_PORT:-8001}/sse
     ports:
       - "${FASTMCP_INDEXER_PORT:-8001}:8001"
       - "18001:18001"
     volumes:
-      - ${HOST_INDEX_PATH:-.}:/work
-
+      - workspace_pvc:/work:rw
+      - codebase_pvc:/work/.codebase:rw
 
   mcp_http:
     build:
@@ -87,6 +104,9 @@ services:
       - COLLECTION_NAME=${COLLECTION_NAME:-codebase}
       - EMBEDDING_MODEL=${EMBEDDING_MODEL}
       - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER}
+      - QWEN3_EMBEDDING_ENABLED=${QWEN3_EMBEDDING_ENABLED:-0}
+      - QWEN3_QUERY_INSTRUCTION=${QWEN3_QUERY_INSTRUCTION:-1}
+      - QWEN3_INSTRUCTION_TEXT=${QWEN3_INSTRUCTION_TEXT}
       - TOOL_STORE_DESCRIPTION=${TOOL_STORE_DESCRIPTION}
       - TOOL_FIND_DESCRIPTION=${TOOL_FIND_DESCRIPTION}
       - FASTMCP_HEALTH_PORT=18000
@@ -95,7 +115,7 @@ services:
       - "${FASTMCP_HTTP_HEALTH_PORT:-18002}:18000"
       - "${FASTMCP_HTTP_PORT:-8002}:8000"
     volumes:
-      - ${HOST_INDEX_PATH:-.}:/work:ro
+      - workspace_pvc:/work:ro
 
   mcp_indexer_http:
     build:
@@ -121,12 +141,16 @@ services:
       - CTX_REQUIRE_IDENTIFIER=${CTX_REQUIRE_IDENTIFIER:-0}
       - COLLECTION_NAME=${COLLECTION_NAME:-codebase}
       - EMBEDDING_MODEL=${EMBEDDING_MODEL}
+      - QWEN3_EMBEDDING_ENABLED=${QWEN3_EMBEDDING_ENABLED:-0}
+      - QWEN3_QUERY_INSTRUCTION=${QWEN3_QUERY_INSTRUCTION:-1}
+      - QWEN3_INSTRUCTION_TEXT=${QWEN3_INSTRUCTION_TEXT}
     # Streamable HTTP endpoint for IDE agents at http://localhost:${FASTMCP_INDEXER_HTTP_PORT:-8003}/mcp/
     ports:
       - "${FASTMCP_INDEXER_HTTP_PORT:-8003}:8001"
       - "${FASTMCP_INDEXER_HTTP_HEALTH_PORT:-18003}:18001"
     volumes:
-      - ${HOST_INDEX_PATH:-.}:/work
+      - workspace_pvc:/work:rw
+      - codebase_pvc:/work/.codebase:rw
 
   llamacpp:
     image: ghcr.io/ggml-org/llama.cpp:server
@@ -185,10 +209,13 @@ services:
       - QDRANT_URL=${QDRANT_URL}
       - COLLECTION_NAME=${COLLECTION_NAME:-codebase}
       - EMBEDDING_MODEL=${EMBEDDING_MODEL}
+      - QWEN3_EMBEDDING_ENABLED=${QWEN3_EMBEDDING_ENABLED:-0}
+      - QWEN3_QUERY_INSTRUCTION=${QWEN3_QUERY_INSTRUCTION:-1}
+      - QWEN3_INSTRUCTION_TEXT=${QWEN3_INSTRUCTION_TEXT}
     working_dir: /work
     volumes:
-      - ${HOST_INDEX_PATH:-.}:/work:ro
-      - ${HOST_INDEX_PATH:-.}/.codebase:/work/.codebase:rw
+      - workspace_pvc:/work:ro
+      - codebase_pvc:/work/.codebase:rw
 
     entrypoint: ["python", "/app/scripts/ingest_code.py"]
 
@@ -204,6 +231,9 @@ services:
       - QDRANT_URL=${QDRANT_URL}
       - COLLECTION_NAME=${COLLECTION_NAME:-codebase}
       - EMBEDDING_MODEL=${EMBEDDING_MODEL}
+      - QWEN3_EMBEDDING_ENABLED=${QWEN3_EMBEDDING_ENABLED:-0}
+      - QWEN3_QUERY_INSTRUCTION=${QWEN3_QUERY_INSTRUCTION:-1}
+      - QWEN3_INSTRUCTION_TEXT=${QWEN3_INSTRUCTION_TEXT}
       - WATCH_ROOT=/work
       # Watcher-specific backpressure & timeouts (safer defaults)
       - QDRANT_TIMEOUT=60
@@ -213,8 +243,8 @@ services:
       - WATCH_DEBOUNCE_SECS=${WATCH_DEBOUNCE_SECS:-1.5}
     working_dir: /work
     volumes:
-      - ${HOST_INDEX_PATH:-.}:/work:ro
-      - ${HOST_INDEX_PATH:-.}/.codebase:/work/.codebase:rw
+      - workspace_pvc:/work:ro
+      - codebase_pvc:/work/.codebase:rw
     entrypoint: ["python", "/app/scripts/watch_index.py"]
 
 
@@ -232,14 +262,19 @@ services:
       - UPLOAD_SERVICE_PORT=8002
       - QDRANT_URL=${QDRANT_URL}
       - WORK_DIR=/work
+      - CTXCE_ADMIN_COLLECTION_DELETE_ENABLED=0
+      - CTXCE_COLLECTION_REGISTRY_UNDELETE_ON_DISCOVERY=${CTXCE_COLLECTION_REGISTRY_UNDELETE_ON_DISCOVERY:-0}
       - COLLECTION_NAME=${COLLECTION_NAME:-codebase}
       - EMBEDDING_MODEL=${EMBEDDING_MODEL}
       - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER}
+      - QWEN3_EMBEDDING_ENABLED=${QWEN3_EMBEDDING_ENABLED:-0}
+      - QWEN3_QUERY_INSTRUCTION=${QWEN3_QUERY_INSTRUCTION:-1}
+      - QWEN3_INSTRUCTION_TEXT=${QWEN3_INSTRUCTION_TEXT}
     ports:
       - "8004:8002"
     volumes:
-      - ${HOST_INDEX_PATH:-.}:/work:rw
-      - ${HOST_INDEX_PATH:-.}/.codebase:/work/.codebase:rw
+      - workspace_pvc:/work:rw
+      - codebase_pvc:/work/.codebase:rw
     user: "0:0"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
@@ -262,11 +297,27 @@ services:
       - COLLECTION_NAME=${COLLECTION_NAME:-codebase}
     working_dir: /work
     volumes:
-      - ${HOST_INDEX_PATH:-.}:/work:ro
-      - ${HOST_INDEX_PATH:-.}/.codebase:/work/.codebase:rw
+      - workspace_pvc:/work:ro
+      - codebase_pvc:/work/.codebase:rw
 
     entrypoint: ["python", "/app/scripts/create_indexes.py"]
 
 volumes:
+  # Workspace volume - binds to ./dev-workspace for safe isolation
+  workspace_pvc:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${HOST_INDEX_PATH:-./dev-workspace}
+
+  # Codebase metadata volume
+  codebase_pvc:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./.codebase
+
   qdrant_storage:
     driver: local
