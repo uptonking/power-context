@@ -690,6 +690,9 @@ class RecursiveReranker:
                 try:
                     # Batch encode all uncached texts at once
                     embeddings = list(embedder.embed(texts_to_encode))
+                    # Validate count matches to avoid IndexError in reconstruction
+                    if len(embeddings) != len(texts_to_encode):
+                        raise ValueError(f"Embedder returned {len(embeddings)} embeddings for {len(texts_to_encode)} texts")
                     for text, emb in zip(texts_to_encode, embeddings):
                         emb_arr = np.array(emb, dtype=np.float32)
                         _cache_embedding(text, emb_arr)

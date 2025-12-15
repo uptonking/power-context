@@ -182,6 +182,11 @@ class CollectionLearner:
                 if not query or not candidates or not teacher_scores:
                     continue
 
+                # Validate alignment between candidates and teacher scores
+                if len(teacher_scores) != len(candidates):
+                    logger.debug(f"Skipping event: teacher_scores length {len(teacher_scores)} != candidates {len(candidates)}")
+                    continue
+
                 # Build doc texts from candidates (same packing as teacher scoring)
                 doc_texts = [self._pack_doc(c) for c in candidates]
 
