@@ -13,6 +13,10 @@ RUN pip install --no-cache-dir --upgrade mcp fastmcp qdrant-client fastembed
 # Create cache directory with proper permissions
 RUN mkdir -p /tmp/cache && chmod 755 /tmp/cache
 
+# Ensure rerank volumes are writable when containers run as non-root (uid 1000).
+RUN mkdir -p /tmp/rerank_events /tmp/rerank_weights \
+    && chmod 777 /tmp/rerank_events /tmp/rerank_weights
+
 # Bake scripts into image so server can run even when /work points elsewhere
 COPY scripts /app/scripts
 

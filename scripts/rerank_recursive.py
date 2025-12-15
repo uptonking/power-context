@@ -1012,7 +1012,11 @@ def rerank_with_learning(
                     teacher_scores = None
 
         try:
-            from scripts.rerank_events import log_training_event
+            # Try both import paths for Docker (/app/scripts) and local (scripts/)
+            try:
+                from rerank_events import log_training_event
+            except ImportError:
+                from scripts.rerank_events import log_training_event
             log_training_event(
                 query=query,
                 candidates=candidates,
