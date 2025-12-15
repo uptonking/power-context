@@ -123,9 +123,9 @@ Context Engine is a production-ready MCP (Model Context Protocol) retrieval stac
 - **Local LLM Integration**: llama.cpp for offline expansion
 - **Caching**: Expanded query results cached for reuse
 
-### 5. Learning Reranker System
+### 5. Learning Reranker System (Optional)
 
-The Learning Reranker is a self-improving ranking system that learns from search patterns to provide increasingly relevant results over time.
+The Learning Reranker is an **optional** self-improving ranking system that learns from search patterns to provide increasingly relevant results over time. It is enabled by default but can be disabled via `RERANK_LEARNING=0` and `RERANK_EVENTS_ENABLED=0` environment variables. See [Configuration](CONFIGURATION.md#learning-reranker) for all options.
 
 #### Architecture Overview
 

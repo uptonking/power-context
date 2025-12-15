@@ -133,6 +133,26 @@ Dynamic HNSW_EF tuning and intelligent query routing for 2x faster simple querie
 
 The learning reranker trains a lightweight neural network (TinyScorer) to improve search rankings over time. See [Architecture](ARCHITECTURE.md#5-learning-reranker-system) for details.
 
+**This feature is optional and enabled by default.** To disable:
+
+```bash
+# Disable learning scorer in search results
+RERANK_LEARNING=0
+
+# Disable event logging (no training data collected)
+RERANK_EVENTS_ENABLED=0
+
+# Or simply don't run the learning_worker container
+```
+
+### Enable/Disable
+
+| Name | Description | Default |
+|------|-------------|---------|
+| RERANK_LEARNING | Enable learning scorer in search results | 1 (enabled) |
+| RERANK_EVENTS_ENABLED | Enable event logging for training | 1 (enabled) |
+| RERANK_EVENTS_SAMPLE_RATE | Fraction of events to log (0.0-1.0) | 0.33 |
+
 ### Weight Management
 
 | Name | Description | Default |
