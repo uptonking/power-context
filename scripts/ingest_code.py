@@ -2143,6 +2143,24 @@ def _ts_extract_symbols_js(text: str) -> List[_Sym]:
             end = n.end_point[0] + 1
             path = f"{class_stack[-1]}.{m}" if class_stack else m
             syms.append(_Sym(kind="method", name=m, path=path, start=start, end=end))
+        # Handle variable declarations with function expressions or arrow functions
+        # e.g., const g = function() {}, const h = () => {}, var j = function() {}
+        if t == "variable_declarator":
+            # Check if the value is a function expression or arrow function
+            name_node = None
+            value_node = None
+            for c in n.children:
+                if c.type == "identifier" and name_node is None:
+                    name_node = c
+                elif c.type in ("function_expression", "arrow_function"):
+                    value_node = c
+            if name_node and value_node:
+                fn = node_text(name_node)
+                start = n.start_point[0] + 1
+                end = n.end_point[0] + 1
+                syms.append(_Sym(kind="function", name=fn, start=start, end=end))
+                # Don't recurse into the function expression to avoid duplicates
+                return
         for c in n.children:
             walk(c)
 
@@ -2204,6 +2222,24 @@ def _ts_extract_symbols(language: str, text: str) -> List[_Sym]:
                         end = n.end_point[0] + 1
                         path = f"{class_stack[-1]}.{m}" if class_stack else m
                         syms.append(_Sym(kind="method", name=m, path=path, start=start, end=end))
+                    # Handle variable declarations with function expressions or arrow functions
+                    # e.g., const g = function() {}, const h = () => {}, var j = function() {}
+                    if t == "variable_declarator":
+                        # Check if the value is a function expression or arrow function
+                        name_node = None
+                        value_node = None
+                        for c in n.children:
+                            if c.type == "identifier" and name_node is None:
+                                name_node = c
+                            elif c.type in ("function_expression", "arrow_function"):
+                                value_node = c
+                        if name_node and value_node:
+                            fn = node_text(name_node)
+                            start = n.start_point[0] + 1
+                            end = n.end_point[0] + 1
+                            syms.append(_Sym(kind="function", name=fn, start=start, end=end))
+                            # Don't recurse into the function expression to avoid duplicates
+                            return
                     for c in n.children:
                         walk(c)
 

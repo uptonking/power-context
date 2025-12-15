@@ -8,6 +8,7 @@ pytestmark = pytest.mark.integration
 ing = importlib.import_module("scripts.ingest_code")
 srv = importlib.import_module("scripts.mcp_indexer_server")
 embedder = importlib.import_module("scripts.embedder")
+hy = importlib.import_module("scripts.hybrid_search")
 
 
 class FakeEmbedder:
@@ -90,10 +91,13 @@ async def test_tier2_fallback_unconditional_with_language_filter(tmp_path, monke
     os.environ["EMBEDDING_MODEL"] = "fake"
     os.environ["REFRAG_GATE_FIRST"] = "1"  # ensure Tier-1 gate-first path is active
 
-    # Stub embeddings everywhere
+    # Stub embeddings everywhere (FakeEmbedder produces 32-dim vectors)
     monkeypatch.setattr(ing, "TextEmbedding", lambda *a, **k: FakeEmbedder("fake"))
     monkeypatch.setattr(embedder, "get_embedding_model", lambda *a, **k: FakeEmbedder("fake"))
+    monkeypatch.setattr(embedder, "get_model_dimension", lambda *a, **k: 32)  # Match FakeEmbedder dim
     monkeypatch.setattr(srv, "_get_embedding_model", lambda *a, **k: FakeEmbedder("fake"))
+    monkeypatch.setattr(hy, "TextEmbedding", lambda *a, **k: FakeEmbedder("fake"))
+    monkeypatch.setattr(hy, "_get_embedding_model", lambda *a, **k: FakeEmbedder("fake"))
 
     # Create tiny repo
     (tmp_path / "pkg").mkdir()
