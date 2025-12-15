@@ -2259,6 +2259,7 @@ async def repo_search(
             json_lines = items  # reuse downstream shaping
         except Exception as e:
             # Fallback to subprocess path if in-process fails
+            logger.debug(f"In-process hybrid search failed, falling back to subprocess: {type(e).__name__}: {e}")
             use_hybrid_inproc = False
 
     if not use_hybrid_inproc:

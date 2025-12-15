@@ -9,6 +9,7 @@ pytestmark = pytest.mark.integration
 ing = importlib.import_module("scripts.ingest_code")
 srv = importlib.import_module("scripts.mcp_indexer_server")
 embedder = importlib.import_module("scripts.embedder")
+hy = importlib.import_module("scripts.hybrid_search")
 
 
 class FakeEmbedder:
@@ -95,12 +96,15 @@ def test_index_and_search_minirepo(tmp_path, monkeypatch, qdrant_container):
     os.environ["HYBRID_IN_PROCESS"] = "1"
     os.environ["EMBEDDING_MODEL"] = "fake"
 
-    # Stub embeddings everywhere
+    # Stub embeddings everywhere (FakeEmbedder produces 32-dim vectors)
     monkeypatch.setattr(ing, "TextEmbedding", lambda *a, **k: FakeEmbedder("fake"))
     monkeypatch.setattr(embedder, "get_embedding_model", lambda *a, **k: FakeEmbedder("fake"))
+    monkeypatch.setattr(embedder, "get_model_dimension", lambda *a, **k: 32)  # Match FakeEmbedder dim
     monkeypatch.setattr(
         srv, "_get_embedding_model", lambda *a, **k: FakeEmbedder("fake")
     )
+    monkeypatch.setattr(hy, "TextEmbedding", lambda *a, **k: FakeEmbedder("fake"))
+    monkeypatch.setattr(hy, "_get_embedding_model", lambda *a, **k: FakeEmbedder("fake"))
 
     # Create tiny repo
     (tmp_path / "pkg").mkdir()
@@ -143,12 +147,15 @@ def test_filters_language_and_path(tmp_path, monkeypatch, qdrant_container):
     os.environ["HYBRID_IN_PROCESS"] = "1"
     os.environ["EMBEDDING_MODEL"] = "fake"
 
-    # Stub embeddings
+    # Stub embeddings (FakeEmbedder produces 32-dim vectors)
     monkeypatch.setattr(ing, "TextEmbedding", lambda *a, **k: FakeEmbedder("fake"))
     monkeypatch.setattr(embedder, "get_embedding_model", lambda *a, **k: FakeEmbedder("fake"))
+    monkeypatch.setattr(embedder, "get_model_dimension", lambda *a, **k: 32)  # Match FakeEmbedder dim
     monkeypatch.setattr(
         srv, "_get_embedding_model", lambda *a, **k: FakeEmbedder("fake")
     )
+    monkeypatch.setattr(hy, "TextEmbedding", lambda *a, **k: FakeEmbedder("fake"))
+    monkeypatch.setattr(hy, "_get_embedding_model", lambda *a, **k: FakeEmbedder("fake"))
 
     # Create tiny repo again in this temp path
     (tmp_path / "pkg").mkdir()
