@@ -433,6 +433,10 @@ _DEFAULT_EXCLUDE_DIRS = [
     "TestResults",
     "/.git",
 ]
+# Glob patterns for directories (matched against basename)
+_DEFAULT_EXCLUDE_DIR_GLOBS = [
+    ".venv*",  # .venv, .venv311, .venv39, etc.
+]
 _DEFAULT_EXCLUDE_FILES = [
     "*.onnx",
     "*.bin",
@@ -460,12 +464,14 @@ class _Excluder:
     def __init__(self, root: Path):
         self.root = root
         self.dir_prefixes = []  # absolute like /path/sub
+        self.dir_globs = []  # fnmatch patterns for directory names
         self.file_globs = []  # fnmatch patterns
 
         # Defaults
         use_defaults = _env_truthy(os.environ.get("QDRANT_DEFAULT_EXCLUDES"), True)
         if use_defaults:
             self.dir_prefixes.extend(_DEFAULT_EXCLUDE_DIRS)
+            self.dir_globs.extend(_DEFAULT_EXCLUDE_DIR_GLOBS)
             self.file_globs.extend(_DEFAULT_EXCLUDE_FILES)
 
         # .qdrantignore
@@ -497,12 +503,18 @@ class _Excluder:
             self.file_globs.append(pat.lstrip("/"))
 
     def exclude_dir(self, rel: str) -> bool:
+        import fnmatch
+
         # rel like /a/b
         for pref in self.dir_prefixes:
             if rel == pref or rel.startswith(pref + "/"):
                 return True
-        # Also allow dir name-only patterns in file_globs (e.g., node_modules)
+        # Match directory name against dir_globs (e.g., .venv*)
         base = rel.rsplit("/", 1)[-1]
+        for g in self.dir_globs:
+            if fnmatch.fnmatch(base, g):
+                return True
+        # Also allow dir name-only patterns in file_globs (e.g., node_modules)
         for g in self.file_globs:
             # Match bare dir names without wildcards
             if g and all(ch not in g for ch in "*?[") and base == g:
