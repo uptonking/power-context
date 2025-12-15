@@ -700,13 +700,22 @@ class RecursiveReranker:
         return np.array(result, dtype=np.float32)
 
     def _project_to_dim(self, embeddings: np.ndarray) -> np.ndarray:
-        """Project embeddings to target dimension if needed."""
+        """Project embeddings to target dimension if needed (cached for efficiency)."""
         if embeddings.shape[-1] == self.dim:
             return embeddings
 
-        # Simple linear projection (in practice, use trained projection)
-        np.random.seed(44)
-        proj_matrix = np.random.randn(embeddings.shape[-1], self.dim).astype(np.float32) * 0.01
+        input_dim = embeddings.shape[-1]
+
+        # Get or create cached projection matrix (deterministic, reused)
+        with self._proj_cache_lock:
+            if input_dim not in self._proj_cache:
+                # Use local RNG for deterministic, process-stable projection
+                rng = np.random.RandomState(44)
+                proj_matrix = rng.randn(input_dim, self.dim).astype(np.float32) * 0.01
+                self._proj_cache[input_dim] = proj_matrix
+
+            proj_matrix = self._proj_cache[input_dim]
+
         projected = embeddings @ proj_matrix
         # Normalize
         norms = np.linalg.norm(projected, axis=-1, keepdims=True) + 1e-8
