@@ -11,6 +11,7 @@ const { createCtxConfigManager } = require('./ctx_config');
 const { createWorkspacePathUtils } = require('./workspace_paths');
 const { createLogsTerminalManager } = require('./logs_terminal');
 const { createPromptPlusManager } = require('./prompt_plus');
+const { createOnboardingManager } = require('./onboarding');
 let outputChannel;
 let watchProcess;
 let forceProcess;
@@ -29,6 +30,7 @@ let mcpConfigManager;
 let ctxConfigManager;
 let workspacePathUtils;
 let promptPlusManager;
+let onboardingManager;
 const REQUIRED_PYTHON_MODULES = ['requests', 'urllib3', 'charset_normalizer'];
 const DEFAULT_CONTAINER_ROOT = '/work';
 const ONBOARDING_PROMPT_KEY = 'contextEngineUploader.onboardingPrompted';
@@ -128,6 +130,27 @@ function activate(context) {
   }
 
   try {
+    onboardingManager = createOnboardingManager({
+      vscode,
+      context,
+      log,
+      appendOutput: text => {
+        if (outputChannel) {
+          outputChannel.append(text);
+        }
+      },
+      showOutput: () => {
+        if (outputChannel) {
+          outputChannel.show(true);
+        }
+      },
+    });
+  } catch (error) {
+    onboardingManager = undefined;
+    log(`Onboarding manager init failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  try {
     bridgeManager = createBridgeManager({
       vscode,
       spawn,
@@ -194,6 +217,7 @@ function activate(context) {
         try { if (bridgeManager && typeof bridgeManager.dispose === 'function') bridgeManager.dispose(); } catch (_) {}
         try { if (logsTerminalManager && typeof logsTerminalManager.dispose === 'function') logsTerminalManager.dispose(); } catch (_) {}
         try { if (promptPlusManager && typeof promptPlusManager.dispose === 'function') promptPlusManager.dispose(); } catch (_) {}
+        try { if (onboardingManager && typeof onboardingManager.dispose === 'function') onboardingManager.dispose(); } catch (_) {}
       }
     };
     context.subscriptions.push(managerDisposable);
@@ -249,6 +273,7 @@ function activate(context) {
         httpBridgeProcess: bridgeManager ? bridgeManager.getState().process : undefined,
         httpBridgePort: bridgeManager ? bridgeManager.getState().port : undefined,
       }),
+      onboarding: onboardingManager,
     });
   } catch (error) {
     log(`Sidebar registration failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -278,6 +303,20 @@ function activate(context) {
   });
   const mcpConfigDisposable = vscode.commands.registerCommand('contextEngineUploader.writeMcpConfig', () => {
     writeMcpConfig().catch(error => log(`MCP config write failed: ${error instanceof Error ? error.message : String(error)}`));
+  });
+  const cloneStackDisposable = vscode.commands.registerCommand('contextEngineUploader.cloneAndStartStack', () => {
+    if (!onboardingManager || typeof onboardingManager.cloneAndStartStack !== 'function') {
+      vscode.window.showErrorMessage('Context Engine onboarding is unavailable in this session.');
+      return;
+    }
+    onboardingManager.cloneAndStartStack();
+  });
+  const startStackDisposable = vscode.commands.registerCommand('contextEngineUploader.startSavedStack', () => {
+    if (!onboardingManager || typeof onboardingManager.startSavedStack !== 'function') {
+      vscode.window.showErrorMessage('Context Engine onboarding is unavailable in this session.');
+      return;
+    }
+    onboardingManager.startSavedStack();
   });
   const showLogsDisposable = vscode.commands.registerCommand('contextEngineUploader.showUploadServiceLogs', () => {
     try {
@@ -393,6 +432,8 @@ function activate(context) {
     restartDisposable,
     indexDisposable,
     uploadGitHistoryDisposable,
+    cloneStackDisposable,
+    startStackDisposable,
     showLogsDisposable,
     tailDockerLogsDisposable,
     promptEnhanceDisposable,

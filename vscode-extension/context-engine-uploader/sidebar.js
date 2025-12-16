@@ -85,6 +85,59 @@ const _authStatusCache = new Map();
 const _AUTH_STATUS_TTL_MS = 30_000;
 const _AUTH_STATUS_TIMEOUT_MS = 750;
 
+const _endpointReachableCache = new Map();
+const _ENDPOINT_REACHABLE_TTL_MS = 15_000;
+const _ENDPOINT_REACHABLE_TIMEOUT_MS = 750;
+
+async function probeEndpointReachable(endpoint) {
+  const base = (endpoint || '').trim().replace(/\/+$/, '');
+  if (!base) {
+    return undefined;
+  }
+
+  const fetchFn = (typeof fetch === 'function' ? fetch : undefined);
+  if (!fetchFn) {
+    return undefined;
+  }
+
+  let timer;
+  let controller;
+  try {
+    controller = (typeof AbortController === 'function') ? new AbortController() : undefined;
+    if (controller) {
+      timer = setTimeout(() => {
+        try { controller.abort(); } catch (_) { }
+      }, _ENDPOINT_REACHABLE_TIMEOUT_MS);
+    }
+    const res = await fetchFn(`${base}/health`, { method: 'GET', signal: controller ? controller.signal : undefined });
+    if (!res) {
+      return false;
+    }
+    return !!res.ok;
+  } catch (_) {
+    return false;
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+async function getCachedEndpointReachable(endpoint) {
+  const key = (endpoint || '').trim();
+  if (!key) {
+    return undefined;
+  }
+  const now = Date.now();
+  const cached = _endpointReachableCache.get(key);
+  if (cached && cached.ts && (now - cached.ts) < _ENDPOINT_REACHABLE_TTL_MS) {
+    return cached.reachable;
+  }
+  const reachable = await probeEndpointReachable(key);
+  _endpointReachableCache.set(key, { reachable, ts: now });
+  return reachable;
+}
+
 async function probeAuthEnabled(endpoint) {
   const base = (endpoint || '').trim().replace(/\/+$/, '');
   if (!base) {
@@ -143,6 +196,7 @@ function register(context, deps) {
   const getEffectiveConfig = deps && deps.getEffectiveConfig;
   const getResolvedTargetPath = deps && deps.getResolvedTargetPath;
   const getState = deps && deps.getState;
+  const onboarding = deps && deps.onboarding;
 
   const providers = [];
 
@@ -250,6 +304,29 @@ function register(context, deps) {
         try { return (cfg.get('endpoint') || '').trim(); } catch (_) { return ''; }
       })();
 
+      const endpointExplicitlyConfigured = (() => {
+        try {
+          const overrides = profiles && typeof profiles.getActiveProfileOverrides === 'function'
+            ? profiles.getActiveProfileOverrides()
+            : {};
+          if (overrides && typeof overrides === 'object' && Object.prototype.hasOwnProperty.call(overrides, 'endpoint')) {
+            return true;
+          }
+        } catch (_) {
+        }
+        try {
+          const inspected = (cfg && typeof cfg.inspect === 'function') ? cfg.inspect('endpoint') : undefined;
+          if (!inspected || typeof inspected !== 'object') {
+            return false;
+          }
+          return inspected.workspaceFolderValue !== undefined || inspected.workspaceValue !== undefined || inspected.globalValue !== undefined;
+        } catch (_) {
+          return false;
+        }
+      })();
+
+      const endpointReachable = endpoint ? await getCachedEndpointReachable(endpoint) : undefined;
+
       const resolvedTarget = typeof getResolvedTargetPath === 'function' ? getResolvedTargetPath() : undefined;
       const targetDescription = resolvedTarget && resolvedTarget.path ? resolvedTarget.path : '(unset)';
       const targetPath = resolvedTarget && resolvedTarget.path ? String(resolvedTarget.path) : '';
@@ -264,8 +341,8 @@ function register(context, deps) {
         return typeof mode === 'string' && mode.startsWith('bridge/');
       })();
 
-      const authEnabled = bridgeMode && endpoint ? await getCachedAuthEnabled(endpoint) : undefined;
-      const showAuth = !!(bridgeMode && endpoint && (authEnabled === true || authEnabled === undefined));
+      const authEnabled = bridgeMode && endpoint && endpointReachable !== false ? await getCachedAuthEnabled(endpoint) : undefined;
+      const showAuth = !!(bridgeMode && endpoint && endpointReachable !== false && (authEnabled === true || authEnabled === undefined));
 
       const missingEndpoint = !endpoint;
       const missingTarget = !targetPath || !targetExists;
@@ -278,12 +355,50 @@ function register(context, deps) {
           command: { command: 'contextEngineUploader.setupWorkspace', title: 'Setup Workspace' },
           tooltip: 'Create and configure a profile for this workspace (recommended for first-time setup).',
         }),
+      ];
+
+      const showCloneStack = !!(
+        onboarding &&
+        typeof onboarding.cloneAndStartStack === 'function' &&
+        (
+          endpointReachable === false ||
+          (!endpointExplicitlyConfigured && endpointReachable !== true)
+        )
+      );
+
+      if (showCloneStack) {
+        items.push(makeTreeItem('Clone & Start Context Engine Stack', {
+          icon: new vscode.ThemeIcon('cloud-download'),
+          command: { command: 'contextEngineUploader.cloneAndStartStack', title: 'Clone Stack & Run docker compose' },
+          tooltip: 'Clone https://github.com/m1rl0k/Context-Engine.git into a folder you choose and run docker compose up -d.',
+        }));
+      }
+
+      const savedStackPath = (() => {
+        try {
+          if (onboarding && typeof onboarding.getSavedStackPath === 'function') {
+            return onboarding.getSavedStackPath();
+          }
+        } catch (_) {
+        }
+        return undefined;
+      })();
+
+      if (endpointReachable === false && savedStackPath) {
+        items.push(makeTreeItem('Start Context Engine Stack', {
+          icon: new vscode.ThemeIcon('play'),
+          command: { command: 'contextEngineUploader.startSavedStack', title: 'Start Saved Stack' },
+          tooltip: `Start docker compose for the previously cloned stack at ${savedStackPath}`,
+        }));
+      }
+
+      items.push(
         makeTreeItem('Open Settings', {
           icon: new vscode.ThemeIcon('gear'),
           command: { command: 'workbench.action.openSettings', title: 'Open Settings', arguments: ['contextEngineUploader'] },
           tooltip: 'Open VS Code settings filtered to Context Engine Uploader.',
-        }),
-      ];
+        })
+      );
 
       if (missingEndpoint) {
         items.push(makeTreeItem('Check Endpoint', {
@@ -400,8 +515,9 @@ function register(context, deps) {
         const mode = resolveMcpMode(cfg);
         return typeof mode === 'string' && mode.startsWith('bridge/');
       })();
-      const authEnabled = bridgeMode && endpoint ? await getCachedAuthEnabled(endpoint) : undefined;
-      const showAuth = !!(bridgeMode && endpoint && (authEnabled === true || authEnabled === undefined));
+      const endpointReachable = endpoint ? await getCachedEndpointReachable(endpoint) : undefined;
+      const authEnabled = bridgeMode && endpoint && endpointReachable !== false ? await getCachedAuthEnabled(endpoint) : undefined;
+      const showAuth = !!(bridgeMode && endpoint && endpointReachable !== false && (authEnabled === true || authEnabled === undefined));
 
       const items = [
         makeTreeItem('Prompt+', { icon: new vscode.ThemeIcon('sparkle'), command: { command: 'contextEngineUploader.promptEnhance', title: 'Prompt+' } }),

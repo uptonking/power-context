@@ -19,7 +19,9 @@
     "onView:contextEngineUploaderStatus",
     "onView:contextEngineUploaderActions",
     "onCommand:contextEngineUploader.promptEnhance",
-    "onCommand:contextEngineUploader.authLogin"
+    "onCommand:contextEngineUploader.authLogin",
+    "onCommand:contextEngineUploader.cloneAndStartStack",
+    "onCommand:contextEngineUploader.startSavedStack"
   ],
   "main": "./extension.js",
   "icon": "assets/icon.png",
@@ -76,6 +78,14 @@
       {
         "command": "contextEngineUploader.authLogin",
         "title": "Context Engine Uploader: Sign In (ctxce auth)"
+      },
+      {
+        "command": "contextEngineUploader.cloneAndStartStack",
+        "title": "Context Engine Uploader: Clone Stack & Run docker compose"
+      },
+      {
+        "command": "contextEngineUploader.startSavedStack",
+        "title": "Context Engine Uploader: Start Saved Stack (docker compose up)"
       }
     ],
     "viewsContainers": {

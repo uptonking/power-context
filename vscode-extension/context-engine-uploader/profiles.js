@@ -578,5 +578,6 @@ module.exports = {
   listProfiles,
   getActiveProfileSummary,
   setActiveProfileId,
+  getActiveProfileOverrides,
   registerCommands,
 };
