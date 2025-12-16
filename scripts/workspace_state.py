@@ -362,14 +362,38 @@ def _detect_repo_name_from_path(path: Path) -> str:
 
     This ensures consistency with how the MCP server detects repos during search.
     Priority:
-    1. Git remote origin URL (canonical repo name like 'Context-Engine')
-    2. Git toplevel directory name (folder name like 'Context-Engine-hash')
-    3. Walk up to find .git and return that folder name
-    4. Return parent folder name as fallback
+    1. Fast-path for server-managed uploads and workspace-relative paths
+    2. Git remote origin URL (canonical repo name like 'Context-Engine')
+    3. Git toplevel directory name (folder name like 'Context-Engine-hash')
+    4. Walk up to find .git and return that folder name
+    5. Return parent folder name as fallback
     """
     slug = _server_managed_slug_from_path(path)
     if slug:
         return slug
+
+    # Fast-path for managed upload workspaces or when workspace_path == /work:
+    # derive the repo name from the first path segment relative to the workspace
+    # root instead of spawning git processes or falling back to "work".
+    try:
+        ws_root = Path(_resolve_workspace_root()).resolve()
+    except Exception:
+        ws_root = Path(_resolve_workspace_root())
+
+    try:
+        resolved = path.resolve()
+    except Exception:
+        resolved = path if path.is_dir() else path.parent
+
+    try:
+        rel = resolved.relative_to(ws_root)
+        if rel.parts:
+            candidate = rel.parts[0]
+            if candidate not in {".codebase", ".git", "__pycache__"}:
+                return candidate
+    except Exception:
+        pass
+
     try:
         base = path if path.is_dir() else path.parent
         # First try: get repo name from git remote origin URL (canonical name)
@@ -408,6 +432,14 @@ def _detect_repo_name_from_path(path: Path) -> str:
                 continue
     except Exception:
         pass
+
+    try:
+        structure_name = _detect_repo_name_from_path_by_structure(path)
+        if structure_name:
+            return structure_name
+    except Exception:
+        pass
+
     return (path if path.is_dir() else path.parent).name or "workspace"
 
 
@@ -779,7 +811,7 @@ def _detect_repo_name_from_path_by_structure(path: Path) -> str:
             continue
 
         repo_path = base / repo_name
-        if repo_path.exists() or str(resolved_path).startswith(str(repo_path) + os.sep):
+        if repo_path.exists() or resolved_path == repo_path or str(resolved_path).startswith(str(repo_path) + os.sep):
             return repo_name
 
     return None
@@ -794,6 +826,13 @@ def _extract_repo_name_from_path(workspace_path: str) -> str:
 
     # First try git-based detection (uses remote origin URL for canonical name)
     git_name = _detect_repo_name_from_path(path)
+    if git_name:
+        try:
+            ws_root = Path(_resolve_workspace_root()).resolve()
+        except Exception:
+            ws_root = Path(_resolve_workspace_root())
+        if ws_root.name and git_name == ws_root.name:
+            git_name = None
     if git_name and git_name != "workspace":
         return git_name
 

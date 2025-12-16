@@ -6,6 +6,7 @@ export DOCKER_HOST =
 
 .PHONY: help up down logs ps restart rebuild index reindex watch watch-remote env hybrid bootstrap history rerank-local setup-reranker prune warm health test-e2e
 .PHONY: venv venv-install dev-remote-up dev-remote-down dev-remote-logs dev-remote-restart dev-remote-bootstrap dev-remote-test dev-remote-client dev-remote-clean
+.PHONY: rerank-eval rerank-eval-ablations rerank-benchmark
 
 .PHONY: qdrant-status qdrant-list qdrant-prune qdrant-index-root
 
@@ -206,9 +207,10 @@ reset-dev-dual: ## bring up BOTH legacy SSE and Streamable HTTP MCPs (dual-compa
 	docker compose build --no-cache indexer mcp mcp_indexer mcp_http mcp_indexer_http watcher llamacpp upload_service
 	docker compose up -d qdrant
 	./scripts/wait-for-qdrant.sh
-	docker compose run --rm init_payload || true
 	$(MAKE) tokenizer
+	# Index first (creates collection), then init_payload (creates indexes on existing collection)
 	docker compose run --rm -e INDEX_MICRO_CHUNKS -e MAX_MICRO_CHUNKS_PER_FILE -e TOKENIZER_PATH -e TOKENIZER_URL indexer --root /work --recreate
+	docker compose run --rm init_payload || true
 	$(MAKE) llama-model
 	docker compose up -d mcp mcp_indexer mcp_http mcp_indexer_http watcher llamacpp upload_service
 	docker compose up -d watcher
@@ -243,24 +245,24 @@ tokenizer: ## download tokenizer.json to models/tokenizer.json (override with TO
 dev-remote-up: ## start dev-remote stack with upload service
 	@echo "Starting development remote upload system..."
 	@mkdir -p dev-workspace/.codebase
-	docker compose -f docker-compose.dev-remote.yml up -d --build
+	docker compose -f docker-compose.yml up -d --build
 
 dev-remote-down: ## stop dev-remote stack
 	@echo "Stopping development remote upload system..."
-	docker compose -f docker-compose.dev-remote.yml down
+	docker compose -f docker-compose.yml down
 
 dev-remote-logs: ## follow logs for dev-remote stack
-	docker compose -f docker-compose.dev-remote.yml logs -f --tail=100
+	docker compose -f docker-compose.yml logs -f --tail=100
 
 dev-remote-restart: ## restart dev-remote stack (rebuild)
-	docker compose -f docker-compose.dev-remote.yml down && docker compose -f docker-compose.dev-remote.yml up -d --build
+	docker compose -f docker-compose.yml down && docker compose -f docker-compose.yml up -d --build
 
 dev-remote-bootstrap: env dev-remote-up ## bootstrap dev-remote: up -> wait -> init -> index -> warm
 	@echo "Bootstrapping development remote upload system..."
 	./scripts/wait-for-qdrant.sh
-	docker compose -f docker-compose.dev-remote.yml run --rm init_payload || true
+	docker compose -f docker-compose.yml run --rm init_payload || true
 	$(MAKE) tokenizer
-	docker compose -f docker-compose.dev-remote.yml run --rm indexer --root /work --recreate
+	docker compose -f docker-compose.yml run --rm indexer --root /work --recreate
 	$(MAKE) warm || true
 	$(MAKE) health
 
@@ -273,11 +275,11 @@ dev-remote-test: ## test remote upload workflow
 
 dev-remote-client: ## start remote upload client for testing
 	@echo "Starting remote upload client..."
-	docker compose -f docker-compose.dev-remote.yml --profile client up -d remote_upload_client
+	docker compose -f docker-compose.yml --profile client up -d remote_upload_client
 
 dev-remote-clean: ## clean up dev-remote volumes and containers
 	@echo "Cleaning up development remote upload system..."
-	docker compose -f docker-compose.dev-remote.yml down -v
+	docker compose -f docker-compose.yml down -v
 	docker volume rm context-engine_shared_workspace context-engine_shared_codebase context-engine_upload_temp context-engine_qdrant_storage_dev_remote 2>/dev/null || true
 	rm -rf dev-workspace
 
@@ -344,3 +346,14 @@ ctx: ## enhance a prompt with repo context: make ctx Q="your question" [ARGS='--
 	  exit 1; \
 	fi; \
 	python3 scripts/ctx.py "$(Q)" $(ARGS)
+
+
+# --- Reranker Evaluation ---
+rerank-eval: ## run offline reranker evaluation (fixed queries, MRR/Recall/latency)
+	python3 scripts/rerank_eval.py --output rerank_eval_results.json
+
+rerank-eval-ablations: ## run full ablation study (baseline, recursive, learning, onnx)
+	python3 scripts/rerank_eval.py --ablations --output rerank_eval_ablations.json
+
+rerank-benchmark: ## run production benchmark on real codebase
+	python3 scripts/rerank_real_benchmark.py
