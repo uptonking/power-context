@@ -344,7 +344,7 @@ function register(context, deps) {
       const authEnabled = bridgeMode && endpoint && endpointReachable !== false ? await getCachedAuthEnabled(endpoint) : undefined;
       const showAuth = !!(bridgeMode && endpoint && endpointReachable !== false && (authEnabled === true || authEnabled === undefined));
 
-      const missingEndpoint = !endpoint;
+      const missingEndpoint = !endpointExplicitlyConfigured || !endpoint;
       const missingTarget = !targetPath || !targetExists;
       const missingMcpConfig = !mcpConfigPath;
       const missingCtxConfig = !ctxConfigPath;
