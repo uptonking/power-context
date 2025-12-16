@@ -31,6 +31,13 @@ _cache_memo_sig: Dict[str, tuple[int, int]] = {}
 _cache_memo_last_check: Dict[str, float] = {}
 
 
+def _cache_memo_recheck_seconds() -> float:
+    try:
+        return float(os.environ.get("CACHE_MEMO_RECHECK_SECONDS", "60") or 60)
+    except Exception:
+        return 60.0
+
+
 def _normalize_cache_key_path(file_path: str) -> str:
     """Normalize a file path for cache keys.
 
@@ -862,7 +869,10 @@ def _extract_repo_name_from_path(workspace_path: str) -> str:
 # Cache functions for file hash tracking
 def _get_cache_path(workspace_path: str) -> Path:
     """Get the path to the cache.json file."""
-    workspace = Path(workspace_path).resolve()
+    try:
+        workspace = Path(os.path.abspath(workspace_path))
+    except Exception:
+        workspace = Path(workspace_path)
     return workspace / STATE_DIRNAME / CACHE_FILENAME
 
 
@@ -887,7 +897,7 @@ def _read_cache_file_cached(cache_path: Path) -> Dict[str, Any]:
 
     with _cache_memo_lock:
         last_check = _cache_memo_last_check.get(key, 0.0)
-        if key in _cache_memo and (now - last_check) < 1.0:
+        if key in _cache_memo and (now - last_check) < _cache_memo_recheck_seconds():
             return _cache_memo[key]
 
     sig = _cache_file_sig(cache_path)

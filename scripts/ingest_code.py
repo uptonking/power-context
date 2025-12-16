@@ -1585,10 +1585,21 @@ def ensure_collection_and_indexes_once(
     if not collection:
         return
     if collection in ENSURED_COLLECTIONS:
+        # By default we do NOT ping Qdrant repeatedly for an already-ensured collection.
+        # This avoids a steady stream of GET /collections/<name> requests during large runs.
+        # Opt-in: set ENSURED_COLLECTION_PING_SECONDS to a positive float (e.g. 60).
+        try:
+            ping_seconds = float(os.environ.get("ENSURED_COLLECTION_PING_SECONDS", "0") or 0)
+        except Exception:
+            ping_seconds = 0.0
+
+        if ping_seconds <= 0:
+            return
+
         try:
             now = time.time()
             last = ENSURED_COLLECTIONS_LAST_CHECK.get(collection, 0.0)
-            if (now - last) < 2.0:
+            if (now - last) < ping_seconds:
                 return
             client.get_collection(collection)
             ENSURED_COLLECTIONS_LAST_CHECK[collection] = now
