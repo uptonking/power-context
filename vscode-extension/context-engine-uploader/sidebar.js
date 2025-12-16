@@ -81,6 +81,63 @@ function findConfigFile(bases, filename) {
   return undefined;
 }
 
+const _authStatusCache = new Map();
+const _AUTH_STATUS_TTL_MS = 30_000;
+const _AUTH_STATUS_TIMEOUT_MS = 750;
+
+async function probeAuthEnabled(endpoint) {
+  const base = (endpoint || '').trim().replace(/\/+$/, '');
+  if (!base) {
+    return undefined;
+  }
+
+  const fetchFn = (typeof fetch === 'function' ? fetch : undefined);
+  if (!fetchFn) {
+    return undefined;
+  }
+
+  let timer;
+  let controller;
+  try {
+    controller = (typeof AbortController === 'function') ? new AbortController() : undefined;
+    if (controller) {
+      timer = setTimeout(() => {
+        try { controller.abort(); } catch (_) { }
+      }, _AUTH_STATUS_TIMEOUT_MS);
+    }
+    const res = await fetchFn(`${base}/auth/status`, { method: 'GET', signal: controller ? controller.signal : undefined });
+    if (!res || !res.ok) {
+      return undefined;
+    }
+    const body = await res.json();
+    if (body && typeof body.enabled === 'boolean') {
+      return body.enabled;
+    }
+    return undefined;
+  } catch (_) {
+    return undefined;
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+async function getCachedAuthEnabled(endpoint) {
+  const key = (endpoint || '').trim();
+  if (!key) {
+    return undefined;
+  }
+  const now = Date.now();
+  const cached = _authStatusCache.get(key);
+  if (cached && cached.ts && (now - cached.ts) < _AUTH_STATUS_TTL_MS) {
+    return cached.enabled;
+  }
+  const enabled = await probeAuthEnabled(key);
+  _authStatusCache.set(key, { enabled, ts: now });
+  return enabled;
+}
+
 function register(context, deps) {
   const profiles = deps && deps.profiles;
   const getEffectiveConfig = deps && deps.getEffectiveConfig;
@@ -202,10 +259,13 @@ function register(context, deps) {
       const mcpConfigPath = findConfigFile(configSearchBases, '.mcp.json');
       const ctxConfigPath = findConfigFile(configSearchBases, 'ctx_config.json');
 
-      const showAuth = (() => {
+      const bridgeMode = (() => {
         const mode = resolveMcpMode(cfg);
         return typeof mode === 'string' && mode.startsWith('bridge/');
       })();
+
+      const authEnabled = bridgeMode && endpoint ? await getCachedAuthEnabled(endpoint) : undefined;
+      const showAuth = !!(bridgeMode && endpoint && (authEnabled === true || authEnabled === undefined));
 
       const missingEndpoint = !endpoint;
       const missingTarget = !targetPath || !targetExists;
@@ -333,10 +393,15 @@ function register(context, deps) {
 
     if (element.contextValue === 'ctxceActionsUtilitiesRoot') {
       const cfg = getEffectiveConfig ? getEffectiveConfig() : vscode.workspace.getConfiguration('contextEngineUploader');
-      const showAuth = (() => {
+      const endpoint = (() => {
+        try { return (cfg.get('endpoint') || '').trim(); } catch (_) { return ''; }
+      })();
+      const bridgeMode = (() => {
         const mode = resolveMcpMode(cfg);
         return typeof mode === 'string' && mode.startsWith('bridge/');
       })();
+      const authEnabled = bridgeMode && endpoint ? await getCachedAuthEnabled(endpoint) : undefined;
+      const showAuth = !!(bridgeMode && endpoint && (authEnabled === true || authEnabled === undefined));
 
       const items = [
         makeTreeItem('Prompt+', { icon: new vscode.ThemeIcon('sparkle'), command: { command: 'contextEngineUploader.promptEnhance', title: 'Prompt+' } }),
