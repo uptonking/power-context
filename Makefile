@@ -6,6 +6,7 @@ export DOCKER_HOST =
 
 .PHONY: help up down logs ps restart rebuild index reindex watch watch-remote env hybrid bootstrap history rerank-local setup-reranker prune warm health test-e2e
 .PHONY: venv venv-install dev-remote-up dev-remote-down dev-remote-logs dev-remote-restart dev-remote-bootstrap dev-remote-test dev-remote-client dev-remote-clean
+.PHONY: rerank-eval rerank-eval-ablations rerank-benchmark
 
 .PHONY: qdrant-status qdrant-list qdrant-prune qdrant-index-root
 
@@ -206,9 +207,10 @@ reset-dev-dual: ## bring up BOTH legacy SSE and Streamable HTTP MCPs (dual-compa
 	docker compose build --no-cache indexer mcp mcp_indexer mcp_http mcp_indexer_http watcher llamacpp upload_service
 	docker compose up -d qdrant
 	./scripts/wait-for-qdrant.sh
-	docker compose run --rm init_payload || true
 	$(MAKE) tokenizer
+	# Index first (creates collection), then init_payload (creates indexes on existing collection)
 	docker compose run --rm -e INDEX_MICRO_CHUNKS -e MAX_MICRO_CHUNKS_PER_FILE -e TOKENIZER_PATH -e TOKENIZER_URL indexer --root /work --recreate
+	docker compose run --rm init_payload || true
 	$(MAKE) llama-model
 	docker compose up -d mcp mcp_indexer mcp_http mcp_indexer_http watcher llamacpp upload_service
 	docker compose up -d watcher
@@ -344,3 +346,14 @@ ctx: ## enhance a prompt with repo context: make ctx Q="your question" [ARGS='--
 	  exit 1; \
 	fi; \
 	python3 scripts/ctx.py "$(Q)" $(ARGS)
+
+
+# --- Reranker Evaluation ---
+rerank-eval: ## run offline reranker evaluation (fixed queries, MRR/Recall/latency)
+	python3 scripts/rerank_eval.py --output rerank_eval_results.json
+
+rerank-eval-ablations: ## run full ablation study (baseline, recursive, learning, onnx)
+	python3 scripts/rerank_eval.py --ablations --output rerank_eval_ablations.json
+
+rerank-benchmark: ## run production benchmark on real codebase
+	python3 scripts/rerank_real_benchmark.py
