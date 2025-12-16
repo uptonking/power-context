@@ -627,13 +627,23 @@ def iter_files(root: Path) -> Iterable[Path]:
 
     excl = _Excluder(root)
     # Use os.walk to prune directories for performance
-    for dirpath, dirnames, filenames in os.walk(root):
-        # Compute rel path like /a/b from root
-        rel_dir = "/" + str(
-            Path(dirpath).resolve().relative_to(root.resolve())
-        ).replace(os.sep, "/")
-        if rel_dir == "/.":
+    # NOTE: avoid Path.resolve()/realpath here; on network filesystems (e.g. CephFS)
+    # it can trigger expensive metadata calls during large unchanged indexing runs.
+    try:
+        root_abs = os.path.abspath(str(root))
+    except Exception:
+        root_abs = str(root)
+
+    for dirpath, dirnames, filenames in os.walk(root_abs):
+        # Compute rel path like /a/b from root without resolving symlinks
+        try:
+            rel = os.path.relpath(dirpath, root_abs)
+        except Exception:
+            rel = "."
+        if rel in (".", ""):
             rel_dir = "/"
+        else:
+            rel_dir = "/" + rel.replace(os.sep, "/")
         # Prune excluded directories in-place
         keep = []
         for d in dirnames:
@@ -3252,7 +3262,8 @@ def index_repo(
                     if int(getattr(st, "st_size", 0)) == int(size) and int(
                         getattr(st, "st_mtime", 0)
                     ) == int(mtime):
-                        print(f"Skipping unchanged file (fs-meta): {file_path}")
+                        if not _use_progress_bar:
+                            print(f"Skipping unchanged file (fs-meta): {file_path}")
                         continue
             except Exception:
                 pass
@@ -3323,7 +3334,16 @@ def index_repo(
                         # When fs fast-path is enabled, refresh cache entry with size/mtime
                         if fast_fs and set_cached_file_hash:
                             try:
-                                set_cached_file_hash(str(file_path), file_hash, per_file_repo)
+                                need_refresh = True
+                                try:
+                                    if get_cached_file_meta:
+                                        _m = get_cached_file_meta(str(file_path), per_file_repo) or {}
+                                        if _m.get("size") is not None and _m.get("mtime") is not None:
+                                            need_refresh = False
+                                except Exception:
+                                    need_refresh = True
+                                if need_refresh:
+                                    set_cached_file_hash(str(file_path), file_hash, per_file_repo)
                             except Exception:
                                 pass
                         # Only print skip messages if no progress bar

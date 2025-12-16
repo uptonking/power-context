@@ -31,6 +31,21 @@ _cache_memo_sig: Dict[str, tuple[int, int]] = {}
 _cache_memo_last_check: Dict[str, float] = {}
 
 
+def _normalize_cache_key_path(file_path: str) -> str:
+    """Normalize a file path for cache keys.
+
+    Prefer os.path.abspath (no filesystem calls) over Path.resolve(), since resolve
+    can trigger expensive metadata operations on network filesystems.
+    """
+    try:
+        return os.path.abspath(file_path)
+    except Exception:
+        try:
+            return str(Path(file_path))
+        except Exception:
+            return str(file_path)
+
+
 def _memoize_cache_obj(cache_path: Path, obj: Dict[str, Any]) -> None:
     key = str(cache_path)
     now = time.time()
@@ -928,14 +943,14 @@ def get_cached_file_hash(file_path: str, repo_name: Optional[str] = None) -> str
 
         cache = _read_cache_file_cached(cache_path)
         file_hashes = cache.get("file_hashes", {})
-        fp = str(Path(file_path).resolve())
+        fp = _normalize_cache_key_path(file_path)
         val = file_hashes.get(fp, "")
         if isinstance(val, dict):
             return str(val.get("hash") or "")
         return str(val or "")
     else:
         cache = _read_cache_cached(_resolve_workspace_root())
-        fp = str(Path(file_path).resolve())
+        fp = _normalize_cache_key_path(file_path)
         val = cache.get("file_hashes", {}).get(fp, "")
         if isinstance(val, dict):
             return str(val.get("hash") or "")
@@ -946,7 +961,7 @@ def get_cached_file_hash(file_path: str, repo_name: Optional[str] = None) -> str
 
 def set_cached_file_hash(file_path: str, file_hash: str, repo_name: Optional[str] = None) -> None:
     """Set cached file hash for tracking changes."""
-    fp = str(Path(file_path).resolve())
+    fp = _normalize_cache_key_path(file_path)
 
     st_size: Optional[int] = None
     st_mtime: Optional[int] = None
@@ -1033,7 +1048,7 @@ def set_cached_file_hash(file_path: str, file_hash: str, repo_name: Optional[str
 
 
 def get_cached_file_meta(file_path: str, repo_name: Optional[str] = None) -> Dict[str, Any]:
-    fp = str(Path(file_path).resolve())
+    fp = _normalize_cache_key_path(file_path)
     if is_multi_repo_mode() and repo_name:
         state_dir = _get_repo_state_dir(repo_name)
         cache_path = state_dir / CACHE_FILENAME
@@ -1066,7 +1081,7 @@ def remove_cached_file(file_path: str, repo_name: Optional[str] = None) -> None:
             cache = _read_cache_file_cached(cache_path)
             file_hashes = cache.get("file_hashes", {})
 
-            fp = str(Path(file_path).resolve())
+            fp = _normalize_cache_key_path(file_path)
             if fp in file_hashes:
                 file_hashes.pop(fp, None)
                 cache["updated_at"] = datetime.now().isoformat()
@@ -1076,7 +1091,7 @@ def remove_cached_file(file_path: str, repo_name: Optional[str] = None) -> None:
         return
 
     cache = _read_cache_cached(_resolve_workspace_root())
-    fp = str(Path(file_path).resolve())
+    fp = _normalize_cache_key_path(file_path)
     if fp in cache.get("file_hashes", {}):
         cache["file_hashes"].pop(fp, None)
         cache["updated_at"] = datetime.now().isoformat()
@@ -1332,23 +1347,18 @@ def get_or_create_collection_for_logical_repo(
 def _get_symbol_cache_path(file_path: str) -> Path:
     """Get symbol cache file path for a given file."""
     try:
-        fp = str(Path(file_path).resolve())
+        fp = _normalize_cache_key_path(file_path)
         # Create symbol cache using file hash to handle renames
         file_hash = hashlib.md5(fp.encode('utf-8')).hexdigest()[:8]
         if is_multi_repo_mode():
-            # Use the same repo-name detection as other state helpers so that
-            # symbol caches live under the correct per-repo .codebase directory
             repo_name = _detect_repo_name_from_path(Path(file_path))
-            state_dir = _get_repo_state_dir(repo_name)
-            return state_dir / f"symbols_{file_hash}.json"
-        else:
-            cache_dir = _get_cache_path(_resolve_workspace_root()).parent
-            return cache_dir / f"symbols_{file_hash}.json"
+            if repo_name:
+                state_dir = _get_repo_state_dir(repo_name)
+                return state_dir / "symbols" / f"{file_hash}.json"
+        return _get_cache_path(_resolve_workspace_root()).parent / "symbols" / f"{file_hash}.json"
     except Exception:
-        # Fallback to simple file-based path
-        cache_dir = _get_cache_path(_resolve_workspace_root()).parent
-        filename = Path(file_path).name.replace('.', '_').replace('/', '_')
-        return cache_dir / f"symbols_{filename}.json"
+        # Fallback: use file name
+        return _get_cache_path(_resolve_workspace_root()).parent / "symbols" / f"{Path(file_path).name}.json"
 
 
 def get_cached_symbols(file_path: str) -> dict:
