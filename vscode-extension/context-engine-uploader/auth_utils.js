@@ -127,8 +127,19 @@ async function runAuthLoginFlow(explicitBackendUrl, deps) {
     return;
   }
   const { vscode, spawn, resolveBridgeCliInvocation, getWorkspaceFolderPath, attachOutput, log } = deps;
-  const settings = vscode.workspace.getConfiguration('contextEngineUploader');
-  let endpoint = (settings.get('endpoint') || '').trim();
+  let endpoint = '';
+  try {
+    if (deps && typeof deps.getEffectiveConfig === 'function') {
+      const cfg = deps.getEffectiveConfig();
+      endpoint = (cfg.get('endpoint') || '').trim();
+    }
+  } catch (_) {
+    endpoint = '';
+  }
+  if (!endpoint) {
+    const settings = vscode.workspace.getConfiguration('contextEngineUploader');
+    endpoint = (settings.get('endpoint') || '').trim();
+  }
   let backendUrl = explicitBackendUrl || endpoint;
   if (!backendUrl) {
     vscode.window.showErrorMessage('Context Engine Uploader: backend endpoint is not configured (contextEngineUploader.endpoint).');

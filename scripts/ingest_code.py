@@ -1363,6 +1363,7 @@ def ensure_payload_indexes(client: QdrantClient, collection: str):
             pass
 
 ENSURED_COLLECTIONS: set[str] = set()
+ENSURED_COLLECTIONS_LAST_CHECK: dict[str, float] = {}
 
 
 def pseudo_backfill_tick(
@@ -1371,6 +1372,8 @@ def pseudo_backfill_tick(
     repo_name: str | None = None,
     *,
     max_points: int = 256,
+    dim: int | None = None,
+    vector_name: str | None = None,
 ) -> int:
     """Best-effort pseudo/tag backfill for a collection.
 
@@ -1448,6 +1451,15 @@ def pseudo_backfill_tick(
     }
     next_offset = None
 
+    def _maybe_ensure_collection() -> bool:
+        if not dim or not vector_name:
+            return False
+        try:
+            ensure_collection_and_indexes_once(client, collection, int(dim), vector_name)
+            return True
+        except Exception:
+            return False
+
     while processed < max_points:
         batch_limit = max(1, min(64, max_points - processed))
         try:
@@ -1460,7 +1472,20 @@ def pseudo_backfill_tick(
                 offset=next_offset,
             )
         except Exception:
-            break
+            if _maybe_ensure_collection():
+                try:
+                    points, next_offset = client.scroll(
+                        collection_name=collection,
+                        scroll_filter=flt,
+                        limit=batch_limit,
+                        with_payload=True,
+                        with_vectors=True,
+                        offset=next_offset,
+                    )
+                except Exception:
+                    break
+            else:
+                break
 
         if not points:
             break
@@ -1535,8 +1560,15 @@ def pseudo_backfill_tick(
             try:
                 upsert_points(client, collection, new_points)
             except Exception:
-                # Best-effort: on failure, stop this tick
-                break
+                if _maybe_ensure_collection():
+                    try:
+                        upsert_points(client, collection, new_points)
+                    except Exception:
+                        # Best-effort: on failure, stop this tick
+                        break
+                else:
+                    # Best-effort: on failure, stop this tick
+                    break
 
         if next_offset is None:
             break
@@ -1553,10 +1585,30 @@ def ensure_collection_and_indexes_once(
     if not collection:
         return
     if collection in ENSURED_COLLECTIONS:
-        return
+        try:
+            now = time.time()
+            last = ENSURED_COLLECTIONS_LAST_CHECK.get(collection, 0.0)
+            if (now - last) < 2.0:
+                return
+            client.get_collection(collection)
+            ENSURED_COLLECTIONS_LAST_CHECK[collection] = now
+            return
+        except Exception:
+            try:
+                ENSURED_COLLECTIONS.discard(collection)
+            except Exception:
+                pass
+            try:
+                ENSURED_COLLECTIONS_LAST_CHECK.pop(collection, None)
+            except Exception:
+                pass
     ensure_collection(client, collection, dim, vector_name)
     ensure_payload_indexes(client, collection)
     ENSURED_COLLECTIONS.add(collection)
+    try:
+        ENSURED_COLLECTIONS_LAST_CHECK[collection] = time.time()
+    except Exception:
+        pass
 
 
 # Lightweight import extraction per language (best-effort)
