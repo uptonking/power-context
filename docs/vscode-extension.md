@@ -35,7 +35,7 @@ Context Engine Uploader extension for automatic workspace sync and Prompt+ integ
 ## Workflow Examples
 
 ### Local Development (dev-remote stack)
-Context-Engine running via `docker-compose.dev-remote.yml` on the same machine:
+Context-Engine running via `docker-compose.yml` on the same machine:
 ```
 Endpoint: http://localhost:8004
 Target Path: (leave empty - uses current workspace or let the extension auto-detect)

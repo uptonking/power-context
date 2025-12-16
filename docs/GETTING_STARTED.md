@@ -33,7 +33,7 @@ git clone https://github.com/m1rl0k/Context-Engine.git
 cd Context-Engine
 
 # Start the dev-remote stack (Qdrant, MCPs, upload service, watcher, etc.)
-docker compose -f docker-compose.dev-remote.yml up -d
+docker compose -f docker-compose.yml up -d
 ```
 
 This brings up, on your host machine:

@@ -8,6 +8,7 @@
 - [Overview](#overview)
 - [Core Principles](#core-principles)
 - [System Architecture](#system-architecture)
+- [Learning Reranker System](#5-learning-reranker-system)
 - [Data Flow](#data-flow)
 - [ReFRAG Pipeline](#refrag-pipeline)
 
@@ -121,6 +122,110 @@ Context Engine is a production-ready MCP (Model Context Protocol) retrieval stac
 - **Query Enhancement**: LLM-assisted query variation generation
 - **Local LLM Integration**: llama.cpp for offline expansion
 - **Caching**: Expanded query results cached for reuse
+
+### 5. Learning Reranker System (Optional)
+
+The Learning Reranker is an **optional** self-improving ranking system that learns from search patterns to provide increasingly relevant results over time. It is enabled by default but can be disabled via `RERANK_LEARNING=0` and `RERANK_EVENTS_ENABLED=0` environment variables. See [Configuration](CONFIGURATION.md#learning-reranker) for all options.
+
+#### Architecture Overview
+
+```
+┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
+│  Search Query   │────►│  Hybrid Search   │────►│  TinyScorer     │
+│                 │     │  (initial rank)  │     │  (learned rank) │
+└─────────────────┘     └──────────────────┘     └─────────────────┘
+                                                         │
+                        ┌──────────────────┐             │
+                        │  Event Logger    │◄────────────┘
+                        │  (NDJSON files)  │
+                        └────────┬─────────┘
+                                 │
+                        ┌────────▼─────────┐
+                        │ Learning Worker  │
+                        │  (background)    │
+                        └────────┬─────────┘
+                                 │
+                        ┌────────▼─────────┐
+                        │  ONNX Teacher    │
+                        │ (cross-encoder)  │
+                        └────────┬─────────┘
+                                 │
+                        ┌────────▼─────────┐
+                        │  Weight Updates  │
+                        │  (.npz files)    │
+                        └──────────────────┘
+```
+
+#### Components
+
+**TinyScorer** (`scripts/rerank_recursive.py`)
+- 2-layer MLP neural network (~3MB per collection)
+- Scores query-document pairs based on learned patterns
+- Hot-reloads weights every 60 seconds from disk
+- Per-collection weights (each repo learns independently)
+
+**Event Logger** (`scripts/rerank_events.py`)
+- Logs every search to NDJSON files at `/tmp/rerank_events/`
+- Records: query, candidates, initial scores, timestamps
+- Hourly file rotation with configurable retention
+
+**Learning Worker** (`scripts/learning_reranker_worker.py`)
+- Background daemon that processes logged events
+- Uses ONNX cross-encoder as "teacher" model
+- Trains TinyScorer via knowledge distillation
+- Saves versioned weight checkpoints atomically
+
+#### Learning Flow
+
+1. **Event Capture**: Every search logs query + candidates to NDJSON
+2. **Teacher Scoring**: ONNX cross-encoder scores the candidates
+3. **Student Training**: TinyScorer learns to match teacher rankings
+4. **Weight Update**: New weights saved atomically with versioning
+5. **Hot Reload**: Serving path picks up new weights within 60s
+6. **Score Integration**: `learning_score` blends with other signals
+
+#### Configuration
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `RERANKER_WEIGHTS_DIR` | Directory for weight files | `/tmp/rerank_weights` |
+| `RERANKER_WEIGHTS_RELOAD_INTERVAL` | Hot-reload check interval (seconds) | 60 |
+| `RERANKER_MAX_CHECKPOINTS` | Number of weight versions to keep | 5 |
+| `RERANKER_LR_DECAY_STEPS` | Steps between learning rate decay | 1000 |
+| `RERANKER_LR_DECAY_RATE` | Learning rate decay multiplier | 0.95 |
+| `RERANKER_MIN_LR` | Minimum learning rate | 0.0001 |
+| `RERANK_EVENTS_DIR` | Directory for event logs | `/tmp/rerank_events` |
+| `RERANK_EVENTS_RETENTION_DAYS` | Days to keep event files | 7 |
+| `RERANK_LEARNING_BATCH_SIZE` | Events per training batch | 32 |
+| `RERANK_LEARNING_POLL_INTERVAL` | Worker poll interval (seconds) | 30 |
+| `RERANK_LEARNING_RATE` | Initial learning rate | 0.001 |
+
+#### Observability
+
+Search results include learning metrics in the `why` field:
+```json
+{
+  "score": 3.2,
+  "why": ["lexical:1.0", "dense_rrf:0.05", "learning:3", "score:3.2"],
+  "components": {
+    "learning_score": 3.2,
+    "learning_iterations": 3
+  }
+}
+```
+
+Worker logs show training progress:
+```
+[codebase] Processed 5 events | v12 | lr=0.001 | avg_loss=1.8 | converged=False
+```
+
+#### Benefits
+
+- **Zero Manual Training**: Learns automatically from usage
+- **Per-Collection Specialization**: Each codebase gets tuned rankings
+- **Fast Inference**: TinyScorer adds <1ms to search latency
+- **Continuous Improvement**: Rankings improve over time
+- **Offline Capable**: Teacher runs locally, no external API calls
 
 #### MCP Router (`scripts/mcp_router.py`)
 - **Intent Classification**: Determines which MCP tool to call based on query

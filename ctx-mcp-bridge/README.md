@@ -15,7 +15,7 @@ other MCP clients) as long as the Context Engine stack is running.
 ## Prerequisites
 
 - Node.js **>= 18** (see `engines` in `package.json`).
-- A running Context Engine stack (e.g. via `docker-compose.dev-remote.yml`) with:
+- A running Context Engine stack (e.g. via `docker-compose.yml`) with:
   - MCP indexer HTTP endpoint (default: `http://localhost:8003/mcp`).
   - MCP memory HTTP endpoint (optional, default: `http://localhost:8002/mcp`).
 - For optional auth:

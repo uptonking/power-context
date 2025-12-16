@@ -13,6 +13,7 @@ Complete environment variable reference for Context Engine.
 - [Query Optimization](#query-optimization)
 - [Watcher Settings](#watcher-settings)
 - [Reranker](#reranker)
+- [Learning Reranker](#learning-reranker)
 - [Decoder (llama.cpp / GLM / MiniMax)](#decoder-llamacpp--glm--minimax)
 - [ReFRAG](#refrag)
 - [Ports](#ports)
@@ -127,6 +128,61 @@ Dynamic HNSW_EF tuning and intelligent query routing for 2x faster simple querie
 | RERANKER_ONNX_PATH | Local ONNX cross-encoder model path | unset |
 | RERANKER_TOKENIZER_PATH | Tokenizer path for reranker | unset |
 | RERANKER_ENABLED | Enable reranker by default | 1 (enabled) |
+
+## Learning Reranker
+
+The learning reranker trains a lightweight neural network (TinyScorer) to improve search rankings over time. See [Architecture](ARCHITECTURE.md#5-learning-reranker-system) for details.
+
+**This feature is optional and enabled by default.** To disable:
+
+```bash
+# Disable learning scorer in search results
+RERANK_LEARNING=0
+
+# Disable event logging (no training data collected)
+RERANK_EVENTS_ENABLED=0
+
+# Or simply don't run the learning_worker container
+```
+
+### Enable/Disable
+
+| Name | Description | Default |
+|------|-------------|---------|
+| RERANK_LEARNING | Enable learning scorer in search results | 1 (enabled) |
+| RERANK_EVENTS_ENABLED | Enable event logging for training | 1 (enabled) |
+| RERANK_EVENTS_SAMPLE_RATE | Fraction of events to log (0.0-1.0) | 0.33 |
+
+### Weight Management
+
+| Name | Description | Default |
+|------|-------------|---------|
+| RERANKER_WEIGHTS_DIR | Directory for learned weight files | /tmp/rerank_weights |
+| RERANKER_WEIGHTS_RELOAD_INTERVAL | How often to check for new weights (seconds) | 60 |
+| RERANKER_MAX_CHECKPOINTS | Number of weight versions to retain | 5 |
+
+### Learning Rate
+
+| Name | Description | Default |
+|------|-------------|---------|
+| RERANKER_LR_DECAY_STEPS | Updates between learning rate decay | 1000 |
+| RERANKER_LR_DECAY_RATE | Decay multiplier (e.g., 0.95 = 5% reduction) | 0.95 |
+| RERANKER_MIN_LR | Minimum learning rate floor | 0.0001 |
+
+### Event Logging
+
+| Name | Description | Default |
+|------|-------------|---------|
+| RERANK_EVENTS_DIR | Directory for search event logs | /tmp/rerank_events |
+| RERANK_EVENTS_RETENTION_DAYS | Days to keep event files before cleanup | 7 |
+
+### Learning Worker
+
+| Name | Description | Default |
+|------|-------------|---------|
+| RERANK_LEARNING_BATCH_SIZE | Number of events per training batch | 32 |
+| RERANK_LEARNING_POLL_INTERVAL | Seconds between checking for new events | 30 |
+| RERANK_LEARNING_RATE | Initial learning rate for TinyScorer | 0.001 |
 
 ## Decoder (llama.cpp / GLM / MiniMax)
 
