@@ -31,6 +31,7 @@ let workspacePathUtils;
 let promptPlusManager;
 const REQUIRED_PYTHON_MODULES = ['requests', 'urllib3', 'charset_normalizer'];
 const DEFAULT_CONTAINER_ROOT = '/work';
+const ONBOARDING_PROMPT_KEY = 'contextEngineUploader.onboardingPrompted';
 // const CLAUDE_HOOK_COMMAND = '/home/coder/project/Context-Engine/ctx-hook-simple.sh';
 
 function getEffectiveConfig() {
@@ -228,6 +229,7 @@ function activate(context) {
       normalizeWorkspaceForBridge,
       runSequence,
       writeMcpConfig,
+      writeCtxConfig,
       fetch: (typeof fetch === 'function' ? fetch : undefined),
     });
     if (Array.isArray(disposables)) {
@@ -405,6 +407,29 @@ function activate(context) {
   );
   const config = getEffectiveConfig();
   ensureTargetPathConfigured();
+// TODO: organise in another modulenise in another module
+  try {
+    const endpoint = (config.get('endpoint') || '').trim();
+    const resolved = resolveTargetPathFromConfig(config);
+    const targetPath = resolved && resolved.path ? String(resolved.path).trim() : '';
+    const needsSetup = !endpoint || !targetPath;
+    if (needsSetup && context && context.workspaceState) {
+      const alreadyPrompted = !!context.workspaceState.get(ONBOARDING_PROMPT_KEY);
+      if (!alreadyPrompted) {
+        context.workspaceState.update(ONBOARDING_PROMPT_KEY, true).catch(() => {});
+        vscode.window.showInformationMessage(
+          'Context Engine Uploader: finish setup for this workspace to start indexing/uploading.',
+          'Setup Workspace',
+          'Later'
+        ).then(choice => {
+          if (choice === 'Setup Workspace') {
+            vscode.commands.executeCommand('contextEngineUploader.setupWorkspace');
+          }
+        });
+      }
+    }
+  } catch (_) {
+  }
   if (config.get('runOnStartup')) {
     runSequence('auto').catch(error => log(`Startup run failed: ${error instanceof Error ? error.message : String(error)}`));
   }

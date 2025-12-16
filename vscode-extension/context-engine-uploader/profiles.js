@@ -343,15 +343,21 @@ async function setupWorkspaceWizard(deps) {
   _vscode.window.showInformationMessage(`Context Engine Uploader: active profile set to "${profileName}".`);
 
   const next = await _vscode.window.showQuickPick(
-    ['Write MCP Config now', 'Index Codebase now', 'Done'],
+    ['Write MCP Config now', 'Write CTX Config now', 'Write MCP + CTX Config now', 'Index Codebase now', 'Done'],
     { placeHolder: 'Next step' },
   );
   if (!next) {
     return;
   }
-  if (next === 'Write MCP Config now' && deps && typeof deps.writeMcpConfig === 'function') {
+
+  if ((next === 'Write MCP Config now' || next === 'Write MCP + CTX Config now') && deps && typeof deps.writeMcpConfig === 'function') {
     await deps.writeMcpConfig();
   }
+
+  if ((next === 'Write CTX Config now' || next === 'Write MCP + CTX Config now') && deps && typeof deps.writeCtxConfig === 'function') {
+    await deps.writeCtxConfig();
+  }
+
   if (next === 'Index Codebase now' && deps && typeof deps.runSequence === 'function') {
     await deps.runSequence('force');
   }

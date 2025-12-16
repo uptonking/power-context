@@ -1,4 +1,6 @@
 const vscode = require('vscode');
+const fs = require('fs');
+const path = require('path');
 
 function makeTreeItem(label, opts = {}) {
   const item = new vscode.TreeItem(label, opts.collapsibleState || vscode.TreeItemCollapsibleState.None);
@@ -40,6 +42,43 @@ function resolveMcpMode(cfg) {
   } catch (_) {
     return 'unknown';
   }
+}
+
+function getWorkspaceRoot() {
+  try {
+    const folders = vscode.workspace.workspaceFolders;
+    if (folders && folders.length) {
+      return folders[0].uri.fsPath;
+    }
+  } catch (_) {
+    // ignore
+  }
+  return undefined;
+}
+
+function pathExists(p, expectDir = false) {
+  try {
+    if (!p) {
+      return false;
+    }
+    const stat = fs.statSync(p);
+    return expectDir ? stat.isDirectory() : stat.isFile();
+  } catch (_) {
+    return false;
+  }
+}
+
+function findConfigFile(bases, filename) {
+  for (const base of bases) {
+    if (!base) {
+      continue;
+    }
+    const candidate = path.join(base, filename);
+    if (pathExists(candidate)) {
+      return candidate;
+    }
+  }
+  return undefined;
 }
 
 function register(context, deps) {
@@ -140,10 +179,105 @@ function register(context, deps) {
   const actionsProvider = createProvider(async (element) => {
     if (!element) {
       return [
+        makeTreeItem('Getting Started', { collapsibleState: vscode.TreeItemCollapsibleState.Expanded, contextValue: 'ctxceActionsGettingStartedRoot' }),
         makeTreeItem('Upload & Watch', { collapsibleState: vscode.TreeItemCollapsibleState.Expanded, contextValue: 'ctxceActionsUploadRoot' }),
         makeTreeItem('MCP Bridge & Config', { collapsibleState: vscode.TreeItemCollapsibleState.Collapsed, contextValue: 'ctxceActionsBridgeRoot' }),
         makeTreeItem('Utilities', { collapsibleState: vscode.TreeItemCollapsibleState.Collapsed, contextValue: 'ctxceActionsUtilitiesRoot' }),
       ];
+    }
+
+    if (element.contextValue === 'ctxceActionsGettingStartedRoot') {
+      const cfg = getEffectiveConfig ? getEffectiveConfig() : vscode.workspace.getConfiguration('contextEngineUploader');
+
+      const endpoint = (() => {
+        try { return (cfg.get('endpoint') || '').trim(); } catch (_) { return ''; }
+      })();
+
+      const resolvedTarget = typeof getResolvedTargetPath === 'function' ? getResolvedTargetPath() : undefined;
+      const targetDescription = resolvedTarget && resolvedTarget.path ? resolvedTarget.path : '(unset)';
+      const targetPath = resolvedTarget && resolvedTarget.path ? String(resolvedTarget.path) : '';
+      const targetExists = pathExists(targetPath, true);
+      const workspaceRoot = getWorkspaceRoot();
+      const configSearchBases = [targetPath, workspaceRoot].filter(Boolean);
+      const mcpConfigPath = findConfigFile(configSearchBases, '.mcp.json');
+      const ctxConfigPath = findConfigFile(configSearchBases, 'ctx_config.json');
+
+      const showAuth = (() => {
+        const mode = resolveMcpMode(cfg);
+        return typeof mode === 'string' && mode.startsWith('bridge/');
+      })();
+
+      const missingEndpoint = !endpoint;
+      const missingTarget = !targetPath || !targetExists;
+      const missingMcpConfig = !mcpConfigPath;
+      const missingCtxConfig = !ctxConfigPath;
+
+      const items = [
+        makeTreeItem('Setup Workspace', {
+          icon: new vscode.ThemeIcon('rocket'),
+          command: { command: 'contextEngineUploader.setupWorkspace', title: 'Setup Workspace' },
+          tooltip: 'Create and configure a profile for this workspace (recommended for first-time setup).',
+        }),
+        makeTreeItem('Open Settings', {
+          icon: new vscode.ThemeIcon('gear'),
+          command: { command: 'workbench.action.openSettings', title: 'Open Settings', arguments: ['contextEngineUploader'] },
+          tooltip: 'Open VS Code settings filtered to Context Engine Uploader.',
+        }),
+      ];
+
+      if (missingEndpoint) {
+        items.push(makeTreeItem('Check Endpoint', {
+          description: '(unset)',
+          icon: new vscode.ThemeIcon('warning'),
+          command: { command: 'workbench.action.openSettings', title: 'Open Settings', arguments: ['contextEngineUploader.endpoint'] },
+          tooltip: 'Configure the upload service endpoint.',
+        }));
+      }
+
+      if (missingTarget) {
+        items.push(makeTreeItem('Check Target Path', {
+          description: targetPath ? `${targetDescription} (missing)` : '(unset)',
+          icon: new vscode.ThemeIcon('warning'),
+          command: { command: 'workbench.action.openSettings', title: 'Open Settings', arguments: ['contextEngineUploader.targetPath'] },
+          tooltip: 'Configure the target path to index/upload.',
+        }));
+      }
+
+      if (missingMcpConfig) {
+        items.push(makeTreeItem('Write MCP Config (.mcp.json)', {
+          description: 'Missing',
+          icon: new vscode.ThemeIcon('warning'),
+          command: { command: 'contextEngineUploader.writeMcpConfig', title: 'Write MCP Config (.mcp.json)' },
+          tooltip: 'Writes project MCP configuration for IDE clients (Claude/Windsurf) based on current settings.',
+        }));
+      }
+
+      if (missingCtxConfig) {
+        items.push(makeTreeItem('Write CTX Config (ctx_config.json)', {
+          description: 'Missing',
+          icon: new vscode.ThemeIcon('warning'),
+          command: { command: 'contextEngineUploader.writeCtxConfig', title: 'Write CTX Config' },
+          tooltip: 'Scaffold ctx_config.json/.env for local tools (Prompt+, etc.).',
+        }));
+      }
+
+      if (!missingEndpoint && !missingTarget && !missingMcpConfig && !missingCtxConfig) {
+        items.push(makeTreeItem('All set', {
+          description: 'Ready',
+          icon: new vscode.ThemeIcon('check'),
+          tooltip: 'Workspace looks ready. You can start indexing/uploading now.',
+        }));
+      }
+
+      if (showAuth) {
+        items.push(makeTreeItem('Sign In', {
+          icon: new vscode.ThemeIcon('account'),
+          command: { command: 'contextEngineUploader.authLogin', title: 'Sign In' },
+          tooltip: 'Runs ctxce auth login for the configured endpoint.',
+        }));
+      }
+
+      return items;
     }
 
     if (element.contextValue === 'ctxceActionsUploadRoot') {
@@ -198,10 +332,21 @@ function register(context, deps) {
     }
 
     if (element.contextValue === 'ctxceActionsUtilitiesRoot') {
-      return [
+      const cfg = getEffectiveConfig ? getEffectiveConfig() : vscode.workspace.getConfiguration('contextEngineUploader');
+      const showAuth = (() => {
+        const mode = resolveMcpMode(cfg);
+        return typeof mode === 'string' && mode.startsWith('bridge/');
+      })();
+
+      const items = [
         makeTreeItem('Prompt+', { icon: new vscode.ThemeIcon('sparkle'), command: { command: 'contextEngineUploader.promptEnhance', title: 'Prompt+' } }),
-        makeTreeItem('Sign In', { icon: new vscode.ThemeIcon('account'), command: { command: 'contextEngineUploader.authLogin', title: 'Sign In' } }),
       ];
+
+      if (showAuth) {
+        items.push(makeTreeItem('Sign In', { icon: new vscode.ThemeIcon('account'), command: { command: 'contextEngineUploader.authLogin', title: 'Sign In' } }));
+      }
+
+      return items;
     }
 
     return [];
