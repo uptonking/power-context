@@ -1169,6 +1169,7 @@ def _process_paths(paths, client, model, vector_name: str, model_dim: int, works
                         dedupe=True,
                         skip_unchanged=False,
                         pseudo_mode=pseudo_mode,
+                        repo_name_for_cache=repo_name,
                     )
             except Exception as e:
                 try:
