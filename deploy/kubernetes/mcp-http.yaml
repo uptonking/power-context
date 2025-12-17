@@ -23,6 +23,17 @@ spec:
         runAsUser: 1000
         runAsGroup: 1000
         fsGroup: 1000
+      initContainers:
+      - name: init-rerank-dirs
+        image: busybox:1.36
+        imagePullPolicy: IfNotPresent
+        command:
+        - sh
+        - -c
+        - mkdir -p /mnt/rerank_weights /mnt/rerank_events && chmod 777 /mnt/rerank_weights /mnt/rerank_events
+        volumeMounts:
+        - name: metadata-volume
+          mountPath: /mnt
       containers:
       - name: mcp-memory-http
         image: context-engine-memory
@@ -97,6 +108,12 @@ spec:
         - name: work-volume
           mountPath: /work
           readOnly: true
+        - name: metadata-volume
+          mountPath: /tmp/rerank_weights
+          subPath: rerank_weights
+        - name: metadata-volume
+          mountPath: /tmp/rerank_events
+          subPath: rerank_events
         livenessProbe:
           httpGet:
             path: /readyz
@@ -116,6 +133,9 @@ spec:
       - name: work-volume
         persistentVolumeClaim:
           claimName: code-repos-pvc
+      - name: metadata-volume
+        persistentVolumeClaim:
+          claimName: code-metadata-pvc
 ---
 apiVersion: v1
 kind: Service
@@ -190,6 +210,17 @@ spec:
         runAsUser: 1000
         runAsGroup: 1000
         fsGroup: 1000
+      initContainers:
+      - name: init-rerank-dirs
+        image: busybox:1.36
+        imagePullPolicy: IfNotPresent
+        command:
+        - sh
+        - -c
+        - mkdir -p /work/.codebase/rerank_weights /work/.codebase/rerank_events && chmod 777 /work/.codebase/rerank_weights /work/.codebase/rerank_events
+        volumeMounts:
+        - name: codebase-volume
+          mountPath: /work/.codebase
       containers:
       - name: mcp-indexer-http
         image: context-engine-indexer
@@ -289,6 +320,12 @@ spec:
           mountPath: /work/.codebase
         - name: models-volume
           mountPath: /work/models
+        - name: codebase-volume
+          mountPath: /tmp/rerank_weights
+          subPath: rerank_weights
+        - name: codebase-volume
+          mountPath: /tmp/rerank_events
+          subPath: rerank_events
         livenessProbe:
           httpGet:
             path: /readyz
