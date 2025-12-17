@@ -3295,7 +3295,7 @@ def index_repo(
             desc="Indexing",
             unit="file",
             ncols=100,
-            bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]",
+            bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}] {postfix}",
         )
     else:
         file_iter = all_files
