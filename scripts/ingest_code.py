@@ -3253,6 +3253,10 @@ def index_repo(
     files_indexed = 0
     points_indexed = 0
 
+    skipped_fsmeta = 0
+    skipped_cache = 0
+    skipped_qdrant = 0
+
     def make_point(pid, dense_vec, lex_vec, payload):
         # Use named vectors if collection has names: store dense + lexical (+ mini if REFRAG_MODE)
         if vector_name:
@@ -3296,6 +3300,22 @@ def index_repo(
     else:
         file_iter = all_files
 
+    def _maybe_update_postfix() -> None:
+        if not _use_progress_bar:
+            return
+        try:
+            if files_seen % 25 != 0:
+                return
+        except Exception:
+            return
+        try:
+            file_iter.set_postfix_str(
+                f"fsmeta={skipped_fsmeta} cache={skipped_cache} qdrant={skipped_qdrant}",
+                refresh=False,
+            )
+        except Exception:
+            pass
+
     for file_path in file_iter:
         files_seen += 1
 
@@ -3327,6 +3347,9 @@ def index_repo(
                     ) == int(mtime):
                         if not _use_progress_bar:
                             print(f"Skipping unchanged file (fs-meta): {file_path}")
+                        else:
+                            skipped_fsmeta += 1
+                            _maybe_update_postfix()
                         continue
             except Exception:
                 pass
@@ -3437,6 +3460,9 @@ def index_repo(
                                     pass
                             else:
                                 print(f"Skipping unchanged file (cache): {file_path}")
+                        else:
+                            skipped_cache += 1
+                            _maybe_update_postfix()
                         continue
             except Exception:
                 pass
@@ -3464,6 +3490,9 @@ def index_repo(
                             print(f"... processed {files_seen} files (skipping unchanged)")
                         else:
                             print(f"Skipping unchanged file: {file_path}")
+                    else:
+                        skipped_qdrant += 1
+                        _maybe_update_postfix()
                     continue
 
             # At this point, file content has changed vs previous index; attempt smart reindex when enabled
