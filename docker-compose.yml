@@ -336,6 +336,9 @@ services:
     environment:
       - QDRANT_URL=${QDRANT_URL}
       - COLLECTION_NAME=${COLLECTION_NAME}
+      - GIT_HISTORY_PRUNE=${GIT_HISTORY_PRUNE:-1}
+      - GIT_HISTORY_DELETE_MANIFEST=${GIT_HISTORY_DELETE_MANIFEST:-0}
+      - GIT_HISTORY_MANIFEST_MAX_FILES=${GIT_HISTORY_MANIFEST_MAX_FILES:-0}
       # Use /tmp for HF caches to avoid permission issues during model download
       - HF_HOME=/tmp/huggingface
       - HF_HUB_CACHE=/tmp/huggingface/hub
@@ -376,6 +379,9 @@ services:
     environment:
       - QDRANT_URL=${QDRANT_URL}
       - COLLECTION_NAME=${COLLECTION_NAME}
+      - GIT_HISTORY_PRUNE=${GIT_HISTORY_PRUNE:-1}
+      - GIT_HISTORY_DELETE_MANIFEST=${GIT_HISTORY_DELETE_MANIFEST:-0}
+      - GIT_HISTORY_MANIFEST_MAX_FILES=${GIT_HISTORY_MANIFEST_MAX_FILES:-0}
       - HF_HOME=/tmp/huggingface
       - HF_HUB_CACHE=/tmp/huggingface/hub
       - TRANSFORMERS_CACHE=/tmp/huggingface/transformers
