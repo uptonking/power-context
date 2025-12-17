@@ -24,6 +24,16 @@ spec:
         runAsGroup: 1000
         fsGroup: 1000
       initContainers:
+      - name: init-rerank-dirs
+        image: busybox:1.36
+        imagePullPolicy: IfNotPresent
+        command:
+        - sh
+        - -c
+        - mkdir -p /mnt/rerank_weights /mnt/rerank_events && chmod 777 /mnt/rerank_weights /mnt/rerank_events
+        volumeMounts:
+        - name: metadata-volume
+          mountPath: /mnt
       - name: wait-for-qdrant
         image: context-engine-indexer-service
         imagePullPolicy: IfNotPresent
@@ -110,6 +120,12 @@ spec:
           mountPath: /work/.codebase
         - name: models-volume
           mountPath: /work/models
+        - name: metadata-volume
+          mountPath: /tmp/rerank_weights
+          subPath: rerank_weights
+        - name: metadata-volume
+          mountPath: /tmp/rerank_events
+          subPath: rerank_events
         envFrom:
         - configMapRef:
             name: context-engine-config
@@ -145,6 +161,16 @@ spec:
         runAsGroup: 1000
         fsGroup: 1000
       initContainers:
+      - name: init-rerank-dirs
+        image: busybox:1.36
+        imagePullPolicy: IfNotPresent
+        command:
+        - sh
+        - -c
+        - mkdir -p /mnt/rerank_weights /mnt/rerank_events && chmod 777 /mnt/rerank_weights /mnt/rerank_events
+        volumeMounts:
+        - name: metadata-volume
+          mountPath: /mnt
       - name: wait-for-qdrant
         image: context-engine-indexer-service
         imagePullPolicy: IfNotPresent
@@ -201,6 +227,12 @@ spec:
           mountPath: /work/.codebase
         - name: models-volume
           mountPath: /work/models
+        - name: metadata-volume
+          mountPath: /tmp/rerank_weights
+          subPath: rerank_weights
+        - name: metadata-volume
+          mountPath: /tmp/rerank_events
+          subPath: rerank_events
         envFrom:
         - configMapRef:
             name: context-engine-config
@@ -236,6 +268,16 @@ spec:
         runAsGroup: 1000
         fsGroup: 1000
       initContainers:
+      - name: init-rerank-dirs
+        image: busybox:1.36
+        imagePullPolicy: IfNotPresent
+        command:
+        - sh
+        - -c
+        - mkdir -p /mnt/rerank_weights /mnt/rerank_events && chmod 777 /mnt/rerank_weights /mnt/rerank_events
+        volumeMounts:
+        - name: metadata-volume
+          mountPath: /mnt
       - name: wait-for-qdrant
         image: context-engine-indexer-service
         imagePullPolicy: IfNotPresent
@@ -282,6 +324,12 @@ spec:
           mountPath: /work
         - name: metadata-volume
           mountPath: /work/.codebase
+        - name: metadata-volume
+          mountPath: /tmp/rerank_weights
+          subPath: rerank_weights
+        - name: metadata-volume
+          mountPath: /tmp/rerank_events
+          subPath: rerank_events
         envFrom:
         - configMapRef:
             name: context-engine-config

@@ -627,13 +627,23 @@ def iter_files(root: Path) -> Iterable[Path]:
 
     excl = _Excluder(root)
     # Use os.walk to prune directories for performance
-    for dirpath, dirnames, filenames in os.walk(root):
-        # Compute rel path like /a/b from root
-        rel_dir = "/" + str(
-            Path(dirpath).resolve().relative_to(root.resolve())
-        ).replace(os.sep, "/")
-        if rel_dir == "/.":
+    # NOTE: avoid Path.resolve()/realpath here; on network filesystems (e.g. CephFS)
+    # it can trigger expensive metadata calls during large unchanged indexing runs.
+    try:
+        root_abs = os.path.abspath(str(root))
+    except Exception:
+        root_abs = str(root)
+
+    for dirpath, dirnames, filenames in os.walk(root_abs):
+        # Compute rel path like /a/b from root without resolving symlinks
+        try:
+            rel = os.path.relpath(dirpath, root_abs)
+        except Exception:
+            rel = "."
+        if rel in (".", ""):
             rel_dir = "/"
+        else:
+            rel_dir = "/" + rel.replace(os.sep, "/")
         # Prune excluded directories in-place
         keep = []
         for d in dirnames:
@@ -1353,6 +1363,7 @@ def ensure_payload_indexes(client: QdrantClient, collection: str):
             pass
 
 ENSURED_COLLECTIONS: set[str] = set()
+ENSURED_COLLECTIONS_LAST_CHECK: dict[str, float] = {}
 
 
 def pseudo_backfill_tick(
@@ -1361,6 +1372,8 @@ def pseudo_backfill_tick(
     repo_name: str | None = None,
     *,
     max_points: int = 256,
+    dim: int | None = None,
+    vector_name: str | None = None,
 ) -> int:
     """Best-effort pseudo/tag backfill for a collection.
 
@@ -1438,6 +1451,15 @@ def pseudo_backfill_tick(
     }
     next_offset = None
 
+    def _maybe_ensure_collection() -> bool:
+        if not dim or not vector_name:
+            return False
+        try:
+            ensure_collection_and_indexes_once(client, collection, int(dim), vector_name)
+            return True
+        except Exception:
+            return False
+
     while processed < max_points:
         batch_limit = max(1, min(64, max_points - processed))
         try:
@@ -1450,7 +1472,20 @@ def pseudo_backfill_tick(
                 offset=next_offset,
             )
         except Exception:
-            break
+            if _maybe_ensure_collection():
+                try:
+                    points, next_offset = client.scroll(
+                        collection_name=collection,
+                        scroll_filter=flt,
+                        limit=batch_limit,
+                        with_payload=True,
+                        with_vectors=True,
+                        offset=next_offset,
+                    )
+                except Exception:
+                    break
+            else:
+                break
 
         if not points:
             break
@@ -1525,8 +1560,15 @@ def pseudo_backfill_tick(
             try:
                 upsert_points(client, collection, new_points)
             except Exception:
-                # Best-effort: on failure, stop this tick
-                break
+                if _maybe_ensure_collection():
+                    try:
+                        upsert_points(client, collection, new_points)
+                    except Exception:
+                        # Best-effort: on failure, stop this tick
+                        break
+                else:
+                    # Best-effort: on failure, stop this tick
+                    break
 
         if next_offset is None:
             break
@@ -1543,10 +1585,41 @@ def ensure_collection_and_indexes_once(
     if not collection:
         return
     if collection in ENSURED_COLLECTIONS:
-        return
+        # By default we do NOT ping Qdrant repeatedly for an already-ensured collection.
+        # This avoids a steady stream of GET /collections/<name> requests during large runs.
+        # Opt-in: set ENSURED_COLLECTION_PING_SECONDS to a positive float (e.g. 60).
+        try:
+            ping_seconds = float(os.environ.get("ENSURED_COLLECTION_PING_SECONDS", "0") or 0)
+        except Exception:
+            ping_seconds = 0.0
+
+        if ping_seconds <= 0:
+            return
+
+        try:
+            now = time.time()
+            last = ENSURED_COLLECTIONS_LAST_CHECK.get(collection, 0.0)
+            if (now - last) < ping_seconds:
+                return
+            client.get_collection(collection)
+            ENSURED_COLLECTIONS_LAST_CHECK[collection] = now
+            return
+        except Exception:
+            try:
+                ENSURED_COLLECTIONS.discard(collection)
+            except Exception:
+                pass
+            try:
+                ENSURED_COLLECTIONS_LAST_CHECK.pop(collection, None)
+            except Exception:
+                pass
     ensure_collection(client, collection, dim, vector_name)
     ensure_payload_indexes(client, collection)
     ENSURED_COLLECTIONS.add(collection)
+    try:
+        ENSURED_COLLECTIONS_LAST_CHECK[collection] = time.time()
+    except Exception:
+        pass
 
 
 # Lightweight import extraction per language (best-effort)
@@ -2617,6 +2690,7 @@ def index_single_file(
     skip_unchanged: bool = True,
     pseudo_mode: str = "full",
     trust_cache: bool | None = None,
+    repo_name_for_cache: str | None = None,
 ) -> bool:
     """Index a single file path. Returns True if indexed, False if skipped.
 
@@ -2653,8 +2727,8 @@ def index_single_file(
     fast_fs = _env_truthy(os.environ.get("INDEX_FS_FASTPATH"), False)
     if skip_unchanged and fast_fs and get_cached_file_meta is not None:
         try:
-            repo_name_for_cache = _detect_repo_name_from_path(file_path)
-            meta = get_cached_file_meta(str(file_path), repo_name_for_cache) or {}
+            repo_for_cache = repo_name_for_cache or _detect_repo_name_from_path(file_path)
+            meta = get_cached_file_meta(str(file_path), repo_for_cache) or {}
             size = meta.get("size")
             mtime = meta.get("mtime")
             if size is not None and mtime is not None:
@@ -2676,7 +2750,7 @@ def index_single_file(
     language = detect_language(file_path)
     file_hash = hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest()
 
-    repo_tag = _detect_repo_name_from_path(file_path)
+    repo_tag = repo_name_for_cache or _detect_repo_name_from_path(file_path)
 
     # Derive logical repo identity and repo-relative path for cross-worktree reuse.
     repo_id: str | None = None
@@ -2951,7 +3025,7 @@ def index_single_file(
         try:
             ws = os.environ.get("WATCH_ROOT") or os.environ.get("WORKSPACE_PATH") or "/work"
             if set_cached_file_hash:
-                file_repo_tag = _detect_repo_name_from_path(file_path)
+                file_repo_tag = repo_tag
                 set_cached_file_hash(str(file_path), file_hash, file_repo_tag)
         except Exception:
             pass
@@ -2976,9 +3050,23 @@ def index_repo(
     fast_fs = _env_truthy(os.environ.get("INDEX_FS_FASTPATH"), False)
     if skip_unchanged and not recreate and fast_fs and get_cached_file_meta is not None:
         try:
+            is_multi_repo = bool(is_multi_repo_mode and is_multi_repo_mode())
+            root_repo_for_cache = (
+                _detect_repo_name_from_path(root)
+                if (not is_multi_repo and _detect_repo_name_from_path)
+                else None
+            )
             all_unchanged = True
             for file_path in iter_files(root):
-                per_file_repo_for_cache = _detect_repo_name_from_path(file_path) if _detect_repo_name_from_path else None
+                per_file_repo_for_cache = (
+                    root_repo_for_cache
+                    if root_repo_for_cache is not None
+                    else (
+                        _detect_repo_name_from_path(file_path)
+                        if _detect_repo_name_from_path
+                        else None
+                    )
+                )
                 meta = get_cached_file_meta(str(file_path), per_file_repo_for_cache) or {}
                 size = meta.get("size")
                 mtime = meta.get("mtime")
@@ -3125,6 +3213,8 @@ def index_repo(
         print("[multi_repo] Skipping single collection setup - will create per-repo collections during indexing")
     # Repo tag for filtering: auto-detect from git or folder name
     repo_tag = _detect_repo_name_from_path(root)
+    # TODO: Long-term, in upload-server mode repo identity should come from workspace metadata
+    # (state.json/origin), but keep bindmount/git fallbacks for back-compat.
     workspace_root = os.environ.get("WATCH_ROOT") or os.environ.get("WORKSPACE_PATH") or "/work"
     touched_repos: set[str] = set()
     repo_roots: dict[str, str] = {}
@@ -3162,6 +3252,10 @@ def index_repo(
     files_seen = 0
     files_indexed = 0
     points_indexed = 0
+
+    skipped_fsmeta = 0
+    skipped_cache = 0
+    skipped_qdrant = 0
 
     def make_point(pid, dense_vec, lex_vec, payload):
         # Use named vectors if collection has names: store dense + lexical (+ mini if REFRAG_MODE)
@@ -3201,10 +3295,26 @@ def index_repo(
             desc="Indexing",
             unit="file",
             ncols=100,
-            bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]",
+            bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}] {postfix}",
         )
     else:
         file_iter = all_files
+
+    def _maybe_update_postfix() -> None:
+        if not _use_progress_bar:
+            return
+        try:
+            if files_seen % 25 != 0:
+                return
+        except Exception:
+            return
+        try:
+            file_iter.set_postfix_str(
+                f"fsmeta={skipped_fsmeta} cache={skipped_cache} qdrant={skipped_qdrant}",
+                refresh=False,
+            )
+        except Exception:
+            pass
 
     for file_path in file_iter:
         files_seen += 1
@@ -3222,7 +3332,11 @@ def index_repo(
         # Optional fs-metadata fast-path: skip files whose size/mtime match cache
         if skip_unchanged and fast_fs and get_cached_file_meta is not None:
             try:
-                per_file_repo_for_cache = _detect_repo_name_from_path(file_path)
+                per_file_repo_for_cache = (
+                    _detect_repo_name_from_path(file_path)
+                    if use_per_repo_collections
+                    else repo_tag
+                )
                 meta = get_cached_file_meta(str(file_path), per_file_repo_for_cache) or {}
                 size = meta.get("size")
                 mtime = meta.get("mtime")
@@ -3231,7 +3345,11 @@ def index_repo(
                     if int(getattr(st, "st_size", 0)) == int(size) and int(
                         getattr(st, "st_mtime", 0)
                     ) == int(mtime):
-                        print(f"Skipping unchanged file (fs-meta): {file_path}")
+                        if not _use_progress_bar:
+                            print(f"Skipping unchanged file (fs-meta): {file_path}")
+                        else:
+                            skipped_fsmeta += 1
+                            _maybe_update_postfix()
                         continue
             except Exception:
                 pass
@@ -3249,11 +3367,13 @@ def index_repo(
         language = detect_language(file_path)
         file_hash = hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest()
 
-        per_file_repo = (
-            _detect_repo_name_from_path(file_path)
-            if _detect_repo_name_from_path
-            else repo_tag
-        )
+        per_file_repo = repo_tag
+        if use_per_repo_collections:
+            per_file_repo = (
+                _detect_repo_name_from_path(file_path)
+                if _detect_repo_name_from_path
+                else repo_tag
+            )
         if per_file_repo:
             touched_repos.add(per_file_repo)
             repo_roots.setdefault(
@@ -3300,7 +3420,16 @@ def index_repo(
                         # When fs fast-path is enabled, refresh cache entry with size/mtime
                         if fast_fs and set_cached_file_hash:
                             try:
-                                set_cached_file_hash(str(file_path), file_hash, per_file_repo)
+                                need_refresh = True
+                                try:
+                                    if get_cached_file_meta:
+                                        _m = get_cached_file_meta(str(file_path), per_file_repo) or {}
+                                        if _m.get("size") is not None and _m.get("mtime") is not None:
+                                            need_refresh = False
+                                except Exception:
+                                    need_refresh = True
+                                if need_refresh:
+                                    set_cached_file_hash(str(file_path), file_hash, per_file_repo)
                             except Exception:
                                 pass
                         # Only print skip messages if no progress bar
@@ -3331,6 +3460,9 @@ def index_repo(
                                     pass
                             else:
                                 print(f"Skipping unchanged file (cache): {file_path}")
+                        else:
+                            skipped_cache += 1
+                            _maybe_update_postfix()
                         continue
             except Exception:
                 pass
@@ -3358,6 +3490,9 @@ def index_repo(
                             print(f"... processed {files_seen} files (skipping unchanged)")
                         else:
                             print(f"Skipping unchanged file: {file_path}")
+                    else:
+                        skipped_qdrant += 1
+                        _maybe_update_postfix()
                     continue
 
             # At this point, file content has changed vs previous index; attempt smart reindex when enabled
@@ -3571,7 +3706,11 @@ def index_repo(
                         for _p, _h in list(batch_file_hashes.items()):
                             try:
                                 if _p and _h:
-                                    file_repo_tag = _detect_repo_name_from_path(Path(_p))
+                                    file_repo_tag = (
+                                        _detect_repo_name_from_path(Path(_p))
+                                        if use_per_repo_collections
+                                        else repo_tag
+                                    )
                                     repos_touched_name = file_repo_tag or per_file_repo
                                     if repos_touched_name:
                                         touched_repos.add(repos_touched_name)
@@ -3593,7 +3732,13 @@ def index_repo(
             )
             try:
                 if update_indexing_status:
-                    per_file_repo = _detect_repo_name_from_path(file_path) if _detect_repo_name_from_path else repo_tag
+                    per_file_repo = repo_tag
+                    if use_per_repo_collections:
+                        per_file_repo = (
+                            _detect_repo_name_from_path(file_path)
+                            if _detect_repo_name_from_path
+                            else repo_tag
+                        )
                     if per_file_repo:
                         update_indexing_status(
                             workspace_path=str(file_path.parent),
@@ -3632,7 +3777,11 @@ def index_repo(
                 for _p, _h in list(batch_file_hashes.items()):
                     try:
                         if _p and _h:
-                            per_file_repo = _detect_repo_name_from_path(Path(_p))
+                            per_file_repo = (
+                                _detect_repo_name_from_path(Path(_p))
+                                if use_per_repo_collections
+                                else repo_tag
+                            )
                             if per_file_repo:
                                 set_cached_file_hash(_p, _h, per_file_repo)
                     except Exception:

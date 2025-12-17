@@ -724,7 +724,12 @@ def _rename_in_store(
         return -1, None
 
 
-def _start_pseudo_backfill_worker(client: QdrantClient, default_collection: str) -> None:
+def _start_pseudo_backfill_worker(
+    client: QdrantClient,
+    default_collection: str,
+    model_dim: int,
+    vector_name: str,
+) -> None:
     flag = (os.environ.get("PSEUDO_BACKFILL_ENABLED") or "").strip().lower()
     if flag not in {"1", "true", "yes", "on"}:
         return
@@ -770,6 +775,8 @@ def _start_pseudo_backfill_worker(client: QdrantClient, default_collection: str)
                                 coll,
                                 repo_name=repo_name,
                                 max_points=max_points,
+                                dim=model_dim,
+                                vector_name=vector_name,
                             )
                             if processed:
                                 try:
@@ -885,11 +892,13 @@ def main():
         vector_name = idx._sanitize_vector_name(MODEL)
 
     try:
-        idx.ensure_collection_and_indexes_once(client, default_collection, model_dim, vector_name)
+        idx.ensure_collection_and_indexes_once(
+            client, default_collection, model_dim, vector_name
+        )
     except Exception:
         pass
 
-    _start_pseudo_backfill_worker(client, default_collection)
+    _start_pseudo_backfill_worker(client, default_collection, model_dim, vector_name)
 
     try:
         if multi_repo_enabled:
@@ -1160,6 +1169,7 @@ def _process_paths(paths, client, model, vector_name: str, model_dim: int, works
                         dedupe=True,
                         skip_unchanged=False,
                         pseudo_mode=pseudo_mode,
+                        repo_name_for_cache=repo_name,
                     )
             except Exception as e:
                 try:

@@ -20,6 +20,103 @@ from typing import Dict, Any, Optional, List, Literal, TypedDict
 import threading
 import time
 
+_SLUGGED_REPO_RE = re.compile(r"^.+-[0-9a-f]{16}$")
+_managed_slug_cache_lock = threading.Lock()
+_managed_slug_cache: set[str] = set()
+_managed_slug_cache_neg: set[str] = set()
+
+_cache_memo_lock = threading.Lock()
+_cache_memo: Dict[str, Dict[str, Any]] = {}
+_cache_memo_sig: Dict[str, tuple[int, int]] = {}
+_cache_memo_last_check: Dict[str, float] = {}
+
+
+def _cache_memo_recheck_seconds() -> float:
+    try:
+        return float(os.environ.get("CACHE_MEMO_RECHECK_SECONDS", "60") or 60)
+    except Exception:
+        return 60.0
+
+
+def _normalize_cache_key_path(file_path: str) -> str:
+    """Normalize a file path for cache keys.
+
+    Prefer os.path.abspath (no filesystem calls) over Path.resolve(), since resolve
+    can trigger expensive metadata operations on network filesystems.
+    """
+    try:
+        return os.path.abspath(file_path)
+    except Exception:
+        try:
+            return str(Path(file_path))
+        except Exception:
+            return str(file_path)
+
+
+def _memoize_cache_obj(cache_path: Path, obj: Dict[str, Any]) -> None:
+    key = str(cache_path)
+    now = time.time()
+    sig = (-1, -1)
+    try:
+        st = cache_path.stat()
+        mtime_ns = int(
+            getattr(st, "st_mtime_ns", int(getattr(st, "st_mtime", 0) * 1_000_000_000))
+        )
+        sig = (mtime_ns, int(getattr(st, "st_size", 0)))
+    except OSError:
+        sig = (-1, -1)
+    with _cache_memo_lock:
+        _cache_memo[key] = obj
+        _cache_memo_last_check[key] = now
+        _cache_memo_sig[key] = sig
+
+
+def _cache_file_sig(cache_path: Path) -> Optional[tuple[int, int]]:
+    try:
+        st = cache_path.stat()
+    except OSError:
+        return None
+    try:
+        mtime_ns = int(
+            getattr(st, "st_mtime_ns", int(getattr(st, "st_mtime", 0) * 1_000_000_000))
+        )
+    except Exception:
+        mtime_ns = int(getattr(st, "st_mtime", 0) * 1_000_000_000)
+    return (mtime_ns, int(getattr(st, "st_size", 0)))
+
+
+def _server_managed_slug_from_path(path: Path) -> Optional[str]:
+    base = path if path.is_dir() else path.parent
+    try:
+        parts = base.resolve().parts
+    except OSError:
+        parts = base.parts
+
+    slug = next((seg for seg in reversed(parts) if _SLUGGED_REPO_RE.match(seg or "")), None)
+    if not slug:
+        return None
+
+    with _managed_slug_cache_lock:
+        if slug in _managed_slug_cache:
+            return slug
+        if slug in _managed_slug_cache_neg:
+            return None
+
+    work_dir = Path(os.environ.get("WORK_DIR") or os.environ.get("WORKDIR") or "/work")
+    marker = work_dir / ".codebase" / "repos" / slug / ".ctxce_managed_upload"
+    try:
+        is_managed = marker.exists()
+    except OSError:
+        is_managed = False
+
+    with _managed_slug_cache_lock:
+        if is_managed:
+            _managed_slug_cache.add(slug)
+        else:
+            _managed_slug_cache_neg.add(slug)
+
+    return slug if is_managed else None
+
 # Type definitions
 IndexingState = Literal['idle', 'initializing', 'scanning', 'indexing', 'watching', 'error']
 ActivityAction = Literal['indexed', 'deleted', 'skipped', 'scan-completed', 'initialized', 'moved']
@@ -287,12 +384,17 @@ def _detect_repo_name_from_path(path: Path) -> str:
 
     This ensures consistency with how the MCP server detects repos during search.
     Priority:
-    1. Git remote origin URL (canonical repo name like 'Context-Engine')
-    2. Git toplevel directory name (folder name like 'Context-Engine-hash')
-    3. Walk up to find .git and return that folder name
-    4. Return parent folder name as fallback
+    1. Fast-path for server-managed uploads and workspace-relative paths
+    2. Git remote origin URL (canonical repo name like 'Context-Engine')
+    3. Git toplevel directory name (folder name like 'Context-Engine-hash')
+    4. Walk up to find .git and return that folder name
+    5. Return parent folder name as fallback
     """
-    # Fast-path for managed upload workspaces (typically mounted at /work):
+    slug = _server_managed_slug_from_path(path)
+    if slug:
+        return slug
+
+    # Fast-path for managed upload workspaces or when workspace_path == /work:
     # derive the repo name from the first path segment relative to the workspace
     # root instead of spawning git processes or falling back to "work".
     try:
@@ -444,7 +546,7 @@ def get_workspace_state(
         with _cross_process_lock(lock_path):
             if state_path.exists():
                 try:
-                    with open(state_path, "r", encoding="utf-8") as f:
+                    with open(state_path, "r", encoding="utf-8-sig") as f:
                         state = json.load(f)
                     if isinstance(state, dict):
                         if logical_repo_reuse_enabled():
@@ -628,7 +730,7 @@ def log_activity(
         with _cross_process_lock(lock_path):
             try:
                 if state_path.exists():
-                    with open(state_path, "r", encoding="utf-8") as f:
+                    with open(state_path, "r", encoding="utf-8-sig") as f:
                         state = json.load(f)
                 else:
                     state = {"created_at": datetime.now().isoformat()}
@@ -767,26 +869,59 @@ def _extract_repo_name_from_path(workspace_path: str) -> str:
 # Cache functions for file hash tracking
 def _get_cache_path(workspace_path: str) -> Path:
     """Get the path to the cache.json file."""
-    workspace = Path(workspace_path).resolve()
+    try:
+        workspace = Path(os.path.abspath(workspace_path))
+    except Exception:
+        workspace = Path(workspace_path)
     return workspace / STATE_DIRNAME / CACHE_FILENAME
+
+
+def _read_cache_file_uncached(cache_path: Path) -> Dict[str, Any]:
+    if not cache_path.exists():
+        now = datetime.now().isoformat()
+        return {"file_hashes": {}, "created_at": now, "updated_at": now}
+    try:
+        with open(cache_path, "r", encoding="utf-8-sig") as f:
+            obj = json.load(f)
+            if isinstance(obj, dict) and isinstance(obj.get("file_hashes"), dict):
+                return obj
+    except (OSError, json.JSONDecodeError, ValueError):
+        pass
+    now = datetime.now().isoformat()
+    return {"file_hashes": {}, "created_at": now, "updated_at": now}
+
+
+def _read_cache_file_cached(cache_path: Path) -> Dict[str, Any]:
+    key = str(cache_path)
+    now = time.time()
+
+    with _cache_memo_lock:
+        last_check = _cache_memo_last_check.get(key, 0.0)
+        if key in _cache_memo and (now - last_check) < _cache_memo_recheck_seconds():
+            return _cache_memo[key]
+
+    sig = _cache_file_sig(cache_path)
+    with _cache_memo_lock:
+        _cache_memo_last_check[key] = now
+        if sig is not None and _cache_memo_sig.get(key) == sig and key in _cache_memo:
+            return _cache_memo[key]
+
+    obj = _read_cache_file_uncached(cache_path)
+    with _cache_memo_lock:
+        _cache_memo[key] = obj
+        _cache_memo_sig[key] = sig or (-1, -1)
+        return obj
+
+
+def _read_cache_cached(workspace_path: str) -> Dict[str, Any]:
+    return _read_cache_file_cached(_get_cache_path(workspace_path))
 
 
 def _read_cache(workspace_path: str) -> Dict[str, Any]:
     """Read cache file, return empty dict if it doesn't exist or is invalid."""
 
     cache_path = _get_cache_path(workspace_path)
-    if not cache_path.exists():
-        return {"file_hashes": {}, "updated_at": datetime.now().isoformat()}
-
-    try:
-        with open(cache_path, "r", encoding="utf-8") as f:
-            obj = json.load(f)
-            if isinstance(obj, dict) and isinstance(obj.get("file_hashes"), dict):
-                return obj
-    except Exception:
-        pass
-
-    return {"file_hashes": {}, "updated_at": datetime.now().isoformat()}
+    return _read_cache_file_uncached(cache_path)
 
 
 def _write_cache(workspace_path: str, cache: Dict[str, Any]) -> None:
@@ -816,21 +951,16 @@ def get_cached_file_hash(file_path: str, repo_name: Optional[str] = None) -> str
         state_dir = _get_repo_state_dir(repo_name)
         cache_path = state_dir / CACHE_FILENAME
 
-        if cache_path.exists():
-            try:
-                with open(cache_path, 'r', encoding='utf-8') as f:
-                    cache = json.load(f)
-                    file_hashes = cache.get("file_hashes", {})
-                    fp = str(Path(file_path).resolve())
-                    val = file_hashes.get(fp, "")
-                    if isinstance(val, dict):
-                        return str(val.get("hash") or "")
-                    return str(val or "")
-            except Exception:
-                pass
+        cache = _read_cache_file_cached(cache_path)
+        file_hashes = cache.get("file_hashes", {})
+        fp = _normalize_cache_key_path(file_path)
+        val = file_hashes.get(fp, "")
+        if isinstance(val, dict):
+            return str(val.get("hash") or "")
+        return str(val or "")
     else:
-        cache = _read_cache(_resolve_workspace_root())
-        fp = str(Path(file_path).resolve())
+        cache = _read_cache_cached(_resolve_workspace_root())
+        fp = _normalize_cache_key_path(file_path)
         val = cache.get("file_hashes", {}).get(fp, "")
         if isinstance(val, dict):
             return str(val.get("hash") or "")
@@ -841,8 +971,17 @@ def get_cached_file_hash(file_path: str, repo_name: Optional[str] = None) -> str
 
 def set_cached_file_hash(file_path: str, file_hash: str, repo_name: Optional[str] = None) -> None:
     """Set cached file hash for tracking changes."""
+    fp = _normalize_cache_key_path(file_path)
 
-    fp = str(Path(file_path).resolve())
+    st_size: Optional[int] = None
+    st_mtime: Optional[int] = None
+    try:
+        st = Path(file_path).stat()
+        st_size = int(getattr(st, "st_size", 0))
+        st_mtime = int(getattr(st, "st_mtime", 0))
+    except Exception:
+        st_size = None
+        st_mtime = None
 
     if is_multi_repo_mode() and repo_name:
         try:
@@ -855,70 +994,80 @@ def set_cached_file_hash(file_path: str, file_hash: str, repo_name: Optional[str
         cache_path = state_dir / CACHE_FILENAME
         state_dir.mkdir(parents=True, exist_ok=True)
 
-        try:
-            if cache_path.exists():
-                try:
-                    with open(cache_path, "r", encoding="utf-8") as f:
-                        cache = json.load(f)
-                except Exception:
-                    # If the existing cache is corrupt/empty, recreate it
-                    cache = {"file_hashes": {}, "created_at": datetime.now().isoformat()}
-            else:
-                cache = {"file_hashes": {}, "created_at": datetime.now().isoformat()}
+        if cache_path.exists():
+            cache = _read_cache_file_cached(cache_path)
+        else:
+            cache = {"file_hashes": {}, "created_at": datetime.now().isoformat()}
 
-            entry: Any = file_hash
-            try:
+        existing = cache.get("file_hashes", {}).get(fp)
+        if isinstance(existing, dict) and st_size is not None and st_mtime is not None:
+            if (
+                str(existing.get("hash") or "") == str(file_hash or "")
+                and int(existing.get("size") or 0) == int(st_size)
+                and int(existing.get("mtime") or 0) == int(st_mtime)
+            ):
+                return
+
+        entry: Any = file_hash
+        try:
+            if st_size is not None and st_mtime is not None:
+                entry = {"hash": file_hash, "size": st_size, "mtime": st_mtime}
+            else:
                 st = Path(file_path).stat()
                 entry = {
                     "hash": file_hash,
                     "size": int(getattr(st, "st_size", 0)),
                     "mtime": int(getattr(st, "st_mtime", 0)),
                 }
-            except Exception:
-                pass
-
-            cache.setdefault("file_hashes", {})[fp] = entry
-            cache["updated_at"] = datetime.now().isoformat()
-
-            _atomic_write_state(cache_path, cache)  # reuse atomic writer for files
-        except Exception:
+        except OSError:
             pass
+
+        cache.setdefault("file_hashes", {})[fp] = entry
+        cache["updated_at"] = datetime.now().isoformat()
+
+        _atomic_write_state(cache_path, cache)  # reuse atomic writer for files
+        _memoize_cache_obj(cache_path, cache)
         return
 
-    cache = _read_cache(_resolve_workspace_root())
+    cache = _read_cache_cached(_resolve_workspace_root())
+    existing = cache.get("file_hashes", {}).get(fp)
+    if isinstance(existing, dict) and st_size is not None and st_mtime is not None:
+        if (
+            str(existing.get("hash") or "") == str(file_hash or "")
+            and int(existing.get("size") or 0) == int(st_size)
+            and int(existing.get("mtime") or 0) == int(st_mtime)
+        ):
+            return
     entry: Any = file_hash
     try:
-        st = Path(file_path).stat()
-        entry = {
-            "hash": file_hash,
-            "size": int(getattr(st, "st_size", 0)),
-            "mtime": int(getattr(st, "st_mtime", 0)),
-        }
-    except Exception:
+        if st_size is not None and st_mtime is not None:
+            entry = {"hash": file_hash, "size": st_size, "mtime": st_mtime}
+        else:
+            st = Path(file_path).stat()
+            entry = {
+                "hash": file_hash,
+                "size": int(getattr(st, "st_size", 0)),
+                "mtime": int(getattr(st, "st_mtime", 0)),
+            }
+    except OSError:
         pass
     cache.setdefault("file_hashes", {})[fp] = entry
     cache["updated_at"] = datetime.now().isoformat()
     _write_cache(_resolve_workspace_root(), cache)
+    _memoize_cache_obj(_get_cache_path(_resolve_workspace_root()), cache)
 
 
 def get_cached_file_meta(file_path: str, repo_name: Optional[str] = None) -> Dict[str, Any]:
-    fp = str(Path(file_path).resolve())
+    fp = _normalize_cache_key_path(file_path)
     if is_multi_repo_mode() and repo_name:
         state_dir = _get_repo_state_dir(repo_name)
         cache_path = state_dir / CACHE_FILENAME
 
-        if cache_path.exists():
-            try:
-                with open(cache_path, 'r', encoding='utf-8') as f:
-                    cache = json.load(f)
-                    file_hashes = cache.get("file_hashes", {})
-                    val = file_hashes.get(fp)
-            except Exception:
-                val = None
-        else:
-            val = None
+        cache = _read_cache_file_cached(cache_path)
+        file_hashes = cache.get("file_hashes", {})
+        val = file_hashes.get(fp)
     else:
-        cache = _read_cache(_resolve_workspace_root())
+        cache = _read_cache_cached(_resolve_workspace_root())
         val = cache.get("file_hashes", {}).get(fp)
 
     if isinstance(val, dict):
@@ -939,27 +1088,25 @@ def remove_cached_file(file_path: str, repo_name: Optional[str] = None) -> None:
         cache_path = state_dir / CACHE_FILENAME
 
         if cache_path.exists():
-            try:
-                with open(cache_path, 'r', encoding='utf-8') as f:
-                    cache = json.load(f)
-                    file_hashes = cache.get("file_hashes", {})
+            cache = _read_cache_file_cached(cache_path)
+            file_hashes = cache.get("file_hashes", {})
 
-                fp = str(Path(file_path).resolve())
-                if fp in file_hashes:
-                    file_hashes.pop(fp, None)
-                    cache["updated_at"] = datetime.now().isoformat()
+            fp = _normalize_cache_key_path(file_path)
+            if fp in file_hashes:
+                file_hashes.pop(fp, None)
+                cache["updated_at"] = datetime.now().isoformat()
 
-                    _atomic_write_state(cache_path, cache)
-            except Exception:
-                pass
+                _atomic_write_state(cache_path, cache)
+                _memoize_cache_obj(cache_path, cache)
         return
 
-    cache = _read_cache(_resolve_workspace_root())
-    fp = str(Path(file_path).resolve())
+    cache = _read_cache_cached(_resolve_workspace_root())
+    fp = _normalize_cache_key_path(file_path)
     if fp in cache.get("file_hashes", {}):
         cache["file_hashes"].pop(fp, None)
         cache["updated_at"] = datetime.now().isoformat()
         _write_cache(_resolve_workspace_root(), cache)
+        _memoize_cache_obj(_get_cache_path(_resolve_workspace_root()), cache)
 
 
 def cleanup_old_cache_locks(max_idle_seconds: int = 900) -> int:
@@ -1018,7 +1165,7 @@ def get_collection_mappings(search_root: Optional[str] = None) -> List[Dict[str,
                     if not state_path.exists():
                         continue
                     try:
-                        with open(state_path, "r", encoding="utf-8") as f:
+                        with open(state_path, "r", encoding="utf-8-sig") as f:
                             state = json.load(f) or {}
                     except Exception as e:
                         print(f"[workspace_state] Failed to read repo state from {state_path}: {e}")
@@ -1041,7 +1188,7 @@ def get_collection_mappings(search_root: Optional[str] = None) -> List[Dict[str,
             state_path = root_path / STATE_DIRNAME / STATE_FILENAME
             if state_path.exists():
                 try:
-                    with open(state_path, "r", encoding="utf-8") as f:
+                    with open(state_path, "r", encoding="utf-8-sig") as f:
                         state = json.load(f) or {}
                 except Exception:
                     state = {}
@@ -1083,7 +1230,7 @@ def find_collection_for_logical_repo(logical_repo_id: str, search_root: Optional
                     if not state_path.exists():
                         continue
                     try:
-                        with open(state_path, "r", encoding="utf-8") as f:
+                        with open(state_path, "r", encoding="utf-8-sig") as f:
                             state = json.load(f) or {}
                     except Exception:
                         continue
@@ -1102,7 +1249,7 @@ def find_collection_for_logical_repo(logical_repo_id: str, search_root: Optional
         state_path = root_path / STATE_DIRNAME / STATE_FILENAME
         if state_path.exists():
             try:
-                with open(state_path, "r", encoding="utf-8") as f:
+                with open(state_path, "r", encoding="utf-8-sig") as f:
                     state = json.load(f) or {}
             except Exception as e:
                 print(f"[workspace_state] Failed to read workspace state from {state_path}: {e}")
@@ -1210,23 +1357,18 @@ def get_or_create_collection_for_logical_repo(
 def _get_symbol_cache_path(file_path: str) -> Path:
     """Get symbol cache file path for a given file."""
     try:
-        fp = str(Path(file_path).resolve())
+        fp = _normalize_cache_key_path(file_path)
         # Create symbol cache using file hash to handle renames
         file_hash = hashlib.md5(fp.encode('utf-8')).hexdigest()[:8]
         if is_multi_repo_mode():
-            # Use the same repo-name detection as other state helpers so that
-            # symbol caches live under the correct per-repo .codebase directory
             repo_name = _detect_repo_name_from_path(Path(file_path))
-            state_dir = _get_repo_state_dir(repo_name)
-            return state_dir / f"symbols_{file_hash}.json"
-        else:
-            cache_dir = _get_cache_path(_resolve_workspace_root()).parent
-            return cache_dir / f"symbols_{file_hash}.json"
+            if repo_name:
+                state_dir = _get_repo_state_dir(repo_name)
+                return state_dir / "symbols" / f"{file_hash}.json"
+        return _get_cache_path(_resolve_workspace_root()).parent / "symbols" / f"{file_hash}.json"
     except Exception:
-        # Fallback to simple file-based path
-        cache_dir = _get_cache_path(_resolve_workspace_root()).parent
-        filename = Path(file_path).name.replace('.', '_').replace('/', '_')
-        return cache_dir / f"symbols_{filename}.json"
+        # Fallback: use file name
+        return _get_cache_path(_resolve_workspace_root()).parent / "symbols" / f"{Path(file_path).name}.json"
 
 
 def get_cached_symbols(file_path: str) -> dict:
@@ -1237,7 +1379,7 @@ def get_cached_symbols(file_path: str) -> dict:
         return {}
 
     try:
-        with open(cache_path, 'r', encoding='utf-8') as f:
+        with open(cache_path, 'r', encoding='utf-8-sig') as f:
             cache_data = json.load(f)
             return cache_data.get("symbols", {})
     except Exception:
@@ -1429,7 +1571,7 @@ def list_workspaces(
                 seen_paths.add(workspace_path)
 
                 # Read state file
-                with open(state_file, "r", encoding="utf-8") as f:
+                with open(state_file, "r", encoding="utf-8-sig") as f:
                     state = json.load(f)
 
                 if not isinstance(state, dict):
@@ -1466,7 +1608,7 @@ def list_workspaces(
                     if not state_file.exists():
                         continue
                     try:
-                        with open(state_file, "r", encoding="utf-8") as f:
+                        with open(state_file, "r", encoding="utf-8-sig") as f:
                             state = json.load(f)
 
                         if not isinstance(state, dict):
