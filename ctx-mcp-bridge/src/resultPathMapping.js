@@ -28,18 +28,170 @@ function _posixToNative(rel) {
   }
 }
 
+function _nativeToPosix(p) {
+  try {
+    if (!p) {
+      return "";
+    }
+    return String(p).split(path.sep).join("/");
+  } catch {
+    return p;
+  }
+}
+
+function _workPathToRepoRelPosix(p) {
+  try {
+    const s = typeof p === "string" ? p.trim() : "";
+    if (!s || !s.startsWith("/work/")) {
+      return null;
+    }
+    const rest = s.slice("/work/".length);
+    const parts = rest.split("/").filter(Boolean);
+    if (parts.length >= 2) {
+      return parts.slice(1).join("/");
+    }
+    if (parts.length === 1) {
+      return parts[0];
+    }
+    return "";
+  } catch {
+    return null;
+  }
+}
+
+function normalizeToolArgPath(p, workspaceRoot) {
+  try {
+    const s = typeof p === "string" ? p.trim() : "";
+    if (!s) {
+      return p;
+    }
+
+    const root = typeof workspaceRoot === "string" ? workspaceRoot : "";
+    const sPosix = s.replace(/\\/g, "/");
+
+    const fromWork = _workPathToRepoRelPosix(sPosix);
+    if (typeof fromWork === "string" && fromWork) {
+      return fromWork;
+    }
+    if (fromWork === "") {
+      return p;
+    }
+
+    if (root) {
+      try {
+        const sNorm = s.replace(/\\/g, path.sep);
+        const rootNorm = root.replace(/\\/g, path.sep);
+        if (sNorm === rootNorm || sNorm.startsWith(rootNorm + path.sep)) {
+          const relNative = path.relative(rootNorm, sNorm);
+          const relPosix = _nativeToPosix(relNative);
+          if (relPosix && relPosix !== "." && relPosix !== ".." && !relPosix.startsWith("../")) {
+            return relPosix;
+          }
+        }
+      } catch {
+        // ignore
+      }
+      try {
+        const base = path.posix.basename(root.replace(/\\/g, "/"));
+        if (base && sPosix.startsWith(base + "/")) {
+          const rest = sPosix.slice((base + "/").length);
+          if (rest && rest !== "." && rest !== ".." && !rest.startsWith("../")) {
+            return rest;
+          }
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    if (sPosix.startsWith("./")) {
+      const rest = sPosix.slice(2);
+      if (rest && rest !== "." && rest !== ".." && !rest.startsWith("../")) {
+        return rest;
+      }
+    }
+    if (sPosix === ".") {
+      return "";
+    }
+    return p;
+  } catch {
+    return p;
+  }
+}
+
+function normalizeToolArgGlob(p, workspaceRoot) {
+  try {
+    const s = typeof p === "string" ? p : "";
+    if (!s) {
+      return p;
+    }
+    // TODO(ctxce): If this becomes annoying, consider making glob normalization
+    // more conservative (e.g. only strip a repo prefix when followed by "/",
+    // and avoid collapsing "<repo>/**" into "**" which can broaden scope).
+    if (s.startsWith("!")) {
+      const rest = s.slice(1);
+      const mapped = normalizeToolArgPath(rest, workspaceRoot);
+      if (typeof mapped === "string") {
+        return "!" + mapped;
+      }
+      return p;
+    }
+    return normalizeToolArgPath(s, workspaceRoot);
+  } catch {
+    return p;
+  }
+}
+
+function applyPathMappingToArgs(value, workspaceRoot, keyHint = "") {
+  try {
+    if (value === null || value === undefined) {
+      return value;
+    }
+
+    const key = typeof keyHint === "string" ? keyHint : "";
+    const lowered = key.toLowerCase();
+    const shouldMapString =
+      lowered === "path" ||
+      lowered === "under" ||
+      lowered === "root" ||
+      lowered === "subdir" ||
+      lowered === "path_glob" ||
+      lowered === "not_glob";
+
+    if (typeof value === "string") {
+      if (!shouldMapString) {
+        return value;
+      }
+      if (lowered === "path_glob" || lowered === "not_glob") {
+        return normalizeToolArgGlob(value, workspaceRoot);
+      }
+      return normalizeToolArgPath(value, workspaceRoot);
+    }
+
+    if (Array.isArray(value)) {
+      return value.map((v) => applyPathMappingToArgs(v, workspaceRoot, keyHint));
+    }
+
+    if (typeof value === "object") {
+      const out = { ...value };
+      for (const [k, v] of Object.entries(out)) {
+        out[k] = applyPathMappingToArgs(v, workspaceRoot, k);
+      }
+      return out;
+    }
+
+    return value;
+  } catch {
+    return value;
+  }
+}
+
 function computeWorkspaceRelativePath(containerPath, hostPath) {
   try {
     const cont = typeof containerPath === "string" ? containerPath.trim() : "";
-    if (cont.startsWith("/work/")) {
-      const rest = cont.slice("/work/".length);
-      const parts = rest.split("/").filter(Boolean);
-      if (parts.length >= 2) {
-        return parts.slice(1).join("/");
-      }
-      if (parts.length === 1) {
-        return parts[0];
-      }
+    const rel = _workPathToRepoRelPosix(cont);
+    if (typeof rel === "string" && rel) {
+      return rel;
     }
   } catch {
   }
@@ -68,15 +220,10 @@ function remapRelatedPathToClient(p, workspaceRoot) {
       return sNorm;
     }
 
-    if (s.startsWith("/work/")) {
-      const rest = s.slice("/work/".length);
-      const parts = rest.split("/").filter(Boolean);
-      if (parts.length >= 2) {
-        const rel = parts.slice(1).join("/");
-        const relNative = _posixToNative(rel);
-        return path.join(root, relNative);
-      }
-      return p;
+    const rel = _workPathToRepoRelPosix(s);
+    if (typeof rel === "string" && rel) {
+      const relNative = _posixToNative(rel);
+      return path.join(root, relNative);
     }
 
     // If it's already a relative path, join it to the workspace root.
@@ -201,17 +348,13 @@ function remapStringPath(p, workspaceRoot) {
     } catch {
       // ignore
     }
-    if (s.startsWith("/work/")) {
-      const rest = s.slice("/work/".length);
-      const parts = rest.split("/").filter(Boolean);
-      if (parts.length >= 2) {
-        const rel = parts.slice(1).join("/");
-        const override = envTruthy(process.env.CTXCE_BRIDGE_OVERRIDE_PATH, true);
-        if (override) {
-          return rel;
-        }
-        return p;
+    const rel = _workPathToRepoRelPosix(s);
+    if (typeof rel === "string" && rel) {
+      const override = envTruthy(process.env.CTXCE_BRIDGE_OVERRIDE_PATH, true);
+      if (override) {
+        return rel;
       }
+      return p;
     }
     return p;
   } catch {
@@ -334,5 +477,23 @@ export function maybeRemapToolResult(name, result, workspaceRoot) {
     return outResult;
   } catch {
     return result;
+  }
+}
+
+export function maybeRemapToolArgs(name, args, workspaceRoot) {
+  try {
+    if (!name || !workspaceRoot) {
+      return args;
+    }
+    const enabled = envTruthy(process.env.CTXCE_BRIDGE_MAP_ARGS, true);
+    if (!enabled) {
+      return args;
+    }
+    if (args === null || args === undefined || typeof args !== "object") {
+      return args;
+    }
+    return applyPathMappingToArgs(args, workspaceRoot, "");
+  } catch {
+    return args;
   }
 }
