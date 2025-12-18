@@ -31,6 +31,7 @@ let ctxConfigManager;
 let workspacePathUtils;
 let promptPlusManager;
 let onboardingManager;
+let pendingProfileRestartTimer;
 const REQUIRED_PYTHON_MODULES = ['requests', 'urllib3', 'charset_normalizer'];
 const DEFAULT_CONTAINER_ROOT = '/work';
 const ONBOARDING_PROMPT_KEY = 'contextEngineUploader.onboardingPrompted';
@@ -60,6 +61,26 @@ function getResolvedTargetPathForSidebar() {
   }
 }
 
+function scheduleRestartAfterProfileChange() {
+  try {
+    if (pendingProfileRestartTimer) {
+      clearTimeout(pendingProfileRestartTimer);
+      pendingProfileRestartTimer = undefined;
+    }
+  } catch (_) {
+  }
+  try {
+    pendingProfileRestartTimer = setTimeout(() => {
+      pendingProfileRestartTimer = undefined;
+      if (!watchProcess) {
+        return;
+      }
+      runSequence('auto').catch(error => log(`Auto-restart after profile change failed: ${error instanceof Error ? error.message : String(error)}`));
+    }, 250);
+  } catch (_) {
+  }
+}
+
 function activate(context) {
   outputChannel = vscode.window.createOutputChannel('Context Engine Upload');
   context.subscriptions.push(outputChannel);
@@ -72,6 +93,11 @@ function activate(context) {
       log,
       onProfileChanged: () => {
         try { ensureTargetPathConfigured(); } catch (_) {}
+        try {
+          if (watchProcess) {
+            scheduleRestartAfterProfileChange();
+          }
+        } catch (_) {}
       },
     });
   } catch (error) {
