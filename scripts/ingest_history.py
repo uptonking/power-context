@@ -357,7 +357,7 @@ def build_text(
 
 def _ingest_from_manifest(
     manifest_path: str,
-    model: TextEmbedding,
+    model: Any,
     client: QdrantClient,
     vec_name: str,
     include_body: bool,
