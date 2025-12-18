@@ -4,7 +4,9 @@ FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    WORK_ROOTS="/work,/app"
+    WORK_ROOTS="/work,/app" \
+    PIP_DEFAULT_TIMEOUT=120 \
+    PIP_RETRIES=10
 
 # OS deps (git for history if we extend later, curl for model downloads)
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl \
@@ -12,7 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends git ca-certific
 
 # Python deps: reuse shared requirements (includes FastMCP + OpenAI SDK)
 COPY requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir --upgrade -r /tmp/requirements.txt
+RUN pip install --no-cache-dir --upgrade --timeout=${PIP_DEFAULT_TIMEOUT} --retries=${PIP_RETRIES} -r /tmp/requirements.txt
 
 # Ensure rerank volumes are writable when containers run as non-root (uid 1000).
 # On first mount of an empty named volume, Docker copies directory contents (incl perms)
