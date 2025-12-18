@@ -365,14 +365,12 @@ LEX_VECTOR_WEIGHT = _safe_float(
     os.environ.get("HYBRID_LEX_VECTOR_WEIGHT", str(LEXICAL_WEIGHT)), LEXICAL_WEIGHT
 )
 EF_SEARCH = _safe_int(os.environ.get("QDRANT_EF_SEARCH", "128"), 128)
-# Symbol boost weights - tuned to be competitive with Augment's symbol matching
-# These are critical for code symbol queries like "_detect_code_signals" or "RecursiveReranker"
-SYMBOL_BOOST = _safe_float(os.environ.get("HYBRID_SYMBOL_BOOST", "0.35"), 0.35)  # Up from 0.15
+# Lightweight, configurable boosts
+SYMBOL_BOOST = _safe_float(os.environ.get("HYBRID_SYMBOL_BOOST", "0.15"), 0.15)
 RECENCY_WEIGHT = _safe_float(os.environ.get("HYBRID_RECENCY_WEIGHT", "0.1"), 0.1)
 CORE_FILE_BOOST = _safe_float(os.environ.get("HYBRID_CORE_FILE_BOOST", "0.1"), 0.1)
-# Exact symbol match is a very strong signal - boost significantly
 SYMBOL_EQUALITY_BOOST = _safe_float(
-    os.environ.get("HYBRID_SYMBOL_EQUALITY_BOOST", "0.6"), 0.6  # Up from 0.25
+    os.environ.get("HYBRID_SYMBOL_EQUALITY_BOOST", "0.25"), 0.25
 )
 VENDOR_PENALTY = _safe_float(os.environ.get("HYBRID_VENDOR_PENALTY", "0.05"), 0.05)
 LANG_MATCH_BOOST = _safe_float(os.environ.get("HYBRID_LANG_MATCH_BOOST", "0.05"), 0.05)
@@ -837,47 +835,6 @@ def tokenize_queries(phrases: List[str]) -> List[str]:
     return out
 
 
-# Regex patterns for extracting full identifiers (preserved as complete symbols)
-_FULL_IDENT_PATTERNS = [
-    # Private/dunder Python identifiers: _private, __dunder__, __init__
-    re.compile(r'(?:^|(?<=\s)|(?<=\())(_+[a-zA-Z][a-zA-Z0-9_]*)\b'),
-    # snake_case: my_function, get_user_data
-    re.compile(r'(?:^|(?<=\s)|(?<=\())([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\b', re.IGNORECASE),
-    # PascalCase: MyClassName, HTTPClient
-    re.compile(r'\b([A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+)+)\b'),
-    # camelCase: getUserData, parseJSON
-    re.compile(r'\b([a-z]+(?:[A-Z][a-z0-9]*)+)\b'),
-    # SCREAMING_SNAKE: MAX_SIZE, HTTP_STATUS_OK
-    re.compile(r'\b([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)\b'),
-    # Backtick-wrapped: `anySymbol`
-    re.compile(r'`([^`]+)`'),
-]
-
-
-def extract_full_identifiers(phrases: List[str]) -> List[str]:
-    """Extract complete code identifiers from queries, preserving their original form.
-
-    Unlike tokenize_queries which splits snake_case/camelCase, this preserves
-    full symbols like _detect_code_signals, RecursiveReranker, etc.
-    """
-    identifiers: List[str] = []
-    seen: set = set()
-
-    for phrase in phrases:
-        for pattern in _FULL_IDENT_PATTERNS:
-            matches = pattern.findall(phrase)
-            for m in matches:
-                m_clean = m.strip()
-                m_lower = m_clean.lower()
-                # Filter short/common words
-                if len(m_clean) > 2 and m_lower not in _STOP:
-                    if m_lower not in seen:
-                        identifiers.append(m_clean)
-                        seen.add(m_lower)
-
-    return identifiers
-
-
 # Minimal code-aware query expansion (quick win)
 CODE_SYNONYMS = {
     "function": ["method", "def", "fn"],
@@ -1146,14 +1103,6 @@ def lexical_score(phrases: List[str], md: Dict[str, Any], token_weights: Dict[st
         return 0.0
     path = str(md.get("path", "")).lower()
     path_segs = re.split(r"[/\\]", path)
-    # Extract just the filename (last segment) for special boosting
-    filename = path_segs[-1] if path_segs else ""
-    # Remove extension for matching
-    filename_base = re.sub(r'\.[^.]+$', '', filename)
-    # Split filename into tokens (snake_case, camelCase, etc.)
-    filename_tokens = set(re.split(r'[_\-.]', filename_base.lower()))
-    filename_tokens.discard('')
-
     sym = str(md.get("symbol", "")).lower()
     symp = str(md.get("symbol_path", "")).lower()
     code = str(md.get("code", ""))[:2000].lower()
@@ -1164,24 +1113,15 @@ def lexical_score(phrases: List[str], md: Dict[str, Any], token_weights: Dict[st
         tags_text = " ".join(str(x) for x in tags_val).lower()
     else:
         tags_text = str(tags_val).lower()
-
     s = 0.0
-    filename_matches = 0  # Track how many query tokens match the filename
-
     for t in tokens:
         if not t:
             continue
         contrib = 0.0
         if t in sym or t in symp:
             contrib += 2.0
-        # Enhanced path segment matching with filename priority
         if any(t in seg for seg in path_segs):
-            # Check if token matches filename specifically (stronger signal)
-            if t in filename or t in filename_tokens:
-                contrib += 1.5  # Stronger boost for filename match (was 0.6)
-                filename_matches += 1
-            else:
-                contrib += 0.6  # Regular path segment match
+            contrib += 0.6
         if t in code:
             contrib += 1.0
         # Pseudo/tags signals: gentle, optional boost
@@ -1194,15 +1134,6 @@ def lexical_score(phrases: List[str], md: Dict[str, Any], token_weights: Dict[st
             w = float(token_weights.get(t, 1.0) or 1.0)
             contrib *= (1.0 + float(bm25_weight) * (w - 1.0))
         s += contrib
-
-    # Filename correlation bonus: when multiple query tokens match the filename,
-    # it's a strong signal that this file is directly relevant to the query
-    # e.g., query "hybrid search" matching file "hybrid_search.py"
-    if filename_matches >= 2:
-        # Superlinear bonus for multiple filename matches
-        filename_bonus = 1.5 * (filename_matches - 1)  # +1.5 for 2 matches, +3.0 for 3, etc.
-        s += filename_bonus
-
     return s
 
 
@@ -1993,15 +1924,6 @@ def run_hybrid_search(
     except Exception:
         pass
 
-    # --- Extract full identifiers for enhanced symbol matching ---
-    # These are preserved as complete symbols (e.g., _detect_code_signals, RecursiveReranker)
-    # for exact/substring matching against indexed symbol names
-    _full_identifiers: List[str] = []
-    try:
-        _full_identifiers = extract_full_identifiers(clean_queries)
-    except Exception:
-        pass
-
     # === Large codebase scaling (automatic) ===
     _coll_stats = _get_collection_stats(client, _collection(collection))
     _coll_size = _coll_stats.get("points_count", 0)
@@ -2492,52 +2414,16 @@ def run_hybrid_search(
         sym = str(md.get("symbol") or "").lower()
         sym_path = str(md.get("symbol_path") or "").lower()
         sym_text = f"{sym} {sym_path}"
-        # Also check code content for full symbol matches
-        code_text = str(md.get("code") or "")[:3000].lower()
-
-        # Track if we found exact/substring matches to avoid double-counting
-        _matched_sub = set()
-        _matched_eq = False
-
-        # Check full identifiers first (highest priority - these are complete symbols)
-        for ident in _full_identifiers:
-            il = ident.lower()
-            if not il:
-                continue
-            # Exact symbol match (strongest signal)
-            if il == sym or il == sym_path:
-                if not _matched_eq:
-                    # Higher boost for full identifier exact match (2x base)
-                    rec["sym_eq"] += SYMBOL_EQUALITY_BOOST * 2.0
-                    rec["s"] += SYMBOL_EQUALITY_BOOST * 2.0
-                    _matched_eq = True
-            # Substring match in symbol/symbol_path
-            elif il in sym_text and il not in _matched_sub:
-                # Higher boost for full identifier substring match (1.5x base)
-                rec["sym_sub"] += SYMBOL_BOOST * 1.5
-                rec["s"] += SYMBOL_BOOST * 1.5
-                _matched_sub.add(il)
-            # Check if full identifier appears in code (definition likely)
-            elif il in code_text and il not in _matched_sub:
-                # Moderate boost for code content match
-                rec["sym_sub"] += SYMBOL_BOOST * 0.75
-                rec["s"] += SYMBOL_BOOST * 0.75
-                _matched_sub.add(il)
-
-        # Standard token-based matching (lower priority)
         for q in qlist:
             ql = q.lower()
-            if not ql or ql in _matched_sub:
+            if not ql:
                 continue
             if ql in sym_text:
                 rec["sym_sub"] += SYMBOL_BOOST
                 rec["s"] += SYMBOL_BOOST
-                _matched_sub.add(ql)
-            if not _matched_eq and (ql == sym or ql == sym_path):
+            if ql == sym or ql == sym_path:
                 rec["sym_eq"] += SYMBOL_EQUALITY_BOOST
                 rec["s"] += SYMBOL_EQUALITY_BOOST
-                _matched_eq = True
-
         path = str(md.get("path") or "")
         if CORE_FILE_BOOST > 0.0 and path and is_core_file(path):
             rec["core"] += CORE_FILE_BOOST
@@ -2572,22 +2458,6 @@ def run_hybrid_search(
             ):
                 rec["doc"] = float(rec.get("doc", 0.0)) - doc_penalty
                 rec["s"] -= doc_penalty
-
-        # Filename relevance boost: when query terms match the filename directly
-        # This helps queries like "hybrid search" find "hybrid_search.py"
-        if path:
-            filename = path_lower.rsplit("/", 1)[-1] if "/" in path_lower else path_lower
-            filename_base = re.sub(r'\.[^.]+$', '', filename)
-            filename_tokens = set(re.split(r'[_\-.]', filename_base))
-            filename_tokens.discard('')
-            # Check how many query tokens match filename tokens
-            query_tokens_lower = set(q.lower() for q in qlist if q)
-            filename_match_count = len(query_tokens_lower & filename_tokens)
-            if filename_match_count >= 2:
-                # Strong bonus for multiple query terms matching filename
-                filename_boost = 0.4 * (filename_match_count - 1)  # +0.4 for 2, +0.8 for 3, etc.
-                rec["fname"] = float(rec.get("fname", 0.0)) + filename_boost
-                rec["s"] += filename_boost
 
         if LANG_MATCH_BOOST > 0.0 and path and eff_language:
             lang = str(eff_language).lower()
@@ -2632,39 +2502,6 @@ def run_hybrid_search(
                 rec_comp = RECENCY_WEIGHT * norm
                 rec["rec"] += rec_comp
                 rec["s"] += rec_comp
-
-    # === Filename-query correlation boost ===
-    # When query tokens strongly correlate with a filename, boost ALL chunks from that file
-    # This helps "hybrid search fusion" find hybrid_search.py even if individual chunks
-    # don't contain all query terms
-    query_tokens_lower = set(q.lower() for q in qlist if q and len(q) >= 3)
-    _filename_boost_cache: Dict[str, float] = {}  # Cache per-file boost
-    for rec in score_map.values():
-        md = (rec["pt"].payload or {}).get("metadata") or {}
-        path = str(md.get("path") or "")
-        if not path:
-            continue
-        # Check cache first
-        if path in _filename_boost_cache:
-            boost = _filename_boost_cache[path]
-        else:
-            path_lower = path.lower()
-            filename = path_lower.rsplit("/", 1)[-1] if "/" in path_lower else path_lower
-            filename_base = re.sub(r'\.[^.]+$', '', filename)
-            filename_tokens = set(re.split(r'[_\-.]', filename_base))
-            filename_tokens.discard('')
-            # Count matching tokens
-            match_count = len(query_tokens_lower & filename_tokens)
-            if match_count >= 2:
-                # Strong boost for files where filename matches multiple query terms
-                # e.g., "hybrid search" -> hybrid_search.py gets boost
-                boost = 0.8 * match_count  # 1.6 for 2 matches, 2.4 for 3, etc.
-            else:
-                boost = 0.0
-            _filename_boost_cache[path] = boost
-        if boost > 0:
-            rec["fname_corr"] = float(rec.get("fname_corr", 0.0)) + boost
-            rec["s"] += boost
 
     # === Large codebase score normalization ===
     # Spread compressed score distributions for better discrimination
@@ -3462,13 +3299,6 @@ def main():
     except Exception:
         pass
 
-    # --- Extract full identifiers for enhanced symbol matching (CLI path) ---
-    _cli_full_identifiers: List[str] = []
-    try:
-        _cli_full_identifiers = extract_full_identifiers(clean_queries)
-    except Exception:
-        pass
-
     # Add server-side lexical vector ranking into fusion (with scaled RRF)
     for rank, p in enumerate(lex_results, 1):
         pid = str(p.id)
@@ -3552,48 +3382,22 @@ def main():
         if isinstance(ts, int):
             timestamps.append(ts)
 
-        # Symbol-based boosts (enhanced with full identifier matching)
+        # Symbol-based boosts
         sym = str(md.get("symbol") or "").lower()
         sym_path = str(md.get("symbol_path") or "").lower()
         sym_text = f"{sym} {sym_path}"
-        code_text = str(md.get("code") or "")[:3000].lower()
-
-        # Track matches to avoid double-counting
-        _cli_matched_sub: set = set()
-        _cli_matched_eq = False
-
-        # Check full identifiers first (highest priority)
-        for ident in _cli_full_identifiers:
-            il = ident.lower()
-            if not il:
-                continue
-            if il == sym or il == sym_path:
-                if not _cli_matched_eq:
-                    rec["sym_eq"] += SYMBOL_EQUALITY_BOOST * 2.0
-                    rec["s"] += SYMBOL_EQUALITY_BOOST * 2.0
-                    _cli_matched_eq = True
-            elif il in sym_text and il not in _cli_matched_sub:
-                rec["sym_sub"] += SYMBOL_BOOST * 1.5
-                rec["s"] += SYMBOL_BOOST * 1.5
-                _cli_matched_sub.add(il)
-            elif il in code_text and il not in _cli_matched_sub:
-                rec["sym_sub"] += SYMBOL_BOOST * 0.75
-                rec["s"] += SYMBOL_BOOST * 0.75
-                _cli_matched_sub.add(il)
-
-        # Standard token-based matching
         for q in queries:
             ql = q.lower()
-            if not ql or ql in _cli_matched_sub:
+            if not ql:
                 continue
+            # substring match boost
             if ql in sym_text:
                 rec["sym_sub"] += SYMBOL_BOOST
                 rec["s"] += SYMBOL_BOOST
-                _cli_matched_sub.add(ql)
-            if not _cli_matched_eq and (ql == sym or ql == sym_path):
+            # exact match boost (symbol or symbol_path)
+            if ql == sym or ql == sym_path:
                 rec["sym_eq"] += SYMBOL_EQUALITY_BOOST
                 rec["s"] += SYMBOL_EQUALITY_BOOST
-                _cli_matched_eq = True
 
         # Path-based adjustments
         path = str(md.get("path") or "")
@@ -3607,19 +3411,6 @@ def main():
             rec["test"] -= TEST_FILE_PENALTY
             rec["s"] -= TEST_FILE_PENALTY
 
-        # Filename relevance boost (CLI path): when query terms match filename
-        if path:
-            path_lower = path.lower()
-            filename = path_lower.rsplit("/", 1)[-1] if "/" in path_lower else path_lower
-            filename_base = re.sub(r'\.[^.]+$', '', filename)
-            filename_tokens = set(re.split(r'[_\-.]', filename_base))
-            filename_tokens.discard('')
-            query_tokens_lower = set(q.lower() for q in queries if q)
-            filename_match_count = len(query_tokens_lower & filename_tokens)
-            if filename_match_count >= 2:
-                filename_boost = 0.4 * (filename_match_count - 1)
-                rec["fname"] = float(rec.get("fname", 0.0)) + filename_boost
-                rec["s"] += filename_boost
 
         # Language match boost if requested
         if (
@@ -3645,32 +3436,6 @@ def main():
                 rec_comp = RECENCY_WEIGHT * norm
                 rec["rec"] += rec_comp
                 rec["s"] += rec_comp
-
-    # === Filename-query correlation boost (CLI path) ===
-    cli_query_tokens_lower = set(q.lower() for q in queries if q and len(q) >= 3)
-    _cli_fname_cache: Dict[str, float] = {}
-    for rec in score_map.values():
-        md = (rec["pt"].payload or {}).get("metadata") or {}
-        path = str(md.get("path") or "")
-        if not path:
-            continue
-        if path in _cli_fname_cache:
-            boost = _cli_fname_cache[path]
-        else:
-            path_lower = path.lower()
-            filename = path_lower.rsplit("/", 1)[-1] if "/" in path_lower else path_lower
-            filename_base = re.sub(r'\.[^.]+$', '', filename)
-            filename_tokens = set(re.split(r'[_\-.]', filename_base))
-            filename_tokens.discard('')
-            match_count = len(cli_query_tokens_lower & filename_tokens)
-            if match_count >= 2:
-                boost = 0.8 * match_count
-            else:
-                boost = 0.0
-            _cli_fname_cache[path] = boost
-        if boost > 0:
-            rec["fname_corr"] = float(rec.get("fname_corr", 0.0)) + boost
-            rec["s"] += boost
 
     # === Large codebase score normalization (CLI path) ===
     _normalize_scores(score_map, _cli_coll_size)

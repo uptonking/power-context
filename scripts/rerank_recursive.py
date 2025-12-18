@@ -862,6 +862,12 @@ class RecursiveReranker:
         ranked_indices = np.argsort(-final_scores)
         reranked = []
 
+        # Filename-query correlation boost (single canonical location)
+        # Boosts results when 2+ query tokens match filename tokens
+        # e.g., "hybrid search" matches "hybrid_search.py"
+        fname_boost_factor = float(os.environ.get("RERANK_FNAME_BOOST", "0.12") or 0.12)
+        query_tokens = set(t.lower() for t in query.split() if len(t) >= 3) if fname_boost_factor > 0 else set()
+
         for rank, idx in enumerate(ranked_indices):
             candidate = candidates[idx].copy()
             candidate["recursive_score"] = float(final_scores[idx])
@@ -872,10 +878,29 @@ class RecursiveReranker:
             trajectory = [float(h[idx]) for h in state.score_history]
             candidate["score_trajectory"] = trajectory
 
+            # Filename boost
+            fname_boost = 0.0
+            if query_tokens:
+                path = str(candidate.get("path") or "").lower()
+                if path:
+                    filename = path.rsplit("/", 1)[-1] if "/" in path else path
+                    filename_base = re.sub(r'\.[^.]+$', '', filename)
+                    fname_tokens = set(re.split(r'[_\-.]', filename_base))
+                    fname_tokens.discard('')
+                    match_count = len(query_tokens & fname_tokens)
+                    if match_count >= 2:
+                        fname_boost = fname_boost_factor * match_count
+
             # Update main score
-            candidate["score"] = float(final_scores[idx])
+            candidate["score"] = float(final_scores[idx]) + fname_boost
+            if fname_boost > 0:
+                candidate["fname_boost"] = fname_boost
 
             reranked.append(candidate)
+
+        # Re-sort if any boosts were applied
+        if fname_boost_factor > 0 and any(c.get("fname_boost", 0) > 0 for c in reranked):
+            reranked.sort(key=lambda x: -x["score"])
 
         return reranked
 
@@ -945,13 +970,7 @@ def _get_learning_reranker(
     """Get or create a learning reranker for a specific collection."""
     with _LEARNING_RERANKERS_LOCK:
         if collection not in _LEARNING_RERANKERS:
-            # Increase blend_with_initial to 0.45 to preserve more hybrid search signals
-            # (symbol matching, filename correlation, lexical scoring, etc.)
-            reranker = RecursiveReranker(
-                n_iterations=n_iterations,
-                dim=dim,
-                blend_with_initial=0.45,  # Up from 0.3 - gives more weight to hybrid search
-            )
+            reranker = RecursiveReranker(n_iterations=n_iterations, dim=dim)
             # Set collection-specific weights path for the scorer
             reranker.scorer.set_collection(collection)
             _LEARNING_RERANKERS[collection] = reranker
@@ -1202,27 +1221,8 @@ class ONNXRecursiveReranker(RecursiveReranker):
             # Fall back to parent implementation
             return super().rerank(query, candidates, initial_scores)
 
-        # Blend ONNX scores with initial hybrid search scores
-        # This preserves important signals like filename correlation, symbol matching, etc.
-        # ONNX weight: 0.6, Initial scores weight: 0.4 (tuned for balance)
-        if initial_scores is not None:
-            initial_arr = np.array(initial_scores, dtype=np.float32)
-            # Normalize both score sets to [0, 1] range for fair blending
-            onnx_min, onnx_max = onnx_scores.min(), onnx_scores.max()
-            init_min, init_max = initial_arr.min(), initial_arr.max()
-            if onnx_max > onnx_min:
-                onnx_norm = (onnx_scores - onnx_min) / (onnx_max - onnx_min)
-            else:
-                onnx_norm = np.ones_like(onnx_scores) * 0.5
-            if init_max > init_min:
-                init_norm = (initial_arr - init_min) / (init_max - init_min)
-            else:
-                init_norm = np.ones_like(initial_arr) * 0.5
-            # Blend normalized scores, then rescale to ONNX range for consistency
-            blended = 0.6 * onnx_norm + 0.4 * init_norm
-            scores = blended * (onnx_max - onnx_min) + onnx_min
-        else:
-            scores = onnx_scores.copy()
+        # Initialize with ONNX scores
+        scores = onnx_scores.copy()
 
         # Encode for latent refinement
         query_emb = self._encode([query])[0]

@@ -1892,10 +1892,7 @@ _CODE_SIGNAL_PATTERNS = {
     "backticks": _re_signals.compile(r'`([^`]+)`'),  # `functionName`
     "camelCase": _re_signals.compile(r'\b[a-z]+(?:[A-Z][a-z0-9]*)+\b'),  # getUserData
     "PascalCase": _re_signals.compile(r'\b[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+)+\b'),  # MyClassName
-    # snake_case: now handles leading underscores for private/dunder functions
-    "snake_case": _re_signals.compile(r'(?:^|(?<=\s)|(?<=\())_*[a-z][a-z0-9]*(?:_[a-z0-9]+)+_*\b'),  # my_function, _private_func, __dunder__
-    # Additional pattern for underscore-prefixed identifiers without multiple underscores
-    "private_ident": _re_signals.compile(r'(?:^|(?<=\s)|(?<=\())_+[a-z][a-z0-9_]*\b'),  # _single, __double
+    "snake_case": _re_signals.compile(r'\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b'),  # my_function
     "SCREAMING_SNAKE": _re_signals.compile(r'\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b'),  # MAX_SIZE
     "parentheses": _re_signals.compile(r'\b(\w+)\s*\(\)'),  # function()
     "dot_path": _re_signals.compile(r'\b\w+(?:\.\w+){2,}\b'),  # module.submodule.func
@@ -2036,16 +2033,7 @@ def _detect_code_signals(query: str) -> dict:
         signal_score += 0.3
         for m in snake_matches:
             if len(m) > 3:
-                extracted_symbols.add(m.strip())
-
-    # Check private identifiers with leading underscores (_private, __dunder__)
-    private_matches = _CODE_SIGNAL_PATTERNS["private_ident"].findall(query)
-    if private_matches:
-        detected_patterns.append("private_ident")
-        signal_score += 0.35  # Strong signal - private methods are very specific
-        for m in private_matches:
-            if len(m) > 2:
-                extracted_symbols.add(m.strip())
+                extracted_symbols.add(m)
 
     # Check SCREAMING_SNAKE_CASE (constants)
     screaming_matches = _CODE_SIGNAL_PATTERNS["SCREAMING_SNAKE"].findall(query)
@@ -2167,14 +2155,11 @@ def _detect_code_signals(query: str) -> dict:
     signal_score = min(1.0, signal_score)
 
     # Build suggested boosts based on signal strength
-    # Tuned to be more aggressive for code-like queries to match Augment's symbol-aware search
     suggested_boosts = {}
-    if signal_score >= 0.2:
-        # More aggressive symbol boost multiplier for code-like queries
-        # At signal_score=0.3 -> 1.6x, at signal_score=0.6 -> 2.2x, at signal_score=1.0 -> 3.0x
-        suggested_boosts["symbol_boost_multiplier"] = 1.0 + (signal_score * 2.0)
-        # Prefer implementations when looking for code
-        suggested_boosts["impl_boost_multiplier"] = 1.0 + (signal_score * 0.8)
+    if signal_score >= 0.25:
+        # Boost symbol matching when we detect code signals
+        suggested_boosts["symbol_boost_multiplier"] = 1.0 + signal_score  # 1.25x - 2.0x
+        suggested_boosts["impl_boost_multiplier"] = 1.0 + (signal_score * 0.5)  # Prefer implementations
 
     return {
         "has_code_signals": signal_score >= 0.2,
@@ -2617,10 +2602,9 @@ async def repo_search(
     if code_signals.get("has_code_signals"):
         boosts = code_signals.get("suggested_boosts", {})
         # Boost symbol matching weight dynamically
-        # Note: base values updated to match hybrid_search.py defaults (0.35 and 0.6)
         if "symbol_boost_multiplier" in boosts:
-            base_sym_boost = float(os.environ.get("HYBRID_SYMBOL_BOOST", "0.35"))
-            base_sym_eq_boost = float(os.environ.get("HYBRID_SYMBOL_EQUALITY_BOOST", "0.6"))
+            base_sym_boost = float(os.environ.get("HYBRID_SYMBOL_BOOST", "0.15"))
+            base_sym_eq_boost = float(os.environ.get("HYBRID_SYMBOL_EQUALITY_BOOST", "0.25"))
             mult = boosts["symbol_boost_multiplier"]
             env["HYBRID_SYMBOL_BOOST"] = str(round(base_sym_boost * mult, 3))
             env["HYBRID_SYMBOL_EQUALITY_BOOST"] = str(round(base_sym_eq_boost * mult, 3))
