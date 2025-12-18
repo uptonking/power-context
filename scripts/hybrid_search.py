@@ -1912,6 +1912,18 @@ def run_hybrid_search(
     except Exception:
         pass
 
+    # --- Code signal symbols: add extracted symbols from query analysis ---
+    # These are passed via CODE_SIGNAL_SYMBOLS env var from repo_search
+    try:
+        _code_signal_syms = os.environ.get("CODE_SIGNAL_SYMBOLS", "").strip()
+        if _code_signal_syms:
+            for sym in _code_signal_syms.split(","):
+                sym = sym.strip()
+                if sym and len(sym) > 1 and sym not in qlist:
+                    qlist.append(sym)
+    except Exception:
+        pass
+
     # === Large codebase scaling (automatic) ===
     _coll_stats = _get_collection_stats(client, _collection(collection))
     _coll_size = _coll_stats.get("points_count", 0)
@@ -3275,6 +3287,17 @@ def main():
             )
         else:
             queries = expand_queries(queries, eff_language)
+
+    # --- Code signal symbols: add extracted symbols from query analysis ---
+    try:
+        _code_signal_syms = os.environ.get("CODE_SIGNAL_SYMBOLS", "").strip()
+        if _code_signal_syms:
+            for sym in _code_signal_syms.split(","):
+                sym = sym.strip()
+                if sym and len(sym) > 1 and sym not in queries:
+                    queries.append(sym)
+    except Exception:
+        pass
 
     # Add server-side lexical vector ranking into fusion (with scaled RRF)
     for rank, p in enumerate(lex_results, 1):
