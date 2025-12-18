@@ -2633,6 +2633,39 @@ def run_hybrid_search(
                 rec["rec"] += rec_comp
                 rec["s"] += rec_comp
 
+    # === Filename-query correlation boost ===
+    # When query tokens strongly correlate with a filename, boost ALL chunks from that file
+    # This helps "hybrid search fusion" find hybrid_search.py even if individual chunks
+    # don't contain all query terms
+    query_tokens_lower = set(q.lower() for q in qlist if q and len(q) >= 3)
+    _filename_boost_cache: Dict[str, float] = {}  # Cache per-file boost
+    for rec in score_map.values():
+        md = (rec["pt"].payload or {}).get("metadata") or {}
+        path = str(md.get("path") or "")
+        if not path:
+            continue
+        # Check cache first
+        if path in _filename_boost_cache:
+            boost = _filename_boost_cache[path]
+        else:
+            path_lower = path.lower()
+            filename = path_lower.rsplit("/", 1)[-1] if "/" in path_lower else path_lower
+            filename_base = re.sub(r'\.[^.]+$', '', filename)
+            filename_tokens = set(re.split(r'[_\-.]', filename_base))
+            filename_tokens.discard('')
+            # Count matching tokens
+            match_count = len(query_tokens_lower & filename_tokens)
+            if match_count >= 2:
+                # Strong boost for files where filename matches multiple query terms
+                # e.g., "hybrid search" -> hybrid_search.py gets boost
+                boost = 0.8 * match_count  # 1.6 for 2 matches, 2.4 for 3, etc.
+            else:
+                boost = 0.0
+            _filename_boost_cache[path] = boost
+        if boost > 0:
+            rec["fname_corr"] = float(rec.get("fname_corr", 0.0)) + boost
+            rec["s"] += boost
+
     # === Large codebase score normalization ===
     # Spread compressed score distributions for better discrimination
     _normalize_scores(score_map, _coll_size)
