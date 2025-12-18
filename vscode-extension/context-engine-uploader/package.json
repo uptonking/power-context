@@ -2,7 +2,7 @@
   "name": "context-engine-uploader",
   "displayName": "Context Engine Uploader",
   "description": "Runs the Context-Engine remote upload client with a force sync on startup followed by watch mode. Requires Python with pip install requests urllib3 charset_normalizer.",
-  "version": "0.1.34",
+  "version": "0.1.35",
   "publisher": "context-engine",
   "engines": {
     "vscode": "^1.85.0"
@@ -20,6 +20,11 @@
     "onView:contextEngineUploaderActions",
     "onCommand:contextEngineUploader.promptEnhance",
     "onCommand:contextEngineUploader.authLogin",
+    "onCommand:contextEngineUploader.writeMcpConfig",
+    "onCommand:contextEngineUploader.writeMcpConfigSelect",
+    "onCommand:contextEngineUploader.writeMcpConfigClaude",
+    "onCommand:contextEngineUploader.writeMcpConfigWindsurf",
+    "onCommand:contextEngineUploader.writeMcpConfigAugment",
     "onCommand:contextEngineUploader.cloneAndStartStack",
     "onCommand:contextEngineUploader.startSavedStack"
   ],
@@ -58,6 +63,22 @@
       {
         "command": "contextEngineUploader.writeMcpConfig",
         "title": "Context Engine Uploader: Write MCP Config (.mcp.json)"
+      },
+      {
+        "command": "contextEngineUploader.writeMcpConfigSelect",
+        "title": "Context Engine Uploader: Write MCP Config..."
+      },
+      {
+        "command": "contextEngineUploader.writeMcpConfigClaude",
+        "title": "Context Engine Uploader: Write MCP Config (Claude Code / .mcp.json)"
+      },
+      {
+        "command": "contextEngineUploader.writeMcpConfigWindsurf",
+        "title": "Context Engine Uploader: Write MCP Config (Windsurf / mcp_config.json)"
+      },
+      {
+        "command": "contextEngineUploader.writeMcpConfigAugment",
+        "title": "Context Engine Uploader: Write MCP Config (Augment Code / settings.json)"
       },
       {
         "command": "contextEngineUploader.writeCtxConfig",
@@ -205,6 +226,11 @@
           "default": false,
           "description": "Enable writing Windsurf's global MCP config (requires Windsurf or compatible clients)."
         },
+        "contextEngineUploader.mcpAugmentEnabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable writing Augment Code's global MCP config (writes ~/.augment/settings.json by default)."
+        },
         "contextEngineUploader.autoWriteMcpConfigOnStartup": {
           "type": "boolean",
           "default": false,
@@ -269,6 +295,11 @@
           "type": "string",
           "default": "",
           "description": "Optional override for Windsurf's mcp_config.json path. Defaults to %USERPROFILE%/.codeium/windsurf/mcp_config.json."
+        },
+        "contextEngineUploader.augmentMcpPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional override for Augment Code's settings.json path. Defaults to ~/.augment/settings.json."
         },
         "contextEngineUploader.claudeHookEnabled": {
           "type": "boolean",
