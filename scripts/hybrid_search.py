@@ -1146,6 +1146,14 @@ def lexical_score(phrases: List[str], md: Dict[str, Any], token_weights: Dict[st
         return 0.0
     path = str(md.get("path", "")).lower()
     path_segs = re.split(r"[/\\]", path)
+    # Extract just the filename (last segment) for special boosting
+    filename = path_segs[-1] if path_segs else ""
+    # Remove extension for matching
+    filename_base = re.sub(r'\.[^.]+$', '', filename)
+    # Split filename into tokens (snake_case, camelCase, etc.)
+    filename_tokens = set(re.split(r'[_\-.]', filename_base.lower()))
+    filename_tokens.discard('')
+
     sym = str(md.get("symbol", "")).lower()
     symp = str(md.get("symbol_path", "")).lower()
     code = str(md.get("code", ""))[:2000].lower()
@@ -1156,15 +1164,24 @@ def lexical_score(phrases: List[str], md: Dict[str, Any], token_weights: Dict[st
         tags_text = " ".join(str(x) for x in tags_val).lower()
     else:
         tags_text = str(tags_val).lower()
+
     s = 0.0
+    filename_matches = 0  # Track how many query tokens match the filename
+
     for t in tokens:
         if not t:
             continue
         contrib = 0.0
         if t in sym or t in symp:
             contrib += 2.0
+        # Enhanced path segment matching with filename priority
         if any(t in seg for seg in path_segs):
-            contrib += 0.6
+            # Check if token matches filename specifically (stronger signal)
+            if t in filename or t in filename_tokens:
+                contrib += 1.5  # Stronger boost for filename match (was 0.6)
+                filename_matches += 1
+            else:
+                contrib += 0.6  # Regular path segment match
         if t in code:
             contrib += 1.0
         # Pseudo/tags signals: gentle, optional boost
@@ -1177,6 +1194,15 @@ def lexical_score(phrases: List[str], md: Dict[str, Any], token_weights: Dict[st
             w = float(token_weights.get(t, 1.0) or 1.0)
             contrib *= (1.0 + float(bm25_weight) * (w - 1.0))
         s += contrib
+
+    # Filename correlation bonus: when multiple query tokens match the filename,
+    # it's a strong signal that this file is directly relevant to the query
+    # e.g., query "hybrid search" matching file "hybrid_search.py"
+    if filename_matches >= 2:
+        # Superlinear bonus for multiple filename matches
+        filename_bonus = 1.5 * (filename_matches - 1)  # +1.5 for 2 matches, +3.0 for 3, etc.
+        s += filename_bonus
+
     return s
 
 
@@ -2547,6 +2573,22 @@ def run_hybrid_search(
                 rec["doc"] = float(rec.get("doc", 0.0)) - doc_penalty
                 rec["s"] -= doc_penalty
 
+        # Filename relevance boost: when query terms match the filename directly
+        # This helps queries like "hybrid search" find "hybrid_search.py"
+        if path:
+            filename = path_lower.rsplit("/", 1)[-1] if "/" in path_lower else path_lower
+            filename_base = re.sub(r'\.[^.]+$', '', filename)
+            filename_tokens = set(re.split(r'[_\-.]', filename_base))
+            filename_tokens.discard('')
+            # Check how many query tokens match filename tokens
+            query_tokens_lower = set(q.lower() for q in qlist if q)
+            filename_match_count = len(query_tokens_lower & filename_tokens)
+            if filename_match_count >= 2:
+                # Strong bonus for multiple query terms matching filename
+                filename_boost = 0.4 * (filename_match_count - 1)  # +0.4 for 2, +0.8 for 3, etc.
+                rec["fname"] = float(rec.get("fname", 0.0)) + filename_boost
+                rec["s"] += filename_boost
+
         if LANG_MATCH_BOOST > 0.0 and path and eff_language:
             lang = str(eff_language).lower()
             md_lang = str((md.get("language") or "").lower())
@@ -3532,6 +3574,19 @@ def main():
             rec["test"] -= TEST_FILE_PENALTY
             rec["s"] -= TEST_FILE_PENALTY
 
+        # Filename relevance boost (CLI path): when query terms match filename
+        if path:
+            path_lower = path.lower()
+            filename = path_lower.rsplit("/", 1)[-1] if "/" in path_lower else path_lower
+            filename_base = re.sub(r'\.[^.]+$', '', filename)
+            filename_tokens = set(re.split(r'[_\-.]', filename_base))
+            filename_tokens.discard('')
+            query_tokens_lower = set(q.lower() for q in queries if q)
+            filename_match_count = len(query_tokens_lower & filename_tokens)
+            if filename_match_count >= 2:
+                filename_boost = 0.4 * (filename_match_count - 1)
+                rec["fname"] = float(rec.get("fname", 0.0)) + filename_boost
+                rec["s"] += filename_boost
 
         # Language match boost if requested
         if (
