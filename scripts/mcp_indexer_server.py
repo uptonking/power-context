@@ -3414,6 +3414,8 @@ async def repo_search(
                     # Update why array if present
                     if "why" in r and isinstance(r["why"], list):
                         r["why"].append(f"fname:{_boost:.2f}")
+        # Re-sort results by updated score so fname_boost affects ranking
+        results = sorted(results, key=lambda x: float(x.get("score", 0)), reverse=True)
 
     if compact:
         results = [
