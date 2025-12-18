@@ -28,6 +28,74 @@ import numpy as np
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass, field
 
+
+def _tokenize_for_fname_boost(text: Any) -> set[str]:
+    """Robust tokenization for filename boosts.
+
+    Some MCP/IDE clients pass query strings that include quotes/brackets
+    or list-like wrappers. Regex tokenization is resilient to that.
+    """
+    if not text:
+        return set()
+    try:
+        s = str(text).lower()
+    except Exception:
+        return set()
+    toks = re.findall(r"[a-z0-9_]{3,}", s)
+    return {t for t in toks if t and len(t) >= 3}
+
+
+def _candidate_path_for_fname_boost(candidate: Dict[str, Any]) -> str:
+    """Best-effort extraction of a path/filename from candidate objects."""
+    for key in ("path", "rel_path", "host_path", "container_path", "client_path"):
+        try:
+            val = candidate.get(key)
+        except Exception:
+            val = None
+        if isinstance(val, str) and val.strip():
+            return val
+
+    try:
+        md = candidate.get("metadata") or {}
+        if isinstance(md, dict):
+            for key in ("path", "rel_path", "host_path", "container_path", "client_path"):
+                val = md.get(key)
+                if isinstance(val, str) and val.strip():
+                    return val
+    except Exception:
+        pass
+
+    return ""
+
+
+def _compute_fname_boost(query: Any, candidate: Dict[str, Any], factor: float) -> float:
+    """Compute filename/query correlation boost for a candidate."""
+    if not factor or factor <= 0:
+        return 0.0
+
+    query_tokens = _tokenize_for_fname_boost(query)
+    if not query_tokens:
+        return 0.0
+
+    path = _candidate_path_for_fname_boost(candidate)
+    path = str(path or "").lower()
+    if not path:
+        return 0.0
+
+    filename = path.rsplit("/", 1)[-1] if "/" in path else path
+    # Strip extension (and tolerate suffixes like ".py:123")
+    filename_base = re.sub(r"\.[^.]+$", "", filename)
+    fname_tokens = {
+        t
+        for t in re.split(r"[_\-.]", filename_base)
+        if t and len(t) >= 3
+    }
+
+    match_count = len(query_tokens & fname_tokens)
+    if match_count >= 2:
+        return float(factor) * match_count
+    return 0.0
+
 # Safe imports
 try:
     import onnxruntime as ort
@@ -867,7 +935,6 @@ class RecursiveReranker:
         # Boosts results when 2+ query tokens match filename tokens
         # e.g., "hybrid search" matches "hybrid_search.py"
         fname_boost_factor = float(os.environ.get("RERANK_FNAME_BOOST", "0.12") or 0.12)
-        query_tokens = set(t.lower() for t in query.split() if len(t) >= 3) if fname_boost_factor > 0 else set()
 
         for rank, idx in enumerate(ranked_indices):
             candidate = candidates[idx].copy()
@@ -880,17 +947,7 @@ class RecursiveReranker:
             candidate["score_trajectory"] = trajectory
 
             # Filename boost
-            fname_boost = 0.0
-            if query_tokens:
-                path = str(candidate.get("path") or "").lower()
-                if path:
-                    filename = path.rsplit("/", 1)[-1] if "/" in path else path
-                    filename_base = re.sub(r'\.[^.]+$', '', filename)
-                    fname_tokens = set(re.split(r'[_\-.]', filename_base))
-                    fname_tokens.discard('')
-                    match_count = len(query_tokens & fname_tokens)
-                    if match_count >= 2:
-                        fname_boost = fname_boost_factor * match_count
+            fname_boost = _compute_fname_boost(query, candidate, fname_boost_factor)
 
             # Update main score
             candidate["score"] = float(final_scores[idx]) + fname_boost
