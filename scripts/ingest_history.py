@@ -36,6 +36,115 @@ except ImportError:
 from scripts.utils import sanitize_vector_name as _sanitize_vector_name
 
 
+def _manifest_run_id(manifest_path: str) -> str:
+    try:
+        stem = Path(str(manifest_path)).name
+        if stem.endswith(".json"):
+            stem = stem[: -len(".json")]
+        stem = stem.strip()
+        return stem or "git_history"
+    except Exception:
+        return "git_history"
+
+
+def _history_prune_enabled() -> bool:
+    try:
+        return str(os.environ.get("GIT_HISTORY_PRUNE", "1")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+    except Exception:
+        return True
+
+
+def _prune_old_commit_points(
+    client: QdrantClient,
+    run_id: str,
+    *,
+    mode: str,
+) -> None:
+    try:
+        if mode != "snapshot" or not _history_prune_enabled():
+            return
+    except Exception:
+        return
+
+    try:
+        keep_cond = models.FieldCondition(
+            key="metadata.git_history_run_id", match=models.MatchValue(value=run_id)
+        )
+        flt = models.Filter(
+            must=[
+                models.FieldCondition(
+                    key="metadata.kind", match=models.MatchValue(value="git_message")
+                ),
+                models.FieldCondition(
+                    key="metadata.repo", match=models.MatchValue(value=REPO_NAME)
+                ),
+            ],
+            must_not=[keep_cond],
+        )
+        client.delete(
+            collection_name=COLLECTION,
+            points_selector=models.FilterSelector(filter=flt),
+            wait=True,
+        )
+    except Exception:
+        return
+
+
+def _cleanup_manifest_files(manifest_path: str) -> None:
+    try:
+        p = Path(str(manifest_path))
+    except Exception:
+        return
+
+    try:
+        delete_self = str(os.environ.get("GIT_HISTORY_DELETE_MANIFEST", "0")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+    except Exception:
+        delete_self = False
+
+    if delete_self:
+        try:
+            p.unlink()
+        except Exception:
+            pass
+
+    try:
+        raw = str(os.environ.get("GIT_HISTORY_MANIFEST_MAX_FILES", "0")).strip()
+        max_keep = int(raw) if raw else 0
+    except Exception:
+        max_keep = 0
+
+    if max_keep <= 0:
+        return
+
+    try:
+        parent = p.parent
+        files = []
+        for cand in parent.glob("git_history_*.json"):
+            try:
+                files.append((cand.stat().st_mtime, cand))
+            except Exception:
+                continue
+        files.sort(key=lambda t: t[0])
+        excess = files[:-max_keep] if len(files) > max_keep else []
+        for _ts, fp in excess:
+            try:
+                fp.unlink()
+            except Exception:
+                continue
+    except Exception:
+        return
+
+
 def run(cmd: str) -> str:
     p = subprocess.run(
         shlex.split(cmd), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
@@ -250,7 +359,7 @@ def build_text(
 
 def _ingest_from_manifest(
     manifest_path: str,
-    model: TextEmbedding,
+    model: Any,
     client: QdrantClient,
     vec_name: str,
     include_body: bool,
@@ -267,6 +376,9 @@ def _ingest_from_manifest(
     if not commits:
         print("No commits in manifest.")
         return 0
+
+    run_id = _manifest_run_id(manifest_path)
+    mode = str(data.get("mode") or "delta").strip().lower() or "delta"
 
     points: List[models.PointStruct] = []
     count = 0
@@ -313,6 +425,8 @@ def _ingest_from_manifest(
                 "symbol_path": commit_id,
                 "repo": REPO_NAME,
                 "commit_id": commit_id,
+                "git_history_run_id": run_id,
+                "git_history_mode": mode,
                 "author_name": author_name,
                 "authored_date": authored_date,
                 "message": message,
@@ -345,6 +459,14 @@ def _ingest_from_manifest(
 
     if points:
         client.upsert(collection_name=COLLECTION, points=points)
+    try:
+        _prune_old_commit_points(client, run_id, mode=mode)
+    except Exception:
+        pass
+    try:
+        _cleanup_manifest_files(manifest_path)
+    except Exception:
+        pass
     print(f"Ingested {count} commits into {COLLECTION} from manifest {manifest_path}.")
     return count
 
