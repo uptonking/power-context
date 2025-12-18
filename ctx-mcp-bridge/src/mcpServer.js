@@ -10,7 +10,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { loadAnyAuthEntry, loadAuthEntry } from "./authConfig.js";
-import { maybeRemapToolResult } from "./resultPathMapping.js";
+import { maybeRemapToolArgs, maybeRemapToolResult } from "./resultPathMapping.js";
 
 function debugLog(message) {
   try {
@@ -502,6 +502,8 @@ async function createBridgeServer(options) {
       }
       args = obj;
     }
+
+    args = maybeRemapToolArgs(name, args, workspace);
 
     if (name === "set_session_defaults") {
       const indexerResult = await indexerClient.callTool({ name, arguments: args });

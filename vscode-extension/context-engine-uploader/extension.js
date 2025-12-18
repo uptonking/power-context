@@ -304,6 +304,64 @@ function activate(context) {
   const mcpConfigDisposable = vscode.commands.registerCommand('contextEngineUploader.writeMcpConfig', () => {
     writeMcpConfig().catch(error => log(`MCP config write failed: ${error instanceof Error ? error.message : String(error)}`));
   });
+  const mcpConfigSelectDisposable = vscode.commands.registerCommand('contextEngineUploader.writeMcpConfigSelect', async () => {
+    try {
+      const cfg = getEffectiveConfig();
+      const claudeEnabled = !!cfg.get('mcpClaudeEnabled', true);
+      const windsurfEnabled = !!cfg.get('mcpWindsurfEnabled', false);
+      const augmentEnabled = !!cfg.get('mcpAugmentEnabled', false);
+
+      const items = [
+        {
+          label: 'All enabled targets',
+          description: 'Writes MCP config for all enabled clients',
+          id: 'all',
+        },
+        {
+          label: 'Claude Code (.mcp.json)',
+          description: claudeEnabled ? 'Enabled' : 'Disabled in settings',
+          id: 'claude',
+        },
+        {
+          label: 'Windsurf (mcp_config.json)',
+          description: windsurfEnabled ? 'Enabled' : 'Disabled in settings',
+          id: 'windsurf',
+        },
+        {
+          label: 'Augment Code (~/.augment/settings.json)',
+          description: augmentEnabled ? 'Enabled' : 'Disabled in settings',
+          id: 'augment',
+        },
+      ];
+
+      const picked = await vscode.window.showQuickPick(items, { placeHolder: 'Select which MCP config to write' });
+      if (!picked) {
+        return;
+      }
+
+      if (picked.id === 'all') {
+        await writeMcpConfig();
+      } else if (picked.id === 'claude') {
+        await writeMcpConfig({ targets: ['claude'] });
+      } else if (picked.id === 'windsurf') {
+        await writeMcpConfig({ targets: ['windsurf'] });
+      } else if (picked.id === 'augment') {
+        await writeMcpConfig({ targets: ['augment'] });
+      }
+    } catch (error) {
+      log(`MCP config select failed: ${error instanceof Error ? error.message : String(error)}`);
+      vscode.window.showErrorMessage('Context Engine Uploader: failed to select MCP config target. See output for details.');
+    }
+  });
+  const mcpConfigClaudeDisposable = vscode.commands.registerCommand('contextEngineUploader.writeMcpConfigClaude', () => {
+    writeMcpConfig({ targets: ['claude'] }).catch(error => log(`Claude MCP config write failed: ${error instanceof Error ? error.message : String(error)}`));
+  });
+  const mcpConfigWindsurfDisposable = vscode.commands.registerCommand('contextEngineUploader.writeMcpConfigWindsurf', () => {
+    writeMcpConfig({ targets: ['windsurf'] }).catch(error => log(`Windsurf MCP config write failed: ${error instanceof Error ? error.message : String(error)}`));
+  });
+  const mcpConfigAugmentDisposable = vscode.commands.registerCommand('contextEngineUploader.writeMcpConfigAugment', () => {
+    writeMcpConfig({ targets: ['augment'] }).catch(error => log(`Augment MCP config write failed: ${error instanceof Error ? error.message : String(error)}`));
+  });
   const cloneStackDisposable = vscode.commands.registerCommand('contextEngineUploader.cloneAndStartStack', () => {
     if (!onboardingManager || typeof onboardingManager.cloneAndStartStack !== 'function') {
       vscode.window.showErrorMessage('Context Engine onboarding is unavailable in this session.');
@@ -395,8 +453,10 @@ function activate(context) {
       event.affectsConfiguration('contextEngineUploader.mcpMemoryUrl') ||
       event.affectsConfiguration('contextEngineUploader.mcpClaudeEnabled') ||
       event.affectsConfiguration('contextEngineUploader.mcpWindsurfEnabled') ||
+      event.affectsConfiguration('contextEngineUploader.mcpAugmentEnabled') ||
       event.affectsConfiguration('contextEngineUploader.mcpTransportMode') ||
       event.affectsConfiguration('contextEngineUploader.windsurfMcpPath') ||
+      event.affectsConfiguration('contextEngineUploader.augmentMcpPath') ||
       event.affectsConfiguration('contextEngineUploader.claudeHookEnabled') ||
       event.affectsConfiguration('contextEngineUploader.surfaceQdrantCollectionHint')
     ) {
@@ -441,6 +501,10 @@ function activate(context) {
     startBridgeDisposable,
     stopBridgeDisposable,
     mcpConfigDisposable,
+    mcpConfigSelectDisposable,
+    mcpConfigClaudeDisposable,
+    mcpConfigWindsurfDisposable,
+    mcpConfigAugmentDisposable,
     ctxConfigDisposable,
     configDisposable,
     workspaceDisposable,
@@ -1248,8 +1312,9 @@ function normalizeWorkspaceForBridge(workspacePath) {
 }
 
 async function writeMcpConfig() {
+  const options = arguments.length ? arguments[0] : undefined;
   if (mcpConfigManager && typeof mcpConfigManager.writeMcpConfig === 'function') {
-    return mcpConfigManager.writeMcpConfig();
+    return mcpConfigManager.writeMcpConfig(options);
   }
 }
 
