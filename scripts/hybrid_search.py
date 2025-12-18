@@ -396,6 +396,29 @@ PSEUDO_BOOST = _safe_float(os.environ.get("HYBRID_PSEUDO_BOOST", "0.0"), 0.0)
 COMMENT_PENALTY = _safe_float(os.environ.get("HYBRID_COMMENT_PENALTY", "0.2"), 0.2)
 COMMENT_RATIO_THRESHOLD = _safe_float(os.environ.get("HYBRID_COMMENT_RATIO_THRESHOLD", "0.6"), 0.6)
 
+# Query intent detection for dynamic boost adjustment
+# When query signals implementation search, apply extra boost
+INTENT_IMPL_BOOST = _safe_float(os.environ.get("HYBRID_INTENT_IMPL_BOOST", "0.15"), 0.15)
+
+# Patterns that indicate user wants implementation code (not docs/tests)
+_IMPL_INTENT_PATTERNS = frozenset({
+    "implementation", "how does", "how is", "where is", "code for",
+    "function that", "method that", "class that", "implements",
+    "defined", "definition", "source", "logic", "algorithm",
+    "where", "find", "locate", "show me", "actual code",
+})
+
+
+def _detect_implementation_intent(queries: List[str]) -> bool:
+    """Detect if query signals user wants implementation code."""
+    if not queries:
+        return False
+    joined = " ".join(queries).lower()
+    for pattern in _IMPL_INTENT_PATTERNS:
+        if pattern in joined:
+            return True
+    return False
+
 # Micro-span compaction and budgeting (ReFRAG-lite output shaping)
 MICRO_OUT_MAX_SPANS = _safe_int(os.environ.get("MICRO_OUT_MAX_SPANS", "3"), 3)
 MICRO_MERGE_LINES = _safe_int(os.environ.get("MICRO_MERGE_LINES", "4"), 4)
@@ -2394,6 +2417,13 @@ def run_hybrid_search(
     eff_mode = (mode or "").strip().lower()
     impl_boost = IMPLEMENTATION_BOOST
     doc_penalty = DOCUMENTATION_PENALTY
+    test_penalty = TEST_FILE_PENALTY
+    # Query intent detection: boost implementation files more when query signals code search
+    if _detect_implementation_intent(qlist):
+        impl_boost += INTENT_IMPL_BOOST
+        # Also increase test/doc penalties when user clearly wants implementation
+        test_penalty += INTENT_IMPL_BOOST
+        doc_penalty += INTENT_IMPL_BOOST * 0.5
     if eff_mode in {"balanced"}:
         doc_penalty = DOCUMENTATION_PENALTY * 0.5
     elif eff_mode in {"docs_first", "docs-first", "docs"}:
@@ -2436,9 +2466,9 @@ def run_hybrid_search(
         if VENDOR_PENALTY > 0.0 and path and is_vendor_path(path):
             rec["vendor"] -= VENDOR_PENALTY
             rec["s"] -= VENDOR_PENALTY
-        if TEST_FILE_PENALTY > 0.0 and path and is_test_file(path):
-            rec["test"] -= TEST_FILE_PENALTY
-            rec["s"] -= TEST_FILE_PENALTY
+        if test_penalty > 0.0 and path and is_test_file(path):
+            rec["test"] -= test_penalty
+            rec["s"] -= test_penalty
 
         # Additional file-type weighting
         path_lower = path.lower()
