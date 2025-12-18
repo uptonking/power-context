@@ -109,6 +109,7 @@ function createCtxConfigManager(deps) {
             decoderRuntime = 'llamacpp';
           }
           useGpuDecoderSetting = !!uploaderSettings.get('useGpuDecoder', false);
+          // TODO: glmApiKey is read from settings.json (plaintext). Consider migrating API keys to VS Code SecretStorage (context.secrets) with backwards-compatible fallback.
           const cfgKey = (uploaderSettings.get('glmApiKey') || '').trim();
           const cfgBase = (uploaderSettings.get('glmApiBase') || '').trim();
           const cfgModel = (uploaderSettings.get('glmModel') || '').trim();

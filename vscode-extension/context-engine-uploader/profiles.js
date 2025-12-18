@@ -7,6 +7,9 @@ let _log;
 let _onProfileChanged;
 
 const PROFILES_DB_FILENAME = 'profiles.json';
+const PROFILES_DB_SETTING_KEY = 'profilesDb';
+const PROFILES_DB_KEY = 'contextEngineUploader.profilesDb';
+// TODO: Decide whether ACTIVE_PROFILE_KEY should be persisted in settings (shared across local/remote) or remain workspace-specific after verifying profilesDb carryover.
 const ACTIVE_PROFILE_KEY = 'contextEngineUploader.activeProfileId';
 
 function init({ vscode, context, log, onProfileChanged }) {
@@ -14,7 +17,88 @@ function init({ vscode, context, log, onProfileChanged }) {
   _context = context;
   _log = typeof log === 'function' ? log : () => {};
   _onProfileChanged = typeof onProfileChanged === 'function' ? onProfileChanged : () => {};
+  try {
+    if (_context && _context.globalState && typeof _context.globalState.setKeysForSync === 'function') {
+      _context.globalState.setKeysForSync([PROFILES_DB_KEY, ACTIVE_PROFILE_KEY]);
+    }
+  } catch (_) {
+  }
   ensureGlobalStorageDir();
+}
+
+function loadProfilesDbFromGlobalState() {
+  try {
+    if (!_context || !_context.globalState) {
+      return undefined;
+    }
+    const raw = _context.globalState.get(PROFILES_DB_KEY);
+    if (raw && typeof raw === 'object' && Array.isArray(raw.profiles)) {
+      return { version: 1, ...raw };
+    }
+  } catch (_) {
+  }
+  return undefined;
+}
+
+function loadProfilesDbFromSettings() {
+  try {
+    if (!_vscode || !_vscode.workspace || typeof _vscode.workspace.getConfiguration !== 'function') {
+      return undefined;
+    }
+    const cfg = _vscode.workspace.getConfiguration('contextEngineUploader');
+    let raw;
+    try {
+      if (cfg && typeof cfg.inspect === 'function') {
+        const inspected = cfg.inspect(PROFILES_DB_SETTING_KEY);
+        if (inspected) {
+          if (inspected.workspaceFolderValue !== undefined) {
+            raw = inspected.workspaceFolderValue;
+          } else if (inspected.workspaceValue !== undefined) {
+            raw = inspected.workspaceValue;
+          } else if (inspected.globalValue !== undefined) {
+            raw = inspected.globalValue;
+          }
+        }
+      }
+    } catch (_) {
+    }
+    if (raw && typeof raw === 'object' && Array.isArray(raw.profiles)) {
+      return { version: 1, ...raw };
+    }
+  } catch (_) {
+  }
+  return undefined;
+}
+
+async function saveProfilesDbToGlobalState(db) {
+  try {
+    if (!_context || !_context.globalState || typeof _context.globalState.update !== 'function') {
+      return false;
+    }
+    await _context.globalState.update(PROFILES_DB_KEY, db || { version: 1, profiles: [] });
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+async function saveProfilesDbToSettings(db) {
+  try {
+    if (!_vscode || !_vscode.workspace || typeof _vscode.workspace.getConfiguration !== 'function') {
+      return false;
+    }
+    const cfg = _vscode.workspace.getConfiguration('contextEngineUploader');
+    if (!cfg || typeof cfg.update !== 'function') {
+      return false;
+    }
+    const target = (_vscode.ConfigurationTarget && _vscode.ConfigurationTarget.Global !== undefined)
+      ? _vscode.ConfigurationTarget.Global
+      : true;
+    await cfg.update(PROFILES_DB_SETTING_KEY, db || { version: 1, profiles: [] }, target);
+    return true;
+  } catch (_) {
+    return false;
+  }
 }
 
 function ensureGlobalStorageDir() {
@@ -37,6 +121,18 @@ function getProfilesDbPath() {
 }
 
 function loadProfilesDb() {
+  const fromSettings = loadProfilesDbFromSettings();
+  if (fromSettings) {
+    return fromSettings;
+  }
+  const mem = loadProfilesDbFromGlobalState();
+  if (mem) {
+    try {
+      saveProfilesDbToSettings(mem).catch(() => {});
+    } catch (_) {
+    }
+    return mem;
+  }
   const dbPath = getProfilesDbPath();
   if (!dbPath) {
     return { version: 1, profiles: [] };
@@ -48,25 +144,42 @@ function loadProfilesDb() {
     const raw = fs.readFileSync(dbPath, 'utf8');
     const parsed = JSON.parse(raw);
     if (parsed && typeof parsed === 'object' && Array.isArray(parsed.profiles)) {
-      return { version: 1, ...parsed };
+      const db = { version: 1, ...parsed };
+      try {
+        saveProfilesDbToGlobalState(db);
+      } catch (_) {
+      }
+      try {
+        saveProfilesDbToSettings(db).catch(() => {});
+      } catch (_) {
+      }
+      return db;
     }
   } catch (_) {
   }
   return { version: 1, profiles: [] };
 }
 
-function saveProfilesDb(db) {
-  const dbPath = getProfilesDbPath();
-  if (!dbPath) {
-    return false;
+async function saveProfilesDb(db) {
+  let saved = false;
+  try {
+    saved = (await saveProfilesDbToSettings(db)) || saved;
+  } catch (_) {
   }
   try {
-    const payload = JSON.stringify(db || { version: 1, profiles: [] }, null, 2) + '\n';
-    fs.writeFileSync(dbPath, payload, 'utf8');
-    return true;
+    saved = (await saveProfilesDbToGlobalState(db)) || saved;
   } catch (_) {
-    return false;
   }
+  const dbPath = getProfilesDbPath();
+  if (dbPath) {
+    try {
+      const payload = JSON.stringify(db || { version: 1, profiles: [] }, null, 2) + '\n';
+      fs.writeFileSync(dbPath, payload, 'utf8');
+      saved = true;
+    } catch (_) {
+    }
+  }
+  return saved;
 }
 
 function generateProfileId() {
@@ -81,6 +194,13 @@ function getActiveProfileId() {
     }
   } catch (_) {
   }
+  try {
+    if (_context && _context.globalState) {
+      const raw = _context.globalState.get(ACTIVE_PROFILE_KEY);
+      return typeof raw === 'string' ? raw : undefined;
+    }
+  } catch (_) {
+  }
   return undefined;
 }
 
@@ -88,6 +208,12 @@ async function setActiveProfileId(profileId) {
   try {
     if (_context && _context.workspaceState) {
       await _context.workspaceState.update(ACTIVE_PROFILE_KEY, profileId || undefined);
+    }
+  } catch (_) {
+  }
+  try {
+    if (_context && _context.globalState && typeof _context.globalState.update === 'function') {
+      await _context.globalState.update(ACTIVE_PROFILE_KEY, profileId || undefined);
     }
   } catch (_) {
   }
@@ -212,9 +338,9 @@ async function setupWorkspaceWizard(deps) {
   if (!_vscode) {
     return;
   }
-  if (!ensureGlobalStorageDir()) {
-    _vscode.window.showErrorMessage('Context Engine Uploader: unable to access extension global storage for profiles.');
-    return;
+  try {
+    ensureGlobalStorageDir();
+  } catch (_) {
   }
   const rawCfg = _vscode.workspace.getConfiguration('contextEngineUploader');
 
@@ -238,7 +364,7 @@ async function setupWorkspaceWizard(deps) {
   }
 
   const profileName = normalizeProfileName(await _vscode.window.showInputBox({
-    prompt: 'Profile name (stored in VS Code global storage, per remote/local environment)',
+    prompt: 'Profile name (stored in VS Code extension storage; syncable via Settings Sync)',
     value: 'default',
     ignoreFocusOut: true,
   }));
@@ -334,7 +460,7 @@ async function setupWorkspaceWizard(deps) {
   }
 
   db.profiles = profiles;
-  if (!saveProfilesDb(db)) {
+  if (!await saveProfilesDb(db)) {
     _vscode.window.showErrorMessage('Context Engine Uploader: failed to save profiles database.');
     return;
   }
@@ -389,9 +515,9 @@ async function createProfileFromCurrentSettingsWizard() {
   if (!_vscode) {
     return;
   }
-  if (!ensureGlobalStorageDir()) {
-    _vscode.window.showErrorMessage('Context Engine Uploader: unable to access extension global storage for profiles.');
-    return;
+  try {
+    ensureGlobalStorageDir();
+  } catch (_) {
   }
   const cfg = _vscode.workspace.getConfiguration('contextEngineUploader');
   const name = normalizeProfileName(await _vscode.window.showInputBox({
@@ -455,7 +581,7 @@ async function createProfileFromCurrentSettingsWizard() {
     overrides,
   });
   db.profiles = profiles;
-  if (!saveProfilesDb(db)) {
+  if (!await saveProfilesDb(db)) {
     _vscode.window.showErrorMessage('Context Engine Uploader: failed to save profiles database.');
     return;
   }
@@ -490,9 +616,9 @@ async function importProfilesWizard() {
   if (!_vscode) {
     return;
   }
-  if (!ensureGlobalStorageDir()) {
-    _vscode.window.showErrorMessage('Context Engine Uploader: unable to access extension global storage for profiles.');
-    return;
+  try {
+    ensureGlobalStorageDir();
+  } catch (_) {
   }
   const uris = await _vscode.window.showOpenDialog({
     title: 'Import Context Engine Uploader profiles',
@@ -551,7 +677,7 @@ async function importProfilesWizard() {
   }
 
   db.profiles = profiles;
-  if (!saveProfilesDb(db)) {
+  if (!await saveProfilesDb(db)) {
     _vscode.window.showErrorMessage('Context Engine Uploader: failed to save profiles database after import.');
     return;
   }
