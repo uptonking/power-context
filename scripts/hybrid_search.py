@@ -358,9 +358,14 @@ from scripts.ingest_code import ensure_collection as _ensure_collection
 from scripts.ingest_code import project_mini as _project_mini
 
 
-RRF_K = _safe_int(os.environ.get("HYBRID_RRF_K", "60"), 60)
-DENSE_WEIGHT = _safe_float(os.environ.get("HYBRID_DENSE_WEIGHT", "1.0"), 1.0)
-LEXICAL_WEIGHT = _safe_float(os.environ.get("HYBRID_LEXICAL_WEIGHT", "0.25"), 0.25)
+# RRF k: lower = denser score distribution (better for small repos)
+# We use 30 as base, which gives rank-1 score of 1/31 ≈ 0.032 (vs 0.016 with k=60)
+RRF_K = _safe_int(os.environ.get("HYBRID_RRF_K", "30"), 30)
+# Dense weight: increased to better balance against lexical scores
+# With k=30: rank-1 dense = 1.5 * 0.032 ≈ 0.048 (3x improvement)
+DENSE_WEIGHT = _safe_float(os.environ.get("HYBRID_DENSE_WEIGHT", "1.5"), 1.5)
+# Lexical weight: slightly reduced to balance
+LEXICAL_WEIGHT = _safe_float(os.environ.get("HYBRID_LEXICAL_WEIGHT", "0.20"), 0.20)
 LEX_VECTOR_WEIGHT = _safe_float(
     os.environ.get("HYBRID_LEX_VECTOR_WEIGHT", str(LEXICAL_WEIGHT)), LEXICAL_WEIGHT
 )
@@ -1148,8 +1153,12 @@ def lexical_score(phrases: List[str], md: Dict[str, Any], token_weights: Dict[st
         contrib = 0.0
         if t in sym or t in symp:
             contrib += 2.0
+        # Path segment match: boost filenames more (last segment)
         if any(t in seg for seg in path_segs):
-            contrib += 0.6
+            contrib += 0.8  # was 0.6
+            # Extra boost for filename match (last segment)
+            if path_segs and t in path_segs[-1]:
+                contrib += 0.3
         if t in code:
             contrib += 1.0
         # Pseudo/tags signals: gentle, optional boost
