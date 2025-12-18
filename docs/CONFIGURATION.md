@@ -241,16 +241,17 @@ The search engine can boost files whose names match query terms—helpful when s
 
 | Name | Description | Default |
 |------|-------------|---------|
-| HYBRID_FNAME_BOOST | Score boost when filename contains query term | 0.25 |
+| FNAME_BOOST | Per-token score boost when filename tokens match query tokens | 0.15 |
 
 **How it works:**
 - Extracts keywords from the query (≥3 chars, alphanumeric)
-- Checks if any keyword appears in the file's basename (case-insensitive)
-- Applies the boost to matching files during reranking
+- Tokenizes the filename and checks for matching tokens
+- Requires at least 2 matching tokens to apply the boost
+- Adds `FNAME_BOOST × matching_token_count` to the score
 
-**Example:** Query "hybrid search implementation" will boost files like `hybrid_search.py`, `hybrid.ts`, or `search_utils.py`.
+**Example:** Query "hybrid search implementation" matching `hybrid_search.py` (2 tokens match: "hybrid", "search") adds 0.30 to the score.
 
-Set `HYBRID_FNAME_BOOST=0` to disable, or increase (e.g., `0.4`) to weight filename matches more heavily.
+Set `FNAME_BOOST=0` to disable, or increase (e.g., `0.25`) to weight filename matches more heavily.
 
 ## Memory Blending
 

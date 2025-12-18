@@ -931,10 +931,10 @@ class RecursiveReranker:
         ranked_indices = np.argsort(-final_scores)
         reranked = []
 
-        # Filename-query correlation boost (single canonical location)
+        # Filename-query correlation boost
         # Boosts results when 2+ query tokens match filename tokens
         # e.g., "hybrid search" matches "hybrid_search.py"
-        fname_boost_factor = float(os.environ.get("RERANK_FNAME_BOOST", "0.12") or 0.12)
+        fname_boost_factor = float(os.environ.get("FNAME_BOOST", "0.15") or 0.15)
 
         for rank, idx in enumerate(ranked_indices):
             candidate = candidates[idx].copy()

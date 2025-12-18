@@ -1829,6 +1829,9 @@ def _init_code_intent_centroids():
         try:
             model_name = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
             model = _get_embedding_model(model_name)
+            if model is None:
+                _CODE_INTENT_CACHE["initialized"] = False
+                return
 
             # Embed archetypes
             code_embeddings = list(model.embed(_CODE_QUERY_ARCHETYPES))
@@ -1866,6 +1869,8 @@ def _detect_code_intent_embedding(query: str) -> float:
     try:
         model_name = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
         model = _get_embedding_model(model_name)
+        if model is None:
+            return 0.5
 
         query_embedding = next(model.embed([query]))
         query_embedding = query_embedding / (np.linalg.norm(query_embedding) + 1e-9)
@@ -3372,7 +3377,7 @@ async def repo_search(
     #   - Reranking disabled
     #   - Reranking timed out / failed
     #   - Subprocess hybrid search without reranking
-    _fname_boost_factor = float(os.environ.get("HYBRID_FNAME_BOOST", "0.25") or 0.25)
+    _fname_boost_factor = float(os.environ.get("FNAME_BOOST", "0.15") or 0.15)
     if _fname_boost_factor > 0 and results:
         _q_str = " ".join(queries).lower()
         _q_toks = {t for t in re.findall(r"[a-z0-9_]{3,}", _q_str) if len(t) >= 3}
