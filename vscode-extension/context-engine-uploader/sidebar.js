@@ -1,6 +1,7 @@
 const vscode = require('vscode');
 const fs = require('fs');
 const path = require('path');
+const { getDefaultWindsurfMcpPath, getDefaultAugmentMcpPath } = require('./mcp_config');
 
 function makeTreeItem(label, opts = {}) {
   const item = new vscode.TreeItem(label, opts.collapsibleState || vscode.TreeItemCollapsibleState.None);
@@ -336,6 +337,32 @@ function register(context, deps) {
       const mcpConfigPath = findConfigFile(configSearchBases, '.mcp.json');
       const ctxConfigPath = findConfigFile(configSearchBases, 'ctx_config.json');
 
+      const claudeEnabled = (() => {
+        try { return !!cfg.get('mcpClaudeEnabled', true); } catch (_) { return true; }
+      })();
+      const windsurfEnabled = (() => {
+        try { return !!cfg.get('mcpWindsurfEnabled', false); } catch (_) { return false; }
+      })();
+      const augmentEnabled = (() => {
+        try { return !!cfg.get('mcpAugmentEnabled', false); } catch (_) { return false; }
+      })();
+      const windsurfMcpPath = (() => {
+        try {
+          const custom = (cfg.get('windsurfMcpPath') || '').trim();
+          return custom || getDefaultWindsurfMcpPath();
+        } catch (_) {
+          return getDefaultWindsurfMcpPath();
+        }
+      })();
+      const augmentMcpPath = (() => {
+        try {
+          const custom = (cfg.get('augmentMcpPath') || '').trim();
+          return custom || getDefaultAugmentMcpPath();
+        } catch (_) {
+          return getDefaultAugmentMcpPath();
+        }
+      })();
+
       const bridgeMode = (() => {
         const mode = resolveMcpMode(cfg);
         return typeof mode === 'string' && mode.startsWith('bridge/');
@@ -346,7 +373,10 @@ function register(context, deps) {
 
       const missingEndpoint = !endpointExplicitlyConfigured || !endpoint;
       const missingTarget = !targetPath || !targetExists;
-      const missingMcpConfig = !mcpConfigPath;
+      const missingClaudeMcpConfig = !!(claudeEnabled && !mcpConfigPath);
+      const missingWindsurfMcpConfig = !!(windsurfEnabled && windsurfMcpPath && !pathExists(windsurfMcpPath));
+      const missingAugmentMcpConfig = !!(augmentEnabled && augmentMcpPath && !pathExists(augmentMcpPath));
+      const missingAnyMcpConfig = !!(missingClaudeMcpConfig || missingWindsurfMcpConfig || missingAugmentMcpConfig);
       const missingCtxConfig = !ctxConfigPath;
 
       const items = [
@@ -418,12 +448,12 @@ function register(context, deps) {
         }));
       }
 
-      if (missingMcpConfig) {
-        items.push(makeTreeItem('Write MCP Config (.mcp.json)', {
+      if (missingAnyMcpConfig) {
+        items.push(makeTreeItem('Write MCP Config...', {
           description: 'Missing',
           icon: new vscode.ThemeIcon('warning'),
-          command: { command: 'contextEngineUploader.writeMcpConfig', title: 'Write MCP Config (.mcp.json)' },
-          tooltip: 'Writes project MCP configuration for IDE clients (Claude/Windsurf) based on current settings.',
+          command: { command: 'contextEngineUploader.writeMcpConfigSelect', title: 'Write MCP Config...' },
+          tooltip: 'Select which MCP config to write (All enabled, Claude, Windsurf, Augment).',
         }));
       }
 
@@ -436,7 +466,7 @@ function register(context, deps) {
         }));
       }
 
-      if (!missingEndpoint && !missingTarget && !missingMcpConfig && !missingCtxConfig) {
+      if (!missingEndpoint && !missingTarget && !missingAnyMcpConfig && !missingCtxConfig) {
         items.push(makeTreeItem('All set', {
           description: 'Ready',
           icon: new vscode.ThemeIcon('check'),
@@ -487,9 +517,10 @@ function register(context, deps) {
 
     if (element.contextValue === 'ctxceActionsBridgeRoot') {
       return [
-        makeTreeItem('Write MCP Config (.mcp.json)', {
+        makeTreeItem('Write MCP Config...', {
           icon: new vscode.ThemeIcon('file-code'),
-          command: { command: 'contextEngineUploader.writeMcpConfig', title: 'Write MCP Config (.mcp.json)' },
+          command: { command: 'contextEngineUploader.writeMcpConfigSelect', title: 'Write MCP Config...' },
+          tooltip: 'Select which MCP config to write (All enabled, Claude, Windsurf, Augment).',
         }),
         makeTreeItem('Write CTX Config (ctx_config.json)', {
           icon: new vscode.ThemeIcon('file-text'),

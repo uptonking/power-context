@@ -2,6 +2,17 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 
+function getDefaultWindsurfMcpPath() {
+  const home = (process.platform === 'win32')
+    ? (process.env.USERPROFILE || os.homedir())
+    : os.homedir();
+  return path.join(home, '.codeium', 'windsurf', 'mcp_config.json');
+}
+
+function getDefaultAugmentMcpPath() {
+  return path.join(os.homedir(), '.augment', 'settings.json');
+}
+
 function createMcpConfigManager(deps) {
   const vscode = deps.vscode;
   const log = deps.log;
@@ -56,10 +67,6 @@ function createMcpConfigManager(deps) {
     return '';
   }
 
-  function getDefaultWindsurfMcpPath() {
-    return path.join(os.homedir(), '.codeium', 'windsurf', 'mcp_config.json');
-  }
-
   function buildBridgeServerConfig(workspacePath, indexerUrl, memoryUrl) {
     const invocation = resolveBridgeCliInvocation();
     const args = [...invocation.args, 'mcp-serve'];
@@ -79,6 +86,157 @@ function createMcpConfigManager(deps) {
     };
   }
 
+  function loadJsonConfigOrDefault(configPath, defaultConfig, invalidUserMessage, invalidLogPrefix) {
+    let config = defaultConfig;
+    if (fs.existsSync(configPath)) {
+      try {
+        const raw = fs.readFileSync(configPath, 'utf8');
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          config = parsed;
+        }
+      } catch (error) {
+        if (invalidUserMessage) {
+          vscode.window.showErrorMessage(invalidUserMessage);
+        }
+        if (invalidLogPrefix) {
+          log(`${invalidLogPrefix}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        return undefined;
+      }
+    }
+    if (!config || typeof config !== 'object' || Array.isArray(config)) {
+      config = defaultConfig;
+    }
+    return config;
+  }
+
+  function ensureMcpServersObject(config) {
+    if (!config.mcpServers || typeof config.mcpServers !== 'object') {
+      config.mcpServers = {};
+    }
+    return config.mcpServers;
+  }
+
+  function writeJsonConfig(configPath, config, successMessage, successLogPrefix, failureUserMessage, failureLogPrefix) {
+    try {
+      const json = JSON.stringify(config, null, 2) + '\n';
+      fs.writeFileSync(configPath, json, 'utf8');
+      if (successMessage) {
+        vscode.window.showInformationMessage(successMessage);
+      }
+      if (successLogPrefix) {
+        log(`${successLogPrefix} ${configPath}`);
+      }
+      return true;
+    } catch (error) {
+      if (failureUserMessage) {
+        vscode.window.showErrorMessage(failureUserMessage);
+      }
+      if (failureLogPrefix) {
+        log(`${failureLogPrefix}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      return false;
+    }
+  }
+
+  function makeMcpRemoteServer(url, options = {}) {
+    const isWindows = process.platform === 'win32';
+    const allowHttpForNonLocal = !!options.allowHttpForNonLocal;
+    const useCmdOnWindows = !!options.useCmdOnWindows;
+
+    const args = ['mcp-remote', url, '--transport', 'sse-only'];
+    if (allowHttpForNonLocal) {
+      try {
+        const u = new URL(url);
+        const isLocalHost =
+          u.hostname === 'localhost' ||
+          u.hostname === '127.0.0.1' ||
+          u.hostname === '::1';
+        if (u.protocol === 'http:' && !isLocalHost) {
+          args.push('--allow-http');
+        }
+      } catch (_) {
+      }
+    }
+
+    if (isWindows && useCmdOnWindows) {
+      return {
+        command: 'cmd',
+        args: ['/c', 'npx', ...args],
+        env: {},
+      };
+    }
+
+    return {
+      command: 'npx',
+      args,
+      env: {},
+    };
+  }
+
+  function applyMcpServersUpdate(servers, options) {
+    const serverMode = options && typeof options.serverMode === 'string' ? options.serverMode : 'bridge';
+    const mode = options && typeof options.transportMode === 'string' ? options.transportMode : 'sse-remote';
+    const indexerUrl = options ? options.indexerUrl : undefined;
+    const memoryUrl = options ? options.memoryUrl : undefined;
+
+    if (serverMode === 'bridge') {
+      const bridgeWorkspace = options && options.bridgeWorkspace ? options.bridgeWorkspace : '';
+      if (mode === 'http') {
+        const bridgeUrl = options && typeof options.bridgeHttpUrl === 'function' ? options.bridgeHttpUrl() : '';
+        if (bridgeUrl) {
+          servers['context-engine'] = options && typeof options.makeBridgeHttpServer === 'function'
+            ? options.makeBridgeHttpServer(bridgeUrl)
+            : { type: 'http', url: bridgeUrl };
+        } else {
+          servers['context-engine'] = buildBridgeServerConfig(bridgeWorkspace, indexerUrl, memoryUrl);
+        }
+      } else {
+        servers['context-engine'] = buildBridgeServerConfig(bridgeWorkspace, indexerUrl, memoryUrl);
+      }
+      delete servers['qdrant-indexer'];
+      delete servers.memory;
+      return;
+    }
+
+    if (mode === 'http') {
+      if (options && options.deleteContextEngineInDirect) {
+        delete servers['context-engine'];
+      }
+      // Note: if indexerUrl or memoryUrl are blank/falsey, we intentionally do
+      // not delete existing entries here. This preserves prior working config
+      // during partial/invalid configuration edits. We can revisit later if we
+      // want blank URLs to mean "delete this server entry".
+      if (indexerUrl) {
+        servers['qdrant-indexer'] = options && typeof options.makeDirectHttpServer === 'function'
+          ? options.makeDirectHttpServer(indexerUrl)
+          : { type: 'http', url: indexerUrl };
+      }
+      if (memoryUrl) {
+        servers.memory = options && typeof options.makeDirectHttpServer === 'function'
+          ? options.makeDirectHttpServer(memoryUrl)
+          : { type: 'http', url: memoryUrl };
+      }
+      return;
+    }
+
+    if (options && options.deleteContextEngineInDirect) {
+      delete servers['context-engine'];
+    }
+    const makeRemote = options && typeof options.makeRemoteSseServer === 'function'
+      ? options.makeRemoteSseServer
+      : (url) => makeMcpRemoteServer(url);
+    // Note: same behavior as HTTP above: falsey URLs do not remove existing
+    // entries. See comment in the HTTP branch about possibly changing this.
+    if (indexerUrl) {
+      servers['qdrant-indexer'] = makeRemote(indexerUrl);
+    }
+    if (memoryUrl) {
+      servers.memory = makeRemote(memoryUrl);
+    }
+  }
+
   async function removeContextEngineFromWindsurfConfig() {
     try {
       const settings = getEffectiveConfig();
@@ -91,15 +249,13 @@ function createMcpConfigManager(deps) {
         // Nothing to remove yet.
         return;
       }
-      let config = { mcpServers: {} };
-      try {
-        const raw = fs.readFileSync(configPath, 'utf8');
-        const parsed = JSON.parse(raw);
-        if (parsed && typeof parsed === 'object') {
-          config = parsed;
-        }
-      } catch (error) {
-        log(`Context Engine Uploader: failed to parse Windsurf mcp_config.json when removing context-engine: ${error instanceof Error ? error.message : String(error)}`);
+      const config = loadJsonConfigOrDefault(
+        configPath,
+        { mcpServers: {} },
+        undefined,
+        'Context Engine Uploader: failed to parse Windsurf mcp_config.json when removing context-engine'
+      );
+      if (!config) {
         return;
       }
       if (!config.mcpServers || typeof config.mcpServers !== 'object') {
@@ -161,94 +317,118 @@ function createMcpConfigManager(deps) {
   async function writeClaudeMcpServers(root, indexerUrl, memoryUrl, transportMode, serverMode = 'bridge') {
     const bridgeWorkspace = resolveBridgeWorkspacePath();
     const configPath = path.join(bridgeWorkspace || root, '.mcp.json');
-    let config = { mcpServers: {} };
-    if (fs.existsSync(configPath)) {
-      try {
-        const raw = fs.readFileSync(configPath, 'utf8');
-        const parsed = JSON.parse(raw);
-        if (parsed && typeof parsed === 'object') {
-          config = parsed;
-        }
-      } catch (error) {
-        vscode.window.showErrorMessage('Context Engine Uploader: existing .mcp.json is invalid JSON; not modified.');
-        log(`Failed to parse .mcp.json: ${error instanceof Error ? error.message : String(error)}`);
-        return false;
-      }
+    const config = loadJsonConfigOrDefault(
+      configPath,
+      { mcpServers: {} },
+      'Context Engine Uploader: existing .mcp.json is invalid JSON; not modified.',
+      'Failed to parse .mcp.json'
+    );
+    if (!config) {
+      return false;
     }
-    if (!config.mcpServers || typeof config.mcpServers !== 'object') {
-      config.mcpServers = {};
-    }
+    ensureMcpServersObject(config);
     log(`Preparing to write .mcp.json at ${configPath} with indexerUrl=${indexerUrl || '""'} memoryUrl=${memoryUrl || '""'}`);
     const servers = config.mcpServers;
     const mode = (typeof transportMode === 'string' ? transportMode.trim() : 'sse-remote') || 'sse-remote';
 
-    if (serverMode === 'bridge') {
-      if (mode === 'http') {
-        const bridgeUrl = resolveBridgeHttpUrl();
-        if (bridgeUrl) {
-          servers['context-engine'] = {
-            type: 'http',
-            url: bridgeUrl,
-          };
-        } else {
-          const bridgeServer = buildBridgeServerConfig(bridgeWorkspace || root, indexerUrl, memoryUrl);
-          servers['context-engine'] = bridgeServer;
-        }
-      } else {
-        const bridgeServer = buildBridgeServerConfig(bridgeWorkspace || root, indexerUrl, memoryUrl);
-        servers['context-engine'] = bridgeServer;
-      }
-      delete servers['qdrant-indexer'];
-      delete servers.memory;
-    } else if (mode === 'http') {
+    if (serverMode !== 'bridge' && mode === 'http') {
       // Direct HTTP MCP endpoints for Claude (.mcp.json)
-      if (indexerUrl) {
-        servers['qdrant-indexer'] = {
-          type: 'http',
-          url: indexerUrl,
-        };
-      }
-      if (memoryUrl) {
-        servers.memory = {
-          type: 'http',
-          url: memoryUrl,
-        };
-      }
-    } else {
+      applyMcpServersUpdate(servers, {
+        serverMode,
+        transportMode: mode,
+        indexerUrl,
+        memoryUrl,
+        bridgeWorkspace: bridgeWorkspace || root,
+        bridgeHttpUrl: () => resolveBridgeHttpUrl(),
+        makeBridgeHttpServer: (url) => ({ type: 'http', url }),
+        makeDirectHttpServer: (url) => ({ type: 'http', url }),
+        makeRemoteSseServer: (url) => makeMcpRemoteServer(url, { allowHttpForNonLocal: false, useCmdOnWindows: true }),
+        deleteContextEngineInDirect: true,
+      });
+    } else if (serverMode !== 'bridge') {
       // Legacy/default: stdio via mcp-remote SSE bridge
-      const isWindows = process.platform === 'win32';
-      const makeServer = url => {
-        if (isWindows) {
-          return {
-            command: 'cmd',
-            args: ['/c', 'npx', 'mcp-remote', url, '--transport', 'sse-only'],
-            env: {},
-          };
-        }
-        return {
-          command: 'npx',
-          args: ['mcp-remote', url, '--transport', 'sse-only'],
-          env: {},
-        };
-      };
-      if (indexerUrl) {
-        servers['qdrant-indexer'] = makeServer(indexerUrl);
-      }
-      if (memoryUrl) {
-        servers.memory = makeServer(memoryUrl);
-      }
+      applyMcpServersUpdate(servers, {
+        serverMode,
+        transportMode: mode,
+        indexerUrl,
+        memoryUrl,
+        bridgeWorkspace: bridgeWorkspace || root,
+        bridgeHttpUrl: () => resolveBridgeHttpUrl(),
+        makeBridgeHttpServer: (url) => ({ type: 'http', url }),
+        makeDirectHttpServer: (url) => ({ type: 'http', url }),
+        makeRemoteSseServer: (url) => makeMcpRemoteServer(url, { allowHttpForNonLocal: false, useCmdOnWindows: true }),
+        deleteContextEngineInDirect: true,
+      });
+    } else {
+      applyMcpServersUpdate(servers, {
+        serverMode,
+        transportMode: mode,
+        indexerUrl,
+        memoryUrl,
+        bridgeWorkspace: bridgeWorkspace || root,
+        bridgeHttpUrl: () => resolveBridgeHttpUrl(),
+        makeBridgeHttpServer: (url) => ({ type: 'http', url }),
+        makeDirectHttpServer: (url) => ({ type: 'http', url }),
+        makeRemoteSseServer: (url) => makeMcpRemoteServer(url, { allowHttpForNonLocal: false, useCmdOnWindows: true }),
+        deleteContextEngineInDirect: true,
+      });
     }
+    return writeJsonConfig(
+      configPath,
+      config,
+      'Context Engine Uploader: .mcp.json updated for Context Engine MCP servers.',
+      'Wrote .mcp.json at',
+      'Context Engine Uploader: failed to write .mcp.json.',
+      'Failed to write .mcp.json'
+    );
+  }
+
+  async function writeAugmentMcpServers(configPath, indexerUrl, memoryUrl, transportMode, serverMode = 'bridge', workspaceHint) {
     try {
-      const json = JSON.stringify(config, null, 2) + '\n';
-      fs.writeFileSync(configPath, json, 'utf8');
-      vscode.window.showInformationMessage('Context Engine Uploader: .mcp.json updated for Context Engine MCP servers.');
-      log(`Wrote .mcp.json at ${configPath}`);
-      return true;
+      fs.mkdirSync(path.dirname(configPath), { recursive: true });
     } catch (error) {
-      vscode.window.showErrorMessage('Context Engine Uploader: failed to write .mcp.json.');
-      log(`Failed to write .mcp.json: ${error instanceof Error ? error.message : String(error)}`);
+      log(`Failed to ensure Augment MCP directory: ${error instanceof Error ? error.message : String(error)}`);
+      vscode.window.showErrorMessage('Context Engine Uploader: failed to prepare Augment MCP directory.');
       return false;
     }
+
+    const config = loadJsonConfigOrDefault(
+      configPath,
+      {},
+      'Context Engine Uploader: existing Augment settings.json is invalid JSON; not modified.',
+      'Failed to parse Augment settings.json'
+    );
+    if (!config) {
+      return false;
+    }
+    ensureMcpServersObject(config);
+
+    const servers = config.mcpServers;
+    const mode = (typeof transportMode === 'string' ? transportMode.trim() : 'sse-remote') || 'sse-remote';
+
+    log(`Preparing to write Augment settings.json at ${configPath} with indexerUrl=${indexerUrl || '""'} memoryUrl=${memoryUrl || '""'}`);
+
+    applyMcpServersUpdate(servers, {
+      serverMode,
+      transportMode: mode,
+      indexerUrl,
+      memoryUrl,
+      bridgeWorkspace: resolveBridgeWorkspacePath() || workspaceHint || '',
+      bridgeHttpUrl: () => resolveBridgeHttpUrl(),
+      makeBridgeHttpServer: (url) => ({ type: 'http', url }),
+      makeDirectHttpServer: (url) => ({ type: 'http', url }),
+      makeRemoteSseServer: (url) => makeMcpRemoteServer(url, { allowHttpForNonLocal: true, useCmdOnWindows: true }),
+      deleteContextEngineInDirect: true,
+    });
+
+    return writeJsonConfig(
+      configPath,
+      config,
+      `Context Engine Uploader: Augment MCP config updated at ${configPath}.`,
+      'Wrote Augment settings.json at',
+      'Context Engine Uploader: failed to write Augment settings.json.',
+      'Failed to write Augment settings.json'
+    );
   }
 
   async function writeWindsurfMcpServers(configPath, indexerUrl, memoryUrl, transportMode, serverMode = 'bridge', workspaceHint) {
@@ -259,60 +439,34 @@ function createMcpConfigManager(deps) {
       vscode.window.showErrorMessage('Context Engine Uploader: failed to prepare Windsurf MCP directory.');
       return false;
     }
-    let config = { mcpServers: {} };
-    if (fs.existsSync(configPath)) {
-      try {
-        const raw = fs.readFileSync(configPath, 'utf8');
-        const parsed = JSON.parse(raw);
-        if (parsed && typeof parsed === 'object') {
-          config = parsed;
-        }
-      } catch (error) {
-        vscode.window.showErrorMessage('Context Engine Uploader: existing Windsurf mcp_config.json is invalid JSON; not modified.');
-        log(`Failed to parse Windsurf mcp_config.json: ${error instanceof Error ? error.message : String(error)}`);
-        return false;
-      }
+    const config = loadJsonConfigOrDefault(
+      configPath,
+      { mcpServers: {} },
+      'Context Engine Uploader: existing Windsurf mcp_config.json is invalid JSON; not modified.',
+      'Failed to parse Windsurf mcp_config.json'
+    );
+    if (!config) {
+      return false;
     }
-    if (!config.mcpServers || typeof config.mcpServers !== 'object') {
-      config.mcpServers = {};
-    }
+    ensureMcpServersObject(config);
     log(`Preparing to write Windsurf mcp_config.json at ${configPath} with indexerUrl=${indexerUrl || '""'} memoryUrl=${memoryUrl || '""'}`);
     const servers = config.mcpServers;
     const mode = (typeof transportMode === 'string' ? transportMode.trim() : 'sse-remote') || 'sse-remote';
 
-    if (serverMode === 'bridge') {
-      const bridgeWorkspace = resolveBridgeWorkspacePath() || workspaceHint || '';
-      if (mode === 'http') {
-        const bridgeUrl = resolveBridgeHttpUrl();
-        if (bridgeUrl) {
-          servers['context-engine'] = {
-            serverUrl: bridgeUrl,
-          };
-        } else {
-          const bridgeServer = buildBridgeServerConfig(bridgeWorkspace, indexerUrl, memoryUrl);
-          servers['context-engine'] = bridgeServer;
-        }
-      } else {
-        const bridgeServer = buildBridgeServerConfig(bridgeWorkspace, indexerUrl, memoryUrl);
-        servers['context-engine'] = bridgeServer;
-      }
-      delete servers['qdrant-indexer'];
-      delete servers.memory;
-    } else if (mode === 'http') {
+    if (serverMode !== 'bridge' && mode === 'http') {
       // Direct HTTP MCP endpoints for Windsurf mcp_config.json
-      if (indexerUrl) {
-        servers['qdrant-indexer'] = {
-          type: 'http',
-          url: indexerUrl,
-        };
-      }
-      if (memoryUrl) {
-        servers.memory = {
-          type: 'http',
-          url: memoryUrl,
-        };
-      }
-    } else {
+      applyMcpServersUpdate(servers, {
+        serverMode,
+        transportMode: mode,
+        indexerUrl,
+        memoryUrl,
+        bridgeWorkspace: resolveBridgeWorkspacePath() || workspaceHint || '',
+        bridgeHttpUrl: () => resolveBridgeHttpUrl(),
+        makeBridgeHttpServer: (url) => ({ serverUrl: url }),
+        makeDirectHttpServer: (url) => ({ type: 'http', url }),
+        deleteContextEngineInDirect: true,
+      });
+    } else if (serverMode !== 'bridge') {
       // Legacy/default: use mcp-remote SSE bridge
       const makeServer = url => {
         // Default args for local/HTTPS endpoints
@@ -336,24 +490,39 @@ function createMcpConfigManager(deps) {
           env: {},
         };
       };
-      if (indexerUrl) {
-        servers['qdrant-indexer'] = makeServer(indexerUrl);
-      }
-      if (memoryUrl) {
-        servers.memory = makeServer(memoryUrl);
-      }
+      applyMcpServersUpdate(servers, {
+        serverMode,
+        transportMode: mode,
+        indexerUrl,
+        memoryUrl,
+        bridgeWorkspace: resolveBridgeWorkspacePath() || workspaceHint || '',
+        bridgeHttpUrl: () => resolveBridgeHttpUrl(),
+        makeBridgeHttpServer: (url) => ({ serverUrl: url }),
+        makeDirectHttpServer: (url) => ({ type: 'http', url }),
+        makeRemoteSseServer: (url) => makeServer(url),
+        deleteContextEngineInDirect: true,
+      });
+    } else {
+      applyMcpServersUpdate(servers, {
+        serverMode,
+        transportMode: mode,
+        indexerUrl,
+        memoryUrl,
+        bridgeWorkspace: resolveBridgeWorkspacePath() || workspaceHint || '',
+        bridgeHttpUrl: () => resolveBridgeHttpUrl(),
+        makeBridgeHttpServer: (url) => ({ serverUrl: url }),
+        makeDirectHttpServer: (url) => ({ type: 'http', url }),
+        deleteContextEngineInDirect: true,
+      });
     }
-    try {
-      const json = JSON.stringify(config, null, 2) + '\n';
-      fs.writeFileSync(configPath, json, 'utf8');
-      vscode.window.showInformationMessage(`Context Engine Uploader: Windsurf MCP config updated at ${configPath}.`);
-      log(`Wrote Windsurf mcp_config.json at ${configPath}`);
-      return true;
-    } catch (error) {
-      vscode.window.showErrorMessage('Context Engine Uploader: failed to write Windsurf mcp_config.json.');
-      log(`Failed to write Windsurf mcp_config.json: ${error instanceof Error ? error.message : String(error)}`);
-      return false;
-    }
+    return writeJsonConfig(
+      configPath,
+      config,
+      `Context Engine Uploader: Windsurf MCP config updated at ${configPath}.`,
+      'Wrote Windsurf mcp_config.json at',
+      'Context Engine Uploader: failed to write Windsurf mcp_config.json.',
+      'Failed to write Windsurf mcp_config.json'
+    );
   }
 
   async function writeClaudeHookConfig(root, commandPath) {
@@ -481,13 +650,20 @@ function createMcpConfigManager(deps) {
     }
   }
 
-  async function writeMcpConfig() {
+  async function writeMcpConfig(options = {}) {
     const settings = getEffectiveConfig();
     const claudeEnabled = settings.get('mcpClaudeEnabled', true);
     const windsurfEnabled = settings.get('mcpWindsurfEnabled', false);
+    const augmentEnabled = settings.get('mcpAugmentEnabled', false);
     const claudeHookEnabled = settings.get('claudeHookEnabled', false);
     const isLinux = process.platform === 'linux';
-    if (!claudeEnabled && !windsurfEnabled && !claudeHookEnabled) {
+
+    const targets = options && Array.isArray(options.targets) ? options.targets : undefined;
+    const wantsClaude = targets ? targets.includes('claude') : claudeEnabled;
+    const wantsWindsurf = targets ? targets.includes('windsurf') : windsurfEnabled;
+    const wantsAugment = targets ? targets.includes('augment') : augmentEnabled;
+
+    if (!wantsClaude && !wantsWindsurf && !wantsAugment && !claudeHookEnabled) {
       vscode.window.showInformationMessage('Context Engine Uploader: MCP config writing is disabled in settings.');
       return;
     }
@@ -529,7 +705,7 @@ function createMcpConfigManager(deps) {
     }
     let wroteAny = false;
     let hookWrote = false;
-    if (claudeEnabled) {
+    if (wantsClaude) {
       const root = getWorkspaceFolderPath();
       if (!root) {
         vscode.window.showErrorMessage('Context Engine Uploader: open a folder before writing .mcp.json.');
@@ -538,11 +714,18 @@ function createMcpConfigManager(deps) {
         wroteAny = wroteAny || result;
       }
     }
-    if (windsurfEnabled) {
+    if (wantsWindsurf) {
       const customPath = (settings.get('windsurfMcpPath') || '').trim();
       const windsPath = customPath || getDefaultWindsurfMcpPath();
       const workspaceHint = getWorkspaceFolderPath();
       const result = await writeWindsurfMcpServers(windsPath, indexerUrl, memoryUrl, transportMode, serverMode, workspaceHint);
+      wroteAny = wroteAny || result;
+    }
+    if (wantsAugment) {
+      const customPath = (settings.get('augmentMcpPath') || '').trim();
+      const augPath = customPath || getDefaultAugmentMcpPath();
+      const workspaceHint = getWorkspaceFolderPath();
+      const result = await writeAugmentMcpServers(augPath, indexerUrl, memoryUrl, transportMode, serverMode, workspaceHint);
       wroteAny = wroteAny || result;
     }
     if (claudeHookEnabled) {
@@ -584,4 +767,6 @@ function createMcpConfigManager(deps) {
 
 module.exports = {
   createMcpConfigManager,
+  getDefaultWindsurfMcpPath,
+  getDefaultAugmentMcpPath,
 };
