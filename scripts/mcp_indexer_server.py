@@ -2826,6 +2826,15 @@ async def repo_search(
                         why_parts.append(f"learning:{obj.get('recursive_iterations', 0)}")
                         why_parts.append(f"score:{float(obj.get('score', 0)):.3f}")
 
+                        # Build components with optional fname_boost
+                        components = (obj.get("components") or {}) | {
+                            "learning_score": float(obj.get("recursive_score", 0)),
+                            "learning_iterations": int(obj.get("recursive_iterations", 0)),
+                        }
+                        if obj.get("fname_boost"):
+                            components["fname_boost"] = float(obj.get("fname_boost", 0))
+                            why_parts.append(f"fname:{float(obj.get('fname_boost', 0)):.2f}")
+
                         item = {
                             "score": float(obj.get("score", 0)),
                             "path": obj.get("path", ""),
@@ -2833,11 +2842,7 @@ async def repo_search(
                             "start_line": int(obj.get("start_line") or 0),
                             "end_line": int(obj.get("end_line") or 0),
                             "why": why_parts,
-                            "components": (obj.get("components") or {})
-                            | {
-                                "learning_score": float(obj.get("recursive_score", 0)),
-                                "learning_iterations": int(obj.get("recursive_iterations", 0)),
-                            },
+                            "components": components,
                         }
                         # Preserve dual-path metadata
                         if obj.get("host_path"):
