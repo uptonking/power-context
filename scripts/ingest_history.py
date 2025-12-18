@@ -23,13 +23,15 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+# Import TextEmbedding for type hints and fallback
+from fastembed import TextEmbedding
+
 # Use embedder factory for Qwen3 support; fallback to direct fastembed
 try:
     from scripts.embedder import get_embedding_model as _get_embedding_model
     _EMBEDDER_FACTORY = True
 except ImportError:
     _EMBEDDER_FACTORY = False
-    from fastembed import TextEmbedding
 
 from scripts.utils import sanitize_vector_name as _sanitize_vector_name
 
