@@ -235,6 +235,23 @@ RERANK_EVENTS_ENABLED=0
 | HYBRID_EXPAND | Enable heuristic multi-query expansion | 0 (off) |
 | LLM_EXPAND_MAX | Max alternate queries via LLM | 0 |
 
+### Filename Boost
+
+The search engine can boost files whose names match query terms—helpful when searching for a specific file like "hybrid_search" or "database_config".
+
+| Name | Description | Default |
+|------|-------------|---------|
+| HYBRID_FNAME_BOOST | Score boost when filename contains query term | 0.25 |
+
+**How it works:**
+- Extracts keywords from the query (≥3 chars, alphanumeric)
+- Checks if any keyword appears in the file's basename (case-insensitive)
+- Applies the boost to matching files during reranking
+
+**Example:** Query "hybrid search implementation" will boost files like `hybrid_search.py`, `hybrid.ts`, or `search_utils.py`.
+
+Set `HYBRID_FNAME_BOOST=0` to disable, or increase (e.g., `0.4`) to weight filename matches more heavily.
+
 ## Memory Blending
 
 | Name | Description | Default |
