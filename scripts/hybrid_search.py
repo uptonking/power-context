@@ -365,12 +365,14 @@ LEX_VECTOR_WEIGHT = _safe_float(
     os.environ.get("HYBRID_LEX_VECTOR_WEIGHT", str(LEXICAL_WEIGHT)), LEXICAL_WEIGHT
 )
 EF_SEARCH = _safe_int(os.environ.get("QDRANT_EF_SEARCH", "128"), 128)
-# Lightweight, configurable boosts
-SYMBOL_BOOST = _safe_float(os.environ.get("HYBRID_SYMBOL_BOOST", "0.15"), 0.15)
+# Symbol boost weights - tuned to be competitive with Augment's symbol matching
+# These are critical for code symbol queries like "_detect_code_signals" or "RecursiveReranker"
+SYMBOL_BOOST = _safe_float(os.environ.get("HYBRID_SYMBOL_BOOST", "0.35"), 0.35)  # Up from 0.15
 RECENCY_WEIGHT = _safe_float(os.environ.get("HYBRID_RECENCY_WEIGHT", "0.1"), 0.1)
 CORE_FILE_BOOST = _safe_float(os.environ.get("HYBRID_CORE_FILE_BOOST", "0.1"), 0.1)
+# Exact symbol match is a very strong signal - boost significantly
 SYMBOL_EQUALITY_BOOST = _safe_float(
-    os.environ.get("HYBRID_SYMBOL_EQUALITY_BOOST", "0.25"), 0.25
+    os.environ.get("HYBRID_SYMBOL_EQUALITY_BOOST", "0.6"), 0.6  # Up from 0.25
 )
 VENDOR_PENALTY = _safe_float(os.environ.get("HYBRID_VENDOR_PENALTY", "0.05"), 0.05)
 LANG_MATCH_BOOST = _safe_float(os.environ.get("HYBRID_LANG_MATCH_BOOST", "0.05"), 0.05)
@@ -833,6 +835,47 @@ def tokenize_queries(phrases: List[str]) -> List[str]:
             out.append(t)
             seen.add(t)
     return out
+
+
+# Regex patterns for extracting full identifiers (preserved as complete symbols)
+_FULL_IDENT_PATTERNS = [
+    # Private/dunder Python identifiers: _private, __dunder__, __init__
+    re.compile(r'(?:^|(?<=\s)|(?<=\())(_+[a-zA-Z][a-zA-Z0-9_]*)\b'),
+    # snake_case: my_function, get_user_data
+    re.compile(r'(?:^|(?<=\s)|(?<=\())([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\b', re.IGNORECASE),
+    # PascalCase: MyClassName, HTTPClient
+    re.compile(r'\b([A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+)+)\b'),
+    # camelCase: getUserData, parseJSON
+    re.compile(r'\b([a-z]+(?:[A-Z][a-z0-9]*)+)\b'),
+    # SCREAMING_SNAKE: MAX_SIZE, HTTP_STATUS_OK
+    re.compile(r'\b([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)\b'),
+    # Backtick-wrapped: `anySymbol`
+    re.compile(r'`([^`]+)`'),
+]
+
+
+def extract_full_identifiers(phrases: List[str]) -> List[str]:
+    """Extract complete code identifiers from queries, preserving their original form.
+
+    Unlike tokenize_queries which splits snake_case/camelCase, this preserves
+    full symbols like _detect_code_signals, RecursiveReranker, etc.
+    """
+    identifiers: List[str] = []
+    seen: set = set()
+
+    for phrase in phrases:
+        for pattern in _FULL_IDENT_PATTERNS:
+            matches = pattern.findall(phrase)
+            for m in matches:
+                m_clean = m.strip()
+                m_lower = m_clean.lower()
+                # Filter short/common words
+                if len(m_clean) > 2 and m_lower not in _STOP:
+                    if m_lower not in seen:
+                        identifiers.append(m_clean)
+                        seen.add(m_lower)
+
+    return identifiers
 
 
 # Minimal code-aware query expansion (quick win)
@@ -1924,6 +1967,15 @@ def run_hybrid_search(
     except Exception:
         pass
 
+    # --- Extract full identifiers for enhanced symbol matching ---
+    # These are preserved as complete symbols (e.g., _detect_code_signals, RecursiveReranker)
+    # for exact/substring matching against indexed symbol names
+    _full_identifiers: List[str] = []
+    try:
+        _full_identifiers = extract_full_identifiers(clean_queries)
+    except Exception:
+        pass
+
     # === Large codebase scaling (automatic) ===
     _coll_stats = _get_collection_stats(client, _collection(collection))
     _coll_size = _coll_stats.get("points_count", 0)
@@ -2414,16 +2466,52 @@ def run_hybrid_search(
         sym = str(md.get("symbol") or "").lower()
         sym_path = str(md.get("symbol_path") or "").lower()
         sym_text = f"{sym} {sym_path}"
+        # Also check code content for full symbol matches
+        code_text = str(md.get("code") or "")[:3000].lower()
+
+        # Track if we found exact/substring matches to avoid double-counting
+        _matched_sub = set()
+        _matched_eq = False
+
+        # Check full identifiers first (highest priority - these are complete symbols)
+        for ident in _full_identifiers:
+            il = ident.lower()
+            if not il:
+                continue
+            # Exact symbol match (strongest signal)
+            if il == sym or il == sym_path:
+                if not _matched_eq:
+                    # Higher boost for full identifier exact match (2x base)
+                    rec["sym_eq"] += SYMBOL_EQUALITY_BOOST * 2.0
+                    rec["s"] += SYMBOL_EQUALITY_BOOST * 2.0
+                    _matched_eq = True
+            # Substring match in symbol/symbol_path
+            elif il in sym_text and il not in _matched_sub:
+                # Higher boost for full identifier substring match (1.5x base)
+                rec["sym_sub"] += SYMBOL_BOOST * 1.5
+                rec["s"] += SYMBOL_BOOST * 1.5
+                _matched_sub.add(il)
+            # Check if full identifier appears in code (definition likely)
+            elif il in code_text and il not in _matched_sub:
+                # Moderate boost for code content match
+                rec["sym_sub"] += SYMBOL_BOOST * 0.75
+                rec["s"] += SYMBOL_BOOST * 0.75
+                _matched_sub.add(il)
+
+        # Standard token-based matching (lower priority)
         for q in qlist:
             ql = q.lower()
-            if not ql:
+            if not ql or ql in _matched_sub:
                 continue
             if ql in sym_text:
                 rec["sym_sub"] += SYMBOL_BOOST
                 rec["s"] += SYMBOL_BOOST
-            if ql == sym or ql == sym_path:
+                _matched_sub.add(ql)
+            if not _matched_eq and (ql == sym or ql == sym_path):
                 rec["sym_eq"] += SYMBOL_EQUALITY_BOOST
                 rec["s"] += SYMBOL_EQUALITY_BOOST
+                _matched_eq = True
+
         path = str(md.get("path") or "")
         if CORE_FILE_BOOST > 0.0 and path and is_core_file(path):
             rec["core"] += CORE_FILE_BOOST
@@ -3299,6 +3387,13 @@ def main():
     except Exception:
         pass
 
+    # --- Extract full identifiers for enhanced symbol matching (CLI path) ---
+    _cli_full_identifiers: List[str] = []
+    try:
+        _cli_full_identifiers = extract_full_identifiers(clean_queries)
+    except Exception:
+        pass
+
     # Add server-side lexical vector ranking into fusion (with scaled RRF)
     for rank, p in enumerate(lex_results, 1):
         pid = str(p.id)
@@ -3382,22 +3477,48 @@ def main():
         if isinstance(ts, int):
             timestamps.append(ts)
 
-        # Symbol-based boosts
+        # Symbol-based boosts (enhanced with full identifier matching)
         sym = str(md.get("symbol") or "").lower()
         sym_path = str(md.get("symbol_path") or "").lower()
         sym_text = f"{sym} {sym_path}"
+        code_text = str(md.get("code") or "")[:3000].lower()
+
+        # Track matches to avoid double-counting
+        _cli_matched_sub: set = set()
+        _cli_matched_eq = False
+
+        # Check full identifiers first (highest priority)
+        for ident in _cli_full_identifiers:
+            il = ident.lower()
+            if not il:
+                continue
+            if il == sym or il == sym_path:
+                if not _cli_matched_eq:
+                    rec["sym_eq"] += SYMBOL_EQUALITY_BOOST * 2.0
+                    rec["s"] += SYMBOL_EQUALITY_BOOST * 2.0
+                    _cli_matched_eq = True
+            elif il in sym_text and il not in _cli_matched_sub:
+                rec["sym_sub"] += SYMBOL_BOOST * 1.5
+                rec["s"] += SYMBOL_BOOST * 1.5
+                _cli_matched_sub.add(il)
+            elif il in code_text and il not in _cli_matched_sub:
+                rec["sym_sub"] += SYMBOL_BOOST * 0.75
+                rec["s"] += SYMBOL_BOOST * 0.75
+                _cli_matched_sub.add(il)
+
+        # Standard token-based matching
         for q in queries:
             ql = q.lower()
-            if not ql:
+            if not ql or ql in _cli_matched_sub:
                 continue
-            # substring match boost
             if ql in sym_text:
                 rec["sym_sub"] += SYMBOL_BOOST
                 rec["s"] += SYMBOL_BOOST
-            # exact match boost (symbol or symbol_path)
-            if ql == sym or ql == sym_path:
+                _cli_matched_sub.add(ql)
+            if not _cli_matched_eq and (ql == sym or ql == sym_path):
                 rec["sym_eq"] += SYMBOL_EQUALITY_BOOST
                 rec["s"] += SYMBOL_EQUALITY_BOOST
+                _cli_matched_eq = True
 
         # Path-based adjustments
         path = str(md.get("path") or "")
