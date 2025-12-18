@@ -2141,7 +2141,7 @@ def _detect_code_signals(query: str) -> dict:
                 signal_score = signal_score * (1 - blend_weight) + embedding_score * blend_weight
         except Exception:
             pass
-    elif use_embedding and signal_score < 0.1:
+    elif str(os.environ.get("CODE_SIGNAL_EMBEDDING", "")).lower() in {"1", "true", "yes"} and signal_score < 0.1:
         # No regex signals - rely more heavily on embedding
         try:
             embedding_score = _detect_code_intent_embedding(query)
