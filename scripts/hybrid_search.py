@@ -3447,9 +3447,9 @@ def main():
         if VENDOR_PENALTY > 0.0 and path and is_vendor_path(path):
             rec["vendor"] -= VENDOR_PENALTY
             rec["s"] -= VENDOR_PENALTY
-        if TEST_FILE_PENALTY > 0.0 and path and is_test_file(path):
-            rec["test"] -= TEST_FILE_PENALTY
-            rec["s"] -= TEST_FILE_PENALTY
+        if test_penalty_cli > 0.0 and path and is_test_file(path):
+            rec["test"] -= test_penalty_cli
+            rec["s"] -= test_penalty_cli
 
 
         # Language match boost if requested
