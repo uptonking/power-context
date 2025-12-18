@@ -3366,6 +3366,50 @@ async def repo_search(
             },
         )
 
+    # ─── Filename boost fallback ───────────────────────────────────────────────
+    # Apply filename-query correlation boost for results that don't have it yet.
+    # The learning reranker applies fname_boost when enabled; this catches:
+    #   - Reranking disabled
+    #   - Reranking timed out / failed
+    #   - Subprocess hybrid search without reranking
+    _fname_boost_factor = float(os.environ.get("HYBRID_FNAME_BOOST", "0.25") or 0.25)
+    if _fname_boost_factor > 0 and results:
+        _q_str = " ".join(queries).lower()
+        _q_toks = {t for t in re.findall(r"[a-z0-9_]{3,}", _q_str) if len(t) >= 3}
+        if _q_toks:
+            for r in results:
+                # Skip if fname_boost already applied by reranker
+                if r.get("fname_boost") or (r.get("components") or {}).get("fname_boost"):
+                    continue
+
+                # Extract path from various possible keys
+                _path = ""
+                for _pk in ("path", "rel_path", "host_path", "container_path", "client_path"):
+                    _pv = r.get(_pk) or (r.get("metadata") or {}).get(_pk)
+                    if isinstance(_pv, str) and _pv.strip():
+                        _path = _pv.lower()
+                        break
+                if not _path:
+                    continue
+
+                # Extract filename base (strip extension)
+                _fname = _path.rsplit("/", 1)[-1] if "/" in _path else _path
+                _fname_base = re.sub(r"\.[^.]+$", "", _fname)
+                _fname_toks = {t for t in re.split(r"[_\-.]", _fname_base) if t and len(t) >= 3}
+
+                # Require 2+ matching tokens for boost
+                _match_count = len(_q_toks & _fname_toks)
+                if _match_count >= 2:
+                    _boost = float(_fname_boost_factor) * _match_count
+                    r["score"] = float(r.get("score", 0)) + _boost
+                    r["fname_boost"] = _boost
+                    # Update components dict if present
+                    if "components" in r and isinstance(r["components"], dict):
+                        r["components"]["fname_boost"] = _boost
+                    # Update why array if present
+                    if "why" in r and isinstance(r["why"], list):
+                        r["why"].append(f"fname:{_boost:.2f}")
+
     if compact:
         results = [
             {
