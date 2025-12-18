@@ -3407,6 +3407,11 @@ def main():
         _BM25_W2 = 0.2
     _bm25_tok_w2 = _bm25_token_weights_from_results(queries, lex_results) if _USE_BM25_CLI else {}
 
+    # Query intent detection for CLI path (same as run_hybrid_search)
+    test_penalty_cli = TEST_FILE_PENALTY
+    if _detect_implementation_intent(queries):
+        test_penalty_cli += INTENT_IMPL_BOOST
+
     timestamps: List[int] = []
     for pid, rec in list(score_map.items()):
         md = (rec["pt"].payload or {}).get("metadata") or {}
