@@ -39,6 +39,26 @@ function _nativeToPosix(p) {
   }
 }
 
+function _workPathToRepoRelPosix(p) {
+  try {
+    const s = typeof p === "string" ? p.trim() : "";
+    if (!s || !s.startsWith("/work/")) {
+      return null;
+    }
+    const rest = s.slice("/work/".length);
+    const parts = rest.split("/").filter(Boolean);
+    if (parts.length >= 2) {
+      return parts.slice(1).join("/");
+    }
+    if (parts.length === 1) {
+      return parts[0];
+    }
+    return "";
+  } catch {
+    return null;
+  }
+}
+
 function normalizeToolArgPath(p, workspaceRoot) {
   try {
     const s = typeof p === "string" ? p.trim() : "";
@@ -49,15 +69,11 @@ function normalizeToolArgPath(p, workspaceRoot) {
     const root = typeof workspaceRoot === "string" ? workspaceRoot : "";
     const sPosix = s.replace(/\\/g, "/");
 
-    if (sPosix.startsWith("/work/")) {
-      const rest = sPosix.slice("/work/".length);
-      const parts = rest.split("/").filter(Boolean);
-      if (parts.length >= 2) {
-        return parts.slice(1).join("/");
-      }
-      if (parts.length === 1) {
-        return parts[0];
-      }
+    const fromWork = _workPathToRepoRelPosix(sPosix);
+    if (typeof fromWork === "string" && fromWork) {
+      return fromWork;
+    }
+    if (fromWork === "") {
       return p;
     }
 
@@ -173,15 +189,9 @@ function applyPathMappingToArgs(value, workspaceRoot, keyHint = "") {
 function computeWorkspaceRelativePath(containerPath, hostPath) {
   try {
     const cont = typeof containerPath === "string" ? containerPath.trim() : "";
-    if (cont.startsWith("/work/")) {
-      const rest = cont.slice("/work/".length);
-      const parts = rest.split("/").filter(Boolean);
-      if (parts.length >= 2) {
-        return parts.slice(1).join("/");
-      }
-      if (parts.length === 1) {
-        return parts[0];
-      }
+    const rel = _workPathToRepoRelPosix(cont);
+    if (typeof rel === "string" && rel) {
+      return rel;
     }
   } catch {
   }
@@ -210,15 +220,10 @@ function remapRelatedPathToClient(p, workspaceRoot) {
       return sNorm;
     }
 
-    if (s.startsWith("/work/")) {
-      const rest = s.slice("/work/".length);
-      const parts = rest.split("/").filter(Boolean);
-      if (parts.length >= 2) {
-        const rel = parts.slice(1).join("/");
-        const relNative = _posixToNative(rel);
-        return path.join(root, relNative);
-      }
-      return p;
+    const rel = _workPathToRepoRelPosix(s);
+    if (typeof rel === "string" && rel) {
+      const relNative = _posixToNative(rel);
+      return path.join(root, relNative);
     }
 
     // If it's already a relative path, join it to the workspace root.
@@ -343,17 +348,13 @@ function remapStringPath(p, workspaceRoot) {
     } catch {
       // ignore
     }
-    if (s.startsWith("/work/")) {
-      const rest = s.slice("/work/".length);
-      const parts = rest.split("/").filter(Boolean);
-      if (parts.length >= 2) {
-        const rel = parts.slice(1).join("/");
-        const override = envTruthy(process.env.CTXCE_BRIDGE_OVERRIDE_PATH, true);
-        if (override) {
-          return rel;
-        }
-        return p;
+    const rel = _workPathToRepoRelPosix(s);
+    if (typeof rel === "string" && rel) {
+      const override = envTruthy(process.env.CTXCE_BRIDGE_OVERRIDE_PATH, true);
+      if (override) {
+        return rel;
       }
+      return p;
     }
     return p;
   } catch {
