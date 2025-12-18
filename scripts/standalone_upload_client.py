@@ -826,7 +826,11 @@ class RemoteUploadClient:
 
         return moves
 
-    def create_delta_bundle(self, changes: Dict[str, List]) -> Tuple[str, Dict[str, Any]]:
+    def create_delta_bundle(
+        self,
+        changes: Dict[str, List],
+        git_history: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[str, Dict[str, Any]]:
         """
         Create a delta bundle from detected changes.
 
@@ -1044,7 +1048,8 @@ class RemoteUploadClient:
             (metadata_dir / "hashes.json").write_text(json.dumps(hashes_metadata, indent=2))
 
             try:
-                git_history = _collect_git_history_for_workspace(self.workspace_path)
+                if git_history is None:
+                    git_history = _collect_git_history_for_workspace(self.workspace_path)
                 if git_history:
                     (metadata_dir / "git_history.json").write_text(
                         json.dumps(git_history, indent=2)
@@ -1330,6 +1335,33 @@ class RemoteUploadClient:
         total_changes = sum(len(files) for op, files in changes.items() if op != "unchanged")
         return total_changes > 0
 
+    def upload_git_history_only(self, git_history: Dict[str, Any]) -> bool:
+        try:
+            empty_changes = {
+                "created": [],
+                "updated": [],
+                "deleted": [],
+                "moved": [],
+                "unchanged": [],
+            }
+            bundle_path, manifest = self.create_delta_bundle(
+                empty_changes,
+                git_history=git_history,
+            )
+            response = self.upload_bundle(bundle_path, manifest)
+            if response.get("success", False):
+                try:
+                    if os.path.exists(bundle_path):
+                        os.remove(bundle_path)
+                    self.cleanup()
+                except Exception:
+                    pass
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"[remote_upload] Error uploading git history metadata: {e}")
+            return False
+
     def process_changes_and_upload(self, changes: Dict[str, List]) -> bool:
         """
         Process pre-computed changes and upload delta bundle.
@@ -1447,7 +1479,6 @@ class RemoteUploadClient:
                     if meaningful_changes > 0:
                         logger.info(f"[watch] Detected {meaningful_changes} changes: { {k: len(v) for k, v in changes.items() if k != 'unchanged'} }")
 
-                        # Use existing upload method
                         success = self.process_changes_and_upload(changes)
 
                         if success:
@@ -1455,7 +1486,21 @@ class RemoteUploadClient:
                         else:
                             logger.error(f"[watch] Failed to upload changes")
                     else:
-                        logger.debug(f"[watch] No changes detected")  # Debug level to avoid spam
+                        git_history = None
+                        try:
+                            git_history = _collect_git_history_for_workspace(self.workspace_path)
+                        except Exception:
+                            git_history = None
+
+                        if git_history:
+                            logger.info("[watch] Detected git history update; uploading git history metadata")
+                            success = self.upload_git_history_only(git_history)
+                            if success:
+                                logger.info("[watch] Successfully uploaded git history metadata")
+                            else:
+                                logger.error("[watch] Failed to upload git history metadata")
+                        else:
+                            logger.debug(f"[watch] No changes detected")  # Debug level to avoid spam
 
                     # Sleep until next check
                     time.sleep(interval)
