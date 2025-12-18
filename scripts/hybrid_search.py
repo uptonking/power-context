@@ -375,13 +375,18 @@ SYMBOL_EQUALITY_BOOST = _safe_float(
 VENDOR_PENALTY = _safe_float(os.environ.get("HYBRID_VENDOR_PENALTY", "0.05"), 0.05)
 LANG_MATCH_BOOST = _safe_float(os.environ.get("HYBRID_LANG_MATCH_BOOST", "0.05"), 0.05)
 CLUSTER_LINES = _safe_int(os.environ.get("HYBRID_CLUSTER_LINES", "15"), 15)
-# Penalize test files slightly to prefer implementation over tests
-TEST_FILE_PENALTY = _safe_float(os.environ.get("HYBRID_TEST_FILE_PENALTY", "0.15"), 0.15)
+# Penalize test files to prefer implementation over tests
+# Increased from 0.15 to 0.35 to ensure implementations rank above tests
+TEST_FILE_PENALTY = _safe_float(os.environ.get("HYBRID_TEST_FILE_PENALTY", "0.35"), 0.35)
 
 # Additional file-type weighting knobs (defaults tuned for Q&A use)
 CONFIG_FILE_PENALTY = _safe_float(os.environ.get("HYBRID_CONFIG_FILE_PENALTY", "0.3"), 0.3)
-IMPLEMENTATION_BOOST = _safe_float(os.environ.get("HYBRID_IMPLEMENTATION_BOOST", "0.2"), 0.2)
-DOCUMENTATION_PENALTY = _safe_float(os.environ.get("HYBRID_DOCUMENTATION_PENALTY", "0.1"), 0.1)
+# Boost implementation files to ensure code ranks above docs/tests
+# Increased from 0.2 to 0.3 for stronger implementation preference
+IMPLEMENTATION_BOOST = _safe_float(os.environ.get("HYBRID_IMPLEMENTATION_BOOST", "0.3"), 0.3)
+# Penalize documentation files to prefer code over docs
+# Increased from 0.1 to 0.25 to ensure code ranks above documentation
+DOCUMENTATION_PENALTY = _safe_float(os.environ.get("HYBRID_DOCUMENTATION_PENALTY", "0.25"), 0.25)
 
 # Modest boost for matches against pseudo/tags produced at index time.
 # Default 0.0 = disabled; set HYBRID_PSEUDO_BOOST>0 to experiment.

@@ -237,21 +237,37 @@ RERANK_EVENTS_ENABLED=0
 
 ### Filename Boost
 
-The search engine can boost files whose names match query terms—helpful when searching for a specific file like "hybrid_search" or "database_config".
+The search engine can boost files whose paths match query terms—production-grade algorithm for real-world codebases.
 
 | Name | Description | Default |
 |------|-------------|---------|
-| FNAME_BOOST | Per-token score boost when filename tokens match query tokens | 0.15 |
+| FNAME_BOOST | Base score boost factor for path/query token matches | 0.15 |
 
-**How it works:**
-- Extracts keywords from the query (≥3 chars, alphanumeric)
-- Tokenizes the filename and checks for matching tokens
-- Requires at least 2 matching tokens to apply the boost
-- Adds `FNAME_BOOST × matching_token_count` to the score
+**Naming convention support:**
+- snake_case, camelCase, PascalCase, kebab-case, SCREAMING_CASE
+- Acronyms: `XMLParser` → xml, parser; `HTTPClient` → http, client
+- Prefixes stripped: `IUserService` → user, service; `_private` → private
+- Dot notation: `com.company.auth` → com, company, auth
 
-**Example:** Query "hybrid search implementation" matching `hybrid_search.py` (2 tokens match: "hybrid", "search") adds 0.30 to the score.
+**Abbreviation normalization:**
+- auth ↔ authenticate/authentication
+- config ↔ configuration/cfg/conf
+- repo ↔ repository, util ↔ utility, impl ↔ implementation, etc.
 
-Set `FNAME_BOOST=0` to disable, or increase (e.g., `0.25`) to weight filename matches more heavily.
+**Scoring tiers:**
+- Exact token match: 1.0 × factor
+- Normalized match (abbreviation/plural): 0.8 × factor
+- Substring containment: 0.4 × factor
+- Filename bonus: 1.5× multiplier for filename vs directory matches
+- Common token penalty: 0.5× for tokens like "utils", "index", "main"
+
+**Example:** Query "authenticate user handler" matching `auth/UserAuthHandler.ts`:
+- "user" exact match in filename (1.0 × 1.5 = 1.5)
+- "authenticate" → "auth" normalized (0.8 × 1.5 = 1.2)
+- "handler" exact match in filename (1.0 × 1.5 = 1.5)
+- Total: 4.2 × 0.15 = 0.63 boost
+
+Set `FNAME_BOOST=0` to disable, or increase (e.g., `0.25`) for stronger path weighting.
 
 ## Memory Blending
 
