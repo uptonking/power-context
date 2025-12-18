@@ -3646,6 +3646,32 @@ def main():
                 rec["rec"] += rec_comp
                 rec["s"] += rec_comp
 
+    # === Filename-query correlation boost (CLI path) ===
+    cli_query_tokens_lower = set(q.lower() for q in queries if q and len(q) >= 3)
+    _cli_fname_cache: Dict[str, float] = {}
+    for rec in score_map.values():
+        md = (rec["pt"].payload or {}).get("metadata") or {}
+        path = str(md.get("path") or "")
+        if not path:
+            continue
+        if path in _cli_fname_cache:
+            boost = _cli_fname_cache[path]
+        else:
+            path_lower = path.lower()
+            filename = path_lower.rsplit("/", 1)[-1] if "/" in path_lower else path_lower
+            filename_base = re.sub(r'\.[^.]+$', '', filename)
+            filename_tokens = set(re.split(r'[_\-.]', filename_base))
+            filename_tokens.discard('')
+            match_count = len(cli_query_tokens_lower & filename_tokens)
+            if match_count >= 2:
+                boost = 0.8 * match_count
+            else:
+                boost = 0.0
+            _cli_fname_cache[path] = boost
+        if boost > 0:
+            rec["fname_corr"] = float(rec.get("fname_corr", 0.0)) + boost
+            rec["s"] += boost
+
     # === Large codebase score normalization (CLI path) ===
     _normalize_scores(score_map, _cli_coll_size)
 

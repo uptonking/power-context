@@ -945,7 +945,13 @@ def _get_learning_reranker(
     """Get or create a learning reranker for a specific collection."""
     with _LEARNING_RERANKERS_LOCK:
         if collection not in _LEARNING_RERANKERS:
-            reranker = RecursiveReranker(n_iterations=n_iterations, dim=dim)
+            # Increase blend_with_initial to 0.45 to preserve more hybrid search signals
+            # (symbol matching, filename correlation, lexical scoring, etc.)
+            reranker = RecursiveReranker(
+                n_iterations=n_iterations,
+                dim=dim,
+                blend_with_initial=0.45,  # Up from 0.3 - gives more weight to hybrid search
+            )
             # Set collection-specific weights path for the scorer
             reranker.scorer.set_collection(collection)
             _LEARNING_RERANKERS[collection] = reranker
@@ -1196,8 +1202,27 @@ class ONNXRecursiveReranker(RecursiveReranker):
             # Fall back to parent implementation
             return super().rerank(query, candidates, initial_scores)
 
-        # Initialize with ONNX scores
-        scores = onnx_scores.copy()
+        # Blend ONNX scores with initial hybrid search scores
+        # This preserves important signals like filename correlation, symbol matching, etc.
+        # ONNX weight: 0.6, Initial scores weight: 0.4 (tuned for balance)
+        if initial_scores is not None:
+            initial_arr = np.array(initial_scores, dtype=np.float32)
+            # Normalize both score sets to [0, 1] range for fair blending
+            onnx_min, onnx_max = onnx_scores.min(), onnx_scores.max()
+            init_min, init_max = initial_arr.min(), initial_arr.max()
+            if onnx_max > onnx_min:
+                onnx_norm = (onnx_scores - onnx_min) / (onnx_max - onnx_min)
+            else:
+                onnx_norm = np.ones_like(onnx_scores) * 0.5
+            if init_max > init_min:
+                init_norm = (initial_arr - init_min) / (init_max - init_min)
+            else:
+                init_norm = np.ones_like(initial_arr) * 0.5
+            # Blend normalized scores, then rescale to ONNX range for consistency
+            blended = 0.6 * onnx_norm + 0.4 * init_norm
+            scores = blended * (onnx_max - onnx_min) + onnx_min
+        else:
+            scores = onnx_scores.copy()
 
         # Encode for latent refinement
         query_emb = self._encode([query])[0]
