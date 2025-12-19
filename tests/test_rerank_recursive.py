@@ -89,24 +89,24 @@ class TestLatentRefiner:
 
 class TestConfidenceEstimator:
     """Tests for early stopping logic."""
-    
+
     def test_no_stop_on_first_iteration(self):
         """Should not stop on first iteration."""
         estimator = ConfidenceEstimator()
-        
+
         state = RefinementState(
             z=np.zeros(64),
             scores=np.array([0.5, 0.3, 0.1]),
             iteration=0
         )
         state.score_history = [state.scores]
-        
+
         assert not estimator.should_stop(state)
-    
+
     def test_stop_on_convergence(self):
         """Should stop when top-k rankings stabilize."""
         estimator = ConfidenceEstimator()
-        
+
         state = RefinementState(
             z=np.zeros(64),
             scores=np.array([0.5, 0.3, 0.1]),
@@ -117,8 +117,81 @@ class TestConfidenceEstimator:
             np.array([0.5, 0.3, 0.1]),
             np.array([0.5, 0.3, 0.1])
         ]
-        
+
         assert estimator.should_stop(state)
+
+    def test_single_candidate(self):
+        """Should handle single candidate without crashing."""
+        estimator = ConfidenceEstimator()
+
+        state = RefinementState(
+            z=np.zeros(64),
+            scores=np.array([0.5]),
+            iteration=2
+        )
+        state.score_history = [
+            np.array([0.4]),
+            np.array([0.5])
+        ]
+
+        # Should not crash and should stop (single element = stable ranking)
+        result = estimator.should_stop(state)
+        assert isinstance(result, bool)
+
+    def test_flipping_order_resets_patience(self):
+        """Flipping ranking order should reset stability count."""
+        estimator = ConfidenceEstimator(patience=2)
+
+        state = RefinementState(
+            z=np.zeros(64),
+            scores=np.array([0.3, 0.5, 0.1]),  # Order: 1, 0, 2
+            iteration=1
+        )
+        state.score_history = [
+            np.array([0.5, 0.3, 0.1]),  # Order: 0, 1, 2
+            np.array([0.3, 0.5, 0.1])   # Order: 1, 0, 2 (flipped!)
+        ]
+
+        # Flipped order = not stable, should not stop
+        assert not estimator.should_stop(state)
+        assert estimator._stable_count == 0
+
+    def test_patience_respected(self):
+        """Should require patience consecutive stable iterations to stop."""
+        estimator = ConfidenceEstimator(patience=3)
+
+        state = RefinementState(
+            z=np.zeros(64),
+            scores=np.array([0.5, 0.3, 0.1]),
+            iteration=1
+        )
+
+        # First stable iteration
+        state.score_history = [
+            np.array([0.5, 0.3, 0.1]),
+            np.array([0.5, 0.3, 0.1])
+        ]
+        assert not estimator.should_stop(state)
+        assert estimator._stable_count == 1
+
+        # Second stable iteration
+        state.score_history.append(np.array([0.5, 0.3, 0.1]))
+        assert not estimator.should_stop(state)
+        assert estimator._stable_count == 2
+
+        # Third stable iteration - now should stop
+        state.score_history.append(np.array([0.5, 0.3, 0.1]))
+        assert estimator.should_stop(state)
+        assert estimator._stable_count == 3
+
+    def test_reset_clears_state(self):
+        """Reset should clear stability count."""
+        estimator = ConfidenceEstimator(patience=2)
+        estimator._stable_count = 5
+
+        estimator.reset()
+
+        assert estimator._stable_count == 0
 
 
 class TestRecursiveReranker:

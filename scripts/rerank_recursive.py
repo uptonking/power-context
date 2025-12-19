@@ -28,55 +28,6 @@ import numpy as np
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass, field
 
-
-# Common abbreviation mappings for normalization
-_ABBREV_MAP = {
-    # Auth
-    "auth": "authenticate", "authenticate": "auth", "authentication": "auth",
-    "authn": "auth", "authz": "authorize",
-    # Config
-    "cfg": "config", "conf": "config", "config": "configuration", "configuration": "config",
-    # Common
-    "util": "utility", "utility": "util", "utils": "util",
-    "repo": "repository", "repository": "repo",
-    "impl": "implementation", "implementation": "impl",
-    "mgr": "manager", "manager": "mgr",
-    "svc": "service", "service": "svc",
-    "ctrl": "controller", "controller": "ctrl",
-    "conn": "connection", "connection": "conn",
-    "db": "database", "database": "db",
-    "msg": "message", "message": "msg",
-    "req": "request", "request": "req",
-    "res": "response", "resp": "response", "response": "resp",
-    "err": "error", "error": "err",
-    "val": "value", "value": "val",
-    "param": "parameter", "parameter": "param",
-    "arg": "argument", "argument": "arg",
-    "fn": "function", "func": "function", "function": "func",
-    "proc": "process", "process": "proc",
-    "exec": "execute", "execute": "exec",
-    "init": "initialize", "initialize": "init",
-    "del": "delete", "delete": "del",
-    "gen": "generate", "generate": "gen",
-    "idx": "index", "index": "idx",
-    "len": "length", "length": "len",
-    "num": "number", "number": "num",
-    "str": "string", "string": "str",
-    "obj": "object", "object": "obj",
-    "arr": "array", "array": "arr",
-    "dict": "dictionary", "dictionary": "dict",
-    "src": "source", "source": "src",
-    "dst": "destination", "dest": "destination", "destination": "dest",
-    "dir": "directory", "directory": "dir",
-    "doc": "document", "document": "doc", "docs": "document",
-    "spec": "specification", "specification": "spec",
-    "env": "environment", "environment": "env",
-    "var": "variable", "variable": "var",
-    "tmp": "temporary", "temp": "temporary", "temporary": "temp",
-    "async": "asynchronous", "asynchronous": "async",
-    "sync": "synchronous", "synchronous": "sync",
-}
-
 # Very common tokens that appear everywhere - reduce their weight
 _COMMON_TOKENS = frozenset({
     "index", "main", "app", "utils", "util", "helper", "helpers", "common",
@@ -139,11 +90,8 @@ def _split_identifier(s: str) -> List[str]:
 
 
 def _normalize_token(tok: str) -> set[str]:
-    """Return the token plus its normalized forms (abbreviations, stems)."""
+    """Return the token plus simple morphological variants."""
     forms = {tok}
-    # Add abbreviation mappings
-    if tok in _ABBREV_MAP:
-        forms.add(_ABBREV_MAP[tok])
     # Simple plural/singular normalization
     if tok.endswith('s') and len(tok) > 3:
         forms.add(tok[:-1])  # services -> service
@@ -218,10 +166,8 @@ def _compute_fname_boost(query: Any, candidate: Dict[str, Any], factor: float) -
     - Prefixes stripped: IService -> service, _private -> private
     - Numbers separated: handler2 -> handler, React18 -> react
 
-    **Abbreviation normalization:**
-    - auth <-> authenticate/authentication
-    - config <-> configuration, cfg, conf
-    - repo <-> repository, util <-> utility, etc.
+    **Normalization:**
+    - Simple plural/singular normalization (services <-> service)
 
     **Position-aware scoring:**
     - Filename matches weighted higher than directory matches
@@ -233,7 +179,7 @@ def _compute_fname_boost(query: Any, candidate: Dict[str, Any], factor: float) -
 
     **Scoring tiers:**
     - Exact match: 1.0 × factor
-    - Normalized match (abbreviation): 0.8 × factor
+    - Normalized match (morphology): 0.8 × factor
     - Substring containment: 0.4 × factor
     - Common token penalty: 0.5× multiplier
     - Filename bonus: 1.5× multiplier for filename matches
@@ -307,33 +253,28 @@ def _compute_fname_boost(query: Any, candidate: Dict[str, Any], factor: float) -
         qtok_forms = _normalize_token(qtok)
         match_score = 0.0
         matched_ptok = None
-        match_type = None
 
         # Tier 1: Exact match
         if qtok in path_tokens:
             match_score = 1.0
             matched_ptok = qtok
-            match_type = "exact"
         else:
-            # Tier 2: Normalized match (abbreviation/plural)
+            # Tier 2: Normalized match (plural/singular)
             for qform in qtok_forms:
                 if qform in path_normalized:
                     match_score = 0.8
                     matched_ptok = path_normalized[qform]
-                    match_type = "normalized"
                     break
 
             # Tier 3: Substring containment (if no normalized match)
             if match_score == 0.0:
                 for ptok in path_tokens:
-                    if len(qtok) >= 4 and len(ptok) >= 4:  # Require 4+ chars for substring
+                    if len(qtok) >= 4 and len(ptok) >= 4:
                         if qtok in ptok or ptok in qtok:
-                            # Prefer longer overlap
                             overlap = min(len(qtok), len(ptok))
                             if overlap >= 4:
                                 match_score = 0.4
                                 matched_ptok = ptok
-                                match_type = "substring"
                                 break
 
         if match_score > 0 and matched_ptok:
@@ -459,8 +400,9 @@ class TinyScorer:
             try:
                 self._load_weights()
                 return
-            except Exception:
-                pass
+            except Exception as e:
+                from scripts.logger import get_logger
+                get_logger(__name__).warning(f"TinyScorer: failed to load {self._weights_path}: {e}, using random init")
 
         self._init_random_weights()
 
@@ -783,31 +725,51 @@ class TinyScorer:
 
     def _load_weights(self):
         """Load weights from disk with dimension validation."""
+        from scripts.logger import get_logger
+        logger = get_logger(__name__)
+
         data = np.load(self._weights_path, allow_pickle=True)
 
         # Helper to safely get from NpzFile (doesn't have .get())
         def _get(key: str, default):
             return data[key] if key in data.files else default
 
-        # Validate dimensions before loading to prevent shape mismatch crashes
-        # W1 shape should be (dim * 3, hidden_dim), W2 shape should be (hidden_dim, 1)
+        # Validate all dimensions before loading to prevent shape mismatch crashes
         w1_loaded = data["W1"]
         w2_loaded = data["W2"]
-        expected_w1_shape = (self.dim * 3, self.hidden_dim)
-        expected_w2_shape = (self.hidden_dim, 1)
+        b1_loaded = data["b1"]
+        b2_loaded = data["b2"]
 
-        if w1_loaded.shape != expected_w1_shape or w2_loaded.shape != expected_w2_shape:
-            # Dimension mismatch: stale weights from different configuration
-            # Fall back to random initialization
+        expected_w1 = (self.dim * 3, self.hidden_dim)
+        expected_w2 = (self.hidden_dim, 1)
+        expected_b1 = (self.hidden_dim,)
+        expected_b2 = (1,)
+
+        shape_ok = (
+            w1_loaded.shape == expected_w1 and
+            w2_loaded.shape == expected_w2 and
+            b1_loaded.shape == expected_b1 and
+            b2_loaded.shape == expected_b2
+        )
+
+        if not shape_ok:
+            logger.warning(
+                f"TinyScorer: shape mismatch in {self._weights_path}, "
+                f"W1={w1_loaded.shape} (expected {expected_w1}), "
+                f"W2={w2_loaded.shape} (expected {expected_w2}), "
+                f"b1={b1_loaded.shape} (expected {expected_b1}), "
+                f"b2={b2_loaded.shape} (expected {expected_b2}). "
+                f"Falling back to random init."
+            )
             data.close()
             self._init_random_weights()
             return
 
-        # Cast to float32 to keep inference dtype stable even if older checkpoints were float64
+        # Cast to float32 to keep inference dtype stable
         self.W1 = w1_loaded.astype(np.float32, copy=False)
-        self.b1 = data["b1"].astype(np.float32, copy=False)
+        self.b1 = b1_loaded.astype(np.float32, copy=False)
         self.W2 = w2_loaded.astype(np.float32, copy=False)
-        self.b2 = data["b2"].astype(np.float32, copy=False)
+        self.b2 = b2_loaded.astype(np.float32, copy=False)
         self._update_count = int(_get("update_count", 0))
         self._total_samples = int(_get("total_samples", 0))
         self._cumulative_loss = float(_get("cumulative_loss", 0.0))
@@ -853,19 +815,167 @@ class LatentRefiner:
     From TRM paper: z encodes "what we've learned about the query so far"
     and gets updated based on the current answer (scores).
 
-    Note: This is currently untrained (random weights). Improvements rely
-    on TinyScorer learning. Future work: save/load refiner weights.
+    Supports:
+    - Per-collection weight persistence (like TinyScorer)
+    - Hot-reload from background worker updates
+    - Online learning via learn_from_teacher()
     """
 
-    def __init__(self, dim: int = 256, hidden_dim: int = 256):
+    # Class-level configuration (mirrors TinyScorer)
+    WEIGHTS_DIR = os.environ.get("RERANKER_WEIGHTS_DIR", "/tmp/rerank_weights")
+    WEIGHTS_RELOAD_INTERVAL = float(os.environ.get("RERANKER_WEIGHTS_RELOAD_INTERVAL", "60"))
+
+    def __init__(self, dim: int = 256, hidden_dim: int = 256, lr: float = 0.001):
         self.dim = dim
-        # Use local RandomState to avoid polluting global RNG
+        self.hidden_dim = hidden_dim
+        self.base_lr = lr
+        self.lr = lr
+        self._collection = "default"
+        self._weights_path = self._get_weights_path("default")
+        self._weights_mtime = 0.0
+        self._last_reload_check = 0.0
+        self._weights_loaded = False
+
+        # Training metrics
+        self._update_count = 0
+        self._version = 0
+
+        # Momentum for SGD
+        self._momentum_W1: Optional[np.ndarray] = None
+        self._momentum_b1: Optional[np.ndarray] = None
+        self._momentum_W2: Optional[np.ndarray] = None
+        self._momentum_b2: Optional[np.ndarray] = None
+
+        # Try to load saved weights, otherwise init random
+        if os.path.exists(self._weights_path):
+            try:
+                self._load_weights()
+                return
+            except Exception as e:
+                from scripts.logger import get_logger
+                get_logger(__name__).warning(f"LatentRefiner: failed to load {self._weights_path}: {e}, using random init")
+
+        self._init_random_weights()
+
+    @staticmethod
+    def _sanitize_collection(collection: str) -> str:
+        """Sanitize collection name to prevent path traversal."""
+        return "".join(c if c.isalnum() or c in "-_" else "_" for c in collection)
+
+    def _get_weights_path(self, collection: str) -> str:
+        """Get weights file path for a collection."""
+        safe_name = self._sanitize_collection(collection)
+        return os.path.join(self.WEIGHTS_DIR, f"refiner_{safe_name}.npz")
+
+    def set_collection(self, collection: str):
+        """Set collection and load corresponding weights."""
+        self._collection = collection
+        self._weights_path = self._get_weights_path(collection)
+        if os.path.exists(self._weights_path):
+            try:
+                self._load_weights()
+            except Exception:
+                pass
+
+    def maybe_reload_weights(self):
+        """Check if weights file changed and reload if needed (hot reload)."""
+        now = time.time()
+        if now - self._last_reload_check < self.WEIGHTS_RELOAD_INTERVAL:
+            return
+        self._last_reload_check = now
+
+        try:
+            if os.path.exists(self._weights_path):
+                mtime = os.path.getmtime(self._weights_path)
+                if mtime > self._weights_mtime:
+                    self._load_weights_safe()
+        except Exception:
+            pass
+
+    def _load_weights_safe(self):
+        """Load weights with advisory file locking (prevents partial reads during writes)."""
+        import fcntl
+        lock_path = self._weights_path + ".lock"
+        try:
+            os.makedirs(os.path.dirname(lock_path) or ".", exist_ok=True)
+            with open(lock_path, "w") as lock_file:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_SH)
+                try:
+                    self._load_weights()
+                finally:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        except Exception:
+            self._load_weights()
+
+    def _init_random_weights(self):
+        """Initialize with random weights using He initialization."""
         rng = np.random.RandomState(43)
-        # Refinement network: [z, query, top_doc_summary] -> z'
-        self.W1 = rng.randn(dim * 3, hidden_dim).astype(np.float32) * np.float32(0.01)
-        self.b1 = np.zeros(hidden_dim, dtype=np.float32)
-        self.W2 = rng.randn(hidden_dim, dim).astype(np.float32) * np.float32(0.01)
-        self.b2 = np.zeros(dim, dtype=np.float32)
+        scale = np.float32(np.sqrt(2.0 / (self.dim * 3)))
+        self.W1 = rng.randn(self.dim * 3, self.hidden_dim).astype(np.float32) * scale
+        self.b1 = np.zeros(self.hidden_dim, dtype=np.float32)
+        w2_scale = np.float32(np.sqrt(2.0 / self.hidden_dim))
+        self.W2 = rng.randn(self.hidden_dim, self.dim).astype(np.float32) * w2_scale
+        self.b2 = np.zeros(self.dim, dtype=np.float32)
+
+        # Initialize momentum
+        self._momentum_W1 = np.zeros_like(self.W1)
+        self._momentum_b1 = np.zeros_like(self.b1)
+        self._momentum_W2 = np.zeros_like(self.W2)
+        self._momentum_b2 = np.zeros_like(self.b2)
+
+    def _load_weights(self) -> bool:
+        """Load trained weights from disk. Returns True on success."""
+        from scripts.logger import get_logger
+        logger = get_logger(__name__)
+        try:
+            data = np.load(self._weights_path, allow_pickle=True)
+
+            # Helper to safely get from NpzFile
+            def _get(key: str, default):
+                return data[key] if key in data.files else default
+
+            # Validate shapes
+            w1 = _get("W1", None)
+            w2 = _get("W2", None)
+            b1 = _get("b1", None)
+            b2 = _get("b2", None)
+
+            if w1 is None or w2 is None:
+                data.close()
+                return False
+
+            expected_w1 = (self.dim * 3, self.hidden_dim)
+            expected_w2 = (self.hidden_dim, self.dim)
+
+            if w1.shape != expected_w1 or w2.shape != expected_w2:
+                logger.warning(f"LatentRefiner: shape mismatch W1={w1.shape} W2={w2.shape}")
+                data.close()
+                return False
+
+            self.W1 = w1.astype(np.float32, copy=False)
+            self.b1 = b1.astype(np.float32, copy=False) if b1 is not None else np.zeros(self.hidden_dim, dtype=np.float32)
+            self.W2 = w2.astype(np.float32, copy=False)
+            self.b2 = b2.astype(np.float32, copy=False) if b2 is not None else np.zeros(self.dim, dtype=np.float32)
+
+            # Load training state
+            self._update_count = int(_get("update_count", 0))
+            self._version = int(_get("version", 0))
+
+            # Initialize momentum if not loaded
+            if self._momentum_W1 is None or self._momentum_W1.shape != self.W1.shape:
+                self._momentum_W1 = np.zeros_like(self.W1)
+                self._momentum_b1 = np.zeros_like(self.b1)
+                self._momentum_W2 = np.zeros_like(self.W2)
+                self._momentum_b2 = np.zeros_like(self.b2)
+
+            self._weights_loaded = True
+            self._weights_mtime = os.path.getmtime(self._weights_path)
+            data.close()
+            logger.debug(f"LatentRefiner: loaded weights v{self._version} from {self._weights_path}")
+            return True
+        except Exception as e:
+            logger.warning(f"LatentRefiner: failed to load weights: {e}")
+            return False
 
     def refine(
         self,
@@ -899,6 +1009,128 @@ class LatentRefiner:
         z_refined = z_refined / (np.linalg.norm(z_refined) + 1e-8)
 
         return z_refined
+
+    def refine_with_cache(
+        self,
+        z: np.ndarray,
+        query_emb: np.ndarray,
+        doc_embs: np.ndarray,
+        scores: np.ndarray,
+        alpha: float = 0.5
+    ) -> tuple:
+        """Refine with cache for backprop. Returns (z_refined, cache)."""
+        weights = np.exp(scores - scores.max())
+        weights = weights / (weights.sum() + 1e-8)
+        doc_summary = (weights[:, None] * doc_embs).sum(axis=0)
+
+        x = np.concatenate([z, query_emb, doc_summary])
+        h = np.maximum(0, x @ self.W1 + self.b1)
+        z_new = h @ self.W2 + self.b2
+        z_refined = alpha * z_new + (1 - alpha) * z
+        z_refined = z_refined / (np.linalg.norm(z_refined) + 1e-8)
+
+        cache = {"x": x, "h": h, "z": z, "z_new": z_new, "alpha": alpha, "weights": weights}
+        return z_refined, cache
+
+    def learn_from_teacher(
+        self,
+        z: np.ndarray,
+        query_emb: np.ndarray,
+        doc_embs: np.ndarray,
+        scores: np.ndarray,
+        teacher_z: np.ndarray,
+    ) -> float:
+        """
+        Online learning: update weights so refined z moves toward teacher_z.
+
+        Uses MSE loss between our z_refined and teacher_z (normalized).
+
+        Returns:
+            Loss value
+        """
+        # Forward pass with cache
+        z_refined, cache = self.refine_with_cache(z, query_emb, doc_embs, scores)
+
+        # MSE loss: ||z_refined - teacher_z||^2
+        diff = z_refined - teacher_z
+        loss = float(np.sum(diff ** 2))
+
+        if loss < 1e-8:
+            return 0.0
+
+        # Backward pass (gradient of MSE)
+        dz_refined = 2.0 * diff  # (dim,)
+
+        # Through normalization (approx - assume near unit norm)
+        dz_new = cache["alpha"] * dz_refined
+
+        # Through W2, b2
+        dW2 = np.outer(cache["h"], dz_new)
+        db2 = dz_new
+
+        # Through ReLU and W1, b1
+        dh = dz_new @ self.W2.T
+        dh = dh * (cache["h"] > 0).astype(np.float32)
+        dW1 = np.outer(cache["x"], dh)
+        db1 = dh
+
+        # SGD with momentum
+        momentum = 0.9
+        if self._momentum_W1 is None:
+            self._momentum_W1 = np.zeros_like(self.W1)
+            self._momentum_b1 = np.zeros_like(self.b1)
+            self._momentum_W2 = np.zeros_like(self.W2)
+            self._momentum_b2 = np.zeros_like(self.b2)
+
+        self._momentum_W1 = momentum * self._momentum_W1 - self.lr * dW1
+        self._momentum_b1 = momentum * self._momentum_b1 - self.lr * db1
+        self._momentum_W2 = momentum * self._momentum_W2 - self.lr * dW2
+        self._momentum_b2 = momentum * self._momentum_b2 - self.lr * db2
+
+        self.W1 += self._momentum_W1
+        self.b1 += self._momentum_b1
+        self.W2 += self._momentum_W2
+        self.b2 += self._momentum_b2
+
+        self._update_count += 1
+        return loss
+
+    def _save_weights(self, checkpoint: bool = False):
+        """Save weights to disk atomically with file locking."""
+        import fcntl
+
+        os.makedirs(self.WEIGHTS_DIR, exist_ok=True)
+        self._version += 1
+
+        # Write to temp file first
+        tmp_path = self._weights_path + ".tmp"
+        lock_path = self._weights_path + ".lock"
+
+        try:
+            with open(lock_path, "w") as lock_file:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                try:
+                    np.savez(
+                        tmp_path,
+                        W1=self.W1,
+                        b1=self.b1,
+                        W2=self.W2,
+                        b2=self.b2,
+                        update_count=self._update_count,
+                        version=self._version,
+                        dim=self.dim,
+                        hidden_dim=self.hidden_dim,
+                    )
+                    os.replace(tmp_path, self._weights_path)
+                finally:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        except Exception:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+            raise
 
 
 class ConfidenceEstimator:
@@ -986,7 +1218,7 @@ class RecursiveReranker:
         # Initialize components
         self.scorer = TinyScorer(dim=dim, hidden_dim=hidden_dim)
         self.refiner = LatentRefiner(dim=dim)
-        self.confidence = ConfidenceEstimator()
+        # Note: ConfidenceEstimator created per-rerank call for thread safety
 
         # Try to use ONNX embedder for document encoding
         self._embedder = None
@@ -1011,8 +1243,6 @@ class RecursiveReranker:
                 self._embedder = get_embedding_model(model_name)
             except Exception:
                 self._embedder = None
-            self._stable_count = 0
-            self._previous_scores = None  # Store previous scores for comparison
             return self._embedder
 
     def _encode(self, texts: List[str]) -> np.ndarray:
@@ -1043,6 +1273,9 @@ class RecursiveReranker:
                         raise ValueError(f"Embedder returned {len(embeddings)} embeddings for {len(texts_to_encode)} texts")
                     for text, emb in zip(texts_to_encode, embeddings):
                         emb_arr = np.array(emb, dtype=np.float32)
+                        # Project to target dim before caching for consistency
+                        if emb_arr.shape[0] != self.dim:
+                            emb_arr = self._project_to_dim(emb_arr.reshape(1, -1))[0]
                         _cache_embedding(text, emb_arr)
                         new_embeddings.append(emb_arr)
                 except Exception:
@@ -1116,8 +1349,8 @@ class RecursiveReranker:
         if not candidates:
             return []
 
-        # Reset confidence estimator state for new query
-        self.confidence.reset()
+        # Create per-call confidence estimator for thread safety
+        confidence = ConfidenceEstimator()
 
         n_docs = len(candidates)
 
@@ -1173,22 +1406,24 @@ class RecursiveReranker:
             )
 
             # Check for early stopping
-            if self.early_stop and self.confidence.should_stop(state):
+            if self.early_stop and confidence.should_stop(state):
                 break
 
         # Blend with initial scores if provided
         final_scores = state.scores
         if initial_scores is not None and self.blend_with_initial > 0:
             init_arr = np.array(initial_scores, dtype=np.float32)
-            # Normalize both to similar scale
-            if final_scores.std() > 0:
-                final_norm = (final_scores - final_scores.mean()) / final_scores.std()
+            # Normalize both to similar scale (clamp std for numerical stability)
+            std = final_scores.std()
+            if std > 1e-6:
+                final_norm = (final_scores - final_scores.mean()) / std
             else:
-                final_norm = final_scores
-            if init_arr.std() > 0:
-                init_norm = (init_arr - init_arr.mean()) / init_arr.std()
+                final_norm = final_scores - final_scores.mean()
+            std = init_arr.std()
+            if std > 1e-6:
+                init_norm = (init_arr - init_arr.mean()) / std
             else:
-                init_norm = init_arr
+                init_norm = init_arr - init_arr.mean()
 
             final_scores = (1 - self.blend_with_initial) * final_norm + self.blend_with_initial * init_norm
 
@@ -1518,11 +1753,8 @@ class ONNXRecursiveReranker(RecursiveReranker):
         if not candidates:
             return []
 
-        # Reset confidence estimator state for new query
-        try:
-            self.confidence.reset()
-        except Exception:
-            pass
+        # Create per-call confidence estimator for thread safety
+        confidence = ConfidenceEstimator()
 
         # Build document texts
         doc_texts = []
@@ -1577,21 +1809,24 @@ class ONNXRecursiveReranker(RecursiveReranker):
             state.scores = (1 - alpha) * state.scores + alpha * adjustment
             state.score_history.append(state.scores.copy())
 
-            if self.early_stop and self.confidence.should_stop(state):
+            if self.early_stop and confidence.should_stop(state):
                 break
 
         # Build results
         final_scores = state.scores
         if initial_scores is not None and self.blend_with_initial > 0:
             init_arr = np.array(initial_scores, dtype=np.float32)
-            if final_scores.std() > 0:
-                final_norm = (final_scores - final_scores.mean()) / final_scores.std()
+            # Clamp std for numerical stability
+            std = final_scores.std()
+            if std > 1e-6:
+                final_norm = (final_scores - final_scores.mean()) / std
             else:
-                final_norm = final_scores
-            if init_arr.std() > 0:
-                init_norm = (init_arr - init_arr.mean()) / init_arr.std()
+                final_norm = final_scores - final_scores.mean()
+            std = init_arr.std()
+            if std > 1e-6:
+                init_norm = (init_arr - init_arr.mean()) / std
             else:
-                init_norm = init_arr
+                init_norm = init_arr - init_arr.mean()
             final_scores = (1 - self.blend_with_initial) * final_norm + self.blend_with_initial * init_norm
 
         ranked_indices = np.argsort(-final_scores)
@@ -1806,14 +2041,17 @@ class SessionAwareReranker:
         final_scores = state.scores
         if self.reranker.blend_with_initial > 0:
             init_arr = np.array(initial_scores, dtype=np.float32)
-            if final_scores.std() > 0:
-                final_norm = (final_scores - final_scores.mean()) / final_scores.std()
+            # Clamp std for numerical stability
+            std = final_scores.std()
+            if std > 1e-6:
+                final_norm = (final_scores - final_scores.mean()) / std
             else:
-                final_norm = final_scores
-            if init_arr.std() > 0:
-                init_norm = (init_arr - init_arr.mean()) / init_arr.std()
+                final_norm = final_scores - final_scores.mean()
+            std = init_arr.std()
+            if std > 1e-6:
+                init_norm = (init_arr - init_arr.mean()) / std
             else:
-                init_norm = init_arr
+                init_norm = init_arr - init_arr.mean()
             final_scores = (1 - self.reranker.blend_with_initial) * final_norm + self.reranker.blend_with_initial * init_norm
 
         ranked_indices = np.argsort(-final_scores)

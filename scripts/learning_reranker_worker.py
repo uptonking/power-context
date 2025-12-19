@@ -45,7 +45,7 @@ from scripts.rerank_events import (
     list_event_files,
     cleanup_old_events,
 )
-from scripts.rerank_recursive import TinyScorer, RecursiveReranker
+from scripts.rerank_recursive import TinyScorer, LatentRefiner, RecursiveReranker
 
 # Configuration
 BATCH_SIZE = int(os.environ.get("RERANK_LEARNING_BATCH_SIZE", "32"))
@@ -74,6 +74,8 @@ class CollectionLearner:
         self.collection = collection
         self.scorer = TinyScorer(lr=LEARNING_RATE)
         self.scorer.set_collection(collection)
+        self.refiner = LatentRefiner(dim=self.scorer.dim, lr=LEARNING_RATE)
+        self.refiner.set_collection(collection)
         self._last_processed_ts = self._load_checkpoint()
         # Reuse the serving reranker's embed + project code path 1:1.
         # We only use its private feature helpers, not its scoring loop.

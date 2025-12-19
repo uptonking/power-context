@@ -3,7 +3,6 @@
 The algorithm handles:
 - All naming conventions (snake_case, camelCase, PascalCase, kebab-case)
 - Acronyms (XMLParser -> xml, parser)
-- Abbreviation normalization (auth <-> authenticate)
 - Position weighting (filename > directory)
 - Common token penalties
 """
@@ -66,16 +65,12 @@ class TestSplitIdentifier:
 
 
 class TestNormalizeToken:
-    """Test abbreviation and plural normalization."""
+    """Test plural normalization."""
 
-    def test_auth_expands(self):
+    def test_no_abbrev_expansion(self):
         forms = _normalize_token("auth")
-        assert "authenticate" in forms
         assert "auth" in forms
-
-    def test_config_expands(self):
-        forms = _normalize_token("config")
-        assert "configuration" in forms
+        assert "authenticate" not in forms
 
     def test_plural_normalized(self):
         forms = _normalize_token("services")
@@ -143,15 +138,15 @@ class TestComputeFnameBoost:
         result = _compute_fname_boost(q, cand, 0.15)
         assert result > 0.4  # 2 exact matches
 
-    def test_abbreviation_normalization_auth(self):
-        """'authenticate' should match 'auth' in path."""
+    def test_substring_matching_authenticate_auth(self):
+        """'authenticate' contains 'auth', so substring tier can still match it."""
         q = "authenticate user"
         cand = {"path": "auth/UserAuth.py"}
         result = _compute_fname_boost(q, cand, 0.15)
-        assert result > 0.3  # normalized + exact match
+        assert result > 0.3
 
-    def test_abbreviation_normalization_config(self):
-        """'configuration' should match 'config' in path."""
+    def test_substring_matching_configuration_config(self):
+        """'configuration' contains 'config', so substring tier can still match it."""
         q = "configuration manager"
         cand = {"path": "config/ConfigManager.ts"}
         result = _compute_fname_boost(q, cand, 0.15)
