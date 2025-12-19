@@ -216,6 +216,9 @@ reset-dev-dual: ## bring up BOTH legacy SSE and Streamable HTTP MCPs (dual-compa
 	docker compose up -d watcher
 	docker compose ps
 
+dev-core: ## core dev stack including uploader (alias for reset-dev-dual)
+	$(MAKE) reset-dev-dual
+
 # --- llama.cpp tiny model provisioning ---
 LLAMACPP_MODEL_URL ?= https://huggingface.co/ibm-granite/granite-4.0-micro-GGUF/resolve/main/granite-4.0-micro-Q4_K_M.gguf
 LLAMACPP_MODEL_PATH ?= models/model.gguf

@@ -9008,6 +9008,33 @@ async def info_request(
 _relax_var_kwarg_defaults()
 
 if __name__ == "__main__":
+    # Configure log level from environment
+    import logging as _logging
+    _log_level_str = os.environ.get("LOG_LEVEL", "INFO").upper()
+    _log_level = getattr(_logging, _log_level_str, _logging.INFO)
+    _logging.getLogger().setLevel(_log_level)
+    
+    # Startup logging with configuration info
+    logger.info("=" * 60)
+    logger.info("MCP Indexer Server starting...")
+    logger.info("=" * 60)
+    logger.info(f"  Host: {HOST}")
+    logger.info(f"  Port: {PORT}")
+    logger.info(f"  Log Level: {_log_level_str}")
+    logger.info(f"  Qdrant URL: {os.environ.get('QDRANT_URL', 'not set')}")
+    logger.info(f"  Collection: {os.environ.get('COLLECTION_NAME', 'codebase')}")
+    logger.info(f"  Transport: {os.environ.get('FASTMCP_TRANSPORT', 'sse')}")
+    logger.info(f"  Embedding Model: {os.environ.get('EMBEDDING_MODEL', 'BAAI/bge-base-en-v1.5')}")
+    logger.info(f"  Embedding Provider: {os.environ.get('EMBEDDING_PROVIDER', 'fastembed')}")
+    logger.info(f"  ReFRAG Decoder: {os.environ.get('REFRAG_DECODER', '1')}")
+    logger.info(f"  Rerank Learning: {os.environ.get('RERANK_LEARNING', '1')}")
+    logger.info(f"  Semantic Chunks: {os.environ.get('INDEX_SEMANTIC_CHUNKS', '1')}")
+    logger.info(f"  Micro Chunks: {os.environ.get('INDEX_MICRO_CHUNKS', '1')}")
+    logger.info(f"  Micro Chunk Tokens: {os.environ.get('MICRO_CHUNK_TOKENS', '128')}")
+    logger.info(f"  Micro Chunk Stride: {os.environ.get('MICRO_CHUNK_STRIDE', '64')}")
+    logger.info(f"  Max Micro Chunks/File: {os.environ.get('MAX_MICRO_CHUNKS_PER_FILE', '200')}")
+    logger.info("=" * 60)
+
     # Optional warmups: gated by env flags to avoid delaying readiness on fresh containers
     try:
         if str(os.environ.get("EMBEDDING_WARMUP", "")).strip().lower() in {

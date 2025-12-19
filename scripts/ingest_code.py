@@ -2856,35 +2856,36 @@ def index_single_file(
         "on",
     }
     if use_micro:
-        chunks = chunk_by_tokens(text)
+        # Dynamic chunk sizing: adjust tokens/stride to fit within MAX_MICRO_CHUNKS_PER_FILE
+        # Never truncate - instead increase chunk size to cover entire file
         try:
-            _cap = int(os.environ.get("MAX_MICRO_CHUNKS_PER_FILE", "500") or 500)
+            _cap = int(os.environ.get("MAX_MICRO_CHUNKS_PER_FILE", "200") or 200)
+            _base_tokens = int(os.environ.get("MICRO_CHUNK_TOKENS", "128") or 128)
+            _base_stride = int(os.environ.get("MICRO_CHUNK_STRIDE", "64") or 64)
+            
+            # First pass with base settings
+            chunks = chunk_by_tokens(text, k_tokens=_base_tokens, stride_tokens=_base_stride)
+            
+            # If exceeds cap, recalculate chunk size to fit
             if _cap > 0 and len(chunks) > _cap:
                 _before = len(chunks)
-                # Priority: keep ALL_CAPS assignments near top so constants survive capping
-                try:
-                    import re as _re
-                    if os.environ.get("INGEST_CONSTANT_PRIORITY", "1").lower() not in {"0", "false", "off", "no"}:
-                        _pat = _re.compile(r"\b[A-Z_]{2,}\s*=\s*")
-                        _important = []
-                        _rest = []
-                        for c in chunks:
-                            txt = c.get("text", "")
-                            (_important if _pat.search(txt) else _rest).append(c)
-                        # Preserve relative order within groups
-                        chunks = (_important + _rest)[:_cap]
-                    else:
-                        chunks = chunks[:_cap]
-                except Exception:
-                    chunks = chunks[:_cap]
+                # Estimate total tokens and calculate required chunk size
+                # Scale up tokens proportionally to fit within cap
+                _scale = (len(chunks) / _cap) * 1.1  # 10% buffer
+                _new_tokens = max(_base_tokens, int(_base_tokens * _scale))
+                _new_stride = max(_base_stride, int(_base_stride * _scale))
+                
+                # Re-chunk with larger window
+                chunks = chunk_by_tokens(text, k_tokens=_new_tokens, stride_tokens=_new_stride)
                 try:
                     print(
-                        f"[ingest] micro-chunks capped path={file_path} count={_before}->{len(chunks)} cap={_cap}"
+                        f"[ingest] micro-chunks resized path={file_path} count={_before}->{len(chunks)} "
+                        f"tokens={_base_tokens}->{_new_tokens} stride={_base_stride}->{_new_stride}"
                     )
                 except Exception:
                     pass
         except Exception:
-            pass
+            chunks = chunk_by_tokens(text)
     elif use_semantic:
         chunks = chunk_semantic(text, language, CHUNK_LINES, CHUNK_OVERLAP)
     else:
@@ -3556,34 +3557,35 @@ def index_repo(
             "on",
         }
         if use_micro:
-            chunks = chunk_by_tokens(text)
+            # Dynamic chunk sizing: adjust tokens/stride to fit within MAX_MICRO_CHUNKS_PER_FILE
+            # Never truncate - instead increase chunk size to cover entire file
             try:
-                _cap = int(os.environ.get("MAX_MICRO_CHUNKS_PER_FILE", "500") or 500)
+                _cap = int(os.environ.get("MAX_MICRO_CHUNKS_PER_FILE", "200") or 200)
+                _base_tokens = int(os.environ.get("MICRO_CHUNK_TOKENS", "128") or 128)
+                _base_stride = int(os.environ.get("MICRO_CHUNK_STRIDE", "64") or 64)
+                
+                # First pass with base settings
+                chunks = chunk_by_tokens(text, k_tokens=_base_tokens, stride_tokens=_base_stride)
+                
+                # If exceeds cap, recalculate chunk size to fit
                 if _cap > 0 and len(chunks) > _cap:
                     _before = len(chunks)
-                    # Priority: keep ALL_CAPS assignments near top so constants survive capping
-                    try:
-                        import re as _re
-                        if os.environ.get("INGEST_CONSTANT_PRIORITY", "1").lower() not in {"0", "false", "off", "no"}:
-                            _pat = _re.compile(r"\b[A-Z_]{2,}\s*=\s*")
-                            _important = []
-                            _rest = []
-                            for c in chunks:
-                                txt = c.get("text", "")
-                                (_important if _pat.search(txt) else _rest).append(c)
-                            chunks = (_important + _rest)[:_cap]
-                        else:
-                            chunks = chunks[:_cap]
-                    except Exception:
-                        chunks = chunks[:_cap]
+                    # Scale up tokens proportionally to fit within cap
+                    _scale = (len(chunks) / _cap) * 1.1  # 10% buffer
+                    _new_tokens = max(_base_tokens, int(_base_tokens * _scale))
+                    _new_stride = max(_base_stride, int(_base_stride * _scale))
+                    
+                    # Re-chunk with larger window
+                    chunks = chunk_by_tokens(text, k_tokens=_new_tokens, stride_tokens=_new_stride)
                     try:
                         print(
-                            f"[ingest] micro-chunks capped path={file_path} count={_before}->{len(chunks)} cap={_cap}"
+                            f"[ingest] micro-chunks resized path={file_path} count={_before}->{len(chunks)} "
+                            f"tokens={_base_tokens}->{_new_tokens} stride={_base_stride}->{_new_stride}"
                         )
                     except Exception:
                         pass
             except Exception:
-                pass
+                chunks = chunk_by_tokens(text)
         elif use_semantic:
             chunks = chunk_semantic(text, language, CHUNK_LINES, CHUNK_OVERLAP)
         else:
