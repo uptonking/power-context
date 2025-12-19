@@ -55,7 +55,7 @@ Memory entries are stored as points in Qdrant with a consistent payload:
 
 ## Example Operations
 
-### Store a Memory
+### Store Memory
 
 Via MCP Memory server tool `store`:
 
@@ -100,16 +100,16 @@ Via Indexer MCP `context_search`:
 ## Query Tips
 
 - Use precise queries (2-5 tokens)
-- Add synonyms if needed; the server supports multiple phrasings
-- Combine `topic`/`tags` in your memory text to make them easier to find
+- Add synonyms if needed; server supports multiple phrasings
+- Combine `topic`/`tags` in memory text for easier discovery
 
 ---
 
 ## Enable Memory Blending
 
-1. Ensure the Memory MCP is running on :8000 (default in compose)
+1. Ensure Memory MCP is running on :8000 (default in compose)
 
-2. Enable SSE memory blending on the Indexer MCP by setting these env vars:
+2. Enable SSE memory blending on Indexer MCP:
 
 ```yaml
 services:
@@ -120,7 +120,7 @@ services:
       - MEMORY_MCP_TIMEOUT=6
 ```
 
-3. Restart the indexer:
+3. Restart indexer:
 
 ```bash
 docker compose up -d mcp_indexer

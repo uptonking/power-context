@@ -25,36 +25,36 @@ Context Engine Uploader extension for automatic workspace sync and Prompt+ integ
 
 ## Features
 
-- **Auto-sync**: Force sync on startup + watch mode keeps your workspace indexed
+- **Auto-sync**: Force sync on startup + watch mode keeps workspace indexed
 - **Prompt+ button**: Status bar button to enhance selected text with unicorn mode
 - **Output channel**: Real-time logs for force-sync and watch operations
 - **GPU decoder support**: Configure llama.cpp, Ollama, or GLM as decoder backend
 - **Remote server support**: Index to any Context-Engine server (local, remote, Kubernetes)
-- **MCP + ctx scaffolding**: Optionally auto-writes Claude Code/Windsurf MCP configs, an optional Claude prompt hook, and a `ctx_config.json` wired to the right collection and decoder settings.
+- **MCP + ctx scaffolding**: Auto-writes Claude Code/Windsurf MCP configs, optional Claude prompt hook, and `ctx_config.json` wired to collection and decoder settings
 
 ## Workflow Examples
 
 ### Local Development (dev-remote stack)
-Context-Engine running via `docker-compose.yml` on the same machine:
+Context-Engine running via `docker-compose.yml` on same machine:
 ```
 Endpoint: http://localhost:8004
-Target Path: (leave empty - uses current workspace or let the extension auto-detect)
+Target Path: (leave empty - uses current workspace or auto-detect)
 ```
-Open any project → extension auto-syncs → MCP tools have your code context.
+Open any project → extension auto-syncs → MCP tools have code context.
 
 ### Remote Server
-Context-Engine on a team server:
+Context-Engine on team server:
 ```
 Endpoint: http://context.yourcompany.com:9090
 Target Path: /Users/you/projects/my-app
 ```
-Your local code is indexed to the shared server. Team members search across all indexed repos.
+Local code indexed to shared server. Team members search across indexed repos.
 
 ### Multi-Project Workflow
-Index multiple projects to the same server:
+Index multiple projects to same server:
 1. Open Project A → auto-syncs to `codebase` collection
 2. Open Project B → auto-syncs to same collection
-3. MCP tools search across both projects seamlessly
+3. MCP tools search across both projects
 
 ### Prompt+ Enhancement
 1. Select code or write a prompt in your editor
