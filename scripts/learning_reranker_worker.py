@@ -225,7 +225,7 @@ class CollectionLearner:
 
                 # Validate alignment between candidates and teacher scores
                 if len(teacher_scores) != len(candidates):
-                    logger.debug(f"Skipping event: teacher_scores length {len(teacher_scores)} != candidates {len(candidates)}")
+                    logger.warning(f"[{self.collection}] Skipping event: teacher_scores length {len(teacher_scores)} != candidates {len(candidates)}")
                     continue
 
                 # Build doc texts from candidates (same packing as teacher scoring)
@@ -254,7 +254,7 @@ class CollectionLearner:
                 self.refiner.learn_from_teacher(z, query_emb, doc_embs, our_scores, teacher_z)
 
             except Exception as e:
-                logger.debug(f"Error processing event: {e}")
+                logger.warning(f"[{self.collection}] Error processing event: {e}")
                 continue
 
     def _maybe_fill_teacher_scores(self, events: List[Dict[str, Any]]):
@@ -293,14 +293,16 @@ class CollectionLearner:
 
         try:
             scores = rerank_local(all_pairs)
-        except Exception:
+        except Exception as e:
+            logger.warning(f"[{self.collection}] Teacher scoring failed for {len(all_pairs)} pairs: {e}")
             return
 
         # Map scores back to each event.
         for event_index, start, end in slices:
             try:
                 events[event_index]["teacher_scores"] = list(scores[start:end])
-            except Exception:
+            except Exception as e:
+                logger.warning(f"[{self.collection}] Failed to map teacher scores for event {event_index}: {e}")
                 continue
 
 
