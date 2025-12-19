@@ -551,7 +551,10 @@ function register(context, deps) {
       const showAuth = !!(bridgeMode && endpoint && endpointReachable !== false && (authEnabled === true || authEnabled === undefined));
 
       const items = [
-        makeTreeItem('Prompt+', { icon: new vscode.ThemeIcon('sparkle'), command: { command: 'contextEngineUploader.promptEnhance', title: 'Prompt+' } }),
+        makeTreeItem('Prompt+ (Replace Selection)', { icon: new vscode.ThemeIcon('sparkle'), command: { command: 'contextEngineUploader.promptEnhance', title: 'Prompt+ (Replace Selection)' } }),
+        makeTreeItem('Prompt+ (Copy to Clipboard)', { icon: new vscode.ThemeIcon('copy'), command: { command: 'contextEngineUploader.promptEnhanceCopy', title: 'Prompt+ (Copy to Clipboard)' } }),
+        makeTreeItem('Prompt+ (Open in New Editor)', { icon: new vscode.ThemeIcon('open-preview'), command: { command: 'contextEngineUploader.promptEnhanceOpen', title: 'Prompt+ (Open in New Editor)' } }),
+        makeTreeItem('Prompt+ Default Mode...', { icon: new vscode.ThemeIcon('settings-gear'), command: { command: 'contextEngineUploader.setCtxDefaultMode', title: 'Prompt+ Default Mode' } }),
       ];
 
       if (showAuth) {

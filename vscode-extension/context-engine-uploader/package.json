@@ -2,7 +2,7 @@
   "name": "context-engine-uploader",
   "displayName": "Context Engine Uploader",
   "description": "Runs the Context-Engine remote upload client with a force sync on startup followed by watch mode. Requires Python with pip install requests urllib3 charset_normalizer.",
-  "version": "0.1.37",
+  "version": "0.1.38",
   "publisher": "context-engine",
   "engines": {
     "vscode": "^1.85.0"
@@ -19,6 +19,9 @@
     "onView:contextEngineUploaderStatus",
     "onView:contextEngineUploaderActions",
     "onCommand:contextEngineUploader.promptEnhance",
+    "onCommand:contextEngineUploader.promptEnhanceCopy",
+    "onCommand:contextEngineUploader.promptEnhanceOpen",
+    "onCommand:contextEngineUploader.setCtxDefaultMode",
     "onCommand:contextEngineUploader.authLogin",
     "onCommand:contextEngineUploader.writeMcpConfig",
     "onCommand:contextEngineUploader.writeMcpConfigSelect",
@@ -95,6 +98,18 @@
       {
         "command": "contextEngineUploader.promptEnhance",
         "title": "Context Engine Uploader: Prompt+ (Unicorn Mode)"
+      },
+      {
+        "command": "contextEngineUploader.promptEnhanceCopy",
+        "title": "Context Engine Uploader: Prompt+ (Copy to Clipboard)"
+      },
+      {
+        "command": "contextEngineUploader.promptEnhanceOpen",
+        "title": "Context Engine Uploader: Prompt+ (Open in New Editor)"
+      },
+      {
+        "command": "contextEngineUploader.setCtxDefaultMode",
+        "title": "Context Engine Uploader: Prompt+ Default Mode (ctx_config.json)"
       },
       {
         "command": "contextEngineUploader.authLogin",
