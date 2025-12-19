@@ -4,43 +4,53 @@ Provides JSON-formatted logging with context and proper exception handling.
 """
 import logging
 import json
+import os
 import sys
 import traceback
-from typing import Any, Dict, Optional
-from datetime import datetime
+from functools import lru_cache
+from typing import Any, Dict, Optional, Union
+from datetime import datetime, timezone
 
-# Configure root logger
+# Configure root logger with LOG_LEVEL from environment
+_log_level_str = os.environ.get("LOG_LEVEL", "INFO").upper()
+_log_level = getattr(logging, _log_level_str, logging.INFO)
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(message)s',
+    level=_log_level,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[logging.StreamHandler(sys.stdout)]
 )
+
+# Cache loggers to avoid repeated lookups
+_logger_cache: Dict[str, logging.Logger] = {}
 
 
 class JSONFormatter(logging.Formatter):
     """Format log records as JSON for structured logging."""
     
+    __slots__ = ()
+    
     def format(self, record: logging.LogRecord) -> str:
         log_data: Dict[str, Any] = {
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),
         }
         
         # Add exception info if present
-        if record.exc_info:
+        if record.exc_info and record.exc_info[0] is not None:
             log_data["exception"] = {
-                "type": record.exc_info[0].__name__ if record.exc_info[0] else None,
+                "type": record.exc_info[0].__name__,
                 "message": str(record.exc_info[1]) if record.exc_info[1] else None,
                 "traceback": traceback.format_exception(*record.exc_info),
             }
         
         # Add extra fields
-        if hasattr(record, 'extra_fields'):
-            log_data.update(record.extra_fields)
+        extra = getattr(record, 'extra_fields', None)
+        if extra:
+            log_data.update(extra)
         
-        return json.dumps(log_data)
+        return json.dumps(log_data, default=str)
 
 
 def get_logger(name: str, json_format: bool = False) -> logging.Logger:
@@ -53,7 +63,12 @@ def get_logger(name: str, json_format: bool = False) -> logging.Logger:
     Returns:
         Configured logger instance
     """
+    cache_key = f"{name}:{json_format}"
+    if cache_key in _logger_cache:
+        return _logger_cache[cache_key]
+    
     logger = logging.getLogger(name)
+    logger.setLevel(_log_level)
     
     if json_format and not any(isinstance(h.formatter, JSONFormatter) for h in logger.handlers):
         handler = logging.StreamHandler(sys.stdout)
@@ -61,11 +76,14 @@ def get_logger(name: str, json_format: bool = False) -> logging.Logger:
         logger.addHandler(handler)
         logger.propagate = False
     
+    _logger_cache[cache_key] = logger
     return logger
 
 
 class ContextLogger:
     """Logger wrapper that adds context fields to all log messages."""
+    
+    __slots__ = ('logger', 'context')
     
     def __init__(self, logger: logging.Logger, **context):
         self.logger = logger
@@ -73,7 +91,9 @@ class ContextLogger:
     
     def _log(self, level: int, msg: str, exc_info: Any = None, **extra):
         """Internal log method that merges context."""
-        merged = {**self.context, **extra}
+        if not self.logger.isEnabledFor(level):
+            return
+        merged = {**self.context, **extra} if extra else self.context
         record = self.logger.makeRecord(
             self.logger.name,
             level,
@@ -104,6 +124,10 @@ class ContextLogger:
     
     def critical(self, msg: str, exc_info: Any = None, **extra):
         self._log(logging.CRITICAL, msg, exc_info=exc_info, **extra)
+    
+    def isEnabledFor(self, level: int) -> bool:
+        """Check if this logger is enabled for the given level."""
+        return self.logger.isEnabledFor(level)
 
 
 # Custom exceptions for Context Engine
