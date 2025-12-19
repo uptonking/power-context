@@ -1099,14 +1099,22 @@ class LatentRefiner:
         return loss
 
     def _save_weights(self, checkpoint: bool = False):
-        """Save weights to disk atomically with file locking."""
+        """Save weights to disk atomically with file locking.
+
+        Mirrors TinyScorer._save_weights: use a base path without the .npz
+        extension for np.savez (which appends .npz automatically), then
+        atomically rename the resulting file into place.
+        """
         import fcntl
 
         os.makedirs(self.WEIGHTS_DIR, exist_ok=True)
         self._version += 1
 
-        # Write to temp file first
-        tmp_path = self._weights_path + ".tmp"
+        # np.savez automatically adds .npz, so follow the same pattern as
+        # TinyScorer: derive a temporary base path and then construct the
+        # actual temp file path that np.savez will create.
+        tmp_base = self._weights_path.replace(".npz", ".tmp")
+        tmp_path = tmp_base + ".npz"
         lock_path = self._weights_path + ".lock"
 
         try:
@@ -1114,7 +1122,7 @@ class LatentRefiner:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
                 try:
                     np.savez(
-                        tmp_path,
+                        tmp_base,
                         W1=self.W1,
                         b1=self.b1,
                         W2=self.W2,
