@@ -3,14 +3,16 @@ FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    WORK_ROOTS="/work,/app"
+    WORK_ROOTS="/work,/app" \
+    PIP_DEFAULT_TIMEOUT=120 \
+    PIP_RETRIES=10
 
 # OS packages needed: git for history ingestion, curl for model downloads
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl && rm -rf /var/lib/apt/lists/*
 
 # Python deps: reuse shared requirements file
 COPY requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir --upgrade -r /tmp/requirements.txt
+RUN pip install --no-cache-dir --upgrade --timeout=${PIP_DEFAULT_TIMEOUT} --retries=${PIP_RETRIES} -r /tmp/requirements.txt
 
 # Download reranker model and tokenizer during build
 # Cross-encoder for reranking (ms-marco-MiniLM) + BGE tokenizer for micro-chunking
