@@ -2834,7 +2834,7 @@ async def repo_search(
                         # Build components with optional fname_boost
                         components = (obj.get("components") or {}) | {
                             "learning_score": float(obj.get("recursive_score", 0)),
-                            "learning_iterations": int(obj.get("recursive_iterations", 0)),
+                            "refinement_iterations": int(obj.get("recursive_iterations", 0)),
                         }
                         if obj.get("fname_boost"):
                             components["fname_boost"] = float(obj.get("fname_boost", 0))
