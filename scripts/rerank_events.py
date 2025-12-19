@@ -29,8 +29,8 @@ RERANK_EVENTS_DIR = os.environ.get("RERANK_EVENTS_DIR", "/tmp/rerank_events")
 RERANK_EVENTS_ENABLED = str(os.environ.get("RERANK_EVENTS_ENABLED", "1")).strip().lower() in {
     "1", "true", "yes", "on"
 }
-# Sampling rate: 0.33 = log 33% of events (reduces volume, still enough to learn)
-RERANK_EVENTS_SAMPLE_RATE = float(os.environ.get("RERANK_EVENTS_SAMPLE_RATE", "0.33"))
+# Sampling rate: 0.5 = log 50% of events (balance volume vs learning signal)
+RERANK_EVENTS_SAMPLE_RATE = float(os.environ.get("RERANK_EVENTS_SAMPLE_RATE", "0.5"))
 # Retention: files older than this many days can be cleaned up (0 = keep forever)
 RERANK_EVENTS_RETENTION_DAYS = int(os.environ.get("RERANK_EVENTS_RETENTION_DAYS", "0"))
 
