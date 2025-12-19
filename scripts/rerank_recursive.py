@@ -990,6 +990,9 @@ class LatentRefiner:
 
         Uses attention-weighted sum of top documents as "answer summary".
         """
+        # Check for hot-reloaded weights
+        self.maybe_reload_weights()
+
         # Softmax attention over scores to get weighted doc representation
         weights = np.exp(scores - scores.max())
         weights = weights / (weights.sum() + 1e-8)
@@ -1529,8 +1532,9 @@ def _get_learning_reranker(
     with _LEARNING_RERANKERS_LOCK:
         if collection not in _LEARNING_RERANKERS:
             reranker = RecursiveReranker(n_iterations=n_iterations, dim=dim)
-            # Set collection-specific weights path for the scorer
+            # Set collection-specific weights path for scorer and refiner
             reranker.scorer.set_collection(collection)
+            reranker.refiner.set_collection(collection)
             _LEARNING_RERANKERS[collection] = reranker
         return _LEARNING_RERANKERS[collection]
 

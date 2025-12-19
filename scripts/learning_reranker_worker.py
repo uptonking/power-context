@@ -72,6 +72,11 @@ class CollectionLearner:
 
     def __init__(self, collection: str):
         self.collection = collection
+        self._lock_file = None
+
+        # Acquire exclusive lock to prevent multiple workers on same collection
+        self._acquire_lock()
+
         self.scorer = TinyScorer(lr=LEARNING_RATE)
         self.scorer.set_collection(collection)
         self.refiner = LatentRefiner(dim=self.scorer.dim, lr=LEARNING_RATE)
@@ -91,6 +96,31 @@ class CollectionLearner:
         """Sanitize collection name to prevent path traversal."""
         return "".join(c if c.isalnum() or c in "-_" else "_" for c in collection)
 
+    def _acquire_lock(self):
+        """Acquire exclusive lock to prevent multiple workers on same collection."""
+        import fcntl
+        safe_name = self._sanitize_collection(self.collection)
+        lock_path = Path(TinyScorer.WEIGHTS_DIR) / f"{safe_name}.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock_file = open(lock_path, "w")
+        try:
+            fcntl.flock(self._lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            logger.debug(f"[{self.collection}] Acquired exclusive lock")
+        except OSError:
+            logger.error(f"[{self.collection}] Another worker already running. Exiting.")
+            sys.exit(1)
+
+    def _release_lock(self):
+        """Release the exclusive lock."""
+        if self._lock_file:
+            import fcntl
+            try:
+                fcntl.flock(self._lock_file, fcntl.LOCK_UN)
+                self._lock_file.close()
+            except Exception:
+                pass
+            self._lock_file = None
+
     def _load_checkpoint(self) -> float:
         """Load last processed timestamp from checkpoint file."""
         safe_name = self._sanitize_collection(self.collection)
@@ -99,20 +129,27 @@ class CollectionLearner:
             if checkpoint_path.exists():
                 with open(checkpoint_path) as f:
                     return json.load(f).get("last_ts", 0)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"[{self.collection}] Failed to load checkpoint: {e}")
         return 0
 
     def _save_checkpoint(self, ts: float):
-        """Save last processed timestamp to checkpoint file."""
+        """Save last processed timestamp to checkpoint file atomically."""
         safe_name = self._sanitize_collection(self.collection)
         checkpoint_path = Path(TinyScorer.WEIGHTS_DIR) / f"checkpoint_{safe_name}.json"
+        tmp_path = checkpoint_path.with_suffix(".json.tmp")
         try:
             checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(checkpoint_path, "w") as f:
+            with open(tmp_path, "w") as f:
                 json.dump({"last_ts": ts, "collection": self.collection}, f)
-        except Exception:
-            pass
+            os.replace(tmp_path, checkpoint_path)
+        except Exception as e:
+            logger.warning(f"[{self.collection}] Failed to save checkpoint: {e}")
+            if tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except Exception:
+                    pass
 
     def _encode_project(self, texts: List[str]) -> np.ndarray:
         """Encode + project via the serving reranker code path."""
@@ -158,20 +195,22 @@ class CollectionLearner:
             self._last_processed_ts = max(e.get("ts", 0) for e in events)
             self._save_checkpoint(self._last_processed_ts)
 
-        # Save weights after processing batch (with checkpoint every 100 versions)
+        # Save weights after processing batch (both scorer and refiner)
         if processed > 0:
             self.scorer._save_weights(checkpoint=True)
+            self.refiner._save_weights(checkpoint=True)
             metrics = self.scorer.get_metrics()
             logger.info(
                 f"[{self.collection}] Processed {processed} events | "
-                f"v{metrics['version']} | lr={metrics['learning_rate']:.6f} | "
+                f"scorer_v{metrics['version']} refiner_v{self.refiner._version} | "
+                f"lr={metrics['learning_rate']:.6f} | "
                 f"avg_loss={metrics['avg_loss']:.4f} | converged={metrics['converged']}"
             )
 
         return processed
 
     def _learn_from_batch(self, events: List[Dict[str, Any]]):
-        """Learn from a batch of events."""
+        """Learn from a batch of events (trains both TinyScorer and LatentRefiner)."""
         # Fill missing teacher scores in batch (amortizes ONNX overhead)
         self._maybe_fill_teacher_scores(events)
 
@@ -195,11 +234,24 @@ class CollectionLearner:
                 # Encode query and docs (1:1 with serving embed+project)
                 query_emb = self._encode_project([query])[0]
                 doc_embs = self._encode_project(doc_texts)
-
-                # Learn from teacher
                 teacher_arr = np.array(teacher_scores, dtype=np.float32)
+
+                # Initialize latent state
                 z = query_emb.copy()
+
+                # Train TinyScorer: learn to match teacher ranking
                 self.scorer.learn_from_teacher(query_emb, doc_embs, z, teacher_arr)
+
+                # Train LatentRefiner: learn to refine z toward teacher-optimal state
+                # Compute teacher-weighted document summary as target z
+                teacher_weights = np.exp(teacher_arr - teacher_arr.max())
+                teacher_weights = teacher_weights / (teacher_weights.sum() + 1e-8)
+                teacher_z = (teacher_weights[:, None] * doc_embs).sum(axis=0)
+                teacher_z = teacher_z / (np.linalg.norm(teacher_z) + 1e-8)
+
+                # Get current scores for refiner input
+                our_scores = self.scorer.forward(query_emb, doc_embs, z)
+                self.refiner.learn_from_teacher(z, query_emb, doc_embs, our_scores, teacher_z)
 
             except Exception as e:
                 logger.debug(f"Error processing event: {e}")
