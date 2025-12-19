@@ -167,18 +167,45 @@ def rerank_onnx(query: str, candidates: List[Dict[str, Any]]) -> List[Dict[str, 
 
 def compute_mrr(ranked_paths: List[str], relevant_paths: List[str], k: int = 10) -> float:
     """Compute Mean Reciprocal Rank."""
-    for i, path in enumerate(ranked_paths[:k]):
-        if path in relevant_paths:
+    # Deduplicate while preserving order (paths can repeat due to multi-span retrieval)
+    rel_set = {p for p in relevant_paths if p}
+    if not rel_set:
+        return 0.0
+
+    seen = set()
+    uniq_ranked: List[str] = []
+    for p in ranked_paths:
+        if not p or p in seen:
+            continue
+        seen.add(p)
+        uniq_ranked.append(p)
+        if len(uniq_ranked) >= k:
+            break
+
+    for i, path in enumerate(uniq_ranked):
+        if path in rel_set:
             return 1.0 / (i + 1)
     return 0.0
 
 
 def compute_recall_at_k(ranked_paths: List[str], relevant_paths: List[str], k: int) -> float:
     """Compute Recall@k."""
-    if not relevant_paths:
+    rel_set = {p for p in relevant_paths if p}
+    if not rel_set:
         return 0.0
-    found = sum(1 for p in ranked_paths[:k] if p in relevant_paths)
-    return found / len(relevant_paths)
+
+    seen = set()
+    uniq_ranked: List[str] = []
+    for p in ranked_paths:
+        if not p or p in seen:
+            continue
+        seen.add(p)
+        uniq_ranked.append(p)
+        if len(uniq_ranked) >= k:
+            break
+
+    found = len(set(uniq_ranked) & rel_set)
+    return found / len(rel_set)
 
 
 def eval_single_query(
@@ -203,8 +230,19 @@ def eval_single_query(
 
     latency_ms = (time.perf_counter() - start) * 1000
 
-    ranked_paths = [c.get("path", "") for c in reranked[:10]]
-    ranked_scores = [float(c.get("score", 0)) for c in reranked[:10]]
+    # Export unique paths (avoid duplicates from multi-span retrieval)
+    ranked_paths: List[str] = []
+    ranked_scores: List[float] = []
+    seen_paths = set()
+    for c in reranked:
+        path = str(c.get("path", "") or "")
+        if not path or path in seen_paths:
+            continue
+        seen_paths.add(path)
+        ranked_paths.append(path)
+        ranked_scores.append(float(c.get("score", 0)))
+        if len(ranked_paths) >= 10:
+            break
 
     mrr = compute_mrr(ranked_paths, reference_paths)
     recall_5 = compute_recall_at_k(ranked_paths, reference_paths, 5)
