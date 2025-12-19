@@ -180,20 +180,25 @@ flowchart LR
     V[VS Code Extension]
   end
   subgraph Docker
+    U[Upload Service]
     I[Indexer MCP]
     M[Memory MCP]
     Q[(Qdrant)]
     L[[LLM Decoder]]
+    W[[Learning Worker]]
   end
-  V -->|upload| I
+  V -->|sync| U
+  U --> I
   A -->|MCP| I
   A -->|MCP| M
   I --> Q
   M --> Q
   I -.-> L
+  I -.-> W
+  W -.-> Q
 ```
 
-The neural reranker learns from search patterns (sampled at 50%) and periodically updates its weights, so results improve the more you use it.
+The VS Code extension syncs your workspace to the stack. Your IDE talks to the MCP servers, which query Qdrant for hybrid search. Optional features include a local LLM decoder (llama.cpp), cloud LLM integration (GLM, MiniMax M2), and adaptive learning that improves ranking over time.
 
 ---
 
