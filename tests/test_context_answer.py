@@ -29,6 +29,9 @@ def _fake_items():
 
 @pytest.mark.service
 def test_context_answer_happy_path(monkeypatch):
+    # Mock embedding model to avoid loading real model
+    monkeypatch.setattr(srv, "_get_embedding_model", lambda *a, **k: None)
+
     # Fake retrieval output (already budgeted)
     import scripts.hybrid_search as hs
 
@@ -60,6 +63,9 @@ def test_context_answer_happy_path(monkeypatch):
 
 
 def test_context_answer_decoder_disabled(monkeypatch):
+    # Mock embedding model to avoid loading real model
+    monkeypatch.setattr(srv, "_get_embedding_model", lambda *a, **k: None)
+
     import scripts.hybrid_search as hs
 
     monkeypatch.setattr(hs, "run_hybrid_search", lambda **k: _fake_items())
@@ -85,6 +91,9 @@ def test_context_answer_decoder_disabled(monkeypatch):
 
 
 def test_context_answer_prefers_identifier_spans(monkeypatch):
+    # Mock embedding model to avoid loading real model
+    monkeypatch.setattr(srv, "_get_embedding_model", lambda *a, **k: None)
+
     import scripts.hybrid_search as hs
 
     def _items():
@@ -132,6 +141,8 @@ def test_context_answer_prefers_identifier_spans(monkeypatch):
 
 def test_context_answer_tier2_retry_without_gating(monkeypatch):
     """Tier 2 should retry run_hybrid_search with relaxed filters when Tier 1 yields zero."""
+    # Mock embedding model to avoid loading real model
+    monkeypatch.setattr(srv, "_get_embedding_model", lambda *a, **k: None)
 
     import scripts.hybrid_search as hs
 
@@ -189,6 +200,9 @@ def test_context_answer_tier2_retry_without_gating(monkeypatch):
 
 
 def test_context_answer_env_lock_release_on_retrieval_exception(monkeypatch):
+    # Mock embedding model to avoid loading real model
+    monkeypatch.setattr(srv, "_get_embedding_model", lambda *a, **k: None)
+
     import os
     # Force retrieval to raise and ensure env/lock are restored
     prev = {k: os.environ.get(k) for k in (

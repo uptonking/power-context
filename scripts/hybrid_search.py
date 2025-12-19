@@ -358,9 +358,14 @@ from scripts.ingest_code import ensure_collection as _ensure_collection
 from scripts.ingest_code import project_mini as _project_mini
 
 
-RRF_K = _safe_int(os.environ.get("HYBRID_RRF_K", "60"), 60)
-DENSE_WEIGHT = _safe_float(os.environ.get("HYBRID_DENSE_WEIGHT", "1.0"), 1.0)
-LEXICAL_WEIGHT = _safe_float(os.environ.get("HYBRID_LEXICAL_WEIGHT", "0.25"), 0.25)
+# RRF k: lower = denser score distribution (better for small repos)
+# We use 30 as base, which gives rank-1 score of 1/31 ≈ 0.032 (vs 0.016 with k=60)
+RRF_K = _safe_int(os.environ.get("HYBRID_RRF_K", "30"), 30)
+# Dense weight: increased to better balance against lexical scores
+# With k=30: rank-1 dense = 1.5 * 0.032 ≈ 0.048 (3x improvement)
+DENSE_WEIGHT = _safe_float(os.environ.get("HYBRID_DENSE_WEIGHT", "1.5"), 1.5)
+# Lexical weight: slightly reduced to balance
+LEXICAL_WEIGHT = _safe_float(os.environ.get("HYBRID_LEXICAL_WEIGHT", "0.20"), 0.20)
 LEX_VECTOR_WEIGHT = _safe_float(
     os.environ.get("HYBRID_LEX_VECTOR_WEIGHT", str(LEXICAL_WEIGHT)), LEXICAL_WEIGHT
 )
@@ -375,13 +380,18 @@ SYMBOL_EQUALITY_BOOST = _safe_float(
 VENDOR_PENALTY = _safe_float(os.environ.get("HYBRID_VENDOR_PENALTY", "0.05"), 0.05)
 LANG_MATCH_BOOST = _safe_float(os.environ.get("HYBRID_LANG_MATCH_BOOST", "0.05"), 0.05)
 CLUSTER_LINES = _safe_int(os.environ.get("HYBRID_CLUSTER_LINES", "15"), 15)
-# Penalize test files slightly to prefer implementation over tests
-TEST_FILE_PENALTY = _safe_float(os.environ.get("HYBRID_TEST_FILE_PENALTY", "0.15"), 0.15)
+# Penalize test files to prefer implementation over tests
+# Increased from 0.15 to 0.35 to ensure implementations rank above tests
+TEST_FILE_PENALTY = _safe_float(os.environ.get("HYBRID_TEST_FILE_PENALTY", "0.35"), 0.35)
 
 # Additional file-type weighting knobs (defaults tuned for Q&A use)
 CONFIG_FILE_PENALTY = _safe_float(os.environ.get("HYBRID_CONFIG_FILE_PENALTY", "0.3"), 0.3)
-IMPLEMENTATION_BOOST = _safe_float(os.environ.get("HYBRID_IMPLEMENTATION_BOOST", "0.2"), 0.2)
-DOCUMENTATION_PENALTY = _safe_float(os.environ.get("HYBRID_DOCUMENTATION_PENALTY", "0.1"), 0.1)
+# Boost implementation files to ensure code ranks above docs/tests
+# Increased from 0.2 to 0.3 for stronger implementation preference
+IMPLEMENTATION_BOOST = _safe_float(os.environ.get("HYBRID_IMPLEMENTATION_BOOST", "0.3"), 0.3)
+# Penalize documentation files to prefer code over docs
+# Increased from 0.1 to 0.25 to ensure code ranks above documentation
+DOCUMENTATION_PENALTY = _safe_float(os.environ.get("HYBRID_DOCUMENTATION_PENALTY", "0.25"), 0.25)
 
 # Modest boost for matches against pseudo/tags produced at index time.
 # Default 0.0 = disabled; set HYBRID_PSEUDO_BOOST>0 to experiment.
@@ -390,6 +400,29 @@ PSEUDO_BOOST = _safe_float(os.environ.get("HYBRID_PSEUDO_BOOST", "0.0"), 0.0)
 # Penalize comment-heavy snippets so code (not comments) ranks higher
 COMMENT_PENALTY = _safe_float(os.environ.get("HYBRID_COMMENT_PENALTY", "0.2"), 0.2)
 COMMENT_RATIO_THRESHOLD = _safe_float(os.environ.get("HYBRID_COMMENT_RATIO_THRESHOLD", "0.6"), 0.6)
+
+# Query intent detection for dynamic boost adjustment
+# When query signals implementation search, apply extra boost
+INTENT_IMPL_BOOST = _safe_float(os.environ.get("HYBRID_INTENT_IMPL_BOOST", "0.15"), 0.15)
+
+# Patterns that indicate user wants implementation code (not docs/tests)
+_IMPL_INTENT_PATTERNS = frozenset({
+    "implementation", "how does", "how is", "where is", "code for",
+    "function that", "method that", "class that", "implements",
+    "defined", "definition", "source", "logic", "algorithm",
+    "where", "find", "locate", "show me", "actual code",
+})
+
+
+def _detect_implementation_intent(queries: List[str]) -> bool:
+    """Detect if query signals user wants implementation code."""
+    if not queries:
+        return False
+    joined = " ".join(queries).lower()
+    for pattern in _IMPL_INTENT_PATTERNS:
+        if pattern in joined:
+            return True
+    return False
 
 # Micro-span compaction and budgeting (ReFRAG-lite output shaping)
 MICRO_OUT_MAX_SPANS = _safe_int(os.environ.get("MICRO_OUT_MAX_SPANS", "3"), 3)
@@ -1120,8 +1153,12 @@ def lexical_score(phrases: List[str], md: Dict[str, Any], token_weights: Dict[st
         contrib = 0.0
         if t in sym or t in symp:
             contrib += 2.0
+        # Path segment match: boost filenames more (last segment)
         if any(t in seg for seg in path_segs):
-            contrib += 0.6
+            contrib += 0.8  # was 0.6
+            # Extra boost for filename match (last segment)
+            if path_segs and t in path_segs[-1]:
+                contrib += 0.3
         if t in code:
             contrib += 1.0
         # Pseudo/tags signals: gentle, optional boost
@@ -1912,6 +1949,18 @@ def run_hybrid_search(
     except Exception:
         pass
 
+    # --- Code signal symbols: add extracted symbols from query analysis ---
+    # These are passed via CODE_SIGNAL_SYMBOLS env var from repo_search
+    try:
+        _code_signal_syms = os.environ.get("CODE_SIGNAL_SYMBOLS", "").strip()
+        if _code_signal_syms:
+            for sym in _code_signal_syms.split(","):
+                sym = sym.strip()
+                if sym and len(sym) > 1 and sym not in qlist:
+                    qlist.append(sym)
+    except Exception:
+        pass
+
     # === Large codebase scaling (automatic) ===
     _coll_stats = _get_collection_stats(client, _collection(collection))
     _coll_size = _coll_stats.get("points_count", 0)
@@ -2377,6 +2426,13 @@ def run_hybrid_search(
     eff_mode = (mode or "").strip().lower()
     impl_boost = IMPLEMENTATION_BOOST
     doc_penalty = DOCUMENTATION_PENALTY
+    test_penalty = TEST_FILE_PENALTY
+    # Query intent detection: boost implementation files more when query signals code search
+    if _detect_implementation_intent(qlist):
+        impl_boost += INTENT_IMPL_BOOST
+        # Also increase test/doc penalties when user clearly wants implementation
+        test_penalty += INTENT_IMPL_BOOST
+        doc_penalty += INTENT_IMPL_BOOST * 0.5
     if eff_mode in {"balanced"}:
         doc_penalty = DOCUMENTATION_PENALTY * 0.5
     elif eff_mode in {"docs_first", "docs-first", "docs"}:
@@ -2419,9 +2475,9 @@ def run_hybrid_search(
         if VENDOR_PENALTY > 0.0 and path and is_vendor_path(path):
             rec["vendor"] -= VENDOR_PENALTY
             rec["s"] -= VENDOR_PENALTY
-        if TEST_FILE_PENALTY > 0.0 and path and is_test_file(path):
-            rec["test"] -= TEST_FILE_PENALTY
-            rec["s"] -= TEST_FILE_PENALTY
+        if test_penalty > 0.0 and path and is_test_file(path):
+            rec["test"] -= test_penalty
+            rec["s"] -= test_penalty
 
         # Additional file-type weighting
         path_lower = path.lower()
@@ -3276,6 +3332,17 @@ def main():
         else:
             queries = expand_queries(queries, eff_language)
 
+    # --- Code signal symbols: add extracted symbols from query analysis ---
+    try:
+        _code_signal_syms = os.environ.get("CODE_SIGNAL_SYMBOLS", "").strip()
+        if _code_signal_syms:
+            for sym in _code_signal_syms.split(","):
+                sym = sym.strip()
+                if sym and len(sym) > 1 and sym not in queries:
+                    queries.append(sym)
+    except Exception:
+        pass
+
     # Add server-side lexical vector ranking into fusion (with scaled RRF)
     for rank, p in enumerate(lex_results, 1):
         pid = str(p.id)
@@ -3349,6 +3416,11 @@ def main():
         _BM25_W2 = 0.2
     _bm25_tok_w2 = _bm25_token_weights_from_results(queries, lex_results) if _USE_BM25_CLI else {}
 
+    # Query intent detection for CLI path (same as run_hybrid_search)
+    test_penalty_cli = TEST_FILE_PENALTY
+    if _detect_implementation_intent(queries):
+        test_penalty_cli += INTENT_IMPL_BOOST
+
     timestamps: List[int] = []
     for pid, rec in list(score_map.items()):
         md = (rec["pt"].payload or {}).get("metadata") or {}
@@ -3384,9 +3456,9 @@ def main():
         if VENDOR_PENALTY > 0.0 and path and is_vendor_path(path):
             rec["vendor"] -= VENDOR_PENALTY
             rec["s"] -= VENDOR_PENALTY
-        if TEST_FILE_PENALTY > 0.0 and path and is_test_file(path):
-            rec["test"] -= TEST_FILE_PENALTY
-            rec["s"] -= TEST_FILE_PENALTY
+        if test_penalty_cli > 0.0 and path and is_test_file(path):
+            rec["test"] -= test_penalty_cli
+            rec["s"] -= test_penalty_cli
 
 
         # Language match boost if requested

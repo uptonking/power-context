@@ -6,6 +6,9 @@ srv = importlib.import_module("scripts.mcp_indexer_server")
 
 @pytest.mark.service
 def test_context_answer_path_mention_fallback(monkeypatch):
+    # Mock embedding model to avoid loading real model
+    monkeypatch.setattr(srv, "_get_embedding_model", lambda *a, **k: None)
+
     # Force retrieval to return nothing so path-mention fallback engages
     import scripts.hybrid_search as hs
     monkeypatch.setattr(hs, "run_hybrid_search", lambda **k: [])

@@ -40,7 +40,7 @@ def test_repo_search_arg_normalization(monkeypatch, tmp_path):
         "symbol": "f",
         "start_line": 1,
         "end_line": 2,
-        "components": ["a.py"],
+        "components": {"test": 1.0},
         "why": "test",
     }
     jsonl = json.dumps(item) + "\n"

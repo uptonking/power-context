@@ -235,6 +235,40 @@ RERANK_EVENTS_ENABLED=0
 | HYBRID_EXPAND | Enable heuristic multi-query expansion | 0 (off) |
 | LLM_EXPAND_MAX | Max alternate queries via LLM | 0 |
 
+### Filename Boost
+
+The search engine can boost files whose paths match query terms—production-grade algorithm for real-world codebases.
+
+| Name | Description | Default |
+|------|-------------|---------|
+| FNAME_BOOST | Base score boost factor for path/query token matches | 0.15 |
+
+**Naming convention support:**
+- snake_case, camelCase, PascalCase, kebab-case, SCREAMING_CASE
+- Acronyms: `XMLParser` → xml, parser; `HTTPClient` → http, client
+- Prefixes stripped: `IUserService` → user, service; `_private` → private
+- Dot notation: `com.company.auth` → com, company, auth
+
+**Abbreviation normalization:**
+- auth ↔ authenticate/authentication
+- config ↔ configuration/cfg/conf
+- repo ↔ repository, util ↔ utility, impl ↔ implementation, etc.
+
+**Scoring tiers:**
+- Exact token match: 1.0 × factor
+- Normalized match (abbreviation/plural): 0.8 × factor
+- Substring containment: 0.4 × factor
+- Filename bonus: 1.5× multiplier for filename vs directory matches
+- Common token penalty: 0.5× for tokens like "utils", "index", "main"
+
+**Example:** Query "authenticate user handler" matching `auth/UserAuthHandler.ts`:
+- "user" exact match in filename (1.0 × 1.5 = 1.5)
+- "authenticate" → "auth" normalized (0.8 × 1.5 = 1.2)
+- "handler" exact match in filename (1.0 × 1.5 = 1.5)
+- Total: 4.2 × 0.15 = 0.63 boost
+
+Set `FNAME_BOOST=0` to disable, or increase (e.g., `0.25`) for stronger path weighting.
+
 ## Memory Blending
 
 | Name | Description | Default |

@@ -1775,6 +1775,407 @@ async def qdrant_prune(kwargs: Any = None, **ignored: Any) -> Dict[str, Any]:
     return res
 
 
+# ---------------------------------------------------------------------------
+# Code signal detection for intelligent query targeting
+# ---------------------------------------------------------------------------
+
+import re as _re_signals
+import numpy as np
+
+# --- Embedding-based code intent detection ---
+# Pre-computed centroid embeddings for code vs natural language queries
+_CODE_INTENT_CACHE: Dict[str, Any] = {"code_centroid": None, "prose_centroid": None, "initialized": False}
+_CODE_INTENT_LOCK = threading.Lock()
+
+# Archetypal queries for each category
+_CODE_QUERY_ARCHETYPES = [
+    "getUserById function implementation",
+    "class UserService methods",
+    "handleRequest error handling",
+    "database connection pool configuration",
+    "async function fetchData",
+    "struct Config fields",
+    "impl Trait for MyType",
+    "std::vector push_back",
+    "interface IRepository methods",
+    "def process_data parameters",
+    "React component useState hook",
+    "SQL query optimization",
+    "API endpoint authentication",
+    "constructor initialization",
+    "enum Status values",
+]
+
+_PROSE_QUERY_ARCHETYPES = [
+    "how does the authentication work",
+    "explain the data flow",
+    "what is the purpose of this module",
+    "where is the main entry point",
+    "how to configure the database",
+    "why was this approach chosen",
+    "what are the dependencies",
+    "describe the architecture",
+    "when should I use this feature",
+    "how to run the tests",
+]
+
+
+def _init_code_intent_centroids():
+    """Initialize embedding centroids for code vs prose query detection."""
+    global _CODE_INTENT_CACHE
+    with _CODE_INTENT_LOCK:
+        if _CODE_INTENT_CACHE.get("initialized"):
+            return
+        try:
+            model_name = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
+            model = _get_embedding_model(model_name)
+            if model is None:
+                _CODE_INTENT_CACHE["initialized"] = False
+                return
+
+            # Embed archetypes
+            code_embeddings = list(model.embed(_CODE_QUERY_ARCHETYPES))
+            prose_embeddings = list(model.embed(_PROSE_QUERY_ARCHETYPES))
+
+            # Compute centroids
+            code_centroid = np.mean(code_embeddings, axis=0)
+            prose_centroid = np.mean(prose_embeddings, axis=0)
+
+            # Normalize
+            code_centroid = code_centroid / (np.linalg.norm(code_centroid) + 1e-9)
+            prose_centroid = prose_centroid / (np.linalg.norm(prose_centroid) + 1e-9)
+
+            _CODE_INTENT_CACHE["code_centroid"] = code_centroid
+            _CODE_INTENT_CACHE["prose_centroid"] = prose_centroid
+            _CODE_INTENT_CACHE["initialized"] = True
+        except Exception as e:
+            if os.environ.get("DEBUG_CODE_SIGNALS"):
+                print(f"[DEBUG] Failed to init code intent centroids: {e}")
+            _CODE_INTENT_CACHE["initialized"] = False
+
+
+def _detect_code_intent_embedding(query: str) -> float:
+    """Detect code intent using embedding similarity to pre-computed centroids.
+
+    Returns:
+        float: 0.0-1.0 indicating code-likeness (1.0 = very code-like)
+    """
+    if not _CODE_INTENT_CACHE.get("initialized"):
+        _init_code_intent_centroids()
+
+    if not _CODE_INTENT_CACHE.get("initialized"):
+        return 0.5  # Neutral if init failed
+
+    try:
+        model_name = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
+        model = _get_embedding_model(model_name)
+        if model is None:
+            return 0.5
+
+        query_embedding = next(model.embed([query]))
+        query_embedding = query_embedding / (np.linalg.norm(query_embedding) + 1e-9)
+
+        code_centroid = _CODE_INTENT_CACHE["code_centroid"]
+        prose_centroid = _CODE_INTENT_CACHE["prose_centroid"]
+
+        # Cosine similarity
+        code_sim = float(np.dot(query_embedding, code_centroid))
+        prose_sim = float(np.dot(query_embedding, prose_centroid))
+
+        # Convert to 0-1 score (softmax-ish)
+        # If code_sim > prose_sim, score > 0.5
+        diff = code_sim - prose_sim
+        score = 1.0 / (1.0 + np.exp(-diff * 5))  # Sigmoid with scaling
+
+        return float(score)
+    except Exception:
+        return 0.5
+
+
+# Patterns that indicate code-like queries (fast regex fallback)
+_CODE_SIGNAL_PATTERNS = {
+    "backticks": _re_signals.compile(r'`([^`]+)`'),  # `functionName`
+    "camelCase": _re_signals.compile(r'\b[a-z]+(?:[A-Z][a-z0-9]*)+\b'),  # getUserData
+    "PascalCase": _re_signals.compile(r'\b[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+)+\b'),  # MyClassName
+    "snake_case": _re_signals.compile(r'\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b'),  # my_function
+    "SCREAMING_SNAKE": _re_signals.compile(r'\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b'),  # MAX_SIZE
+    "parentheses": _re_signals.compile(r'\b(\w+)\s*\(\)'),  # function()
+    "dot_path": _re_signals.compile(r'\b\w+(?:\.\w+){2,}\b'),  # module.submodule.func
+    "namespace_path": _re_signals.compile(r'\b\w+(?:::\w+)+\b'),  # std::vector, MyNamespace::MyClass (C++/Rust)
+    "file_ext": _re_signals.compile(
+        r'\b[\w/\\-]+\.(?:'
+        # Python
+        r'py|pyi|pyx|pxd|'
+        # JavaScript/TypeScript
+        r'js|jsx|ts|tsx|mjs|cjs|'
+        # Go
+        r'go|'
+        # Rust
+        r'rs|'
+        # Java/Kotlin/Scala
+        r'java|kt|kts|scala|'
+        # C/C++
+        r'c|h|cpp|hpp|cc|hh|cxx|hxx|c\+\+|h\+\+|inl|ipp|tpp|'
+        # C#/F#/.NET
+        r'cs|fs|fsx|vb|'
+        # Swift/Objective-C
+        r'swift|m|mm|'
+        # Ruby
+        r'rb|rake|'
+        # PHP
+        r'php|'
+        # Lua
+        r'lua|'
+        # Perl
+        r'pl|pm|'
+        # Shell
+        r'sh|bash|zsh|'
+        # Haskell/Erlang/Elixir
+        r'hs|erl|ex|exs|'
+        # Clojure/Lisp
+        r'clj|cljs|cljc|lisp|el|'
+        # Zig/Nim/V
+        r'zig|nim|v|'
+        # Assembly
+        r'asm|s|'
+        # SQL
+        r'sql|'
+        # Config as code
+        r'tf|hcl|'
+        # Others
+        r'dart|r|jl|ml|mli|'
+        r'proto|thrift|graphql|gql'
+        r')\b',
+        _re_signals.IGNORECASE
+    ),
+    "path_like": _re_signals.compile(r'(?:^|[\s"])(?:\.?\.?/)?(?:[\w-]+/)+[\w.-]+'),  # src/utils/helper.py
+    # Generic symbols: angle brackets for generics (C++/Java/C#/Rust)
+    "generic_type": _re_signals.compile(r'\b([A-Z][a-zA-Z0-9]*)<[^>]+>'),  # List<String>, Vec<T>, HashMap<K,V>
+    # Interface naming convention (C#/.NET: IFoo, IUserRepository)
+    "interface_I": _re_signals.compile(r'\bI[A-Z][a-zA-Z0-9]+\b'),  # IUserRepository, IDisposable
+    # Single uppercase word that looks like a type (Vec, String, Result)
+    "type_name": _re_signals.compile(r'\b[A-Z][a-z][a-zA-Z0-9]{2,}\b'),  # Vec, String, Result, Option
+}
+
+# Keywords that suggest code intent (language-agnostic)
+_CODE_KEYWORDS = frozenset([
+    # Universal
+    "class", "function", "method", "def", "async", "import", "from",
+    "module", "package", "interface", "struct", "enum", "type",
+    "variable", "const", "constant", "property", "attribute",
+    "constructor", "destructor", "handler", "callback", "hook",
+    "implementation", "definition", "declaration", "signature",
+    # C/C++
+    "namespace", "template", "typedef", "pragma", "inline", "virtual",
+    "override", "static", "extern", "sizeof", "nullptr", "constexpr",
+    # Rust
+    "trait", "impl", "fn", "pub", "mod", "crate", "use", "mut", "ref",
+    "where", "dyn", "unsafe", "async", "await", "macro", "derive",
+    # Go
+    "func", "chan", "defer", "goroutine", "interface", "select",
+    # Java/Kotlin/Scala
+    "abstract", "extends", "implements", "throws", "synchronized",
+    "companion", "object", "sealed", "data", "suspend", "lateinit",
+    # C#/.NET
+    "delegate", "event", "partial", "readonly", "sealed", "yield",
+    "async", "await", "linq", "nullable", "record", "init",
+    # Swift
+    "protocol", "extension", "guard", "lazy", "weak", "unowned",
+    # Ruby
+    "attr_accessor", "attr_reader", "module", "require", "include",
+    # PHP
+    "namespace", "trait", "abstract", "final",
+    # General
+    "api", "endpoint", "route", "controller", "service", "repository",
+    "factory", "singleton", "builder", "adapter", "decorator", "facade",
+])
+
+
+def _detect_code_signals(query: str) -> dict:
+    """Detect code-like patterns in query and extract potential symbols.
+
+    Returns:
+        {
+            "has_code_signals": bool,
+            "signal_strength": float (0.0-1.0),
+            "extracted_symbols": list[str],
+            "detected_patterns": list[str],
+            "suggested_boosts": dict
+        }
+    """
+    if not query or not isinstance(query, str):
+        return {"has_code_signals": False, "signal_strength": 0.0, "extracted_symbols": [], "detected_patterns": [], "suggested_boosts": {}}
+
+    query_lower = query.lower()
+    detected_patterns = []
+    extracted_symbols = set()
+    signal_score = 0.0
+
+    # Check for backtick-wrapped code (highest signal)
+    backtick_matches = _CODE_SIGNAL_PATTERNS["backticks"].findall(query)
+    if backtick_matches:
+        detected_patterns.append("backticks")
+        signal_score += 0.4
+        for m in backtick_matches:
+            if len(m) > 1:
+                extracted_symbols.add(m.strip())
+
+    # Check CamelCase/PascalCase (strong signal for class/type names)
+    for name, pattern in [("PascalCase", _CODE_SIGNAL_PATTERNS["PascalCase"]),
+                          ("camelCase", _CODE_SIGNAL_PATTERNS["camelCase"])]:
+        matches = pattern.findall(query)
+        if matches:
+            detected_patterns.append(name)
+            signal_score += 0.3
+            for m in matches:
+                if len(m) > 2 and m.lower() not in {"the", "and", "for", "with"}:
+                    extracted_symbols.add(m)
+
+    # Check snake_case (strong signal for function/variable names)
+    snake_matches = _CODE_SIGNAL_PATTERNS["snake_case"].findall(query)
+    if snake_matches:
+        detected_patterns.append("snake_case")
+        signal_score += 0.3
+        for m in snake_matches:
+            if len(m) > 3:
+                extracted_symbols.add(m)
+
+    # Check SCREAMING_SNAKE_CASE (constants)
+    screaming_matches = _CODE_SIGNAL_PATTERNS["SCREAMING_SNAKE"].findall(query)
+    if screaming_matches:
+        detected_patterns.append("SCREAMING_SNAKE")
+        signal_score += 0.2
+        for m in screaming_matches:
+            if len(m) > 3:
+                extracted_symbols.add(m)
+
+    # Check for function call syntax: name()
+    paren_matches = _CODE_SIGNAL_PATTERNS["parentheses"].findall(query)
+    if paren_matches:
+        detected_patterns.append("parentheses")
+        signal_score += 0.3
+        for m in paren_matches:
+            if len(m) > 1:
+                extracted_symbols.add(m)
+
+    # Check for module.path.syntax (Python, Java, etc.)
+    dot_matches = _CODE_SIGNAL_PATTERNS["dot_path"].findall(query)
+    if dot_matches:
+        detected_patterns.append("dot_path")
+        signal_score += 0.2
+        for m in dot_matches:
+            # Extract the last component as the symbol
+            parts = m.split(".")
+            if parts:
+                extracted_symbols.add(parts[-1])
+                extracted_symbols.add(m)  # Also add full path
+
+    # Check for namespace::path syntax (C++, Rust)
+    namespace_matches = _CODE_SIGNAL_PATTERNS["namespace_path"].findall(query)
+    if namespace_matches:
+        detected_patterns.append("namespace_path")
+        signal_score += 0.3  # Strong signal - very code-specific
+        for m in namespace_matches:
+            parts = m.split("::")
+            if parts:
+                extracted_symbols.add(parts[-1])  # Last component
+                if len(parts) >= 2:
+                    extracted_symbols.add("::".join(parts[-2:]))  # Last two
+                extracted_symbols.add(m)  # Full path
+
+    # Check for generic types: Type<T>, Vec<String>, etc.
+    generic_matches = _CODE_SIGNAL_PATTERNS["generic_type"].findall(query)
+    if generic_matches:
+        detected_patterns.append("generic_type")
+        signal_score += 0.25
+        for m in generic_matches:
+            # Extract base type name (before <)
+            base = m.split("<")[0]
+            if base and len(base) > 1:
+                extracted_symbols.add(base)
+
+    # Check for file paths/extensions
+    if _CODE_SIGNAL_PATTERNS["file_ext"].search(query):
+        detected_patterns.append("file_ext")
+        signal_score += 0.2
+
+    if _CODE_SIGNAL_PATTERNS["path_like"].search(query):
+        detected_patterns.append("path_like")
+        signal_score += 0.15
+
+    # Check for C#/.NET interface naming (IFoo)
+    interface_matches = _CODE_SIGNAL_PATTERNS["interface_I"].findall(query)
+    if interface_matches:
+        detected_patterns.append("interface_I")
+        signal_score += 0.3
+        for m in interface_matches:
+            if len(m) > 2:
+                extracted_symbols.add(m)
+
+    # Check for single type names (Vec, String, Result, Option)
+    type_matches = _CODE_SIGNAL_PATTERNS["type_name"].findall(query)
+    if type_matches:
+        # Only count as signal if we have other signals or it's a known type pattern
+        # Avoid false positives on regular words
+        for m in type_matches:
+            # Skip common English words that match the pattern
+            if m.lower() not in {"the", "and", "for", "with", "from", "this", "that", "have", "been", "were", "they"}:
+                if len(m) > 2:
+                    extracted_symbols.add(m)
+        if type_matches and not detected_patterns:
+            # Weak signal on its own
+            signal_score += 0.1
+
+    # Check for code keywords
+    words = set(query_lower.split())
+    keyword_matches = words & _CODE_KEYWORDS
+    if keyword_matches:
+        detected_patterns.append("code_keywords")
+        signal_score += 0.1 * min(len(keyword_matches), 3)
+
+    # --- Embedding-based intent detection (blended with regex) ---
+    # Only use if regex signals are ambiguous (0.1 - 0.5 range)
+    embedding_score = 0.0
+    if 0.1 <= signal_score <= 0.5:
+        try:
+            embedding_score = _detect_code_intent_embedding(query)
+            if embedding_score > 0.6:
+                detected_patterns.append("embedding_code_intent")
+                # Blend: weight embedding more when regex is weak
+                blend_weight = 0.4 if signal_score < 0.3 else 0.25
+                signal_score = signal_score * (1 - blend_weight) + embedding_score * blend_weight
+        except Exception:
+            pass
+    elif str(os.environ.get("CODE_SIGNAL_EMBEDDING", "")).lower() in {"1", "true", "yes"} and signal_score < 0.1:
+        # No regex signals - rely more heavily on embedding
+        try:
+            embedding_score = _detect_code_intent_embedding(query)
+            if embedding_score > 0.55:
+                detected_patterns.append("embedding_code_intent")
+                signal_score = embedding_score * 0.6  # Modest boost from embedding alone
+        except Exception:
+            pass
+
+    # Cap signal strength at 1.0
+    signal_score = min(1.0, signal_score)
+
+    # Build suggested boosts based on signal strength
+    suggested_boosts = {}
+    if signal_score >= 0.25:
+        # Boost symbol matching when we detect code signals
+        suggested_boosts["symbol_boost_multiplier"] = 1.0 + signal_score  # 1.25x - 2.0x
+        suggested_boosts["impl_boost_multiplier"] = 1.0 + (signal_score * 0.5)  # Prefer implementations
+
+    return {
+        "has_code_signals": signal_score >= 0.2,
+        "signal_strength": round(signal_score, 2),
+        "embedding_score": round(embedding_score, 2) if embedding_score else None,
+        "extracted_symbols": sorted(extracted_symbols)[:10],  # Limit to 10
+        "detected_patterns": detected_patterns,
+        "suggested_boosts": suggested_boosts,
+    }
+
+
 @mcp.tool()
 async def repo_search(
     query: Any = None,
@@ -2004,7 +2405,7 @@ async def repo_search(
     # Coerce incoming args (which may be null) to proper types
     limit = _to_int(limit, 10)
     per_path = _to_int(per_path, 2)
-    include_snippet = _to_bool(include_snippet, False)
+    include_snippet = _to_bool(include_snippet, True)
     context_lines = _to_int(context_lines, 2)
     # Reranker: default ON; can be disabled via env or client args
     rerank_env_default = str(
@@ -2184,9 +2585,43 @@ async def repo_search(
     if not queries:
         return {"error": "query required"}
 
+    # --- Code signal detection for intelligent targeting ---
+    # Analyze query for code-like patterns and extract potential symbols
+    code_signals = {"has_code_signals": False, "signal_strength": 0.0, "extracted_symbols": [], "detected_patterns": [], "suggested_boosts": {}}
+    try:
+        combined_query = " ".join(queries)
+        code_signals = _detect_code_signals(combined_query)
+    except Exception:
+        pass
+
+    # If code signals detected and no explicit symbol filter, use extracted symbols for boosting
+    auto_symbol_hints: list[str] = []
+    if code_signals.get("has_code_signals") and code_signals.get("extracted_symbols"):
+        auto_symbol_hints = code_signals["extracted_symbols"]
+
     env = os.environ.copy()
     env["QDRANT_URL"] = QDRANT_URL
     env["COLLECTION_NAME"] = collection
+
+    # Apply dynamic boosts based on code signal strength
+    if code_signals.get("has_code_signals"):
+        boosts = code_signals.get("suggested_boosts", {})
+        # Boost symbol matching weight dynamically
+        if "symbol_boost_multiplier" in boosts:
+            base_sym_boost = float(os.environ.get("HYBRID_SYMBOL_BOOST", "0.15"))
+            base_sym_eq_boost = float(os.environ.get("HYBRID_SYMBOL_EQUALITY_BOOST", "0.25"))
+            mult = boosts["symbol_boost_multiplier"]
+            env["HYBRID_SYMBOL_BOOST"] = str(round(base_sym_boost * mult, 3))
+            env["HYBRID_SYMBOL_EQUALITY_BOOST"] = str(round(base_sym_eq_boost * mult, 3))
+        # Boost implementation files over tests/docs when looking for code
+        if "impl_boost_multiplier" in boosts:
+            base_impl_boost = float(os.environ.get("HYBRID_IMPLEMENTATION_BOOST", "0.2"))
+            mult = boosts["impl_boost_multiplier"]
+            env["HYBRID_IMPLEMENTATION_BOOST"] = str(round(base_impl_boost * mult, 3))
+
+    # Pass extracted symbols as additional search hints (augments existing queries)
+    if auto_symbol_hints:
+        env["CODE_SIGNAL_SYMBOLS"] = ",".join(auto_symbol_hints[:5])
 
     results = []
     json_lines = []
@@ -2396,6 +2831,15 @@ async def repo_search(
                         why_parts.append(f"learning:{obj.get('recursive_iterations', 0)}")
                         why_parts.append(f"score:{float(obj.get('score', 0)):.3f}")
 
+                        # Build components with optional fname_boost
+                        components = (obj.get("components") or {}) | {
+                            "learning_score": float(obj.get("recursive_score", 0)),
+                            "learning_iterations": int(obj.get("recursive_iterations", 0)),
+                        }
+                        if obj.get("fname_boost"):
+                            components["fname_boost"] = float(obj.get("fname_boost", 0))
+                            why_parts.append(f"fname:{float(obj.get('fname_boost', 0)):.2f}")
+
                         item = {
                             "score": float(obj.get("score", 0)),
                             "path": obj.get("path", ""),
@@ -2403,11 +2847,7 @@ async def repo_search(
                             "start_line": int(obj.get("start_line") or 0),
                             "end_line": int(obj.get("end_line") or 0),
                             "why": why_parts,
-                            "components": (obj.get("components") or {})
-                            | {
-                                "learning_score": float(obj.get("recursive_score", 0)),
-                                "learning_iterations": int(obj.get("recursive_iterations", 0)),
-                            },
+                            "components": components,
                         }
                         # Preserve dual-path metadata
                         if obj.get("host_path"):
@@ -2931,6 +3371,52 @@ async def repo_search(
             },
         )
 
+    # ─── Filename boost fallback ───────────────────────────────────────────────
+    # Apply filename-query correlation boost for results that don't have it yet.
+    # The learning reranker applies fname_boost when enabled; this catches:
+    #   - Reranking disabled
+    #   - Reranking timed out / failed
+    #   - Subprocess hybrid search without reranking
+    _fname_boost_factor = float(os.environ.get("FNAME_BOOST", "0.15") or 0.15)
+    if _fname_boost_factor > 0 and results:
+        _q_str = " ".join(queries).lower()
+        _q_toks = {t for t in re.findall(r"[a-z0-9_]{3,}", _q_str) if len(t) >= 3}
+        if _q_toks:
+            for r in results:
+                # Skip if fname_boost already applied by reranker
+                if r.get("fname_boost") or (r.get("components") or {}).get("fname_boost"):
+                    continue
+
+                # Extract path from various possible keys
+                _path = ""
+                for _pk in ("path", "rel_path", "host_path", "container_path", "client_path"):
+                    _pv = r.get(_pk) or (r.get("metadata") or {}).get(_pk)
+                    if isinstance(_pv, str) and _pv.strip():
+                        _path = _pv.lower()
+                        break
+                if not _path:
+                    continue
+
+                # Extract filename base (strip extension)
+                _fname = _path.rsplit("/", 1)[-1] if "/" in _path else _path
+                _fname_base = re.sub(r"\.[^.]+$", "", _fname)
+                _fname_toks = {t for t in re.split(r"[_\-.]", _fname_base) if t and len(t) >= 3}
+
+                # Require 2+ matching tokens for boost
+                _match_count = len(_q_toks & _fname_toks)
+                if _match_count >= 2:
+                    _boost = float(_fname_boost_factor) * _match_count
+                    r["score"] = float(r.get("score", 0)) + _boost
+                    r["fname_boost"] = _boost
+                    # Update components dict if present
+                    if "components" in r and isinstance(r["components"], dict):
+                        r["components"]["fname_boost"] = _boost
+                    # Update why array if present
+                    if "why" in r and isinstance(r["why"], list):
+                        r["why"].append(f"fname:{_boost:.2f}")
+        # Re-sort results by updated score so fname_boost affects ranking
+        results = sorted(results, key=lambda x: float(x.get("score", 0)), reverse=True)
+
     if compact:
         results = [
             {
@@ -2968,6 +3454,7 @@ async def repo_search(
         },
         "used_rerank": bool(used_rerank),
         "rerank_counters": rerank_counters,
+        "code_signals": code_signals if code_signals.get("has_code_signals") else None,
         "total": len(results),
         "results": results,
         **res,
