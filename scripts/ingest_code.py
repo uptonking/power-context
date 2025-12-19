@@ -768,15 +768,20 @@ def chunk_by_tokens(
     except Exception:
         Tokenizer = None  # type: ignore
 
+    # Prefer explicit function arguments when provided; fall back to env/defaults.
+    # This lets dynamic resizing callers override MICRO_CHUNK_TOKENS/STRIDE correctly.
     try:
-        k = int(os.environ.get("MICRO_CHUNK_TOKENS", str(k_tokens or 16)) or 16)
+        if k_tokens is not None:
+            k = int(k_tokens)
+        else:
+            k = int(os.environ.get("MICRO_CHUNK_TOKENS", "16") or 16)
     except Exception:
         k = 16
     try:
-        s = int(
-            os.environ.get("MICRO_CHUNK_STRIDE", str(stride_tokens or max(1, k // 2)))
-            or max(1, k // 2)
-        )
+        if stride_tokens is not None:
+            s = int(stride_tokens)
+        else:
+            s = int(os.environ.get("MICRO_CHUNK_STRIDE", "") or max(1, k // 2))
     except Exception:
         s = max(1, k // 2)
 
