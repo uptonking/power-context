@@ -423,6 +423,18 @@ function register(context, deps) {
       }
 
       items.push(
+        makeTreeItem('Read Docs', {
+          icon: new vscode.ThemeIcon('book'),
+          command: {
+            command: 'vscode.open',
+            title: 'Open Context Engine Docs',
+            arguments: [vscode.Uri.parse('https://github.com/m1rl0k/Context-Engine/blob/test/docs/GETTING_STARTED.md')],
+          },
+          tooltip: 'Open the Context Engine documentation in your browser.',
+        })
+      );
+
+      items.push(
         makeTreeItem('Open Settings', {
           icon: new vscode.ThemeIcon('gear'),
           command: { command: 'workbench.action.openSettings', title: 'Open Settings', arguments: ['contextEngineUploader'] },
