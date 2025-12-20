@@ -7,14 +7,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     HF_HOME=/tmp/cache \
     TRANSFORMERS_CACHE=/tmp/cache
 
-# Install latest FastMCP with Streamable HTTP (RMCP) support + deps
-RUN pip install --no-cache-dir --upgrade mcp fastmcp qdrant-client fastembed
-
-# Create cache directory with proper permissions
-RUN mkdir -p /tmp/cache && chmod 755 /tmp/cache
-
-# Ensure rerank volumes are writable when containers run as non-root (uid 1000).
-RUN mkdir -p /tmp/rerank_events /tmp/rerank_weights \
+# Install deps + create cache/rerank directories in single layer
+RUN pip install --no-cache-dir --upgrade mcp fastmcp qdrant-client fastembed \
+    && mkdir -p /tmp/cache && chmod 755 /tmp/cache \
+    && mkdir -p /tmp/rerank_events /tmp/rerank_weights \
     && chmod 777 /tmp/rerank_events /tmp/rerank_weights
 
 # Bake scripts into image so server can run even when /work points elsewhere

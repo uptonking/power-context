@@ -21,20 +21,17 @@ WORKDIR /app
 COPY requirements.txt .
 
 # Install Python dependencies
-RUN pip install --upgrade pip && \
-    pip install -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY scripts/ ./scripts/
 COPY . .
 
-# Create work directory for repositories
-RUN mkdir -p /work && \
-    chmod 755 /work
-
-# Create non-root user for security
-RUN useradd --create-home --shell /bin/bash app && \
-    chown -R app:app /app /work
+# Create work dir, non-root user, and set ownership in single layer
+RUN mkdir -p /work && chmod 755 /work \
+    && useradd --create-home --shell /bin/bash app \
+    && chown -R app:app /app /work
 USER app
 
 # Expose port
