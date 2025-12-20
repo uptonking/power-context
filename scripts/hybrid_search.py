@@ -2043,11 +2043,26 @@ def run_hybrid_search(
         if LEX_SPARSE_MODE:
             sparse_vec = lex_sparse_vector(qlist)
             lex_results = sparse_lex_query(client, sparse_vec, flt, _scaled_per_query, collection)
+            # Fallback to dense lex if sparse returned empty (collection may not have sparse index)
+            if not lex_results:
+                lex_vec = lex_hash_vector(qlist)
+                lex_results = lex_query(client, lex_vec, flt, _scaled_per_query, collection)
+                if lex_results:
+                    print(f"[hybrid_search] LEX_SPARSE_MODE enabled but sparse query returned empty; fell back to dense lex")
         else:
             lex_vec = lex_hash_vector(qlist)
             lex_results = lex_query(client, lex_vec, flt, _scaled_per_query, collection)
-    except Exception:
-        lex_results = []
+    except Exception as e:
+        # On sparse query failure, try falling back to dense lex
+        if LEX_SPARSE_MODE:
+            try:
+                lex_vec = lex_hash_vector(qlist)
+                lex_results = lex_query(client, lex_vec, flt, _scaled_per_query, collection)
+                print(f"[hybrid_search] LEX_SPARSE_MODE sparse query failed ({e}); fell back to dense lex")
+            except Exception:
+                lex_results = []
+        else:
+            lex_results = []
 
     # Per-query adaptive weights (default ON, gentle clamps)
     _USE_ADAPT = _env_truthy(os.environ.get("HYBRID_ADAPTIVE_WEIGHTS"), True)
@@ -2393,16 +2408,27 @@ def run_hybrid_search(
                 if len(prf_qs) >= extra_q:
                     break
         if prf_qs:
-            # Lexical PRF pass (use sparse when enabled)
+            # Lexical PRF pass (use sparse when enabled, with fallback)
+            _prf_limit = max(12, limit // 2 or 6)
             try:
                 if LEX_SPARSE_MODE:
                     sparse_vec2 = lex_sparse_vector(prf_qs)
-                    lex_results2 = sparse_lex_query(client, sparse_vec2, flt, max(12, limit // 2 or 6), collection)
+                    lex_results2 = sparse_lex_query(client, sparse_vec2, flt, _prf_limit, collection)
+                    if not lex_results2:
+                        lex_vec2 = lex_hash_vector(prf_qs)
+                        lex_results2 = lex_query(client, lex_vec2, flt, _prf_limit, collection)
                 else:
                     lex_vec2 = lex_hash_vector(prf_qs)
-                    lex_results2 = lex_query(client, lex_vec2, flt, max(12, limit // 2 or 6), collection)
+                    lex_results2 = lex_query(client, lex_vec2, flt, _prf_limit, collection)
             except Exception:
-                lex_results2 = []
+                if LEX_SPARSE_MODE:
+                    try:
+                        lex_vec2 = lex_hash_vector(prf_qs)
+                        lex_results2 = lex_query(client, lex_vec2, flt, _prf_limit, collection)
+                    except Exception:
+                        lex_results2 = []
+                else:
+                    lex_results2 = []
             for rank, p in enumerate(lex_results2, 1):
                 pid = str(p.id)
                 score_map.setdefault(
@@ -3366,16 +3392,29 @@ def main():
     queries = list(clean_queries)
     # Initialize score map early so we can accumulate from lex and dense
     score_map: Dict[str, Dict[str, Any]] = {}
-    # Server-side lexical vector search (use sparse when LEX_SPARSE_MODE enabled)
+    # Server-side lexical vector search (use sparse when LEX_SPARSE_MODE enabled, with fallback)
     try:
         if LEX_SPARSE_MODE:
             sparse_vec = lex_sparse_vector(queries)
             lex_results = sparse_lex_query(client, sparse_vec, flt, _cli_scaled_per_query, eff_collection)
+            if not lex_results:
+                lex_vec = lex_hash_vector(queries)
+                lex_results = lex_query(client, lex_vec, flt, _cli_scaled_per_query, eff_collection)
+                if lex_results:
+                    print(f"[hybrid_search:cli] LEX_SPARSE_MODE sparse query returned empty; fell back to dense lex")
         else:
             lex_vec = lex_hash_vector(queries)
             lex_results = lex_query(client, lex_vec, flt, _cli_scaled_per_query, eff_collection)
-    except Exception:
-        lex_results = []
+    except Exception as e:
+        if LEX_SPARSE_MODE:
+            try:
+                lex_vec = lex_hash_vector(queries)
+                lex_results = lex_query(client, lex_vec, flt, _cli_scaled_per_query, eff_collection)
+                print(f"[hybrid_search:cli] LEX_SPARSE_MODE sparse query failed ({e}); fell back to dense lex")
+            except Exception:
+                lex_results = []
+        else:
+            lex_results = []
 
     # Per-query adaptive weights for CLI path (default ON)
     _USE_ADAPT2 = _env_truthy(os.environ.get("HYBRID_ADAPTIVE_WEIGHTS"), True)

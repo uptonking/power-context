@@ -2523,10 +2523,12 @@ def _ts_extract_symbols_yaml(text: str) -> List[_Sym]:
         return []
 
     syms: List[_Sym] = []
-    lines = text.encode("utf-8").split(b"\n")
+    text_bytes = text.encode("utf-8")
+    lines = text_bytes.split(b"\n")
 
     def _node_text(node) -> str:
-        return text[node.start_byte:node.end_byte]
+        # Use byte offsets on the byte string, then decode, to handle non-ASCII correctly
+        return text_bytes[node.start_byte:node.end_byte].decode("utf-8", errors="replace")
 
     def walk(node, path: list[str] | None = None):
         path = path or []

@@ -232,6 +232,17 @@ Controls the sparse lexical (keyword) vectors used for hybrid search.
 | LEX_BIGRAMS | Enable bigram hashing for phrase matching | 1 (enabled) |
 | LEX_BIGRAM_WEIGHT | Weight for bigram entries relative to unigrams | 0.7 |
 
+### Sparse Vector Settings (Experimental)
+
+True sparse vectors for lossless lexical matching (no hash collisions).
+
+| Name | Description | Default |
+|------|-------------|---------|
+| LEX_SPARSE_MODE | Enable sparse lexical vectors instead of dense hash vectors | 0 (off) |
+| LEX_SPARSE_NAME | Name of sparse vector index in Qdrant | lex_sparse |
+
+**Note:** Enabling `LEX_SPARSE_MODE` requires the collection to have a sparse vector index configured. Use `--recreate` flag when switching modes. If sparse query fails or returns empty, the system automatically falls back to dense lexical vectors.
+
 **Note:** Changing `LEX_VECTOR_DIM` requires recreating collections (`--recreate` flag).
 To use legacy settings (pre-v2): `LEX_VECTOR_DIM=4096 LEX_MULTI_HASH=1 LEX_BIGRAMS=0`
 

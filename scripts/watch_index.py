@@ -1206,10 +1206,21 @@ def _process_paths(paths, client, model, vector_name: str, model_dim: int, works
                         repo_name_for_cache=repo_name,
                     )
             except _SkipUnchanged:
-                # File unchanged - skip without error
+                # File unchanged - skip without error but still count towards progress
                 status = "skipped"
                 print(f"[{status}] {p} -> {collection}")
                 _log_activity(repo_key, "skipped", p, {"reason": "hash_unchanged"})
+                repo_progress[repo_key] = repo_progress.get(repo_key, 0) + 1
+                try:
+                    _update_progress(
+                        repo_key,
+                        started_at,
+                        repo_progress[repo_key],
+                        len(repo_files),
+                        p,
+                    )
+                except Exception:
+                    pass
                 continue
             except Exception as e:
                 try:
