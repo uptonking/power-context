@@ -195,7 +195,8 @@ RERANK_EVENTS_ENABLED=0
 | DECODER_MAX_TOKENS | Max tokens for decoder responses | 4000 |
 | REFRAG_DECODER_MODE | prompt or soft (soft requires patched llama.cpp) | prompt |
 | GLM_API_KEY | API key for GLM provider | unset |
-| GLM_MODEL | GLM model name | glm-4.6 |
+| GLM_MODEL | GLM model name (used for context_answer) | glm-4.6 |
+| GLM_MODEL_FAST | GLM model for expand_query/simple tasks (higher concurrency) | glm-4.5 |
 | GLM_TIMEOUT_SEC | GLM request timeout in seconds | unset |
 | MINIMAX_API_KEY | API key for MiniMax M2 provider | unset |
 | MINIMAX_MODEL | MiniMax model name | MiniMax-M2 |
