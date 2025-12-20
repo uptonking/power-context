@@ -9033,6 +9033,13 @@ if __name__ == "__main__":
     logger.info(f"  Micro Chunk Tokens: {os.environ.get('MICRO_CHUNK_TOKENS', '128')}")
     logger.info(f"  Micro Chunk Stride: {os.environ.get('MICRO_CHUNK_STRIDE', '64')}")
     logger.info(f"  Max Micro Chunks/File: {os.environ.get('MAX_MICRO_CHUNKS_PER_FILE', '200')}")
+    logger.info(f"  ReFRAG Mode: {os.environ.get('REFRAG_MODE', '0')}")
+    logger.info(f"  ReFRAG Gate First: {os.environ.get('REFRAG_GATE_FIRST', '0')}")
+    logger.info(f"  Lexical Vector Dim: {os.environ.get('LEX_VECTOR_DIM', '768')}")
+    logger.info(f"  Lexical Sparse Mode: {os.environ.get('LEX_SPARSE_MODE', '0')}")
+    logger.info(f"  Reranker Enabled: {os.environ.get('RERANKER_ENABLED', '0')}")
+    logger.info(f"  Rerank Top N: {os.environ.get('RERANK_TOP_N', '20')}")
+    logger.info(f"  Rerank Timeout MS: {os.environ.get('RERANK_TIMEOUT_MS', '500')}")
     logger.info("=" * 60)
 
     # Optional warmups: gated by env flags to avoid delaying readiness on fresh containers
