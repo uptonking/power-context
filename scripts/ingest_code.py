@@ -272,8 +272,16 @@ CODE_EXTS = {
 
 # --- Named vector config ---
 LEX_VECTOR_NAME = os.environ.get("LEX_VECTOR_NAME", "lex")
-# Reduced from 4096 to 2048: with multi-hash+bigrams, denser vectors discriminate better
-LEX_VECTOR_DIM = int(os.environ.get("LEX_VECTOR_DIM", "2048") or 2048)
+# Legacy default 4096 for existing collections; new users can set LEX_VECTOR_DIM=2048 via .env
+# (2048 works better with multi-hash+bigrams when those are enabled)
+def _safe_int_env(key: str, default: int) -> int:
+    try:
+        val = os.environ.get(key)
+        return int(val) if val else default
+    except (ValueError, TypeError):
+        return default
+
+LEX_VECTOR_DIM = _safe_int_env("LEX_VECTOR_DIM", 4096)
 # Optional mini vector (ReFRAG-style gating); conditionally created by REFRAG_MODE
 MINI_VECTOR_NAME = os.environ.get("MINI_VECTOR_NAME", "mini")
 MINI_VEC_DIM = int(os.environ.get("MINI_VEC_DIM", "64") or 64)

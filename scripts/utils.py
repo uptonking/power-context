@@ -27,12 +27,27 @@ def sanitize_vector_name(model_name: str) -> str:
 # Shared lexical hashing utilities to keep ingest/search/memory consistent
 import re, hashlib, math, os
 
-# Feature flags for improved lexical hashing (v2)
-# LEX_MULTI_HASH: number of hash functions per token (default 3 for v2, 1 for legacy)
-# LEX_BIGRAMS: enable bigram hashing (default 1 for v2)
-_LEX_MULTI_HASH = int(os.environ.get("LEX_MULTI_HASH", "3") or 3)
-_LEX_BIGRAMS = os.environ.get("LEX_BIGRAMS", "1").strip().lower() in ("1", "true", "yes", "on")
-_LEX_BIGRAM_WEIGHT = float(os.environ.get("LEX_BIGRAM_WEIGHT", "0.7") or 0.7)
+# Feature flags for improved lexical hashing
+# Defaults are legacy-safe (4096 dim, 1 hash, no bigrams) for existing collections.
+# New users can enable v2 improvements via .env:
+#   LEX_VECTOR_DIM=2048
+#   LEX_MULTI_HASH=3
+#   LEX_BIGRAMS=1
+def _safe_int(val: str | None, default: int) -> int:
+    try:
+        return int(val) if val else default
+    except (ValueError, TypeError):
+        return default
+
+def _safe_float(val: str | None, default: float) -> float:
+    try:
+        return float(val) if val else default
+    except (ValueError, TypeError):
+        return default
+
+_LEX_MULTI_HASH = _safe_int(os.environ.get("LEX_MULTI_HASH"), 1)  # legacy: 1, v2: 3
+_LEX_BIGRAMS = os.environ.get("LEX_BIGRAMS", "0").strip().lower() in ("1", "true", "yes", "on")  # legacy: off
+_LEX_BIGRAM_WEIGHT = _safe_float(os.environ.get("LEX_BIGRAM_WEIGHT"), 0.7)
 
 
 def _split_ident_lex(s: str) -> list[str]:
@@ -53,13 +68,22 @@ def _hash_token(token: str, seed: int = 0) -> int:
     return int(hashlib.md5(f"{seed}:{token}".encode("utf-8", errors="ignore")).hexdigest()[:8], 16)
 
 
-def lex_hash_vector_text(text: str, dim: int = 2048) -> list[float]:
+# Default lex vector dimension - legacy 4096 for existing collections
+# New users: set LEX_VECTOR_DIM=2048 in .env for v2 (denser, better with multi-hash)
+_LEX_VECTOR_DIM_DEFAULT = _safe_int(os.environ.get("LEX_VECTOR_DIM"), 4096)
+
+
+def lex_hash_vector_text(text: str, dim: int | None = None) -> list[float]:
     """Hash text into sparse lexical vector with multi-hash and bigrams.
 
-    Improvements over v1:
+    Features (when enabled via env):
     - Multi-hash: each token hashes to multiple buckets (reduces collision impact)
     - Bigrams: consecutive token pairs captured for phrase matching
+
+    Note: dim defaults to LEX_VECTOR_DIM env var (legacy 4096) for consistency with ingest.
     """
+    if dim is None:
+        dim = _LEX_VECTOR_DIM_DEFAULT
     if not text:
         return [0.0] * dim
     toks = _split_ident_lex(text)
@@ -87,8 +111,13 @@ def lex_hash_vector_text(text: str, dim: int = 2048) -> list[float]:
     return [v / norm for v in vec]
 
 
-def lex_hash_vector_queries(phrases: list[str], dim: int = 2048) -> list[float]:
-    """Hash query phrases into sparse lexical vector (same algorithm as text)."""
+def lex_hash_vector_queries(phrases: list[str], dim: int | None = None) -> list[float]:
+    """Hash query phrases into sparse lexical vector (same algorithm as text).
+
+    Note: dim defaults to LEX_VECTOR_DIM env var (legacy 4096) for consistency with ingest.
+    """
+    if dim is None:
+        dim = _LEX_VECTOR_DIM_DEFAULT
     toks: list[str] = []
     for ph in phrases or []:
         toks.extend(_split_ident_lex(str(ph)))
