@@ -3,7 +3,11 @@ Feature-flagged adapter for decoder-side ReFRAG using GLM (ZhipuAI).
 
 Safe defaults:
 - Only used when REFRAG_DECODER=1 and REFRAG_RUNTIME=glm
-- Requires GLM_API_KEY; optionally configure GLM_MODEL
+- Requires GLM_API_KEY; optionally configure GLM_MODEL and GLM_MODEL_FAST
+
+Model selection:
+- GLM_MODEL: Used for context_answer (default: glm-4.6)
+- GLM_MODEL_FAST: Used for expand_query/simple tasks when disable_thinking=True (default: glm-4.5)
 """
 from __future__ import annotations
 import os
@@ -34,7 +38,12 @@ class GLMRefragClient:
         max_tokens: int = 256,
         **gen_kwargs: Any,
     ) -> str:
-        model = os.environ.get("GLM_MODEL", "glm-4.6")
+        # Use fast model for simple tasks (expand_query), full model for context_answer
+        disable_thinking = bool(gen_kwargs.pop("disable_thinking", False))
+        if disable_thinking:
+            model = os.environ.get("GLM_MODEL_FAST", "glm-4.5")
+        else:
+            model = os.environ.get("GLM_MODEL", "glm-4.6")
         temperature = float(gen_kwargs.get("temperature", 0.2))
         top_p = float(gen_kwargs.get("top_p", 0.95))
         stop = gen_kwargs.get("stop")
@@ -46,8 +55,6 @@ class GLMRefragClient:
         except Exception:
             timeout_val = None
 
-        # GLM-4.6: optionally disable deep thinking for simple tasks (expand_query)
-        disable_thinking = bool(gen_kwargs.pop("disable_thinking", False))
         try:
             create_kwargs: dict[str, Any] = {
                 "model": model,
