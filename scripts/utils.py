@@ -45,7 +45,7 @@ def _safe_float(val: str | None, default: float) -> float:
     except (ValueError, TypeError):
         return default
 
-_LEX_MULTI_HASH = _safe_int(os.environ.get("LEX_MULTI_HASH"), 1)  # legacy: 1, v2: 3
+_LEX_MULTI_HASH = max(1, _safe_int(os.environ.get("LEX_MULTI_HASH"), 1))  # legacy: 1, v2: 3; clamp >= 1
 _LEX_BIGRAMS = os.environ.get("LEX_BIGRAMS", "0").strip().lower() in ("1", "true", "yes", "on")  # legacy: off
 _LEX_BIGRAM_WEIGHT = _safe_float(os.environ.get("LEX_BIGRAM_WEIGHT"), 0.7)
 

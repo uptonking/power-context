@@ -155,8 +155,8 @@ def _safe_float(val: Any, default: float) -> float:
         return default
 
 LEX_VECTOR_NAME = os.environ.get("LEX_VECTOR_NAME", "lex")
-# Reduced from 4096 to 2048: with multi-hash+bigrams, denser vectors discriminate better
-LEX_VECTOR_DIM = _safe_int(os.environ.get("LEX_VECTOR_DIM", "2048"), 2048)
+# Legacy default 4096 for existing collections; set LEX_VECTOR_DIM=2048 in .env for v2
+LEX_VECTOR_DIM = _safe_int(os.environ.get("LEX_VECTOR_DIM"), 4096)
 # Optional mini vector (ReFRAG gating)
 MINI_VECTOR_NAME = os.environ.get("MINI_VECTOR_NAME", "mini")
 MINI_VEC_DIM = _safe_int(os.environ.get("MINI_VEC_DIM", "64"), 64)
