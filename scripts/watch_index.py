@@ -37,7 +37,7 @@ from scripts.workspace_state import (
     _get_repo_state_dir,
     _cross_process_lock,
     get_collection_mappings,
-    indexing_lock,
+    is_indexing_locked,
 )
 import hashlib
 from datetime import datetime
@@ -193,6 +193,19 @@ class ChangeQueue:
             paths = list(self._paths)
             self._paths.clear()
             self._timer = None
+
+        # Check if full indexer is running - if so, defer processing
+        if is_indexing_locked():
+            print(f"[WATCHER] Indexer is running, deferring {len(paths)} file(s)")
+            with self._lock:
+                self._pending.update(paths)
+                if self._timer is None:
+                    # Retry after a delay
+                    self._timer = threading.Timer(DELAY_SECS * 2, self._flush)
+                    self._timer.daemon = True
+                    self._timer.start()
+            return
+
         # Try to run the processor exclusively; if busy, queue and return
         if not self._processing_lock.acquire(blocking=False):
             with self._lock:
@@ -204,26 +217,34 @@ class ChangeQueue:
                     self._timer.start()
             return
         try:
-            # Acquire cross-process lock - blocks if indexer is running
-            with indexing_lock():
-                todo = paths
-                while True:
-                    try:
-                        self._process_cb(list(todo))
-                    except Exception as e:
-                        try:
-                            print(f"[watcher_error] processing batch failed: {e}")
-                        except Exception as inner_e:  # pragma: no cover - logging fallback
-                            logger.error(
-                                "Exception in ChangeQueue._flush during batch processing",
-                                extra={"error": str(inner_e)},
-                            )
-                    # drain any pending accumulated during processing
+            todo = paths
+            while True:
+                # Re-check lock in case indexer started while we were processing
+                if is_indexing_locked():
+                    print(f"[WATCHER] Indexer started, deferring remaining {len(todo)} file(s)")
                     with self._lock:
-                        if not self._pending:
-                            break
-                        todo = list(self._pending)
-                        self._pending.clear()
+                        self._pending.update(todo)
+                        if self._timer is None:
+                            self._timer = threading.Timer(DELAY_SECS * 2, self._flush)
+                            self._timer.daemon = True
+                            self._timer.start()
+                    break
+                try:
+                    self._process_cb(list(todo))
+                except Exception as e:
+                    try:
+                        print(f"[watcher_error] processing batch failed: {e}")
+                    except Exception as inner_e:  # pragma: no cover - logging fallback
+                        logger.error(
+                            "Exception in ChangeQueue._flush during batch processing",
+                            extra={"error": str(inner_e)},
+                        )
+                # drain any pending accumulated during processing
+                with self._lock:
+                    if not self._pending:
+                        break
+                    todo = list(self._pending)
+                    self._pending.clear()
         finally:
             self._processing_lock.release()
 

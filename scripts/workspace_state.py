@@ -380,48 +380,105 @@ def _cross_process_lock(lock_path: Path):
                 pass
 
 
-# Global indexing lock path - used to coordinate indexer and watcher
-# Uses /work/.codebase (shared volume) for cross-container coordination in Docker
+# Per-file locking for indexer/watcher coordination
+# Uses /work/.codebase/locks (shared volume) for cross-container coordination in Docker
 # Falls back to /tmp for local development
 _SHARED_LOCK_DIR = Path("/work/.codebase")
 if _SHARED_LOCK_DIR.exists() and _SHARED_LOCK_DIR.is_dir():
-    INDEXING_LOCK_PATH = _SHARED_LOCK_DIR / "indexing.lock"
+    _FILE_LOCKS_DIR = _SHARED_LOCK_DIR / "locks"
 else:
-    INDEXING_LOCK_PATH = Path("/tmp/context-engine-indexing.lock")
+    _FILE_LOCKS_DIR = Path("/tmp/context-engine-locks")
+
+# Lock timeout - if lock file is older than this, consider it stale
+_FILE_LOCK_TIMEOUT_SECONDS = 300  # 5 min max per file (generous for LLM calls)
 
 
-def is_indexing_locked() -> bool:
-    """Check if the global indexing lock is held (non-blocking check).
-    Returns True if another process holds the lock.
+def _get_file_lock_path(file_path: str) -> Path:
+    """Get the lock file path for a given file."""
+    # Use hash of file path to avoid filesystem path issues
+    import hashlib
+    path_hash = hashlib.md5(file_path.encode()).hexdigest()[:16]
+    return _FILE_LOCKS_DIR / f"{path_hash}.lock"
+
+
+def is_file_locked(file_path: str) -> bool:
+    """Check if a specific file is currently being indexed.
+
+    Uses file-based locking with timestamp for cross-container coordination.
+    Returns True if file is locked (lock file exists and is recent).
     """
-    if fcntl is None:
-        return False  # Can't check on Windows, assume unlocked
-
     try:
-        fd = os.open(INDEXING_LOCK_PATH, os.O_CREAT | os.O_RDWR, 0o664)
-        lock_file = os.fdopen(fd, "a+")
-        try:
-            # Try non-blocking lock
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            # Got the lock, release it immediately - not locked by another process
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        lock_path = _get_file_lock_path(file_path)
+        if not lock_path.exists():
             return False
-        except (IOError, OSError):
-            # Could not acquire lock - another process holds it
-            return True
-        finally:
-            lock_file.close()
+        # Check if lock is stale
+        mtime = lock_path.stat().st_mtime
+        age = time.time() - mtime
+        if age > _FILE_LOCK_TIMEOUT_SECONDS:
+            # Stale lock - remove it
+            try:
+                lock_path.unlink()
+            except Exception:
+                pass
+            return False
+        return True
     except Exception:
         return False
 
 
 @contextmanager
-def indexing_lock():
-    """Acquire the global indexing lock. Use during full/batch indexing operations.
-    Watcher should check is_indexing_locked() before processing changes.
+def file_indexing_lock(file_path: str):
+    """Acquire a lock for indexing a specific file.
+
+    Use this before processing a file to prevent indexer/watcher collision.
+    Non-blocking - raises if file is already locked.
     """
-    with _cross_process_lock(INDEXING_LOCK_PATH):
+    lock_path = _get_file_lock_path(file_path)
+
+    # Check if already locked
+    if is_file_locked(file_path):
+        raise FileExistsError(f"File is already being indexed: {file_path}")
+
+    # Create lock
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.write_text(json.dumps({
+            "file": file_path,
+            "locked_at": time.time(),
+            "pid": os.getpid(),
+        }))
+    except Exception as e:
+        raise RuntimeError(f"Could not acquire file lock: {e}")
+
+    try:
         yield
+    finally:
+        # Release lock
+        try:
+            lock_path.unlink()
+        except Exception:
+            pass
+
+
+# Legacy global lock for backward compatibility (deprecated)
+INDEXING_LOCK_PATH = _FILE_LOCKS_DIR.parent / "indexing.lock" if _SHARED_LOCK_DIR.exists() else Path("/tmp/context-engine-indexing.lock")
+
+
+def is_indexing_locked() -> bool:
+    """DEPRECATED: Use is_file_locked() for per-file coordination.
+
+    Check if global indexing lock is held. Returns False (no global lock).
+    """
+    return False  # Per-file locking means no global lock needed
+
+
+@contextmanager
+def indexing_lock():
+    """DEPRECATED: Use file_indexing_lock() for per-file coordination.
+
+    No-op for backward compatibility.
+    """
+    yield
 
 def _detect_repo_name_from_path(path: Path) -> str:
     """Detect repository name from path using git remote origin URL.
