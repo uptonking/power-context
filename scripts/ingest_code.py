@@ -4767,19 +4767,34 @@ def main():
     flag = (os.environ.get("PSEUDO_BACKFILL_ENABLED") or "").strip().lower()
     pseudo_mode = "off" if flag in {"1", "true", "yes", "on"} else "full"
 
-    index_repo(
-        Path(args.root).resolve(),
-        qdrant_url,
-        api_key,
-        collection,
-        model_name,
-        args.recreate,
-        dedupe=(not args.no_dedupe),
-        skip_unchanged=(not args.no_skip_unchanged),
-        # Pseudo/tags are inlined by default; when PSEUDO_BACKFILL_ENABLED=1 we run
-        # base-only and rely on the background backfill worker to add pseudo/tags.
-        pseudo_mode=pseudo_mode,
-    )
+    # Acquire cross-process lock to coordinate with watcher
+    if indexing_lock is not None:
+        print("[INDEXER] Acquiring indexing lock to coordinate with watcher...")
+        with indexing_lock():
+            index_repo(
+                Path(args.root).resolve(),
+                qdrant_url,
+                api_key,
+                collection,
+                model_name,
+                args.recreate,
+                dedupe=(not args.no_dedupe),
+                skip_unchanged=(not args.no_skip_unchanged),
+                pseudo_mode=pseudo_mode,
+            )
+    else:
+        # Fallback when workspace_state is not available
+        index_repo(
+            Path(args.root).resolve(),
+            qdrant_url,
+            api_key,
+            collection,
+            model_name,
+            args.recreate,
+            dedupe=(not args.no_dedupe),
+            skip_unchanged=(not args.no_skip_unchanged),
+            pseudo_mode=pseudo_mode,
+        )
 
 
 if __name__ == "__main__":
