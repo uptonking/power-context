@@ -47,16 +47,19 @@
       <p class="muted">Collection deletion is disabled by server configuration.</p>
     {% endif %}
 
-    <table>
-      <tr>
-        <th>id</th>
-        <th>qdrant_collection</th>
-        <th>indexing_status</th>
-        <th>mapping</th>
-        <th>applied_hash</th>
-        <th>current_hash</th>
-        <th>actions</th>
-      </tr>
+    <table id="collections-table" data-deletion-enabled="{{ '1' if deletion_enabled else '0' }}" data-work-dir="{{ work_dir }}">
+      <thead>
+        <tr>
+          <th>id</th>
+          <th>qdrant_collection</th>
+          <th>indexing_status</th>
+          <th>mapping</th>
+          <th>applied_hash</th>
+          <th>current_hash</th>
+          <th>actions</th>
+        </tr>
+      </thead>
+      <tbody id="collections-body">
       {% if collections and collections|length > 0 %}
         {% for c in collections %}
           <tr {% if c.needs_reindex %}style="background:#fff3cd"{% endif %}>
@@ -127,6 +130,7 @@
       {% else %}
         <tr><td colspan="7">(none)</td></tr>
       {% endif %}
+      </tbody>
     </table>
   </div>
 
@@ -184,4 +188,134 @@
 
     <p class="muted">Collection permissions are enforced by MCP servers when CTXCE_MCP_ACL_ENFORCE=1 (and CTXCE_ACL_ALLOW_ALL=0).</p>
   </div>
+  <script>
+    (function () {
+      const REFRESH_MS = 5000;
+      const bodyEl = document.getElementById("collections-body");
+      const tableEl = document.getElementById("collections-table");
+      if (!bodyEl) {
+        return;
+      }
+      const deletionEnabled =
+        tableEl && tableEl.dataset && tableEl.dataset.deletionEnabled === "1";
+      const workDir = (tableEl && tableEl.dataset && tableEl.dataset.workDir) || "";
+
+      function escapeHtml(str) {
+        return str
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;")
+          .replace(/'/g, "&#39;");
+      }
+
+      function safeValue(val) {
+        return val === null || val === undefined ? "" : val;
+      }
+
+      function renderRow(c) {
+        const highlight = c.needs_reindex ? ' style="background:#fff3cd"' : "";
+        const containerInfo = c.container_path
+          ? `<div class="muted">${escapeHtml(c.container_path)}</div>`
+          : "";
+        const repoInfo = c.repo_name ? `<div class="muted">repo: ${escapeHtml(c.repo_name)}</div>` : "";
+        const mappingInfo = c.has_mapping
+          ? `<span class="muted">ok (${c.mapping_count})</span>`
+          : '<span class="error">missing</span>';
+        const maintenance = c.needs_reindex ? '<div class="error">maintenance needed</div>' : "";
+        const started = c.indexing_started_at
+          ? `<div class="muted">started ${escapeHtml(c.indexing_started_at)}</div>`
+          : "";
+        const filesProcessed =
+          c.progress_files_processed !== null && c.progress_files_processed !== undefined
+            ? `<div class="muted">${c.progress_files_processed}${
+                c.progress_total_files ? ` / ${c.progress_total_files}` : ""
+              } files</div>`
+            : "";
+        const currentFile = c.progress_current_file
+          ? `<div class="muted small">${escapeHtml(c.progress_current_file)}</div>`
+          : "";
+        const actions = c.has_mapping
+          ? `
+            <form class="inline" method="post" action="/admin/collections/reindex" onsubmit="return confirm('Reindex collection ${escapeHtml(
+              c.qdrant_collection
+            )}?');">
+              <input type="hidden" name="collection" value="${escapeHtml(c.qdrant_collection)}" />
+              <button type="submit">Reindex</button>
+            </form>
+            <form class="inline" method="post" action="/admin/collections/recreate" onsubmit="return confirm('Recreate collection ${escapeHtml(
+              c.qdrant_collection
+            )}? This will recreate Qdrant collection and reindex all files.');">
+              <input type="hidden" name="collection" value="${escapeHtml(c.qdrant_collection)}" />
+              <button type="submit">Recreate</button>
+            </form>
+          `
+          : "";
+        const deleteHtml = deletionEnabled
+          ? `
+            <form class="inline" method="post" action="/admin/collections/delete" onsubmit="return confirm('Delete collection ${escapeHtml(
+              c.qdrant_collection
+            )}? This may delete server-side files under ${escapeHtml(workDir)} if filesystem cleanup is selected.');">
+              <input type="hidden" name="collection" value="${escapeHtml(c.qdrant_collection)}" />
+              <label class="muted" style="display:block; margin-bottom:6px;">
+                <input type="checkbox" name="delete_fs" value="1" />
+                Also delete filesystem (dangerous)
+              </label>
+              <button type="submit">Delete</button>
+            </form>
+          `
+          : "";
+
+        return `
+          <tr${highlight}>
+            <td>${escapeHtml(String(safeValue(c.id)))}</td>
+            <td>
+              <div>${escapeHtml(c.qdrant_collection || "")}</div>
+              ${containerInfo}
+              ${repoInfo}
+            </td>
+            <td>
+              <div>${escapeHtml(c.indexing_state || "idle")}</div>
+              ${started}
+              ${filesProcessed}
+              ${currentFile}
+            </td>
+            <td>
+              ${mappingInfo}
+              ${maintenance}
+            </td>
+            <td><span class="muted">${escapeHtml(c.applied_indexing_hash || "")}</span></td>
+            <td><span class="muted">${escapeHtml(c.current_indexing_hash || "")}</span></td>
+            <td>
+              ${actions}
+              ${deleteHtml}
+            </td>
+          </tr>
+        `;
+      }
+
+      async function refreshCollections() {
+        try {
+          const resp = await fetch("/admin/collections/status", { headers: { "X-Requested-With": "fetch" } });
+          if (!resp.ok) {
+            throw new Error("Failed to load status");
+          }
+          const data = await resp.json();
+          if (!data || !Array.isArray(data.collections)) {
+            return;
+          }
+          if (data.collections.length === 0) {
+            bodyEl.innerHTML = '<tr><td colspan="7">(none)</td></tr>';
+            return;
+          }
+          bodyEl.innerHTML = data.collections.map(renderRow).join("");
+        } catch (err) {
+          console.warn("Failed to refresh collections", err);
+        }
+      }
+
+      refreshCollections();
+      setInterval(refreshCollections, REFRESH_MS);
+    })();
+  </script>
 {% endblock %}

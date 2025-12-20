@@ -597,6 +597,20 @@ async def admin_acl_grant(
     return RedirectResponse(url="/admin/acl", status_code=302)
 
 
+@app.get("/admin/collections/status")
+async def admin_collections_status(request: Request):
+    _require_admin_session(request)
+    try:
+        collections = list_collections(include_deleted=False)
+    except AuthDisabledError:
+        raise HTTPException(status_code=404, detail="Auth disabled")
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to load collections")
+
+    enriched = build_admin_collections_view(collections=collections, work_dir=WORK_DIR)
+    return JSONResponse({"collections": enriched})
+
+
 @app.post("/admin/collections/reindex")
 async def admin_reindex_collection(
     request: Request,
