@@ -96,6 +96,7 @@ try:
         update_symbols_with_pseudo,
         get_workspace_state,
         get_cached_file_meta,
+        indexing_lock,
     )
 except ImportError:
     # State integration is optional; continue if not available
@@ -114,6 +115,7 @@ except ImportError:
     compare_symbol_changes = None  # type: ignore
     get_workspace_state = None  # type: ignore
     get_cached_file_meta = None  # type: ignore
+    indexing_lock = None  # type: ignore
 
 # Optional Tree-sitter import (graceful fallback) - tree-sitter 0.25+ API
 _TS_LANGUAGES: Dict[str, Any] = {}
@@ -1137,10 +1139,43 @@ def ensure_collection(client: QdrantClient, name: str, dim: int, vector_name: st
         # Prevent I/O storm - only update vectors if they actually don't exist
         try:
             cfg = getattr(info.config.params, "vectors", None)
+            sparse_cfg = getattr(info.config.params, "sparse_vectors", None)
             if isinstance(cfg, dict):
                 # Check if collection already has required vectors before updating
                 has_lex = LEX_VECTOR_NAME in cfg
                 has_mini = MINI_VECTOR_NAME in cfg
+                # Check if sparse vectors are configured when LEX_SPARSE_MODE is enabled
+                has_sparse = sparse_cfg and LEX_SPARSE_NAME in (sparse_cfg if isinstance(sparse_cfg, dict) else {})
+
+                # If LEX_SPARSE_MODE enabled but collection lacks sparse vectors, must recreate
+                if LEX_SPARSE_MODE and not has_sparse:
+                    print(f"[COLLECTION_INFO] Collection {name} lacks sparse vector '{LEX_SPARSE_NAME}' - recreating...")
+                    # Backup memories before recreating
+                    try:
+                        import tempfile
+                        import subprocess
+                        import sys
+                        with tempfile.NamedTemporaryFile(mode='w', suffix='_memories_backup.json', delete=False) as f:
+                            backup_file = f.name
+                        print(f"[MEMORY_BACKUP] Backing up memories from {name} to {backup_file}")
+                        backup_script = Path(__file__).parent / "memory_backup.py"
+                        result = subprocess.run([
+                            sys.executable, str(backup_script),
+                            "--collection", name,
+                            "--output", backup_file
+                        ], capture_output=True, text=True, cwd=Path(__file__).parent.parent)
+                        if result.returncode != 0:
+                            print(f"[MEMORY_BACKUP_WARNING] Backup script failed: {result.stderr}")
+                            backup_file = None
+                    except Exception as backup_e:
+                        print(f"[MEMORY_BACKUP_WARNING] Failed to backup memories: {backup_e}")
+                        backup_file = None
+                    try:
+                        client.delete_collection(name)
+                        print(f"[COLLECTION_INFO] Deleted existing collection {name}")
+                    except Exception:
+                        pass
+                    raise CollectionNeedsRecreateError(f"Collection {name} needs sparse vectors")
 
                 # Only add to missing if vector doesn't already exist
                 missing = {}
@@ -3237,6 +3272,7 @@ def index_repo(
     skip_unchanged: bool = True,
     pseudo_mode: str = "full",
 ):
+    """Index a repository into Qdrant. Acquires cross-process lock to coordinate with watcher."""
     # Optional fast no-change precheck: when INDEX_FS_FASTPATH is enabled, use
     # fs metadata + cache.json to exit early before model/Qdrant setup when all
     # files are unchanged.

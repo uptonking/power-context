@@ -379,6 +379,44 @@ def _cross_process_lock(lock_path: Path):
             except Exception:
                 pass
 
+
+# Global indexing lock path - used to coordinate indexer and watcher
+INDEXING_LOCK_PATH = Path("/tmp/context-engine-indexing.lock")
+
+
+def is_indexing_locked() -> bool:
+    """Check if the global indexing lock is held (non-blocking check).
+    Returns True if another process holds the lock.
+    """
+    if fcntl is None:
+        return False  # Can't check on Windows, assume unlocked
+
+    try:
+        fd = os.open(INDEXING_LOCK_PATH, os.O_CREAT | os.O_RDWR, 0o664)
+        lock_file = os.fdopen(fd, "a+")
+        try:
+            # Try non-blocking lock
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            # Got the lock, release it immediately - not locked by another process
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            return False
+        except (IOError, OSError):
+            # Could not acquire lock - another process holds it
+            return True
+        finally:
+            lock_file.close()
+    except Exception:
+        return False
+
+
+@contextmanager
+def indexing_lock():
+    """Acquire the global indexing lock. Use during full/batch indexing operations.
+    Watcher should check is_indexing_locked() before processing changes.
+    """
+    with _cross_process_lock(INDEXING_LOCK_PATH):
+        yield
+
 def _detect_repo_name_from_path(path: Path) -> str:
     """Detect repository name from path using git remote origin URL.
 

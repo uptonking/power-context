@@ -37,6 +37,7 @@ from scripts.workspace_state import (
     _get_repo_state_dir,
     _cross_process_lock,
     get_collection_mappings,
+    indexing_lock,
 )
 import hashlib
 from datetime import datetime
@@ -203,24 +204,26 @@ class ChangeQueue:
                     self._timer.start()
             return
         try:
-            todo = paths
-            while True:
-                try:
-                    self._process_cb(list(todo))
-                except Exception as e:
+            # Acquire cross-process lock - blocks if indexer is running
+            with indexing_lock():
+                todo = paths
+                while True:
                     try:
-                        print(f"[watcher_error] processing batch failed: {e}")
-                    except Exception as inner_e:  # pragma: no cover - logging fallback
-                        logger.error(
-                            "Exception in ChangeQueue._flush during batch processing",
-                            extra={"error": str(inner_e)},
-                        )
-                # drain any pending accumulated during processing
-                with self._lock:
-                    if not self._pending:
-                        break
-                    todo = list(self._pending)
-                    self._pending.clear()
+                        self._process_cb(list(todo))
+                    except Exception as e:
+                        try:
+                            print(f"[watcher_error] processing batch failed: {e}")
+                        except Exception as inner_e:  # pragma: no cover - logging fallback
+                            logger.error(
+                                "Exception in ChangeQueue._flush during batch processing",
+                                extra={"error": str(inner_e)},
+                            )
+                    # drain any pending accumulated during processing
+                    with self._lock:
+                        if not self._pending:
+                            break
+                        todo = list(self._pending)
+                        self._pending.clear()
         finally:
             self._processing_lock.release()
 
