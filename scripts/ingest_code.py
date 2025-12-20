@@ -97,6 +97,8 @@ try:
         get_workspace_state,
         get_cached_file_meta,
         indexing_lock,
+        file_indexing_lock,
+        is_file_locked,
     )
 except ImportError:
     # State integration is optional; continue if not available
@@ -116,6 +118,8 @@ except ImportError:
     get_workspace_state = None  # type: ignore
     get_cached_file_meta = None  # type: ignore
     indexing_lock = None  # type: ignore
+    file_indexing_lock = None  # type: ignore
+    is_file_locked = None  # type: ignore
 
 # Optional Tree-sitter import (graceful fallback) - tree-sitter 0.25+ API
 _TS_LANGUAGES: Dict[str, Any] = {}
