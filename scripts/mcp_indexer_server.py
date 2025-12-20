@@ -286,6 +286,47 @@ os.environ.setdefault(
 )  # Disable strict identifier requirement
 
 
+# --- TOON (Token-Oriented Object Notation) support ---
+# Feature flag: TOON_ENABLED=1 to enable TOON output format
+# See: https://github.com/toon-format/toon
+def _is_toon_output_enabled() -> bool:
+    """Check if TOON output format is enabled globally."""
+    return os.environ.get("TOON_ENABLED", "0").lower() in ("1", "true", "yes")
+
+
+def _should_use_toon(output_format: Any) -> bool:
+    """Determine if TOON format should be used based on explicit param or env flag."""
+    if output_format is not None:
+        fmt = str(output_format).strip().lower()
+        return fmt == "toon"
+    return _is_toon_output_enabled()
+
+
+def _format_results_as_toon(response: Dict[str, Any], compact: bool = False) -> Dict[str, Any]:
+    """Convert response to include TOON-formatted results string.
+
+    Keeps original structure but adds 'results_toon' field with TOON encoding.
+    This allows clients to use either format.
+    """
+    try:
+        from scripts.toon_encoder import encode_search_results, encode
+
+        results = response.get("results", [])
+        if results and isinstance(results, list):
+            # Encode just the results array in tabular format
+            toon_results = encode_search_results(results, compact=compact)
+            response["results_toon"] = toon_results
+            response["output_format"] = "toon"
+
+        return response
+    except ImportError:
+        logger.warning("TOON encoder not available, returning JSON format")
+        return response
+    except Exception as e:
+        logger.debug(f"TOON encoding failed: {e}")
+        return response
+
+
 # --- Workspace state integration helpers ---
 def _state_file_path(ws_path: str = "/work") -> str:
     """Locate workspace state using centralized metadata helpers when available."""
@@ -2213,6 +2254,7 @@ async def repo_search(
     repo: Any = None,  # str, list[str], or "*" to search all repos
     # Response shaping
     compact: Any = None,
+    output_format: Any = None,  # "json" (default) or "toon" for token-efficient format
     args: Any = None,  # Compatibility shim for mcp-remote/Claude wrappers that send args/kwargs
     kwargs: Any = None,
 ) -> Dict[str, Any]:
@@ -2228,6 +2270,8 @@ async def repo_search(
     - per_path: int (default 2). Max results per file.
     - include_snippet/context_lines: return inline snippets near hits when true.
     - rerank_*: optional ONNX reranker toggles; timeouts fall back to hybrid output.
+    - output_format: "json" (default) or "toon" for token-efficient TOON format.
+      Set TOON_ENABLED=1 env var to enable TOON by default.
     - collection: str. Target collection; defaults to workspace state or env COLLECTION_NAME.
     - repo: str or list[str]. Filter by repo name(s). Use "*" to search all repos (disable auto-filter).
       By default, auto-detects current repo from CURRENT_REPO env and filters to it.
@@ -3427,7 +3471,7 @@ async def repo_search(
             for r in results
         ]
 
-    return {
+    response = {
         "args": {
             "queries": queries,
             "limit": int(limit),
@@ -3459,6 +3503,11 @@ async def repo_search(
         "results": results,
         **res,
     }
+
+    # Apply TOON formatting if requested or enabled globally
+    if _should_use_toon(output_format):
+        return _format_results_as_toon(response, compact=bool(compact))
+    return response
 
 
 @mcp.tool()
@@ -4236,6 +4285,8 @@ async def context_search(
     compact: Any = None,
     # Repo scoping (cross-codebase isolation)
     repo: Any = None,  # str, list[str], or "*" to search all repos
+    # Output format
+    output_format: Any = None,  # "json" (default) or "toon" for token-efficient format
     kwargs: Any = None,
 ) -> Dict[str, Any]:
     """Blend code search results with memory-store entries (notes, docs) for richer context.
@@ -4250,6 +4301,7 @@ async def context_search(
     - memory_weight: float (default 1.0). Scales memory scores relative to code.
     - per_source_limits: dict, e.g. {"code": 5, "memory": 3}
     - All repo_search filters are supported and passed through.
+    - output_format: "json" (default) or "toon" for token-efficient TOON format.
     - repo: str or list[str]. Filter by repo name(s). Use "*" to search all repos (disable auto-filter).
       By default, auto-detects current repo from CURRENT_REPO env and filters to it.
 
@@ -5378,6 +5430,9 @@ async def context_search(
                 }
         except Exception:
             pass
+        # Apply TOON formatting if requested or enabled globally
+        if _should_use_toon(output_format):
+            return _format_results_as_toon(ret, compact=True)
         return ret
 
     ret = {"results": blended, "total": len(blended)}
@@ -5400,6 +5455,9 @@ async def context_search(
         "context_lines": int(context_lines) if context_lines not in (None, "") else 2,
         "compact": bool(eff_compact),
     }
+    # Apply TOON formatting if requested or enabled globally
+    if _should_use_toon(output_format):
+        return _format_results_as_toon(ret, compact=bool(eff_compact))
     return ret
 
 
@@ -8828,6 +8886,8 @@ async def info_request(
     # Additional options
     include_snippet: bool = None,
     context_lines: int = None,
+    # Output format
+    output_format: Any = None,  # "json" (default) or "toon" for token-efficient format
     kwargs: Any = None,
 ) -> Dict[str, Any]:
     """Simplified codebase retrieval with optional explanation mode.
@@ -8846,6 +8906,7 @@ async def info_request(
     - language: str. Filter by programming language.
     - under: str. Limit search to specific directory.
     - repo: str or list[str]. Filter by repository name(s).
+    - output_format: "json" (default) or "toon" for token-efficient TOON format.
 
     Returns:
     - Compact mode (default): results with information field and relevance_score alias
@@ -9002,6 +9063,9 @@ async def info_request(
             "search_strategy": search_strategy,
         }
 
+    # Apply TOON formatting if requested or enabled globally
+    if _should_use_toon(output_format):
+        return _format_results_as_toon(response, compact=True)
     return response
 
 
