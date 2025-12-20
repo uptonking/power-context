@@ -136,6 +136,8 @@ services:
       - LEX_MULTI_HASH
       - LEX_BIGRAMS
       - LEX_BIGRAM_WEIGHT
+      - LEX_SPARSE_MODE
+      - LEX_SPARSE_NAME
       # Learning reranker configuration
       - RERANK_LEARNING=${RERANK_LEARNING:-1}
       - RERANKER_WEIGHTS_DIR=/tmp/rerank_weights
@@ -307,6 +309,8 @@ services:
       - LEX_MULTI_HASH
       - LEX_BIGRAMS
       - LEX_BIGRAM_WEIGHT
+      - LEX_SPARSE_MODE
+      - LEX_SPARSE_NAME
       # Learning reranker configuration
       - RERANK_LEARNING=${RERANK_LEARNING:-1}
       - RERANKER_WEIGHTS_DIR=/tmp/rerank_weights
@@ -383,6 +387,8 @@ services:
       - LEX_MULTI_HASH
       - LEX_BIGRAMS
       - LEX_BIGRAM_WEIGHT
+      - LEX_SPARSE_MODE
+      - LEX_SPARSE_NAME
     volumes:
       - workspace_pvc:/work:rw
       - codebase_pvc:/work/.codebase:rw
@@ -435,6 +441,8 @@ services:
       - LEX_MULTI_HASH
       - LEX_BIGRAMS
       - LEX_BIGRAM_WEIGHT
+      - LEX_SPARSE_MODE
+      - LEX_SPARSE_NAME
     volumes:
       - workspace_pvc:/work:rw
       - codebase_pvc:/work/.codebase:rw
@@ -545,6 +553,8 @@ services:
       - LEX_MULTI_HASH
       - LEX_BIGRAMS
       - LEX_BIGRAM_WEIGHT
+      - LEX_SPARSE_MODE
+      - LEX_SPARSE_NAME
     ports:
       - "8004:8002"  # Map to different host port to avoid conflicts
       - "18004:18000"  # Health check port

@@ -157,6 +157,9 @@ def _safe_float(val: Any, default: float) -> float:
 LEX_VECTOR_NAME = os.environ.get("LEX_VECTOR_NAME", "lex")
 # Legacy default 4096 for existing collections; set LEX_VECTOR_DIM=2048 in .env for v2
 LEX_VECTOR_DIM = _safe_int(os.environ.get("LEX_VECTOR_DIM"), 4096)
+# Sparse lexical vectors (lossless exact matching)
+LEX_SPARSE_NAME = os.environ.get("LEX_SPARSE_NAME", "lex_sparse")
+LEX_SPARSE_MODE = os.environ.get("LEX_SPARSE_MODE", "0").strip().lower() in ("1", "true", "yes", "on")
 # Optional mini vector (ReFRAG gating)
 MINI_VECTOR_NAME = os.environ.get("MINI_VECTOR_NAME", "mini")
 MINI_VEC_DIM = _safe_int(os.environ.get("MINI_VEC_DIM", "64"), 64)
@@ -1385,10 +1388,16 @@ def _split_ident_lex(s: str) -> List[str]:
 
 
 from scripts.utils import lex_hash_vector_queries as _lex_hash_vector_queries
+from scripts.utils import lex_sparse_vector_queries as _lex_sparse_vector_queries
 
 
 def lex_hash_vector(phrases: List[str], dim: int = LEX_VECTOR_DIM) -> List[float]:
     return _lex_hash_vector_queries(phrases, dim)
+
+
+def lex_sparse_vector(phrases: List[str]) -> Dict[str, Any]:
+    """Generate sparse vector for query phrases (lossless exact matching)."""
+    return _lex_sparse_vector_queries(phrases)
 
 # Defensive: sanitize Qdrant filter objects so we never send an empty filter {}
 # Qdrant returns 400 if filter has no conditions; return None in that case.
@@ -1503,6 +1512,53 @@ def lex_query(client: QdrantClient, v: List[float], flt, per_query: int, collect
                 except Exception:
                     pass
         return _legacy_vector_search(client, collection, LEX_VECTOR_NAME, v, per_query, flt)
+
+
+def sparse_lex_query(
+    client: QdrantClient, sparse_vec: Dict[str, Any], flt, per_query: int, collection_name: str | None = None
+) -> List[Any]:
+    """Query using sparse lexical vector for lossless exact matching."""
+    flt = _sanitize_filter_obj(flt)
+    collection = _collection(collection_name)
+
+    if not sparse_vec.get("indices"):
+        return []
+
+    try:
+        # Use Qdrant's sparse vector search
+        qp = client.query_points(
+            collection_name=collection,
+            query=models.SparseVector(
+                indices=sparse_vec["indices"],
+                values=sparse_vec["values"],
+            ),
+            using=LEX_SPARSE_NAME,
+            query_filter=flt,
+            limit=per_query,
+            with_payload=True,
+        )
+        return _coerce_points(getattr(qp, "points", qp))
+    except TypeError:
+        # Try with 'filter' instead of 'query_filter'
+        try:
+            qp = client.query_points(
+                collection_name=collection,
+                query=models.SparseVector(
+                    indices=sparse_vec["indices"],
+                    values=sparse_vec["values"],
+                ),
+                using=LEX_SPARSE_NAME,
+                filter=flt,
+                limit=per_query,
+                with_payload=True,
+            )
+            return _coerce_points(getattr(qp, "points", qp))
+        except Exception:
+            return []
+    except Exception as e:
+        if os.environ.get("DEBUG_HYBRID_SEARCH"):
+            logger.debug("SPARSE_LEX_QUERY_ERROR", extra={"error": str(e)[:200]})
+        return []
 
 
 def dense_query(
@@ -1981,10 +2037,15 @@ def run_hybrid_search(
         return 1.0 / (_scaled_rrf_k + rank)
 
     # Lexical vector query (with scaled retrieval)
+    # Use sparse vectors when LEX_SPARSE_MODE is enabled for lossless matching
     score_map: Dict[str, Dict[str, Any]] = {}
     try:
-        lex_vec = lex_hash_vector(qlist)
-        lex_results = lex_query(client, lex_vec, flt, _scaled_per_query, collection)
+        if LEX_SPARSE_MODE:
+            sparse_vec = lex_sparse_vector(qlist)
+            lex_results = sparse_lex_query(client, sparse_vec, flt, _scaled_per_query, collection)
+        else:
+            lex_vec = lex_hash_vector(qlist)
+            lex_results = lex_query(client, lex_vec, flt, _scaled_per_query, collection)
     except Exception:
         lex_results = []
 
@@ -2332,12 +2393,14 @@ def run_hybrid_search(
                 if len(prf_qs) >= extra_q:
                     break
         if prf_qs:
-            # Lexical PRF pass
+            # Lexical PRF pass (use sparse when enabled)
             try:
-                lex_vec2 = lex_hash_vector(prf_qs)
-                lex_results2 = lex_query(
-                    client, lex_vec2, flt, max(12, limit // 2 or 6), collection
-                )
+                if LEX_SPARSE_MODE:
+                    sparse_vec2 = lex_sparse_vector(prf_qs)
+                    lex_results2 = sparse_lex_query(client, sparse_vec2, flt, max(12, limit // 2 or 6), collection)
+                else:
+                    lex_vec2 = lex_hash_vector(prf_qs)
+                    lex_results2 = lex_query(client, lex_vec2, flt, max(12, limit // 2 or 6), collection)
             except Exception:
                 lex_results2 = []
             for rank, p in enumerate(lex_results2, 1):
@@ -3303,10 +3366,14 @@ def main():
     queries = list(clean_queries)
     # Initialize score map early so we can accumulate from lex and dense
     score_map: Dict[str, Dict[str, Any]] = {}
-    # Server-side lexical vector search (hashing) as an additional ranked list
+    # Server-side lexical vector search (use sparse when LEX_SPARSE_MODE enabled)
     try:
-        lex_vec = lex_hash_vector(queries)
-        lex_results = lex_query(client, lex_vec, flt, _cli_scaled_per_query, eff_collection)
+        if LEX_SPARSE_MODE:
+            sparse_vec = lex_sparse_vector(queries)
+            lex_results = sparse_lex_query(client, sparse_vec, flt, _cli_scaled_per_query, eff_collection)
+        else:
+            lex_vec = lex_hash_vector(queries)
+            lex_results = lex_query(client, lex_vec, flt, _cli_scaled_per_query, eff_collection)
     except Exception:
         lex_results = []
 

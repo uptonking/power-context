@@ -72,6 +72,9 @@ def _hash_token(token: str, seed: int = 0) -> int:
 # New users: set LEX_VECTOR_DIM=2048 in .env for v2 (denser, better with multi-hash)
 _LEX_VECTOR_DIM_DEFAULT = _safe_int(os.environ.get("LEX_VECTOR_DIM"), 4096)
 
+# Lossless sparse lexical vectors - no modulo, no collisions
+_LEX_SPARSE_MODE = os.environ.get("LEX_SPARSE_MODE", "0").strip().lower() in ("1", "true", "yes", "on")
+
 
 def lex_hash_vector_text(text: str, dim: int | None = None) -> list[float]:
     """Hash text into sparse lexical vector with multi-hash and bigrams.
@@ -109,6 +112,77 @@ def lex_hash_vector_text(text: str, dim: int | None = None) -> list[float]:
 
     norm = math.sqrt(sum(v * v for v in vec)) or 1.0
     return [v / norm for v in vec]
+
+
+def lex_sparse_vector_text(text: str) -> dict:
+    """Lossless sparse lexical vector - no dimension limit, no collisions.
+
+    Returns Qdrant sparse vector format: {"indices": [...], "values": [...]}
+    Uses full 32-bit hash as index (4B+ possible buckets).
+    """
+    if not text:
+        return {"indices": [], "values": []}
+    toks = _split_ident_lex(text)
+    if not toks:
+        return {"indices": [], "values": []}
+
+    # Accumulate weights by hash index
+    weights: dict[int, float] = {}
+    n_hashes = _LEX_MULTI_HASH
+
+    # Unigrams
+    for t in toks:
+        for seed in range(n_hashes):
+            h = _hash_token(t, seed)
+            weights[h] = weights.get(h, 0.0) + 1.0
+
+    # Bigrams
+    if _LEX_BIGRAMS and len(toks) > 1:
+        for i in range(len(toks) - 1):
+            bigram = f"{toks[i]}_{toks[i+1]}"
+            for seed in range(n_hashes):
+                h = _hash_token(bigram, seed)
+                weights[h] = weights.get(h, 0.0) + _LEX_BIGRAM_WEIGHT
+
+    # Normalize
+    norm = math.sqrt(sum(v * v for v in weights.values())) or 1.0
+    indices = sorted(weights.keys())
+    values = [weights[i] / norm for i in indices]
+
+    return {"indices": indices, "values": values}
+
+
+def lex_sparse_vector_queries(phrases: list[str]) -> dict:
+    """Lossless sparse lexical vector for queries.
+
+    Returns Qdrant sparse vector format: {"indices": [...], "values": [...]}
+    """
+    toks: list[str] = []
+    for ph in phrases or []:
+        toks.extend(_split_ident_lex(str(ph)))
+    if not toks:
+        return {"indices": [], "values": []}
+
+    weights: dict[int, float] = {}
+    n_hashes = _LEX_MULTI_HASH
+
+    for t in toks:
+        for seed in range(n_hashes):
+            h = _hash_token(t, seed)
+            weights[h] = weights.get(h, 0.0) + 1.0
+
+    if _LEX_BIGRAMS and len(toks) > 1:
+        for i in range(len(toks) - 1):
+            bigram = f"{toks[i]}_{toks[i+1]}"
+            for seed in range(n_hashes):
+                h = _hash_token(bigram, seed)
+                weights[h] = weights.get(h, 0.0) + _LEX_BIGRAM_WEIGHT
+
+    norm = math.sqrt(sum(v * v for v in weights.values())) or 1.0
+    indices = sorted(weights.keys())
+    values = [weights[i] / norm for i in indices]
+
+    return {"indices": indices, "values": values}
 
 
 def lex_hash_vector_queries(phrases: list[str], dim: int | None = None) -> list[float]:
