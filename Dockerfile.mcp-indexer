@@ -17,19 +17,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends git ca-certific
 COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir --upgrade --timeout=${PIP_DEFAULT_TIMEOUT} --retries=${PIP_RETRIES} -r /tmp/requirements.txt
 
-# Ensure rerank volumes are writable when containers run as non-root (uid 1000).
-# On first mount of an empty named volume, Docker copies directory contents (incl perms)
-# from the image into the volume.
-RUN mkdir -p /tmp/rerank_events /tmp/rerank_weights \
-    && chmod 777 /tmp/rerank_events /tmp/rerank_weights
-
-# Download reranker model and tokenizer during build
-# Cross-encoder for reranking (ms-marco-MiniLM) + BGE tokenizer for micro-chunking
+# Create rerank dirs + download reranker model/tokenizer in single layer
 ARG RERANKER_ONNX_URL=https://huggingface.co/cross-encoder/ms-marco-MiniLM-L-6-v2/resolve/main/onnx/model.onnx
 ARG TOKENIZER_URL=https://huggingface.co/BAAI/bge-base-en-v1.5/resolve/main/tokenizer.json
-RUN mkdir -p /app/models && \
-    curl -L --fail --retry 3 -o /app/models/reranker.onnx "${RERANKER_ONNX_URL}" && \
-    curl -L --fail --retry 3 -o /app/models/tokenizer.json "${TOKENIZER_URL}"
+RUN mkdir -p /tmp/rerank_events /tmp/rerank_weights \
+    && chmod 777 /tmp/rerank_events /tmp/rerank_weights \
+    && mkdir -p /app/models \
+    && curl -L --fail --retry 3 -o /app/models/reranker.onnx "${RERANKER_ONNX_URL}" \
+    && curl -L --fail --retry 3 -o /app/models/tokenizer.json "${TOKENIZER_URL}"
 
 # Set default paths for reranker (can be overridden via env)
 ENV RERANKER_ONNX_PATH=/app/models/reranker.onnx \

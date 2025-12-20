@@ -423,6 +423,18 @@ function register(context, deps) {
       }
 
       items.push(
+        makeTreeItem('Read Docs', {
+          icon: new vscode.ThemeIcon('book'),
+          command: {
+            command: 'vscode.open',
+            title: 'Open Context Engine Docs',
+            arguments: [vscode.Uri.parse('https://github.com/m1rl0k/Context-Engine/blob/test/docs/GETTING_STARTED.md')],
+          },
+          tooltip: 'Open the Context Engine documentation in your browser.',
+        })
+      );
+
+      items.push(
         makeTreeItem('Open Settings', {
           icon: new vscode.ThemeIcon('gear'),
           command: { command: 'workbench.action.openSettings', title: 'Open Settings', arguments: ['contextEngineUploader'] },
@@ -551,7 +563,10 @@ function register(context, deps) {
       const showAuth = !!(bridgeMode && endpoint && endpointReachable !== false && (authEnabled === true || authEnabled === undefined));
 
       const items = [
-        makeTreeItem('Prompt+', { icon: new vscode.ThemeIcon('sparkle'), command: { command: 'contextEngineUploader.promptEnhance', title: 'Prompt+' } }),
+        makeTreeItem('Prompt+ (Replace Selection)', { icon: new vscode.ThemeIcon('sparkle'), command: { command: 'contextEngineUploader.promptEnhance', title: 'Prompt+ (Replace Selection)' } }),
+        makeTreeItem('Prompt+ (Copy to Clipboard)', { icon: new vscode.ThemeIcon('copy'), command: { command: 'contextEngineUploader.promptEnhanceCopy', title: 'Prompt+ (Copy to Clipboard)' } }),
+        makeTreeItem('Prompt+ (Open in New Editor)', { icon: new vscode.ThemeIcon('open-preview'), command: { command: 'contextEngineUploader.promptEnhanceOpen', title: 'Prompt+ (Open in New Editor)' } }),
+        makeTreeItem('Prompt+ Default Mode...', { icon: new vscode.ThemeIcon('settings-gear'), command: { command: 'contextEngineUploader.setCtxDefaultMode', title: 'Prompt+ Default Mode' } }),
       ];
 
       if (showAuth) {

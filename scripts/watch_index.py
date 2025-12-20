@@ -1155,7 +1155,7 @@ def _process_paths(paths, client, model, vector_name: str, model_dim: int, works
                                             model,
                                             vector_name,
                                         )
-                                        ok = status == "success"
+                                        ok = status in ("success", "skipped")
                                     except Exception as se:
                                         try:
                                             print(f"[SMART_REINDEX][watcher] Smart reindexing failed for {p}: {se}")
