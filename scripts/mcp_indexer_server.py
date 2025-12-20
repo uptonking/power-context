@@ -303,19 +303,18 @@ def _should_use_toon(output_format: Any) -> bool:
 
 
 def _format_results_as_toon(response: Dict[str, Any], compact: bool = False) -> Dict[str, Any]:
-    """Convert response to include TOON-formatted results string.
+    """Convert response to use TOON-formatted results string instead of JSON array.
 
-    Keeps original structure but adds 'results_toon' field with TOON encoding.
-    This allows clients to use either format.
+    Replaces 'results' array with 'results' string in TOON format to save tokens.
     """
     try:
-        from scripts.toon_encoder import encode_search_results, encode
+        from scripts.toon_encoder import encode_search_results
 
         results = response.get("results", [])
         if results and isinstance(results, list):
-            # Encode just the results array in tabular format
+            # Replace JSON array with TOON string
             toon_results = encode_search_results(results, compact=compact)
-            response["results_toon"] = toon_results
+            response["results"] = toon_results  # Replace, don't add
             response["output_format"] = "toon"
 
         return response
