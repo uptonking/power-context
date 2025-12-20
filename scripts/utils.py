@@ -25,7 +25,14 @@ def sanitize_vector_name(model_name: str) -> str:
 
 
 # Shared lexical hashing utilities to keep ingest/search/memory consistent
-import re, hashlib, math
+import re, hashlib, math, os
+
+# Feature flags for improved lexical hashing (v2)
+# LEX_MULTI_HASH: number of hash functions per token (default 3 for v2, 1 for legacy)
+# LEX_BIGRAMS: enable bigram hashing (default 1 for v2)
+_LEX_MULTI_HASH = int(os.environ.get("LEX_MULTI_HASH", "3") or 3)
+_LEX_BIGRAMS = os.environ.get("LEX_BIGRAMS", "1").strip().lower() in ("1", "true", "yes", "on")
+_LEX_BIGRAM_WEIGHT = float(os.environ.get("LEX_BIGRAM_WEIGHT", "0.7") or 0.7)
 
 
 def _split_ident_lex(s: str) -> list[str]:
@@ -39,30 +46,72 @@ def _split_ident_lex(s: str) -> list[str]:
     return [x.lower() for x in out if x]
 
 
-def lex_hash_vector_text(text: str, dim: int = 4096) -> list[float]:
+def _hash_token(token: str, seed: int = 0) -> int:
+    """Hash a token with optional seed for multi-hash."""
+    if seed == 0:
+        return int(hashlib.md5(token.encode("utf-8", errors="ignore")).hexdigest()[:8], 16)
+    return int(hashlib.md5(f"{seed}:{token}".encode("utf-8", errors="ignore")).hexdigest()[:8], 16)
+
+
+def lex_hash_vector_text(text: str, dim: int = 2048) -> list[float]:
+    """Hash text into sparse lexical vector with multi-hash and bigrams.
+
+    Improvements over v1:
+    - Multi-hash: each token hashes to multiple buckets (reduces collision impact)
+    - Bigrams: consecutive token pairs captured for phrase matching
+    """
     if not text:
         return [0.0] * dim
     toks = _split_ident_lex(text)
     if not toks:
         return [0.0] * dim
+
     vec = [0.0] * dim
+    n_hashes = _LEX_MULTI_HASH
+
+    # Unigrams with multi-hash
     for t in toks:
-        h = int(hashlib.md5(t.encode("utf-8", errors="ignore")).hexdigest()[:8], 16)
-        vec[h % dim] += 1.0
+        for seed in range(n_hashes):
+            h = _hash_token(t, seed)
+            vec[h % dim] += 1.0
+
+    # Bigrams (weighted less than unigrams)
+    if _LEX_BIGRAMS and len(toks) > 1:
+        for i in range(len(toks) - 1):
+            bigram = f"{toks[i]}_{toks[i+1]}"
+            for seed in range(n_hashes):
+                h = _hash_token(bigram, seed)
+                vec[h % dim] += _LEX_BIGRAM_WEIGHT
+
     norm = math.sqrt(sum(v * v for v in vec)) or 1.0
     return [v / norm for v in vec]
 
 
-def lex_hash_vector_queries(phrases: list[str], dim: int = 4096) -> list[float]:
+def lex_hash_vector_queries(phrases: list[str], dim: int = 2048) -> list[float]:
+    """Hash query phrases into sparse lexical vector (same algorithm as text)."""
     toks: list[str] = []
     for ph in phrases or []:
         toks.extend(_split_ident_lex(str(ph)))
     if not toks:
         return [0.0] * dim
+
     vec = [0.0] * dim
+    n_hashes = _LEX_MULTI_HASH
+
+    # Unigrams with multi-hash
     for t in toks:
-        h = int(hashlib.md5(t.encode("utf-8", errors="ignore")).hexdigest()[:8], 16)
-        vec[h % dim] += 1.0
+        for seed in range(n_hashes):
+            h = _hash_token(t, seed)
+            vec[h % dim] += 1.0
+
+    # Bigrams
+    if _LEX_BIGRAMS and len(toks) > 1:
+        for i in range(len(toks) - 1):
+            bigram = f"{toks[i]}_{toks[i+1]}"
+            for seed in range(n_hashes):
+                h = _hash_token(bigram, seed)
+                vec[h % dim] += _LEX_BIGRAM_WEIGHT
+
     norm = math.sqrt(sum(v * v for v in vec)) or 1.0
     return [v / norm for v in vec]
 
