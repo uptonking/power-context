@@ -1627,19 +1627,17 @@ def pseudo_backfill_tick(
                     # Fallback: collections without named vectors - leave dense vector as-is
                     new_vec = vec
 
-                # Add sparse vector if LEX_SPARSE_MODE enabled
-                sparse_vectors = None
-                if LEX_SPARSE_MODE and aug_text:
+                # Add sparse vector to vecs dict if LEX_SPARSE_MODE enabled (new qdrant-client API)
+                if LEX_SPARSE_MODE and aug_text and isinstance(new_vec, dict):
                     sparse_vec = _lex_sparse_vector_text(aug_text)
                     if sparse_vec.get("indices"):
-                        sparse_vectors = {LEX_SPARSE_NAME: models.SparseVector(**sparse_vec)}
+                        new_vec[LEX_SPARSE_NAME] = models.SparseVector(**sparse_vec)
 
                 new_points.append(
                     models.PointStruct(
                         id=rec.id,
                         vector=new_vec,
                         payload=payload,
-                        sparse_vectors=sparse_vectors,
                     )
                 )
                 processed += 1
@@ -3124,15 +3122,11 @@ def _index_single_file_inner(
                     vecs[MINI_VECTOR_NAME] = project_mini(list(dense_vec), MINI_VEC_DIM)
             except Exception:
                 pass
-            # Add sparse vector if LEX_SPARSE_MODE enabled
+            # Add sparse vector to vecs dict if LEX_SPARSE_MODE enabled (new qdrant-client API)
             if LEX_SPARSE_MODE and lex_text:
                 sparse_vec = _lex_sparse_vector_text(lex_text)
-                return models.PointStruct(
-                    id=pid,
-                    vector=vecs,
-                    payload=payload,
-                    sparse_vectors={LEX_SPARSE_NAME: models.SparseVector(**sparse_vec)} if sparse_vec.get("indices") else None,
-                )
+                if sparse_vec.get("indices"):
+                    vecs[LEX_SPARSE_NAME] = models.SparseVector(**sparse_vec)
             return models.PointStruct(id=pid, vector=vecs, payload=payload)
         else:
             # unnamed collection: store dense only
@@ -3558,15 +3552,11 @@ def index_repo(
                     vecs[MINI_VECTOR_NAME] = project_mini(list(dense_vec), MINI_VEC_DIM)
             except Exception:
                 pass
-            # Add sparse vector if LEX_SPARSE_MODE enabled
+            # Add sparse vector to vecs dict if LEX_SPARSE_MODE enabled (new qdrant-client API)
             if LEX_SPARSE_MODE and lex_text:
                 sparse_vec = _lex_sparse_vector_text(lex_text)
-                return models.PointStruct(
-                    id=pid,
-                    vector=vecs,
-                    payload=payload,
-                    sparse_vectors={LEX_SPARSE_NAME: models.SparseVector(**sparse_vec)} if sparse_vec.get("indices") else None,
-                )
+                if sparse_vec.get("indices"):
+                    vecs[LEX_SPARSE_NAME] = models.SparseVector(**sparse_vec)
             return models.PointStruct(id=pid, vector=vecs, payload=payload)
         else:
             # unnamed collection: store dense only
@@ -4584,20 +4574,14 @@ def process_file_with_smart_reindexing(
                             )
                     except Exception:
                         pass
-                    # Add sparse vector if LEX_SPARSE_MODE enabled
-                    sparse_vectors = None
+                    # Add sparse vector to vecs dict if LEX_SPARSE_MODE enabled (new qdrant-client API)
                     if LEX_SPARSE_MODE and lt:
                         sparse_vec = _lex_sparse_vector_text(lt)
                         if sparse_vec.get("indices"):
-                            sparse_vectors = {LEX_SPARSE_NAME: models.SparseVector(**sparse_vec)}
-                    if sparse_vectors:
-                        new_points.append(
-                            models.PointStruct(id=pid, vector=vecs, payload=pl, sparse_vectors=sparse_vectors)
-                        )
-                    else:
-                        new_points.append(
-                            models.PointStruct(id=pid, vector=vecs, payload=pl)
-                        )
+                            vecs[LEX_SPARSE_NAME] = models.SparseVector(**sparse_vec)
+                    new_points.append(
+                        models.PointStruct(id=pid, vector=vecs, payload=pl)
+                    )
                 else:
                     new_points.append(
                         models.PointStruct(id=pid, vector=v, payload=pl)
