@@ -11,6 +11,7 @@ const { createCtxConfigManager } = require('./ctx_config');
 const { createWorkspacePathUtils } = require('./workspace_paths');
 const { createLogsTerminalManager } = require('./logs_terminal');
 const { createPromptPlusManager } = require('./prompt_plus');
+const { registerPromptPlusCommands } = require('./prompt_plus_commands');
 const { createOnboardingManager } = require('./onboarding');
 let outputChannel;
 let watchProcess;
@@ -31,6 +32,7 @@ let ctxConfigManager;
 let workspacePathUtils;
 let promptPlusManager;
 let onboardingManager;
+let sidebarApi;
 let pendingProfileRestartTimer;
 const REQUIRED_PYTHON_MODULES = ['requests', 'urllib3', 'charset_normalizer'];
 const DEFAULT_CONTAINER_ROOT = '/work';
@@ -290,7 +292,7 @@ function activate(context) {
   }
 
   try {
-    sidebar.register(context, {
+    sidebarApi = sidebar.register(context, {
       profiles,
       getEffectiveConfig,
       getResolvedTargetPath: getResolvedTargetPathForSidebar,
@@ -437,21 +439,24 @@ function activate(context) {
       log(`HTTP MCP bridge stop failed: ${error instanceof Error ? error.message : String(error)}`);
     });
   });
-  const promptEnhanceDisposable = vscode.commands.registerCommand('contextEngineUploader.promptEnhance', () => {
-    try {
-      if (promptPlusManager && typeof promptPlusManager.enhanceSelectionWithUnicorn === 'function') {
-        promptPlusManager.enhanceSelectionWithUnicorn().catch(error => {
-          log(`Prompt+ failed: ${error instanceof Error ? error.message : String(error)}`);
-          vscode.window.showErrorMessage('Prompt+ failed. See Context Engine Upload output.');
-        });
-      } else {
-        vscode.window.showErrorMessage('Context Engine Uploader: Prompt+ is unavailable (extension failed to initialize Prompt+ manager). See output for details.');
-      }
-    } catch (error) {
-      log(`Prompt+ failed: ${error instanceof Error ? error.message : String(error)}`);
-      vscode.window.showErrorMessage('Prompt+ failed. See Context Engine Upload output.');
+  try {
+    const promptDisposables = registerPromptPlusCommands({
+      vscode,
+      fs,
+      path,
+      log,
+      getEffectiveConfig,
+      resolveTargetPathFromConfig,
+      writeCtxConfig,
+      getPromptPlusManager: () => promptPlusManager,
+      getSidebarApi: () => sidebarApi,
+    });
+    if (Array.isArray(promptDisposables) && promptDisposables.length) {
+      context.subscriptions.push(...promptDisposables);
     }
-  });
+  } catch (error) {
+    log(`Prompt+ command registration failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
   const authLoginDisposable = vscode.commands.registerCommand('contextEngineUploader.authLogin', () => {
     try {
       const cfg = getEffectiveConfig();
@@ -522,7 +527,6 @@ function activate(context) {
     startStackDisposable,
     showLogsDisposable,
     tailDockerLogsDisposable,
-    promptEnhanceDisposable,
     authLoginDisposable,
     startBridgeDisposable,
     stopBridgeDisposable,
