@@ -381,13 +381,17 @@ def _cross_process_lock(lock_path: Path):
 
 
 # Per-file locking for indexer/watcher coordination
-# Uses /work/.codebase/locks (shared volume) for cross-container coordination in Docker
+# Uses /work/.codebase/file_locks (shared volume) for cross-container coordination in Docker
 # Falls back to /tmp for local development
 _SHARED_LOCK_DIR = Path("/work/.codebase")
-if _SHARED_LOCK_DIR.exists() and _SHARED_LOCK_DIR.is_dir():
-    _FILE_LOCKS_DIR = _SHARED_LOCK_DIR / "locks"
+# ALWAYS create the locks dir if /work exists - don't check if .codebase exists yet
+# (it might not exist at import time but will be created during indexing)
+if Path("/work").exists():
+    _FILE_LOCKS_DIR = _SHARED_LOCK_DIR / "file_locks"
+    _FILE_LOCKS_DIR.mkdir(parents=True, exist_ok=True)
 else:
     _FILE_LOCKS_DIR = Path("/tmp/context-engine-locks")
+    _FILE_LOCKS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Lock timeout - if lock file is older than this, consider it stale
 _FILE_LOCK_TIMEOUT_SECONDS = 300  # 5 min max per file (generous for LLM calls)
