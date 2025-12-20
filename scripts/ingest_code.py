@@ -3994,6 +3994,11 @@ def process_file_with_smart_reindexing(
             changed_symbols = list(symbol_meta.keys())
         changed_set = set(changed_symbols)
 
+        # Short-circuit: if nothing changed and we have cached symbols, skip entirely
+        if len(changed_symbols) == 0 and cached_symbols:
+            print(f"[SMART_REINDEX] {file_path}: 0 changes detected, skipping")
+            return "skipped"
+
         # Load existing points for this file (for embedding reuse)
         existing_points = []
         try:
@@ -4082,6 +4087,12 @@ def process_file_with_smart_reindexing(
         imports, calls = _get_imports_calls(language, text)
         last_mod, churn_count, author_count = _git_metadata(file_path)
 
+        # Feature flag: PSEUDO_BATCH_CONCURRENCY > 1 enables parallel GLM calls
+        pseudo_batch_concurrency = int(os.environ.get("PSEUDO_BATCH_CONCURRENCY", "1") or 1)
+        use_batch_pseudo = pseudo_batch_concurrency > 1
+
+        # Pre-process chunks: collect metadata and identify which need pseudo
+        chunk_data_sr: list[dict] = []
         for ch in chunks:
             info = build_information(
                 language,
@@ -4140,12 +4151,57 @@ def process_file_with_smart_reindexing(
                 },
             }
 
-            # Pseudo / tags with symbol-aware gating
-            needs_pseudo, cached_pseudo, cached_tags = should_process_pseudo_for_chunk(
+            # Check pseudo cache status
+            needs_pseudo_gen, cached_pseudo, cached_tags = should_process_pseudo_for_chunk(
                 fp, ch, changed_set
             )
-            pseudo, tags = cached_pseudo, cached_tags
-            if needs_pseudo:
+
+            chunk_data_sr.append({
+                "chunk": ch,
+                "info": info,
+                "payload": payload,
+                "kind": kind,
+                "sym": sym,
+                "sym_path": sym_path,
+                "needs_pseudo": needs_pseudo_gen,
+                "cached_pseudo": cached_pseudo,
+                "cached_tags": cached_tags,
+            })
+
+        # Batch pseudo generation (feature-flagged)
+        if use_batch_pseudo:
+            pending_indices = [i for i, cd in enumerate(chunk_data_sr) if cd["needs_pseudo"]]
+            pending_texts = [chunk_data_sr[i]["chunk"].get("text") or "" for i in pending_indices]
+
+            if pending_texts:
+                try:
+                    from scripts.refrag_glm import generate_pseudo_tags_batch
+                    batch_results = generate_pseudo_tags_batch(pending_texts, concurrency=pseudo_batch_concurrency)
+                    for idx, (pseudo, tags) in zip(pending_indices, batch_results):
+                        chunk_data_sr[idx]["cached_pseudo"] = pseudo
+                        chunk_data_sr[idx]["cached_tags"] = tags
+                        chunk_data_sr[idx]["needs_pseudo"] = False
+                        if pseudo or tags:
+                            ch = chunk_data_sr[idx]["chunk"]
+                            symbol_name = ch.get("symbol", "")
+                            if symbol_name and set_cached_pseudo:
+                                k = ch.get("kind", "unknown")
+                                start_line = ch.get("start", 0)
+                                sid = f"{k}_{symbol_name}_{start_line}"
+                                set_cached_pseudo(fp, sid, pseudo, tags, file_hash)
+                except Exception as e:
+                    print(f"[PSEUDO_BATCH] Smart reindex batch failed, falling back: {e}")
+                    use_batch_pseudo = False
+
+        # Finalize payloads with pseudo/tags
+        for cd in chunk_data_sr:
+            ch = cd["chunk"]
+            payload = cd["payload"]
+            pseudo = cd["cached_pseudo"]
+            tags = cd["cached_tags"]
+
+            # Sequential fallback
+            if not use_batch_pseudo and cd["needs_pseudo"]:
                 try:
                     pseudo, tags = generate_pseudo_tags(ch.get("text") or "")
                     if pseudo or tags:
@@ -4158,10 +4214,16 @@ def process_file_with_smart_reindexing(
                                 set_cached_pseudo(fp, sid, pseudo, tags, file_hash)
                 except Exception:
                     pass
+
             if pseudo:
                 payload["pseudo"] = pseudo
             if tags:
                 payload["tags"] = tags
+
+            # Extract variables for embedding reuse logic
+            info = cd["info"]
+            kind = cd["kind"]
+            sym = cd["sym"]
 
             # Decide whether we can reuse an existing embedding for this chunk
             code_text = ch.get("text") or ""
