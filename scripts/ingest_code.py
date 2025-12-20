@@ -2884,6 +2884,48 @@ def index_single_file(
     except Exception:
         return False
 
+    # Try to acquire per-file lock - skip if another process is indexing this file
+    _file_lock_ctx = None
+    if file_indexing_lock is not None:
+        try:
+            _file_lock_ctx = file_indexing_lock(str(file_path))
+            _file_lock_ctx.__enter__()
+        except FileExistsError:
+            print(f"[FILE_LOCKED] Skipping {file_path} - another process is indexing it")
+            return False
+        except Exception:
+            pass  # Continue without lock if lock acquisition fails
+
+    # Wrap the rest in try/finally to ensure lock release
+    try:
+        return _index_single_file_inner(
+            client, model, collection, vector_name, file_path,
+            dedupe=dedupe, skip_unchanged=skip_unchanged, pseudo_mode=pseudo_mode,
+            trust_cache=trust_cache, repo_name_for_cache=repo_name_for_cache,
+        )
+    finally:
+        if _file_lock_ctx is not None:
+            try:
+                _file_lock_ctx.__exit__(None, None, None)
+            except Exception:
+                pass
+
+
+def _index_single_file_inner(
+    client: QdrantClient,
+    model: "TextEmbedding",
+    collection: str,
+    vector_name: str,
+    file_path: Path,
+    *,
+    dedupe: bool = True,
+    skip_unchanged: bool = True,
+    pseudo_mode: str = "full",
+    trust_cache: bool | None = None,
+    repo_name_for_cache: str | None = None,
+) -> bool:
+    """Inner implementation of index_single_file (after lock is acquired)."""
+
     # Resolve trust_cache from env when not explicitly provided. INDEX_TRUST_CACHE is intended
     # for debugging only and should not be enabled in normal indexing runs.
     if trust_cache is None:
@@ -4771,34 +4813,18 @@ def main():
     flag = (os.environ.get("PSEUDO_BACKFILL_ENABLED") or "").strip().lower()
     pseudo_mode = "off" if flag in {"1", "true", "yes", "on"} else "full"
 
-    # Acquire cross-process lock to coordinate with watcher
-    if indexing_lock is not None:
-        print("[INDEXER] Acquiring indexing lock to coordinate with watcher...")
-        with indexing_lock():
-            index_repo(
-                Path(args.root).resolve(),
-                qdrant_url,
-                api_key,
-                collection,
-                model_name,
-                args.recreate,
-                dedupe=(not args.no_dedupe),
-                skip_unchanged=(not args.no_skip_unchanged),
-                pseudo_mode=pseudo_mode,
-            )
-    else:
-        # Fallback when workspace_state is not available
-        index_repo(
-            Path(args.root).resolve(),
-            qdrant_url,
-            api_key,
-            collection,
-            model_name,
-            args.recreate,
-            dedupe=(not args.no_dedupe),
-            skip_unchanged=(not args.no_skip_unchanged),
-            pseudo_mode=pseudo_mode,
-        )
+    # Per-file locking in index_single_file handles indexer/watcher coordination
+    index_repo(
+        Path(args.root).resolve(),
+        qdrant_url,
+        api_key,
+        collection,
+        model_name,
+        args.recreate,
+        dedupe=(not args.no_dedupe),
+        skip_unchanged=(not args.no_skip_unchanged),
+        pseudo_mode=pseudo_mode,
+    )
 
 
 if __name__ == "__main__":
