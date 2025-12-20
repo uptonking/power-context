@@ -381,7 +381,13 @@ def _cross_process_lock(lock_path: Path):
 
 
 # Global indexing lock path - used to coordinate indexer and watcher
-INDEXING_LOCK_PATH = Path("/tmp/context-engine-indexing.lock")
+# Uses /work/.codebase (shared volume) for cross-container coordination in Docker
+# Falls back to /tmp for local development
+_SHARED_LOCK_DIR = Path("/work/.codebase")
+if _SHARED_LOCK_DIR.exists() and _SHARED_LOCK_DIR.is_dir():
+    INDEXING_LOCK_PATH = _SHARED_LOCK_DIR / "indexing.lock"
+else:
+    INDEXING_LOCK_PATH = Path("/tmp/context-engine-indexing.lock")
 
 
 def is_indexing_locked() -> bool:
