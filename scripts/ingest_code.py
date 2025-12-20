@@ -4533,9 +4533,14 @@ def process_file_with_smart_reindexing(
                         sparse_vec = _lex_sparse_vector_text(lt)
                         if sparse_vec.get("indices"):
                             sparse_vectors = {LEX_SPARSE_NAME: models.SparseVector(**sparse_vec)}
-                    new_points.append(
-                        models.PointStruct(id=pid, vector=vecs, payload=pl, sparse_vectors=sparse_vectors)
-                    )
+                    if sparse_vectors:
+                        new_points.append(
+                            models.PointStruct(id=pid, vector=vecs, payload=pl, sparse_vectors=sparse_vectors)
+                        )
+                    else:
+                        new_points.append(
+                            models.PointStruct(id=pid, vector=vecs, payload=pl)
+                        )
                 else:
                     new_points.append(
                         models.PointStruct(id=pid, vector=v, payload=pl)
