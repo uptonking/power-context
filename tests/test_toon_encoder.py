@@ -296,20 +296,17 @@ class TestMCPIntegration:
         assert "/src/main.py,10,20" in toon_output
         assert "/src/utils.py,5,15" in toon_output
 
-    def test_toon_preserves_original_response(self):
-        """Test that TOON formatting doesn't break original response."""
-        response = {
-            "results": [
-                {"path": "/src/main.py", "start_line": 10, "end_line": 20},
-            ],
-            "total": 1,
-            "args": {"query": "test"},
-        }
+    def test_toon_replaces_results_array(self):
+        """Test that TOON formatting replaces JSON array with TOON string."""
+        results = [
+            {"path": "/src/main.py", "start_line": 10, "end_line": 20},
+        ]
 
-        # Original response should still be valid
-        assert response["total"] == 1
-        assert len(response["results"]) == 1
-        assert response["results"][0]["path"] == "/src/main.py"
+        # When TOON is applied, results becomes a string
+        toon_output = encode_search_results(results, compact=True)
+        assert isinstance(toon_output, str)
+        assert "results[1]{path,start_line,end_line}:" in toon_output
+        assert "/src/main.py,10,20" in toon_output
 
     def test_toon_compact_mode_excludes_score(self):
         """Test that compact mode excludes score field."""
