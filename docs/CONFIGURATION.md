@@ -198,6 +198,7 @@ RERANK_EVENTS_ENABLED=0
 | GLM_MODEL | GLM model name (used for context_answer) | glm-4.6 |
 | GLM_MODEL_FAST | GLM model for expand_query/simple tasks (higher concurrency) | glm-4.5 |
 | GLM_TIMEOUT_SEC | GLM request timeout in seconds | unset |
+| PSEUDO_BATCH_CONCURRENCY | Parallel GLM calls for pseudo-tag indexing (1=sequential, 4=4x speedup) | 1 |
 | MINIMAX_API_KEY | API key for MiniMax M2 provider | unset |
 | MINIMAX_MODEL | MiniMax model name | MiniMax-M2 |
 | MINIMAX_API_BASE | MiniMax API base URL | https://api.minimax.io/v1 |
