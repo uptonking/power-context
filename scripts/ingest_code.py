@@ -1340,9 +1340,14 @@ def ensure_collection(client: QdrantClient, name: str, dim: int, vector_name: st
             if result.returncode == 0:
                 print(f"[MEMORY_RESTORE] Successfully restored memories using {restore_script.name}")
             else:
-                msg = result.stderr or result.stdout or "unknown error"
-                print(f"[MEMORY_RESTORE_WARNING] Restore script failed: {msg}")
+                # Log full output for debugging
+                print(f"[MEMORY_RESTORE_WARNING] Restore script failed (exit {result.returncode})")
+                if result.stdout:
+                    print(f"[MEMORY_RESTORE_STDOUT] {result.stdout}")
+                if result.stderr:
+                    print(f"[MEMORY_RESTORE_STDERR] {result.stderr}")
                 if strict_restore:
+                    msg = result.stderr or result.stdout or f"exit code {result.returncode}"
                     raise RuntimeError(f"Memory restore failed for collection {name}: {msg}")
 
             # Clean up backup file once we've attempted restore
@@ -3274,7 +3279,11 @@ def index_repo(
     skip_unchanged: bool = True,
     pseudo_mode: str = "full",
 ):
-    """Index a repository into Qdrant. Acquires cross-process lock to coordinate with watcher."""
+    """Index a repository into Qdrant.
+
+    Note: Caller is responsible for acquiring indexing_lock() if coordination
+    with watcher is required. See workspace_state.indexing_lock() for details.
+    """
     # Optional fast no-change precheck: when INDEX_FS_FASTPATH is enabled, use
     # fs metadata + cache.json to exit early before model/Qdrant setup when all
     # files are unchanged.
