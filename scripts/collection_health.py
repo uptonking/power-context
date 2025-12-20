@@ -120,6 +120,120 @@ def clear_cache(workspace_path: str) -> bool:
         return False
 
 
+def clear_repo_cache(repo_name: str) -> bool:
+    """Clear the local file hash cache for a specific repo (multi-repo mode)."""
+    try:
+        from scripts.workspace_state import _get_repo_state_dir, CACHE_FILENAME
+        from datetime import datetime
+
+        state_dir = _get_repo_state_dir(repo_name)
+        cache_path = state_dir / CACHE_FILENAME
+
+        if cache_path.exists():
+            cache = {"file_hashes": {}, "updated_at": datetime.now().isoformat()}
+            with open(cache_path, "w", encoding="utf-8") as f:
+                import json
+                json.dump(cache, f, indent=2)
+            logger.info(f"Cleared cache for repo: {repo_name}")
+            return True
+        return False
+    except Exception as e:
+        logger.error(f"Failed to clear repo cache for {repo_name}: {e}")
+        return False
+
+
+def get_repo_cached_files_count(repo_name: str) -> int:
+    """Return the number of files tracked in a repo's cache (multi-repo mode)."""
+    try:
+        from scripts.workspace_state import _get_repo_state_dir, CACHE_FILENAME
+        import json
+
+        state_dir = _get_repo_state_dir(repo_name)
+        cache_path = state_dir / CACHE_FILENAME
+
+        if not cache_path.exists():
+            return 0
+
+        with open(cache_path, "r", encoding="utf-8") as f:
+            cache = json.load(f)
+        return len(cache.get("file_hashes", {}))
+    except Exception as e:
+        logger.warning(f"Failed to read repo cache for {repo_name}: {e}")
+        return 0
+
+
+def auto_heal_multi_repo(
+    workspace_path: str,
+    qdrant_url: Optional[str] = None,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """
+    Health check for multi-repo mode. Checks each repo's collection.
+
+    Only clears cache when collection is EMPTY but cache has entries.
+    This is the safest possible check - avoids clearing cache unnecessarily.
+
+    Returns dict with per-repo results.
+    """
+    from scripts.workspace_state import is_multi_repo_mode, get_collection_name
+
+    results = {"repos_checked": 0, "repos_healed": 0, "details": {}}
+
+    if not is_multi_repo_mode():
+        results["skipped"] = "not in multi-repo mode"
+        return results
+
+    # Find all repos under workspace
+    ws = Path(workspace_path)
+    repos = []
+    for entry in ws.iterdir():
+        if entry.is_dir() and not entry.name.startswith("."):
+            # Check if it looks like a repo (has .git or files)
+            if (entry / ".git").exists() or any(entry.iterdir()):
+                repos.append(entry.name)
+
+    for repo_name in repos:
+        try:
+            # Get collection name for this repo
+            repo_path = ws / repo_name
+            collection = get_collection_name(str(repo_path))
+            if not collection:
+                continue
+
+            cached_count = get_repo_cached_files_count(repo_name)
+            if cached_count == 0:
+                # No cache entries, nothing to validate
+                continue
+
+            points_count = get_collection_points_count(collection, qdrant_url)
+            results["repos_checked"] += 1
+
+            repo_result = {
+                "collection": collection,
+                "cached_files": cached_count,
+                "collection_points": points_count,
+                "action": "none",
+            }
+
+            # ONLY clear if collection is completely empty
+            # This is ultra-conservative - won't clear for partial issues
+            if points_count == 0 and cached_count > 0:
+                repo_result["issue"] = f"Collection empty but cache has {cached_count} files"
+                if not dry_run:
+                    if clear_repo_cache(repo_name):
+                        repo_result["action"] = "cleared_cache"
+                        results["repos_healed"] += 1
+                else:
+                    repo_result["action"] = "would_clear_cache"
+
+            results["details"][repo_name] = repo_result
+
+        except Exception as e:
+            results["details"][repo_name] = {"error": str(e)}
+
+    return results
+
+
 def detect_collection_health(
     workspace_path: str,
     collection_name: str,
