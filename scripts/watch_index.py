@@ -37,6 +37,9 @@ from scripts.workspace_state import (
     _get_repo_state_dir,
     _cross_process_lock,
     get_collection_mappings,
+    get_indexing_config_snapshot,
+    compute_indexing_config_hash,
+    persist_indexing_config,
 )
 import hashlib
 from datetime import datetime
@@ -905,6 +908,11 @@ def main():
             root_repo_name = _extract_repo_name_from_path(str(ROOT))
             if root_repo_name:
                 root_collection = get_collection_name(root_repo_name)
+                try:
+                    if persist_indexing_config:
+                        persist_indexing_config(workspace_path=str(ROOT), repo_name=root_repo_name)
+                except Exception:
+                    pass
                 update_indexing_status(
                     repo_name=root_repo_name,
                     status={"state": "watching"},
@@ -917,10 +925,15 @@ def main():
                     "[workspace_state] Multi-repo: root path is not a repo; skipping state initialization"
                 )
         else:
-            update_workspace_state(
-                workspace_path=str(ROOT),
-                updates={"qdrant_collection": default_collection},
-            )
+            updates = {"qdrant_collection": default_collection}
+            try:
+                if get_indexing_config_snapshot and compute_indexing_config_hash:
+                    cfg = get_indexing_config_snapshot()
+                    updates["indexing_config"] = cfg
+                    updates["indexing_config_hash"] = compute_indexing_config_hash(cfg)
+            except Exception:
+                pass
+            update_workspace_state(workspace_path=str(ROOT), updates=updates)
             update_indexing_status(status={"state": "watching"})
     except Exception as e:
         print(f"[workspace_state] Error initializing workspace state: {e}")
@@ -1018,6 +1031,11 @@ def _process_paths(paths, client, model, vector_name: str, model_dim: int, works
     for repo_path, repo_files in repo_groups.items():
         try:
             repo_name = _extract_repo_name_from_path(repo_path)
+            try:
+                if persist_indexing_config:
+                    persist_indexing_config(workspace_path=repo_path, repo_name=repo_name)
+            except Exception:
+                pass
             update_indexing_status(
                 repo_name=repo_name,
                 status={

@@ -171,6 +171,8 @@ class WorkspaceState(TypedDict, total=False):
     qdrant_stats: Optional[Dict[str, Any]]
     origin: Optional[OriginInfo]
     logical_repo_id: Optional[str]
+    indexing_config: Optional[Dict[str, Any]]
+    indexing_config_hash: Optional[str]
 
 def is_multi_repo_mode() -> bool:
     """Check if multi-repo mode is enabled."""
@@ -1211,6 +1213,69 @@ def get_collection_mappings(search_root: Optional[str] = None) -> List[Dict[str,
         return mappings
 
     return mappings
+
+
+def _env_truthy(name: str, default: bool = False) -> bool:
+    try:
+        v = os.environ.get(name)
+        if v is None:
+            return bool(default)
+        return str(v).strip().lower() in {"1", "true", "yes", "on"}
+    except Exception:
+        return bool(default)
+
+
+def _env_int(name: str) -> Optional[int]:
+    try:
+        v = os.environ.get(name)
+        if v is None:
+            return None
+        v = str(v).strip()
+        if not v:
+            return None
+        return int(v)
+    except Exception:
+        return None
+
+
+def get_indexing_config_snapshot() -> Dict[str, Any]:
+    return {
+        "embedding_model": os.environ.get("EMBEDDING_MODEL"),
+        "embedding_provider": os.environ.get("EMBEDDING_PROVIDER"),
+        "refrag_mode": _env_truthy("REFRAG_MODE", False),
+        "qwen3_embedding_enabled": _env_truthy("QWEN3_EMBEDDING_ENABLED", False),
+        "index_semantic_chunks": _env_truthy("INDEX_SEMANTIC_CHUNKS", True),
+        "index_micro_chunks": _env_truthy("INDEX_MICRO_CHUNKS", False),
+        "micro_chunk_tokens": _env_int("MICRO_CHUNK_TOKENS"),
+        "micro_chunk_stride": _env_int("MICRO_CHUNK_STRIDE"),
+        "max_micro_chunks_per_file": _env_int("MAX_MICRO_CHUNKS_PER_FILE"),
+        "index_chunk_lines": _env_int("INDEX_CHUNK_LINES"),
+        "index_chunk_overlap": _env_int("INDEX_CHUNK_OVERLAP"),
+        "use_tree_sitter": _env_truthy("USE_TREE_SITTER", False),
+        "index_use_enhanced_ast": _env_truthy("INDEX_USE_ENHANCED_AST", False),
+    }
+
+
+def compute_indexing_config_hash(cfg: Dict[str, Any]) -> str:
+    try:
+        payload = json.dumps(cfg, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    except Exception:
+        payload = str(cfg)
+    return hashlib.sha1(payload.encode("utf-8", errors="ignore")).hexdigest()
+
+
+def persist_indexing_config(
+    *,
+    workspace_path: Optional[str] = None,
+    repo_name: Optional[str] = None,
+) -> WorkspaceState:
+    cfg = get_indexing_config_snapshot()
+    cfg_hash = compute_indexing_config_hash(cfg)
+    return update_workspace_state(
+        workspace_path=workspace_path,
+        repo_name=repo_name,
+        updates={"indexing_config": cfg, "indexing_config_hash": cfg_hash},
+    )
 
 
 def find_collection_for_logical_repo(logical_repo_id: str, search_root: Optional[str] = None) -> Optional[str]:

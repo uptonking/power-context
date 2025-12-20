@@ -96,6 +96,9 @@ try:
         update_symbols_with_pseudo,
         get_workspace_state,
         get_cached_file_meta,
+        get_indexing_config_snapshot,
+        compute_indexing_config_hash,
+        persist_indexing_config,
     )
 except ImportError:
     # State integration is optional; continue if not available
@@ -114,6 +117,9 @@ except ImportError:
     compare_symbol_changes = None  # type: ignore
     get_workspace_state = None  # type: ignore
     get_cached_file_meta = None  # type: ignore
+    get_indexing_config_snapshot = None  # type: ignore
+    compute_indexing_config_hash = None  # type: ignore
+    persist_indexing_config = None  # type: ignore
 
 # Optional Tree-sitter import (graceful fallback) - tree-sitter 0.25+ API
 _TS_LANGUAGES: Dict[str, Any] = {}
@@ -3155,9 +3161,17 @@ def index_repo(
                     pass
 
         if update_workspace_state and not use_per_repo_collections:
+            updates = {"qdrant_collection": collection}
+            try:
+                if get_indexing_config_snapshot and compute_indexing_config_hash:
+                    cfg = get_indexing_config_snapshot()
+                    updates["indexing_config"] = cfg
+                    updates["indexing_config_hash"] = compute_indexing_config_hash(cfg)
+            except Exception:
+                pass
             update_workspace_state(
                 workspace_path=ws_path,
-                updates={"qdrant_collection": collection},
+                updates=updates,
                 repo_name=repo_tag,
             )
         if update_indexing_status and repo_tag:
@@ -3843,6 +3857,11 @@ def index_repo(
             for repo_name in touched_repos or ({repo_tag} if repo_tag else set()):
                 try:
                     target_ws = repo_roots.get(repo_name) or ws_path
+                    try:
+                        if persist_indexing_config:
+                            persist_indexing_config(workspace_path=target_ws, repo_name=repo_name)
+                    except Exception:
+                        pass
                     update_indexing_status(
                         workspace_path=target_ws,
                         status={

@@ -48,15 +48,71 @@
     {% endif %}
 
     <table>
-      <tr><th>id</th><th>qdrant_collection</th><th></th></tr>
+      <tr>
+        <th>id</th>
+        <th>qdrant_collection</th>
+        <th>indexing_status</th>
+        <th>mapping</th>
+        <th>applied_hash</th>
+        <th>current_hash</th>
+        <th>actions</th>
+      </tr>
       {% if collections and collections|length > 0 %}
         {% for c in collections %}
-          <tr>
+          <tr {% if c.needs_reindex %}style="background:#fff3cd"{% endif %}>
             <td>{{ c.id }}</td>
-            <td>{{ c.qdrant_collection }}</td>
             <td>
+              <div>{{ c.qdrant_collection }}</div>
+              {% if c.container_path %}
+                <div class="muted">{{ c.container_path }}</div>
+              {% endif %}
+              {% if c.repo_name %}
+                <div class="muted">repo: {{ c.repo_name }}</div>
+              {% endif %}
+            </td>
+            <td>
+              <div>{{ c.indexing_state or "idle" }}</div>
+              {% if c.indexing_started_at %}
+                <div class="muted">started {{ c.indexing_started_at }}</div>
+              {% endif %}
+              {% if c.progress_files_processed is not none %}
+                <div class="muted">
+                  {{ c.progress_files_processed }}
+                  {% if c.progress_total_files %}
+                    / {{ c.progress_total_files }}
+                  {% endif %}
+                  files
+                </div>
+              {% endif %}
+              {% if c.progress_current_file %}
+                <div class="muted small">{{ c.progress_current_file }}</div>
+              {% endif %}
+            </td>
+            <td>
+              {% if c.has_mapping %}
+                <span class="muted">ok ({{ c.mapping_count }})</span>
+              {% else %}
+                <span class="error">missing</span>
+              {% endif %}
+              {% if c.needs_reindex %}
+                <div class="error">maintenance needed</div>
+              {% endif %}
+            </td>
+            <td><span class="muted">{{ c.applied_indexing_hash }}</span></td>
+            <td><span class="muted">{{ c.current_indexing_hash }}</span></td>
+            <td>
+              {% if c.has_mapping %}
+                <form class="inline" method="post" action="/admin/collections/reindex" onsubmit="return confirm('Reindex collection ' + '{{ c.qdrant_collection }}' + '?');">
+                  <input type="hidden" name="collection" value="{{ c.qdrant_collection }}" />
+                  <button type="submit">Reindex</button>
+                </form>
+                <form class="inline" method="post" action="/admin/collections/recreate" onsubmit="return confirm('Recreate collection ' + '{{ c.qdrant_collection }}' + '? This will recreate Qdrant collection and reindex all files.');">
+                  <input type="hidden" name="collection" value="{{ c.qdrant_collection }}" />
+                  <button type="submit">Recreate</button>
+                </form>
+              {% endif %}
               {% if deletion_enabled %}
-                <form method="post" action="/admin/collections/delete" onsubmit="return confirm('Delete collection ' + '{{ c.qdrant_collection }}' + '? This may delete server-side files under {{ work_dir }} if filesystem cleanup is selected.');">
+                <form class="inline" method="post" action="/admin/collections/delete" onsubmit="return confirm('Delete collection ' + '{{ c.qdrant_collection }}' + '? This may delete server-side files under {{ work_dir }} if filesystem cleanup is selected.');">
                   <input type="hidden" name="collection" value="{{ c.qdrant_collection }}" />
                   <label class="muted" style="display:block; margin-bottom:6px;">
                     <input type="checkbox" name="delete_fs" value="1" />
@@ -69,7 +125,7 @@
           </tr>
         {% endfor %}
       {% else %}
-        <tr><td colspan="3">(none)</td></tr>
+        <tr><td colspan="7">(none)</td></tr>
       {% endif %}
     </table>
   </div>

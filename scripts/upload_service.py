@@ -24,6 +24,13 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from scripts.upload_delta_bundle import get_workspace_key, process_delta_bundle
 
+from scripts.indexing_admin import (
+    build_admin_collections_view,
+    resolve_collection_root,
+    spawn_ingest_code,
+    recreate_collection_qdrant,
+)
+
 from pydantic import BaseModel, Field
 from scripts.auth_backend import (
     AuthDisabledError,
@@ -557,10 +564,12 @@ async def admin_acl_page(request: Request):
         logger.error(f"[upload_service] Failed to load admin UI data: {e}")
         raise HTTPException(status_code=500, detail="Failed to load admin data")
 
+    enriched = build_admin_collections_view(collections=collections, work_dir=WORK_DIR)
+
     resp = render_admin_acl(
         request,
         users=users,
-        collections=collections,
+        collections=enriched,
         grants=grants,
         deletion_enabled=ADMIN_COLLECTION_DELETE_ENABLED,
         work_dir=WORK_DIR,
@@ -585,6 +594,85 @@ async def admin_acl_grant(
         raise HTTPException(status_code=404, detail="Auth disabled")
     except Exception as e:
         return render_admin_error(request, title="Grant Failed", message=str(e), back_href="/admin/acl")
+    return RedirectResponse(url="/admin/acl", status_code=302)
+
+
+@app.post("/admin/collections/reindex")
+async def admin_reindex_collection(
+    request: Request,
+    collection: str = Form(...),
+):
+    _require_admin_session(request)
+    name = (collection or "").strip()
+    if not name:
+        return render_admin_error(
+            request,
+            title="Reindex Failed",
+            message="collection is required",
+            back_href="/admin/acl",
+        )
+
+    root, repo_name = resolve_collection_root(collection=name, work_dir=WORK_DIR)
+    if not root:
+        return render_admin_error(
+            request,
+            title="Reindex Failed",
+            message="No workspace mapping found for collection (no state.json mapping)",
+            back_href="/admin/acl",
+        )
+
+    try:
+        spawn_ingest_code(root=root, work_dir=WORK_DIR, collection=name, recreate=False, repo_name=repo_name)
+    except Exception as e:
+        return render_admin_error(
+            request,
+            title="Reindex Failed",
+            message=str(e),
+            back_href="/admin/acl",
+        )
+
+    return RedirectResponse(url="/admin/acl", status_code=302)
+
+
+@app.post("/admin/collections/recreate")
+async def admin_recreate_collection(
+    request: Request,
+    collection: str = Form(...),
+):
+    _require_admin_session(request)
+    name = (collection or "").strip()
+    if not name:
+        return render_admin_error(
+            request,
+            title="Recreate Failed",
+            message="collection is required",
+            back_href="/admin/acl",
+        )
+
+    root, repo_name = resolve_collection_root(collection=name, work_dir=WORK_DIR)
+    if not root:
+        return render_admin_error(
+            request,
+            title="Recreate Failed",
+            message="No workspace mapping found for collection (no state.json mapping)",
+            back_href="/admin/acl",
+        )
+
+    try:
+        recreate_collection_qdrant(
+            qdrant_url=QDRANT_URL,
+            api_key=os.environ.get("QDRANT_API_KEY") or None,
+            collection=name,
+        )
+        spawn_ingest_code(root=root, work_dir=WORK_DIR, collection=name, recreate=False, repo_name=repo_name)
+    except Exception as e:
+        return render_admin_error(
+            request,
+            title="Recreate Failed",
+            message=str(e),
+            back_href="/admin/acl",
+        )
+
     return RedirectResponse(url="/admin/acl", status_code=302)
 
 
