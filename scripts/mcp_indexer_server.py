@@ -306,16 +306,41 @@ def _format_results_as_toon(response: Dict[str, Any], compact: bool = False) -> 
     """Convert response to use TOON-formatted results string instead of JSON array.
 
     Replaces 'results' array with 'results' string in TOON format to save tokens.
+    Always adds output_format marker when TOON is requested, even for empty results.
     """
     try:
         from scripts.toon_encoder import encode_search_results
 
         results = response.get("results", [])
-        if results and isinstance(results, list):
-            # Replace JSON array with TOON string
+        if isinstance(results, list):
+            # Replace JSON array with TOON string (handles empty arrays too)
             toon_results = encode_search_results(results, compact=compact)
-            response["results"] = toon_results  # Replace, don't add
-            response["output_format"] = "toon"
+            response["results"] = toon_results
+        response["output_format"] = "toon"
+
+        return response
+    except ImportError:
+        logger.warning("TOON encoder not available, returning JSON format")
+        return response
+    except Exception as e:
+        logger.debug(f"TOON encoding failed: {e}")
+        return response
+
+
+def _format_context_results_as_toon(response: Dict[str, Any], compact: bool = False) -> Dict[str, Any]:
+    """Convert context_search response to TOON format, handling mixed code/memory results.
+
+    Uses encode_context_results which properly handles memory entries (content/score)
+    vs code entries (path/line), avoiding blank rows or dropped content.
+    """
+    try:
+        from scripts.toon_encoder import encode_context_results
+
+        results = response.get("results", [])
+        if isinstance(results, list):
+            toon_results = encode_context_results(results, compact=compact)
+            response["results"] = toon_results
+        response["output_format"] = "toon"
 
         return response
     except ImportError:
@@ -5432,7 +5457,7 @@ async def context_search(
             pass
         # Apply TOON formatting if requested or enabled globally
         if _should_use_toon(output_format):
-            return _format_results_as_toon(ret, compact=True)
+            return _format_context_results_as_toon(ret, compact=True)
         return ret
 
     ret = {"results": blended, "total": len(blended)}
@@ -5455,9 +5480,9 @@ async def context_search(
         "context_lines": int(context_lines) if context_lines not in (None, "") else 2,
         "compact": bool(eff_compact),
     }
-    # Apply TOON formatting if requested or enabled globally
+    # Apply TOON formatting if requested or enabled globally (use context-aware encoder for memory support)
     if _should_use_toon(output_format):
-        return _format_results_as_toon(ret, compact=bool(eff_compact))
+        return _format_context_results_as_toon(ret, compact=bool(eff_compact))
     return ret
 
 

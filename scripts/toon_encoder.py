@@ -150,10 +150,14 @@ def encode_simple_array(
 
     Example output:
         tags[3]: python,async,api
+        empty[0]: []
     """
     length_part = f"[{len(arr)}]" if include_length else ""
-    values = [_encode_value(v, delimiter) for v in arr]
     prefix = "  " * indent
+    # Handle empty arrays with explicit [] marker
+    if not arr:
+        return [f"{prefix}{key}{length_part}: []"]
+    values = [_encode_value(v, delimiter) for v in arr]
     return [f"{prefix}{key}{length_part}: {delimiter.join(values)}"]
 
 
@@ -267,13 +271,15 @@ def encode_search_results(
     Returns:
         TOON-formatted search results
     """
-    if not results:
-        return "results[0]: []"
-
     if delimiter is None:
         delimiter = get_toon_delimiter()
     if include_length is None:
         include_length = include_length_markers()
+
+    length_part = f"[{len(results)}]" if include_length else ""
+
+    if not results:
+        return f"results{length_part}: []"
 
     # Determine fields based on compact mode
     if compact:
@@ -287,13 +293,83 @@ def encode_search_results(
                 fields.append(f)
 
     # Build tabular output
-    length_part = f"[{len(results)}]" if include_length else ""
     fields_part = "{" + delimiter.join(fields) + "}"
 
     lines = [f"results{length_part}{fields_part}:"]
     for r in results:
         values = [_encode_value(r.get(f), delimiter) for f in fields]
         lines.append(f"  {delimiter.join(values)}")
+
+    return "\n".join(lines)
+
+
+def encode_context_results(
+    results: List[Dict[str, Any]],
+    delimiter: Optional[str] = None,
+    include_length: Optional[bool] = None,
+    compact: bool = True,
+) -> str:
+    """Encode context_search results (code + memory) to TOON format.
+
+    Handles mixed result types:
+    - Code results: {source: "code", path, start_line, end_line, ...}
+    - Memory results: {source: "memory", content, score, ...}
+
+    Args:
+        results: List of mixed search result dicts
+        delimiter: Field delimiter
+        include_length: Include [N] markers
+        compact: If True, use minimal fields
+
+    Returns:
+        TOON-formatted context results with source-aware encoding
+    """
+    if delimiter is None:
+        delimiter = get_toon_delimiter()
+    if include_length is None:
+        include_length = include_length_markers()
+
+    length_part = f"[{len(results)}]" if include_length else ""
+
+    if not results:
+        return f"results{length_part}: []"
+
+    # Separate code and memory results
+    code_results = [r for r in results if r.get("source") != "memory"]
+    memory_results = [r for r in results if r.get("source") == "memory"]
+
+    lines = []
+
+    # Encode code results
+    if code_results:
+        code_len = f"[{len(code_results)}]" if include_length else ""
+        if compact:
+            code_fields = ["path", "start_line", "end_line"]
+        else:
+            code_fields = ["path", "start_line", "end_line", "score", "symbol"]
+        code_fields_part = "{" + delimiter.join(code_fields) + "}"
+        lines.append(f"code{code_len}{code_fields_part}:")
+        for r in code_results:
+            values = [_encode_value(r.get(f), delimiter) for f in code_fields]
+            lines.append(f"  {delimiter.join(values)}")
+
+    # Encode memory results
+    if memory_results:
+        mem_len = f"[{len(memory_results)}]" if include_length else ""
+        if compact:
+            mem_fields = ["content", "score"]
+        else:
+            mem_fields = ["content", "score", "id"]
+        mem_fields_part = "{" + delimiter.join(mem_fields) + "}"
+        lines.append(f"memory{mem_len}{mem_fields_part}:")
+        for r in memory_results:
+            values = [_encode_value(r.get(f), delimiter) for f in mem_fields]
+            lines.append(f"  {delimiter.join(values)}")
+
+    # If no separation needed (all same type or empty), use unified format
+    if not lines:
+        # Fallback: use generic encode
+        return encode_search_results(results, delimiter, include_length, compact)
 
     return "\n".join(lines)
 
