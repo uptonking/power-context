@@ -2723,9 +2723,6 @@ def run_hybrid_search(
             t = tok.strip()
             if len(t) >= 3:
                 kw.add(t)
-    # Add a few commonly relevant code tokens (helps for gate-first cases)
-    for t in ("hasidcondition", "pid_str", "matchany", "gate-first", "gatefirst"):
-        kw.add(t)
 
     import io as _io
 
@@ -2761,30 +2758,6 @@ def run_hybrid_search(
         except Exception:
             return 0
 
-    # Apply bump to top-N ranked (limited for speed)
-    topN = min(len(ranked), 200)
-    for i in range(topN):
-        m = ranked[i]
-        md = (m["pt"].payload or {}).get("metadata") or {}
-        hits = _snippet_contains(md)
-        if hits > 0 and kb > 0.0:
-            bump = min(kcap, kb * float(hits))
-            m["s"] += bump
-        # Apply comment-heavy penalty to de-emphasize comments/doc blocks
-        try:
-            if COMMENT_PENALTY > 0.0:
-                ratio = _snippet_comment_ratio(md)
-                thr = float(COMMENT_RATIO_THRESHOLD)
-                if ratio >= thr:
-                    # Scale penalty with how far ratio exceeds threshold (cap at COMMENT_PENALTY)
-                    scale = (ratio - thr) / max(1e-6, 1.0 - thr)
-                    pen = min(float(COMMENT_PENALTY), float(COMMENT_PENALTY) * max(0.0, scale))
-                    if pen > 0:
-                        m["cmt"] = float(m.get("cmt", 0.0)) - pen
-                        m["s"] -= pen
-        except Exception:
-            pass
-    # Re-sort after bump
     def _snippet_comment_ratio(md: dict) -> float:
         # Estimate fraction of non-blank lines that are comments (language-agnostic heuristics)
         try:
@@ -2851,7 +2824,29 @@ def run_hybrid_search(
             return 0.0
 
     # Apply bump to top-N ranked (limited for speed)
+    topN = min(len(ranked), 200)
+    for i in range(topN):
+        m = ranked[i]
+        md = (m["pt"].payload or {}).get("metadata") or {}
+        hits = _snippet_contains(md)
+        if hits > 0 and kb > 0.0:
+            bump = min(kcap, kb * float(hits))
+            m["s"] += bump
+        # Apply comment-heavy penalty to de-emphasize comments/doc blocks
+        try:
+            if COMMENT_PENALTY > 0.0:
+                ratio = _snippet_comment_ratio(md)
+                thr = float(COMMENT_RATIO_THRESHOLD)
+                if ratio >= thr:
+                    scale = (ratio - thr) / max(1e-6, 1.0 - thr)
+                    pen = min(float(COMMENT_PENALTY), float(COMMENT_PENALTY) * max(0.0, scale))
+                    if pen > 0:
+                        m["cmt"] = float(m.get("cmt", 0.0)) - pen
+                        m["s"] -= pen
+        except Exception:
+            pass
 
+    # Re-sort after bump
     ranked = sorted(ranked, key=_tie_key)
 
     # Cluster by path adjacency
