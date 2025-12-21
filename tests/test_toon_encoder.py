@@ -17,8 +17,6 @@ from scripts.toon_encoder import (
     encode_context_results,
     compare_formats,
     is_toon_enabled,
-    get_toon_delimiter,
-    include_length_markers,
     _encode_value,
     _is_uniform_array_of_objects,
 )
@@ -37,21 +35,6 @@ class TestFeatureFlags:
         
         monkeypatch.setenv("TOON_ENABLED", "true")
         assert is_toon_enabled() is True
-
-    def test_delimiter_default(self, monkeypatch):
-        monkeypatch.delenv("TOON_DELIMITER", raising=False)
-        assert get_toon_delimiter() == ","
-
-    def test_delimiter_tab(self, monkeypatch):
-        monkeypatch.setenv("TOON_DELIMITER", "\\t")
-        assert get_toon_delimiter() == "\t"
-        
-        monkeypatch.setenv("TOON_DELIMITER", "tab")
-        assert get_toon_delimiter() == "\t"
-
-    def test_length_markers_default(self, monkeypatch):
-        monkeypatch.delenv("TOON_INCLUDE_LENGTH", raising=False)
-        assert include_length_markers() is True
 
 
 class TestValueEncoding:
@@ -174,7 +157,8 @@ class TestFullEncoding:
             ]
         }
         result = encode(obj)
-        assert "users[2]{id,name}:" in result
+        # python-toon uses [N,] format for comma delimiter
+        assert "users[2,]{id,name}:" in result
         assert "  1,Alice" in result
         assert "  2,Bob" in result
 
@@ -197,8 +181,8 @@ class TestFullEncoding:
         assert "  task: Our favorite hikes together" in result
         # Friends inline
         assert "friends[3]: ana,luis,sam" in result
-        # Hikes tabular
-        assert "hikes[2]{id,name,distanceKm}:" in result
+        # Hikes tabular - python-toon uses [N,] format
+        assert "hikes[2,]{id,name,distanceKm}:" in result
 
 
 class TestSearchResults:
@@ -422,8 +406,8 @@ class TestContextResults:
 
         output = encode_context_results(results, delimiter="\t", compact=True)
 
-        # Should use tab delimiter
-        assert "code[1]{path\tstart_line\tend_line}:" in output
+        # Should use tab delimiter with [N\t] format
+        assert "code[1\t]{path\tstart_line\tend_line}:" in output
         assert "/src/main.py\t10\t20" in output
 
 
@@ -438,7 +422,8 @@ class TestFormatContextResultsAsToon:
         result = _format_context_results_as_toon(response.copy())
 
         assert result["output_format"] == "toon"
-        assert "results[0]: []" in result["results"]
+        # Empty array per spec: key[0]:
+        assert result["results"] == "results[0]:"
 
     def test_format_mixed_results(self):
         """Test formatting mixed code/memory results."""

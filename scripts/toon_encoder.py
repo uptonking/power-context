@@ -13,7 +13,7 @@ Reference: https://github.com/toon-format/toon
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 # Use official python-toon library
 from toon import encode as toon_encode
@@ -208,8 +208,8 @@ def encode_search_results(
 
 def encode_context_results(
     results: List[Dict[str, Any]],
-    delimiter: Optional[str] = None,
-    include_length: Optional[bool] = None,
+    delimiter: str = ",",
+    include_length: bool = True,
     compact: bool = True,
 ) -> str:
     """Encode context_search results (code + memory) to TOON format.
@@ -219,18 +219,13 @@ def encode_context_results(
 
     Args:
         results: List of mixed search result dicts
-        delimiter: Field delimiter
-        include_length: Include [N] markers
+        delimiter: Field delimiter (default: ",")
+        include_length: Include [N] markers (default: True)
         compact: If True, use minimal core fields only
 
     Returns:
         TOON-formatted context results with source-aware encoding
     """
-    if delimiter is None:
-        delimiter = get_toon_delimiter()
-    if include_length is None:
-        include_length = include_length_markers()
-
     bracket = _bracket_segment(len(results), delimiter, include_length)
 
     if not results:
