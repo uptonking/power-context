@@ -348,8 +348,19 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from scripts.utils import sanitize_vector_name as _sanitize_vector_name
-from scripts.ingest_code import ensure_collection as _ensure_collection
+from scripts.ingest_code import ensure_collection as _ensure_collection_raw
 from scripts.ingest_code import project_mini as _project_mini
+
+# Process-local cache to avoid calling ensure_collection on every search
+_ENSURED_COLLECTIONS: set = set()
+
+def _ensure_collection(client, collection: str, dim: int, vec_name: str):
+    """Cached wrapper for ensure_collection - only calls once per (collection, vec_name) pair."""
+    cache_key = f"{collection}:{vec_name}:{dim}"
+    if cache_key in _ENSURED_COLLECTIONS:
+        return
+    _ensure_collection_raw(client, collection, dim, vec_name)
+    _ENSURED_COLLECTIONS.add(cache_key)
 
 
 # RRF k: lower = denser score distribution (better for small repos)
@@ -2181,10 +2192,12 @@ def run_hybrid_search(
         except Exception:
             pass
 
+    _gate_first_ran = False
     if gate_first and refrag_on and not should_bypass_gate:
         try:
             # ReFRAG gate-first: Use MINI vectors to prefilter candidates
             mini_queries = [_project_mini(list(v), MINI_VEC_DIM) for v in embedded]
+            _gate_first_ran = True
 
             # Get top candidates using MINI vectors (fast prefilter)
             candidate_ids = set()
@@ -2242,8 +2255,9 @@ def run_hybrid_search(
 
     flt_gated = _sanitize_filter_obj(flt_gated)
 
-    # Parallel dense query execution for multiple queries
-    if len(embedded) > 1 and os.environ.get("PARALLEL_DENSE_QUERIES", "1") == "1":
+    # Parallel dense query execution for multiple queries (threshold >= 4 to avoid thread overhead for small N)
+    _parallel_threshold = int(os.environ.get("PARALLEL_DENSE_THRESHOLD", "4") or 4)
+    if len(embedded) >= _parallel_threshold and os.environ.get("PARALLEL_DENSE_QUERIES", "1") == "1":
         executor = _get_query_executor()
         futures = [
             executor.submit(
@@ -2278,7 +2292,7 @@ def run_hybrid_search(
 
     # Optional ReFRAG-style mini-vector gating: add compact-vector RRF if enabled
     try:
-        if os.environ.get("REFRAG_MODE", "").strip().lower() in {
+        if not _gate_first_ran and os.environ.get("REFRAG_MODE", "").strip().lower() in {
             "1",
             "true",
             "yes",
@@ -2326,12 +2340,9 @@ def run_hybrid_search(
             prf_dw = 0.4
 
         try:
-            # Get top results for PRF context
-            top_results = []
-            for pid, rec in score_map.items():
-                top_results.append(rec["pt"])
-                if len(top_results) >= 8:  # Use top 8 for PRF
-                    break
+            # Get top results for PRF context (sorted by score, not arbitrary dict order)
+            sorted_items = sorted(score_map.items(), key=lambda x: x[1]["s"], reverse=True)
+            top_results = [rec["pt"] for _, rec in sorted_items[:8]]
 
             if top_results:
                 semantic_prf_terms = expand_queries_with_prf(
@@ -2578,6 +2589,8 @@ def run_hybrid_search(
         sym = str(md.get("symbol") or "").lower()
         sym_path = str(md.get("symbol_path") or "").lower()
         sym_text = f"{sym} {sym_path}"
+        # Pre-split symbol into parts for token-level matching (camelCase/snake_case)
+        sym_parts = set(p.lower() for p in _split_ident(md.get("symbol") or "") if len(p) >= 2)
         for q in qlist:
             ql = q.lower()
             if not ql:
@@ -2585,10 +2598,22 @@ def run_hybrid_search(
             if ql in sym_text:
                 rec["sym_sub"] += SYMBOL_BOOST
                 rec["s"] += SYMBOL_BOOST
-            if ql == sym or ql == sym_path:
+            # Exact match: full symbol OR any split part matches query
+            if ql == sym or ql == sym_path or ql in sym_parts:
                 rec["sym_eq"] += SYMBOL_EQUALITY_BOOST
                 rec["s"] += SYMBOL_EQUALITY_BOOST
         path = str(md.get("path") or "")
+        # Filename match boost: query matches file basename or stem parts
+        if path:
+            basename = path.rsplit("/", 1)[-1].lower()
+            stem = basename.rsplit(".", 1)[0] if "." in basename else basename
+            stem_parts = set(p.lower() for p in _split_ident(stem) if len(p) >= 2)
+            for q in qlist:
+                ql = q.lower()
+                if ql and len(ql) >= 3 and (ql == stem or ql in stem_parts or ql in basename):
+                    rec["sym_eq"] += SYMBOL_EQUALITY_BOOST * 0.5
+                    rec["s"] += SYMBOL_EQUALITY_BOOST * 0.5
+                    break
         if CORE_FILE_BOOST > 0.0 and path and is_core_file(path):
             rec["core"] += CORE_FILE_BOOST
             rec["s"] += CORE_FILE_BOOST
