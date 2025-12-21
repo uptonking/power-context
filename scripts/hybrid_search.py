@@ -35,16 +35,6 @@ import re
 import json
 import math
 
-# Prefer orjson for faster serialization (2-3x speedup)
-try:
-    import orjson
-    def _json_dumps(obj):
-        return orjson.dumps(obj).decode()
-except ImportError:
-    orjson = None
-    def _json_dumps(obj):
-        return json.dumps(obj)
-
 import logging
 import threading
 

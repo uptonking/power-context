@@ -36,3 +36,4 @@ pytest
 pytest-asyncio
 anyio
 testcontainers
+python-toon>=0.1.3
