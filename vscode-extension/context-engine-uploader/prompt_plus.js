@@ -67,22 +67,99 @@ function createPromptPlusManager(deps) {
     return undefined;
   }
 
-  async function enhanceSelectionWithUnicorn() {
+  function getActiveSelectionText() {
     const editor = vscode.window.activeTextEditor;
     if (!editor) {
-      vscode.window.showWarningMessage('Open a file and select text to enhance with Prompt+.');
-      return;
+      return { editor: undefined, selection: undefined, text: '' };
     }
     const selection = editor.selections && editor.selections.length ? editor.selections[0] : editor.selection;
     const text = selection && !selection.isEmpty ? editor.document.getText(selection) : '';
-    if (!text || !text.trim()) {
-      vscode.window.showWarningMessage('Select text to enhance with Prompt+.');
-      return;
+    return { editor, selection, text };
+  }
+
+  async function resolveInputTextFromUser(selectionText) {
+    const selectionTrimmed = (selectionText || '').trim();
+    if (selectionTrimmed) {
+      const picked = await vscode.window.showQuickPick(
+        [
+          { label: 'Use selection', id: 'selection' },
+          { label: 'Enter message', id: 'message' },
+          { label: 'Enter message + selection', id: 'message+selection' },
+        ],
+        { placeHolder: 'Prompt+ input source' }
+      );
+      if (!picked) {
+        return undefined;
+      }
+      if (picked.id === 'selection') {
+        return selectionText;
+      }
+      const message = await vscode.window.showInputBox({
+        prompt: 'Prompt+ message',
+        placeHolder: 'Type an instruction or question to enhance with Context Engine',
+        ignoreFocusOut: true,
+      });
+      const msgTrimmed = (message || '').trim();
+      if (!msgTrimmed) {
+        return undefined;
+      }
+      if (picked.id === 'message') {
+        return msgTrimmed;
+      }
+      return `${msgTrimmed}\n\n${selectionText}`;
     }
 
+    const message = await vscode.window.showInputBox({
+      prompt: 'Prompt+ message',
+      placeHolder: 'Type an instruction or question to enhance with Context Engine',
+      ignoreFocusOut: true,
+    });
+    const msgTrimmed = (message || '').trim();
+    if (!msgTrimmed) {
+      return undefined;
+    }
+    return msgTrimmed;
+  }
+
+  function normalizePromptMode(raw) {
+    const v = (raw || '').trim().toLowerCase();
+    if (v === 'unicorn') {
+      return 'unicorn';
+    }
+    return 'default';
+  }
+
+  function readDefaultModeFromCtxConfig(ctxWorkspaceDir) {
+    try {
+      if (!ctxWorkspaceDir || typeof ctxWorkspaceDir !== 'string') {
+        return undefined;
+      }
+      const cfgPath = path.join(ctxWorkspaceDir, 'ctx_config.json');
+      if (!fs.existsSync(cfgPath)) {
+        return undefined;
+      }
+      const raw = fs.readFileSync(cfgPath, 'utf8');
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object') {
+        return undefined;
+      }
+      if (typeof parsed.default_mode === 'string') {
+        return normalizePromptMode(parsed.default_mode);
+      }
+      return undefined;
+    } catch (_) {
+      return undefined;
+    }
+  }
+
+  function runPrompt(text) {
+    const input = (text || '').trim();
+    if (!input) {
+      return Promise.resolve(undefined);
+    }
     const ctxScript = resolveCtxScriptPath();
     if (!ctxScript) {
-      return;
+      return Promise.resolve(undefined);
     }
 
     const pythonPath = getConfiguredPythonPath();
@@ -111,16 +188,15 @@ function createPromptPlusManager(deps) {
         env.MCP_INDEXER_URL = idxUrlRaw;
       }
     } catch (_) {
-      // ignore config read failures; fall back to defaults
     }
 
+    let ctxWorkspaceDir;
     try {
       const cfg = getEffectiveConfig();
       const useGpuDecoder = cfg.get('useGpuDecoder', false);
       if (useGpuDecoder) {
         env.USE_GPU_DECODER = '1';
       }
-      let ctxWorkspaceDir;
       try {
         ctxWorkspaceDir = getTargetPath(cfg);
       } catch (error) {
@@ -136,16 +212,23 @@ function createPromptPlusManager(deps) {
         env.CTX_WORKSPACE_DIR = ctxWorkspaceDir;
       }
     } catch (_) {
-      // ignore config read failures; fall back to defaults
+      ctxWorkspaceDir = undefined;
     }
 
     const existingPyPath = env.PYTHONPATH || '';
     env.PYTHONPATH = existingPyPath ? `${projectRoot}${path.delimiter}${existingPyPath}` : projectRoot;
 
-    log(`Running Prompt+ via ctx.py at ${ctxScript}`);
+    const configuredMode = readDefaultModeFromCtxConfig(ctxWorkspaceDir);
+    const modeUsed = configuredMode || 'default';
+
+    log(`Running Prompt+ via ctx.py at ${ctxScript} (mode=${modeUsed})`);
 
     return new Promise((resolve) => {
-      const args = [ctxScript, '--unicorn', text];
+      const args = [ctxScript];
+      if (modeUsed === 'unicorn') {
+        args.push('--unicorn');
+      }
+      args.push(input);
       const child = spawn(pythonPath, args, { cwd: projectRoot, env });
       let stdout = '';
       let stderr = '';
@@ -164,7 +247,6 @@ function createPromptPlusManager(deps) {
               appendOutput(`[prompt+] ${chunk}`);
             }
           } catch (_) {
-            // ignore
           }
         });
       }
@@ -172,34 +254,82 @@ function createPromptPlusManager(deps) {
       child.on('error', error => {
         log(`Prompt+ spawn failed: ${error instanceof Error ? error.message : String(error)}`);
         vscode.window.showErrorMessage('Prompt+ failed to start. Check Python path.');
-        resolve();
+        resolve(undefined);
       });
 
       child.on('close', code => {
         if (code !== 0) {
           log(`Prompt+ exited with code ${code}${stderr ? `: ${stderr.trim()}` : ''}`);
           vscode.window.showErrorMessage('Prompt+ failed. See output for details.');
-          return resolve();
+          return resolve(undefined);
         }
         const enhanced = (stdout || '').trim();
         if (!enhanced) {
           vscode.window.showWarningMessage('Prompt+ returned no output.');
-          return resolve();
+          return resolve(undefined);
         }
-        editor.edit(editBuilder => editBuilder.replace(selection, enhanced)).then(ok => {
-          if (ok) {
-            vscode.window.showInformationMessage('Prompt+ applied (Unicorn Mode).');
-          } else {
-            vscode.window.showErrorMessage('Prompt+ could not update the selection.');
-          }
-          resolve();
-        });
+        resolve({ enhanced, modeUsed });
       });
     });
   }
 
+  async function enhanceSelectionWithUnicorn() {
+    const { editor, selection, text } = getActiveSelectionText();
+    if (!editor) {
+      vscode.window.showWarningMessage('Open a file and select text to enhance with Prompt+.');
+      return;
+    }
+    if (!selection || selection.isEmpty || !text || !text.trim()) {
+      vscode.window.showWarningMessage('Select text to enhance with Prompt+.');
+      return;
+    }
+    const result = await runPrompt(text);
+    if (!result || !result.enhanced) {
+      return;
+    }
+    const modeLabel = result.modeUsed === 'unicorn' ? 'Unicorn Mode' : 'Default Mode';
+    await editor.edit(editBuilder => editBuilder.replace(selection, result.enhanced)).then(ok => {
+      if (ok) {
+        vscode.window.showInformationMessage(`Prompt+ applied (${modeLabel}).`);
+      } else {
+        vscode.window.showErrorMessage('Prompt+ could not update the selection.');
+      }
+    });
+  }
+
+  async function enhancePromptWithUnicornCopy() {
+    const { text } = getActiveSelectionText();
+    const input = await resolveInputTextFromUser(text);
+    if (!input) {
+      return;
+    }
+    const result = await runPrompt(input);
+    if (!result || !result.enhanced) {
+      return;
+    }
+    const modeLabel = result.modeUsed === 'unicorn' ? 'Unicorn Mode' : 'Default Mode';
+    await vscode.env.clipboard.writeText(result.enhanced);
+    vscode.window.showInformationMessage(`Prompt+ copied to clipboard (${modeLabel}).`);
+  }
+
+  async function enhancePromptWithUnicornOpen() {
+    const { text } = getActiveSelectionText();
+    const input = await resolveInputTextFromUser(text);
+    if (!input) {
+      return;
+    }
+    const result = await runPrompt(input);
+    if (!result || !result.enhanced) {
+      return;
+    }
+    const doc = await vscode.workspace.openTextDocument({ content: result.enhanced, language: 'markdown' });
+    await vscode.window.showTextDocument(doc, { preview: true });
+  }
+
   return {
     enhanceSelectionWithUnicorn,
+    enhancePromptWithUnicornCopy,
+    enhancePromptWithUnicornOpen,
     dispose,
   };
 }

@@ -2257,7 +2257,7 @@ async def repo_search(
     args: Any = None,  # Compatibility shim for mcp-remote/Claude wrappers that send args/kwargs
     kwargs: Any = None,
 ) -> Dict[str, Any]:
-    """Zero-config code search over repositories (hybrid: vector + lexical RRF, optional rerank).
+    """Zero-config code search over repositories (hybrid: vector + lexical RRF, rerank ON by default).
 
     When to use:
     - Find relevant code spans quickly; prefer this over embedding-only search.
@@ -2268,7 +2268,7 @@ async def repo_search(
     - limit: int (default 10). Total results across files.
     - per_path: int (default 2). Max results per file.
     - include_snippet/context_lines: return inline snippets near hits when true.
-    - rerank_*: optional ONNX reranker toggles; timeouts fall back to hybrid output.
+    - rerank_*: ONNX reranker is ON by default for best relevance; timeouts fall back to hybrid.
     - output_format: "json" (default) or "toon" for token-efficient TOON format.
       Set TOON_ENABLED=1 env var to enable TOON by default.
     - collection: str. Target collection; defaults to workspace state or env COLLECTION_NAME.
@@ -4301,6 +4301,7 @@ async def context_search(
     - per_source_limits: dict, e.g. {"code": 5, "memory": 3}
     - All repo_search filters are supported and passed through.
     - output_format: "json" (default) or "toon" for token-efficient TOON format.
+    - rerank_enabled: bool (default true). ONNX reranker is ON by default for better relevance.
     - repo: str or list[str]. Filter by repo name(s). Use "*" to search all repos (disable auto-filter).
       By default, auto-detects current repo from CURRENT_REPO env and filters to it.
 
@@ -7889,7 +7890,7 @@ async def context_answer(
     """Natural-language Q&A over the repo using retrieval + local LLM (llama.cpp).
 
     What it does:
-    - Retrieves relevant code (hybrid vector+lexical with ReFRAG gate-first).
+    - Retrieves relevant code (hybrid vector+lexical with reranking enabled by default).
     - Budgets/merges micro-spans, builds citations, and asks the LLM to answer.
     - Returns a concise answer plus file/line citations.
 
@@ -7913,6 +7914,7 @@ async def context_answer(
     - On decoder disabled/error, returns {"error": "...", "citations": [...], "query": [...]}
 
     Notes:
+    - Reranking is enabled by default for optimal retrieval quality.
     - Honors env knobs such as REFRAG_MODE, REFRAG_GATE_FIRST, MICRO_BUDGET_TOKENS, DECODER_*.
     - Keeps answers brief (2–4 sentences) and grounded; rejects ungrounded output.
     """
@@ -8694,10 +8696,11 @@ async def code_search(
     compact: Any = None,
     kwargs: Any = None,
 ) -> Dict[str, Any]:
-    """Exact alias of repo_search (hybrid code search).
+    """Exact alias of repo_search (hybrid code search with reranking enabled by default).
 
     Prefer repo_search; this name exists for discoverability in some IDEs/agents.
     Same parameters and return shape as repo_search.
+    Reranking (rerank_enabled=true) is ON by default for optimal result quality.
     """
     return await repo_search(
         query=query,
@@ -9096,6 +9099,16 @@ if __name__ == "__main__":
     logger.info(f"  Micro Chunk Tokens: {os.environ.get('MICRO_CHUNK_TOKENS', '128')}")
     logger.info(f"  Micro Chunk Stride: {os.environ.get('MICRO_CHUNK_STRIDE', '64')}")
     logger.info(f"  Max Micro Chunks/File: {os.environ.get('MAX_MICRO_CHUNKS_PER_FILE', '200')}")
+    logger.info(f"  ReFRAG Mode: {os.environ.get('REFRAG_MODE', '0')}")
+    logger.info(f"  ReFRAG Gate First: {os.environ.get('REFRAG_GATE_FIRST', '0')}")
+    logger.info(f"  Lexical Vector Dim: {os.environ.get('LEX_VECTOR_DIM', '4096')}")
+    logger.info(f"  Lexical Multi Hash: {os.environ.get('LEX_MULTI_HASH', '1')}")
+    logger.info(f"  Lexical Bigrams: {os.environ.get('LEX_BIGRAMS', '0')}")
+    logger.info(f"  Lexical Bigram Weight: {os.environ.get('LEX_BIGRAM_WEIGHT', '0.7')}")
+    logger.info(f"  Lexical Sparse Mode: {os.environ.get('LEX_SPARSE_MODE', '0')}")
+    logger.info(f"  Reranker Enabled: {os.environ.get('RERANKER_ENABLED', '0')}")
+    logger.info(f"  Rerank Top N: {os.environ.get('RERANK_TOP_N', '20')}")
+    logger.info(f"  Rerank Timeout MS: {os.environ.get('RERANK_TIMEOUT_MS', '500')}")
     logger.info("=" * 60)
 
     # Optional warmups: gated by env flags to avoid delaying readiness on fresh containers
