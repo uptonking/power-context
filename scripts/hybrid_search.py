@@ -2211,7 +2211,6 @@ def run_hybrid_search(
         try:
             # ReFRAG gate-first: Use MINI vectors to prefilter candidates
             mini_queries = [_project_mini(list(v), MINI_VEC_DIM) for v in embedded]
-            _gate_first_ran = True
 
             # Get top candidates using MINI vectors (fast prefilter)
             candidate_ids = set()
@@ -2248,6 +2247,8 @@ def run_hybrid_search(
             else:
                 # No candidates -> no gating
                 flt_gated = flt
+            # Mark gate-first as successful only after all logic completes
+            _gate_first_ran = True
         except Exception as e:
             if os.environ.get("DEBUG_HYBRID_SEARCH"):
                 logger.debug(f"ReFRAG gate-first failed: {e}, proceeding without gating")
