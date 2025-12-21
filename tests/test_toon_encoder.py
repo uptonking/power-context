@@ -55,10 +55,11 @@ class TestFeatureFlags:
 
 
 class TestValueEncoding:
-    """Test individual value encoding."""
+    """Test individual value encoding per TOON spec."""
 
     def test_encode_primitives(self):
-        assert _encode_value(None, ",") == ""
+        # Per spec §2: null is encoded as literal "null"
+        assert _encode_value(None, ",") == "null"
         assert _encode_value(True, ",") == "true"
         assert _encode_value(False, ",") == "false"
         assert _encode_value(42, ",") == "42"
@@ -68,9 +69,10 @@ class TestValueEncoding:
     def test_encode_string_with_delimiter(self):
         # String containing delimiter should be quoted
         assert _encode_value("hello,world", ",") == '"hello,world"'
-        
+
     def test_encode_string_with_newline(self):
-        assert _encode_value("line1\nline2", ",") == '"line1\nline2"'
+        # Per spec §7.1: newlines escaped as \n
+        assert _encode_value("line1\nline2", ",") == '"line1\\nline2"'
 
     def test_encode_nested_object(self):
         # Nested objects become compact JSON
@@ -115,14 +117,16 @@ class TestTabularEncoding:
         assert lines[0] == "items{x}:"
 
     def test_encode_tabular_tab_delimiter(self):
+        # Per spec §6: tab delimiter appears inside brackets [N<TAB>] and braces
         arr = [{"a": 1, "b": 2}]
         lines = encode_tabular("data", arr, delimiter="\t")
-        assert lines[0] == "data[1]{a\tb}:"
+        assert lines[0] == "data[1\t]{a\tb}:"
         assert lines[1] == "  1\t2"
 
     def test_encode_empty_array(self):
+        # Per spec §9.1: empty arrays are key[0]: (no values after colon)
         lines = encode_tabular("empty", [])
-        assert lines == ["empty[0]: []"]
+        assert lines == ["empty[0]:"]
 
 
 class TestSimpleArrayEncoding:
@@ -215,8 +219,9 @@ class TestSearchResults:
         assert "0.95" in output
 
     def test_encode_empty_results(self):
+        # Per spec: empty arrays are key[0]: (nothing after colon)
         output = encode_search_results([])
-        assert output == "results[0]: []"
+        assert output == "results[0]:"
 
 
 class TestTokenComparison:
@@ -337,9 +342,10 @@ class TestContextResults:
     """Test encode_context_results for mixed code/memory results."""
 
     def test_encode_empty_context_results(self):
-        """Test empty results return proper TOON format with marker."""
+        """Test empty results return proper TOON format per spec."""
         output = encode_context_results([])
-        assert "results[0]: []" in output
+        # Per spec: empty arrays are key[0]: (nothing after colon)
+        assert output == "results[0]:"
 
     def test_encode_code_only_results(self):
         """Test encoding results with only code entries."""

@@ -1,9 +1,8 @@
 """
 TOON (Token-Oriented Object Notation) encoder for Context-Engine.
 
-A compact, token-efficient format for LLM input that combines:
-- YAML-like indentation for nested objects
-- CSV-style tabular layout for uniform arrays
+Uses the official python-toon library for spec-compliant encoding.
+Provides helper functions for search result formatting.
 
 Feature flags:
 - TOON_ENABLED=1          Enable TOON encoding (default: 0)
@@ -16,8 +15,10 @@ Reference: https://github.com/toon-format/toon
 from __future__ import annotations
 
 import os
-import re
-from typing import Any, Dict, List, Optional, Union, Callable
+from typing import Any, Dict, List, Optional
+
+# Use official python-toon library
+from toon import encode as toon_encode
 
 # -----------------------------------------------------------------------------
 # Feature Flags
@@ -47,32 +48,80 @@ def include_length_markers() -> bool:
 # -----------------------------------------------------------------------------
 
 def _needs_quoting(value: str, delimiter: str) -> bool:
-    """Check if a string value needs quoting."""
+    """Check if a string value needs quoting per TOON spec §7.2."""
     if not value:
-        return False
-    # Quote if contains delimiter, newline, or starts/ends with whitespace
-    return (
-        delimiter in value
-        or "\n" in value
-        or "\r" in value
-        or value[0].isspace()
-        or value[-1].isspace()
-        or value.startswith('"')
-    )
+        return True  # Empty string MUST be quoted
+    # Leading or trailing whitespace
+    if value[0].isspace() or value[-1].isspace():
+        return True
+    # Reserved literals (case-sensitive)
+    if value in ("true", "false", "null"):
+        return True
+    # Numeric-like patterns
+    if re.match(r'^-?\d+(?:\.\d+)?(?:e[+-]?\d+)?$', value, re.IGNORECASE):
+        return True
+    if re.match(r'^0\d+$', value):  # Leading zeros like "05"
+        return True
+    # Contains structural characters: colon, quote, backslash, brackets
+    if any(c in value for c in (':', '"', '\\', '[', ']', '{', '}')):
+        return True
+    # Contains control characters
+    if '\n' in value or '\r' in value or '\t' in value:
+        return True
+    # Contains the delimiter
+    if delimiter in value:
+        return True
+    # Hyphen cases: equals "-" or starts with "-"
+    if value == "-" or value.startswith("-"):
+        return True
+    return False
+
+
+def _escape_string(value: str) -> str:
+    """Escape a string per TOON spec §7.1 (only 5 escapes allowed)."""
+    result = value
+    result = result.replace('\\', '\\\\')  # Backslash first
+    result = result.replace('"', '\\"')    # Quote
+    result = result.replace('\n', '\\n')   # Newline
+    result = result.replace('\r', '\\r')   # Carriage return
+    result = result.replace('\t', '\\t')   # Tab
+    return result
+
+
+def _encode_number(value: Union[int, float]) -> str:
+    """Encode a number in canonical form per TOON spec §2."""
+    import math
+    # Handle special floats
+    if isinstance(value, float):
+        if math.isnan(value) or math.isinf(value):
+            return "null"
+        # Normalize -0 to 0
+        if value == 0.0:
+            return "0"
+        # Check if it's effectively an integer
+        if value == int(value) and abs(value) < 1e15:
+            return str(int(value))
+        # Format without exponent, removing trailing zeros
+        formatted = f"{value:.15g}"
+        # Ensure no exponent notation for reasonable ranges
+        if 'e' in formatted.lower() and abs(value) < 1e15 and abs(value) > 1e-6:
+            formatted = f"{value:.10f}".rstrip('0').rstrip('.')
+        return formatted
+    # Integers are straightforward
+    return str(value)
 
 
 def _encode_value(value: Any, delimiter: str) -> str:
-    """Encode a single value to TOON format."""
+    """Encode a single value to TOON format per spec."""
     if value is None:
-        return ""
+        return "null"
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, (int, float)):
-        return str(value)
+        return _encode_number(value)
     if isinstance(value, str):
         if _needs_quoting(value, delimiter):
-            # Escape quotes and wrap
-            escaped = value.replace('"', '""')
+            escaped = _escape_string(value)
             return f'"{escaped}"'
         return value
     # For nested objects/arrays in a table row, use compact JSON
@@ -106,6 +155,24 @@ def _get_field_order(arr: List[Dict[str, Any]]) -> List[str]:
 # TOON Encoding
 # -----------------------------------------------------------------------------
 
+def _bracket_segment(length: int, delimiter: str, include_length: bool) -> str:
+    """Build bracket segment with optional delimiter symbol per spec §6.
+
+    - Comma (default): [N]
+    - Tab: [N<TAB>]  (actual tab character inside brackets)
+    - Pipe: [N|]
+    """
+    if not include_length:
+        return ""
+    # Delimiter symbol inside brackets (comma is implicit/absent)
+    if delimiter == "\t":
+        return f"[{length}\t]"
+    elif delimiter == "|":
+        return f"[{length}|]"
+    else:
+        return f"[{length}]"
+
+
 def encode_tabular(
     key: str,
     arr: List[Dict[str, Any]],
@@ -114,28 +181,34 @@ def encode_tabular(
     include_length: bool = True,
 ) -> List[str]:
     """Encode a uniform array of objects as TOON tabular format.
-    
-    Example output:
+
+    Example output (comma delimiter):
         users[3]{id,name,role}:
           1,Alice,admin
           2,Bob,user
           3,Carol,viewer
+
+    Example output (tab delimiter):
+        users[3<TAB>]{id<TAB>name<TAB>role}:
+          1<TAB>Alice<TAB>admin
     """
+    prefix = "  " * indent
+    bracket = _bracket_segment(len(arr), delimiter, include_length)
+
     if not arr:
-        length_part = "[0]" if include_length else ""
-        return [f"{'  ' * indent}{key}{length_part}: []"]
-    
+        # Empty array: key[0]: (no values, no [])
+        return [f"{prefix}{key}{bracket}:"]
+
     fields = _get_field_order(arr)
-    length_part = f"[{len(arr)}]" if include_length else ""
     fields_part = "{" + delimiter.join(fields) + "}"
-    
-    lines = [f"{'  ' * indent}{key}{length_part}{fields_part}:"]
-    
+
+    lines = [f"{prefix}{key}{bracket}{fields_part}:"]
+
     row_indent = "  " * (indent + 1)
     for item in arr:
         values = [_encode_value(item.get(f), delimiter) for f in fields]
         lines.append(f"{row_indent}{delimiter.join(values)}")
-    
+
     return lines
 
 
@@ -150,15 +223,16 @@ def encode_simple_array(
 
     Example output:
         tags[3]: python,async,api
-        empty[0]: []
+        empty[0]:
     """
-    length_part = f"[{len(arr)}]" if include_length else ""
     prefix = "  " * indent
-    # Handle empty arrays with explicit [] marker
+    bracket = _bracket_segment(len(arr), delimiter, include_length)
+
+    # Empty array: key[0]: (nothing after colon per spec)
     if not arr:
-        return [f"{prefix}{key}{length_part}: []"]
+        return [f"{prefix}{key}{bracket}:"]
     values = [_encode_value(v, delimiter) for v in arr]
-    return [f"{prefix}{key}{length_part}: {delimiter.join(values)}"]
+    return [f"{prefix}{key}{bracket}: {delimiter.join(values)}"]
 
 
 def encode_object(
@@ -276,10 +350,11 @@ def encode_search_results(
     if include_length is None:
         include_length = include_length_markers()
 
-    length_part = f"[{len(results)}]" if include_length else ""
+    bracket = _bracket_segment(len(results), delimiter, include_length)
 
     if not results:
-        return f"results{length_part}: []"
+        # Empty array per spec: key[0]: (nothing after colon)
+        return f"results{bracket}:"
 
     # Determine fields based on compact mode
     if compact:
@@ -298,10 +373,10 @@ def encode_search_results(
         extra_fields = sorted(all_fields - set(core_order))
         fields.extend(extra_fields)
 
-    # Build tabular output
+    # Build tabular output with delimiter in fields segment too
     fields_part = "{" + delimiter.join(fields) + "}"
 
-    lines = [f"results{length_part}{fields_part}:"]
+    lines = [f"results{bracket}{fields_part}:"]
     for r in results:
         values = [_encode_value(r.get(f), delimiter) for f in fields]
         lines.append(f"  {delimiter.join(values)}")
@@ -334,10 +409,11 @@ def encode_context_results(
     if include_length is None:
         include_length = include_length_markers()
 
-    length_part = f"[{len(results)}]" if include_length else ""
+    bracket = _bracket_segment(len(results), delimiter, include_length)
 
     if not results:
-        return f"results{length_part}: []"
+        # Empty per spec: key[0]:
+        return f"results{bracket}:"
 
     # Separate code and memory results
     code_results = [r for r in results if r.get("source") != "memory"]
@@ -347,7 +423,7 @@ def encode_context_results(
 
     # Encode code results
     if code_results:
-        code_len = f"[{len(code_results)}]" if include_length else ""
+        code_bracket = _bracket_segment(len(code_results), delimiter, include_length)
         if compact:
             code_fields = ["path", "start_line", "end_line"]
         else:
@@ -362,14 +438,14 @@ def encode_context_results(
             extra = sorted(all_code_fields - set(core_order) - {"source"})
             code_fields.extend(extra)
         code_fields_part = "{" + delimiter.join(code_fields) + "}"
-        lines.append(f"code{code_len}{code_fields_part}:")
+        lines.append(f"code{code_bracket}{code_fields_part}:")
         for r in code_results:
             values = [_encode_value(r.get(f), delimiter) for f in code_fields]
             lines.append(f"  {delimiter.join(values)}")
 
     # Encode memory results
     if memory_results:
-        mem_len = f"[{len(memory_results)}]" if include_length else ""
+        mem_bracket = _bracket_segment(len(memory_results), delimiter, include_length)
         if compact:
             mem_fields = ["content", "score"]
         else:
@@ -382,7 +458,7 @@ def encode_context_results(
             extra = sorted(all_mem_fields - set(core_order) - {"source"})
             mem_fields.extend(extra)
         mem_fields_part = "{" + delimiter.join(mem_fields) + "}"
-        lines.append(f"memory{mem_len}{mem_fields_part}:")
+        lines.append(f"memory{mem_bracket}{mem_fields_part}:")
         for r in memory_results:
             values = [_encode_value(r.get(f), delimiter) for f in mem_fields]
             lines.append(f"  {delimiter.join(values)}")

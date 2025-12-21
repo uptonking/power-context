@@ -3543,6 +3543,7 @@ async def repo_search(
     }
 
     # Apply TOON formatting if requested or enabled globally
+    # Full mode (compact=False) still saves tokens vs JSON while preserving all fields
     if _should_use_toon(output_format):
         return _format_results_as_toon(response, compact=bool(compact))
     return response
