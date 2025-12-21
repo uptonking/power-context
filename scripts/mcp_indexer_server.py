@@ -8995,7 +8995,7 @@ async def info_request(
         elif "how does" in query_lower or "what is" in query_lower:
             eff_limit = 8   # Questions need focused results
 
-    # Call repo_search
+    # Call repo_search (always JSON - we format TOON ourselves after enhancement)
     search_result = await repo_search(
         query=query,
         limit=eff_limit,
@@ -9007,6 +9007,7 @@ async def info_request(
         under=under,
         repo=repo,
         path_glob=path_glob,
+        output_format="json",  # Always get JSON to iterate results
         kwargs=kwargs,
     )
 
@@ -9108,7 +9109,7 @@ async def info_request(
 
     # Apply TOON formatting if requested or enabled globally
     if _should_use_toon(output_format):
-        return _format_results_as_toon(response, compact=True)
+        return _format_results_as_toon(response, compact=False)  # Keep info_request fields
     return response
 
 
