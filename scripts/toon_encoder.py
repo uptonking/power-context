@@ -259,14 +259,14 @@ def encode_search_results(
 ) -> str:
     """Encode search results to TOON tabular format.
 
-    Optimized for the typical search result shape:
-        {path, start_line, end_line, score, symbol?, snippet?}
+    Dynamically includes all fields present in results to avoid dropping data.
+    Core fields are ordered first, then any additional fields alphabetically.
 
     Args:
         results: List of search result dicts
         delimiter: Field delimiter
         include_length: Include [N] markers
-        compact: If True, only include path/lines (no score/snippet)
+        compact: If True, only include core location fields (path/lines)
 
     Returns:
         TOON-formatted search results
@@ -285,12 +285,18 @@ def encode_search_results(
     if compact:
         fields = ["path", "start_line", "end_line"]
     else:
-        # Use first result to determine available fields
-        sample = results[0]
-        fields = []
-        for f in ["path", "start_line", "end_line", "score", "symbol", "kind"]:
-            if f in sample:
-                fields.append(f)
+        # Collect all unique fields from all results
+        all_fields: set = set()
+        for r in results:
+            all_fields.update(r.keys())
+
+        # Core fields ordered first, then remaining alphabetically
+        core_order = ["path", "start_line", "end_line", "score", "symbol", "kind",
+                      "snippet", "information", "relevance_score", "why"]
+        fields = [f for f in core_order if f in all_fields]
+        # Add remaining fields not in core_order
+        extra_fields = sorted(all_fields - set(core_order))
+        fields.extend(extra_fields)
 
     # Build tabular output
     fields_part = "{" + delimiter.join(fields) + "}"
@@ -311,15 +317,14 @@ def encode_context_results(
 ) -> str:
     """Encode context_search results (code + memory) to TOON format.
 
-    Handles mixed result types:
-    - Code results: {source: "code", path, start_line, end_line, ...}
-    - Memory results: {source: "memory", content, score, ...}
+    Dynamically includes all fields present to avoid dropping data.
+    Handles mixed result types with source-aware encoding.
 
     Args:
         results: List of mixed search result dicts
         delimiter: Field delimiter
         include_length: Include [N] markers
-        compact: If True, use minimal fields
+        compact: If True, use minimal core fields only
 
     Returns:
         TOON-formatted context results with source-aware encoding
@@ -346,7 +351,16 @@ def encode_context_results(
         if compact:
             code_fields = ["path", "start_line", "end_line"]
         else:
-            code_fields = ["path", "start_line", "end_line", "score", "symbol"]
+            # Collect all fields from code results
+            all_code_fields: set = set()
+            for r in code_results:
+                all_code_fields.update(r.keys())
+            # Core order, then extras
+            core_order = ["path", "start_line", "end_line", "score", "symbol", "kind",
+                          "snippet", "information", "relevance_score", "why"]
+            code_fields = [f for f in core_order if f in all_code_fields]
+            extra = sorted(all_code_fields - set(core_order) - {"source"})
+            code_fields.extend(extra)
         code_fields_part = "{" + delimiter.join(code_fields) + "}"
         lines.append(f"code{code_len}{code_fields_part}:")
         for r in code_results:
@@ -359,7 +373,14 @@ def encode_context_results(
         if compact:
             mem_fields = ["content", "score"]
         else:
-            mem_fields = ["content", "score", "id"]
+            # Collect all fields from memory results
+            all_mem_fields: set = set()
+            for r in memory_results:
+                all_mem_fields.update(r.keys())
+            core_order = ["content", "score", "id", "information"]
+            mem_fields = [f for f in core_order if f in all_mem_fields]
+            extra = sorted(all_mem_fields - set(core_order) - {"source"})
+            mem_fields.extend(extra)
         mem_fields_part = "{" + delimiter.join(mem_fields) + "}"
         lines.append(f"memory{mem_len}{mem_fields_part}:")
         for r in memory_results:
