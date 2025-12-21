@@ -29,6 +29,20 @@ import json
 import asyncio
 import uuid
 
+# Prefer orjson for faster serialization (2-3x speedup on large payloads)
+try:
+    import orjson
+    def _json_dumps(obj) -> str:
+        return orjson.dumps(obj).decode("utf-8")
+    def _json_dumps_bytes(obj) -> bytes:
+        return orjson.dumps(obj)
+except ImportError:
+    orjson = None  # type: ignore
+    def _json_dumps(obj) -> str:
+        return json.dumps(obj)
+    def _json_dumps_bytes(obj) -> bytes:
+        return json.dumps(obj).encode("utf-8")
+
 import os
 import subprocess
 import threading
@@ -514,7 +528,7 @@ def _start_readyz_server():
                         self.send_header("Content-Type", "application/json")
                         self.end_headers()
                         payload = {"ok": True, "app": APP_NAME}
-                        self.wfile.write((json.dumps(payload)).encode("utf-8"))
+                        self.wfile.write(_json_dumps_bytes(payload))
                     elif self.path == "/tools":
                         self.send_response(200)
                         self.send_header("Content-Type", "application/json")
@@ -535,7 +549,7 @@ def _start_readyz_server():
                         except Exception:
                             pass
                         payload = {"ok": True, "tools": tools}
-                        self.wfile.write((json.dumps(payload)).encode("utf-8"))
+                        self.wfile.write(_json_dumps_bytes(payload))
                     else:
                         self.send_response(404)
                         self.end_headers()
