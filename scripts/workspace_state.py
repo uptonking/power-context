@@ -435,23 +435,58 @@ def file_indexing_lock(file_path: str):
     """Acquire a lock for indexing a specific file.
 
     Use this before processing a file to prevent indexer/watcher collision.
-    Non-blocking - raises if file is already locked.
+    Non-blocking - raises FileExistsError if file is already locked.
+
+    Uses O_CREAT | O_EXCL for atomic lock acquisition to prevent race conditions
+    where two processes could both pass is_file_locked() and overwrite each other.
     """
     lock_path = _get_file_lock_path(file_path)
+    fd = None
 
-    # Check if already locked
-    if is_file_locked(file_path):
-        raise FileExistsError(f"File is already being indexed: {file_path}")
-
-    # Create lock
     try:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
-        lock_path.write_text(json.dumps({
+
+        # First check if there's a stale lock we should clean up
+        if lock_path.exists():
+            try:
+                mtime = lock_path.stat().st_mtime
+                age = time.time() - mtime
+                if age > _FILE_LOCK_TIMEOUT_SECONDS:
+                    # Stale lock - try to remove it
+                    lock_path.unlink()
+                else:
+                    # Fresh lock held by another process
+                    raise FileExistsError(f"File is already being indexed: {file_path}")
+            except FileNotFoundError:
+                # Lock was removed between exists() and stat() - continue to acquire
+                pass
+
+        # Atomic lock acquisition: O_CREAT | O_EXCL fails if file exists
+        # This prevents race condition where two processes both pass the check above
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            # Another process created the lock between our check and open
+            raise FileExistsError(f"File is already being indexed: {file_path}")
+
+        # Write lock metadata
+        lock_data = json.dumps({
             "file": file_path,
             "locked_at": time.time(),
             "pid": os.getpid(),
-        }))
+        })
+        os.write(fd, lock_data.encode())
+        os.close(fd)
+        fd = None
+
+    except FileExistsError:
+        raise
     except Exception as e:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except Exception:
+                pass
         raise RuntimeError(f"Could not acquire file lock: {e}")
 
     try:
