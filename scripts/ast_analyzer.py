@@ -75,6 +75,7 @@ try:
         ("yaml", "tree_sitter_yaml"),
         ("html", "tree_sitter_html"),
         ("css", "tree_sitter_css"),
+        ("markdown", "tree_sitter_markdown"),
     ]:
         try:
             mod = __import__(pkg_name)

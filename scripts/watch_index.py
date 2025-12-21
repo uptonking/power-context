@@ -64,6 +64,11 @@ COLLECTION = os.environ.get("COLLECTION_NAME", "my-collection")
 DELAY_SECS = float(os.environ.get("WATCH_DEBOUNCE_SECS", "1.0"))
 
 
+class _SkipUnchanged(Exception):
+    """Sentinel exception to skip unchanged files in the watch loop."""
+    pass
+
+
 def _detect_repo_for_file(file_path: Path) -> Optional[Path]:
     """Detect repository root for a file under WATCH root."""
     try:
@@ -187,6 +192,7 @@ class ChangeQueue:
             paths = list(self._paths)
             self._paths.clear()
             self._timer = None
+
         # Try to run the processor exclusively; if busy, queue and return
         if not self._processing_lock.acquire(blocking=False):
             with self._lock:
@@ -198,6 +204,7 @@ class ChangeQueue:
                     self._timer.start()
             return
         try:
+            # Per-file locking in index_single_file handles indexer/watcher coordination
             todo = paths
             while True:
                 try:
@@ -837,20 +844,31 @@ def main():
 
     # Health check: detect and auto-heal cache/collection sync issues
     try:
-        from scripts.collection_health import auto_heal_if_needed
+        from scripts.collection_health import auto_heal_if_needed, auto_heal_multi_repo
 
         print("[health_check] Checking collection health...")
-        heal_result = auto_heal_if_needed(
-            str(ROOT), default_collection, QDRANT_URL, dry_run=False
-        )
-        if heal_result.get("action_taken") == "cleared_cache":
-            print("[health_check] Cache cleared due to sync issue - files will be reindexed")
-        elif not heal_result.get("health_check", {}).get("healthy", True):
-            print(
-                f"[health_check] Issue detected: {heal_result['health_check'].get('issue', 'unknown')}"
-            )
+        if multi_repo_enabled:
+            # Multi-repo: check each repo's collection
+            heal_result = auto_heal_multi_repo(str(ROOT), QDRANT_URL, dry_run=False)
+            if heal_result.get("repos_healed", 0) > 0:
+                print(f"[health_check] Cleared cache for {heal_result['repos_healed']} repos with empty collections")
+            elif heal_result.get("repos_checked", 0) > 0:
+                print(f"[health_check] Checked {heal_result['repos_checked']} repos - all OK")
+            else:
+                print("[health_check] No repos with cached state to check")
         else:
-            print("[health_check] Collection health OK")
+            # Single-repo mode
+            heal_result = auto_heal_if_needed(
+                str(ROOT), default_collection, QDRANT_URL, dry_run=False
+            )
+            if heal_result.get("action_taken") == "cleared_cache":
+                print("[health_check] Cache cleared due to sync issue - files will be reindexed")
+            elif not heal_result.get("health_check", {}).get("healthy", True):
+                print(
+                    f"[health_check] Issue detected: {heal_result['health_check'].get('issue', 'unknown')}"
+                )
+            else:
+                print("[health_check] Collection health OK")
     except Exception as e:
         print(f"[health_check] Warning: health check failed: {e}")
 
@@ -1113,6 +1131,19 @@ def _process_paths(paths, client, model, vector_name: str, model_dim: int, works
                             except Exception:
                                 file_hash = ""
                             if file_hash:
+                                # Fast path: skip if content hash matches cached hash (file unchanged)
+                                # Safety: startup health check clears stale cache per-repo
+                                try:
+                                    cached_hash = get_cached_file_hash(str(p), repo_name) if repo_name else None
+                                    if cached_hash and cached_hash == file_hash:
+                                        print(f"[skip_unchanged] {p} (hash match)")
+                                        ok = True
+                                        raise _SkipUnchanged()
+                                except _SkipUnchanged:
+                                    raise
+                                except Exception:
+                                    pass  # hash check failed, proceed with reindex
+
                                 try:
                                     use_smart, smart_reason = idx.should_use_smart_reindexing(str(p), file_hash)
                                 except Exception:
@@ -1149,6 +1180,8 @@ def _process_paths(paths, client, model, vector_name: str, model_dim: int, works
                                         print(f"[SMART_REINDEX][watcher] Using full reindexing for {p} ({smart_reason})")
                                     except Exception:
                                         pass
+                except _SkipUnchanged:
+                    raise  # Propagate skip to outer handler
                 except Exception as e_smart:
                     try:
                         print(f"[SMART_REINDEX][watcher] Smart reindexing disabled or preview failed for {p}: {e_smart}")
@@ -1171,6 +1204,23 @@ def _process_paths(paths, client, model, vector_name: str, model_dim: int, works
                         pseudo_mode=pseudo_mode,
                         repo_name_for_cache=repo_name,
                     )
+            except _SkipUnchanged:
+                # File unchanged - skip without error but still count towards progress
+                status = "skipped"
+                print(f"[{status}] {p} -> {collection}")
+                _log_activity(repo_key, "skipped", p, {"reason": "hash_unchanged"})
+                repo_progress[repo_key] = repo_progress.get(repo_key, 0) + 1
+                try:
+                    _update_progress(
+                        repo_key,
+                        started_at,
+                        repo_progress[repo_key],
+                        len(repo_files),
+                        p,
+                    )
+                except Exception:
+                    pass
+                continue
             except Exception as e:
                 try:
                     print(f"[index_error] {p}: {e}")

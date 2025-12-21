@@ -14,7 +14,9 @@ Environment Variables:
 from __future__ import annotations
 
 import os
+import shutil
 import threading
+import time
 from typing import Any, Dict, List, Optional
 
 # Default model configuration
@@ -99,15 +101,48 @@ def get_embedding_model(model_name: Optional[str] = None) -> Any:
         if cached is not None:
             return cached
 
-        model = TextEmbedding(model_name=model_name)
-        # Warmup with common code patterns
-        try:
-            _ = list(model.embed(["function", "class", "import", "def", "const"]))
-        except Exception:
-            pass
+        # Robust initialization with cache cleanup on corrupted ONNX downloads.
+        # We've seen fastembed download a truncated ONNX model and then
+        # onnxruntime raises INVALID_PROTOBUF when loading it. When that
+        # happens, we clear FASTEMBED_CACHE_PATH and retry a few times
+        # instead of crashing the whole service.
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            try:
+                model = TextEmbedding(model_name=model_name)
+                # Warmup with common code patterns (best-effort)
+                try:
+                    _ = list(model.embed(["function", "class", "import", "def", "const"]))
+                except Exception:
+                    pass
 
-        _EMBED_MODEL_CACHE[model_name] = model
-        return model
+                _EMBED_MODEL_CACHE[model_name] = model
+                return model
+            except Exception as e:  # pragma: no cover - defensive path
+                last_exc = e
+                msg = str(e)
+                is_proto_error = "INVALID_PROTOBUF" in msg or "Protobuf parsing failed" in msg
+                is_size_mismatch = "Local file sizes do not match the metadata" in msg
+                if not (is_proto_error or is_size_mismatch):
+                    # Non-cache-related failure – don't spin.
+                    break
+
+                cache_root = os.environ.get("FASTEMBED_CACHE_PATH", "/tmp/huggingface/fastembed")
+                try:
+                    print(
+                        f"[embedder] Detected corrupt FastEmbed cache at {cache_root} (attempt {attempt + 1}); "
+                        "clearing and retrying..."
+                    )
+                    shutil.rmtree(cache_root, ignore_errors=True)
+                except Exception:
+                    # If we can't delete the cache, just surface the error.
+                    break
+                time.sleep(1.0)
+
+        # If we reach here, all attempts failed.
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("Failed to initialize embedding model for unknown reasons")
 
 
 def is_qwen3_model(model_name: Optional[str] = None) -> bool:

@@ -96,6 +96,9 @@ try:
         update_symbols_with_pseudo,
         get_workspace_state,
         get_cached_file_meta,
+        indexing_lock,
+        file_indexing_lock,
+        is_file_locked,
     )
 except ImportError:
     # State integration is optional; continue if not available
@@ -114,6 +117,9 @@ except ImportError:
     compare_symbol_changes = None  # type: ignore
     get_workspace_state = None  # type: ignore
     get_cached_file_meta = None  # type: ignore
+    indexing_lock = None  # type: ignore
+    file_indexing_lock = None  # type: ignore
+    is_file_locked = None  # type: ignore
 
 # Optional Tree-sitter import (graceful fallback) - tree-sitter 0.25+ API
 _TS_LANGUAGES: Dict[str, Any] = {}
@@ -168,6 +174,7 @@ try:
         ("yaml", "tree_sitter_yaml"),
         ("html", "tree_sitter_html"),
         ("css", "tree_sitter_css"),
+        ("markdown", "tree_sitter_markdown"),
     ]:
         try:
             mod = __import__(pkg_name)
@@ -272,10 +279,22 @@ CODE_EXTS = {
 
 # --- Named vector config ---
 LEX_VECTOR_NAME = os.environ.get("LEX_VECTOR_NAME", "lex")
-LEX_VECTOR_DIM = int(os.environ.get("LEX_VECTOR_DIM", "4096") or 4096)
+# Legacy default 4096 for existing collections; new users can set LEX_VECTOR_DIM=2048 via .env
+# (2048 works better with multi-hash+bigrams when those are enabled)
+def _safe_int_env(key: str, default: int) -> int:
+    try:
+        val = os.environ.get(key)
+        return int(val) if val else default
+    except (ValueError, TypeError):
+        return default
+
+LEX_VECTOR_DIM = _safe_int_env("LEX_VECTOR_DIM", 4096)
 # Optional mini vector (ReFRAG-style gating); conditionally created by REFRAG_MODE
 MINI_VECTOR_NAME = os.environ.get("MINI_VECTOR_NAME", "mini")
 MINI_VEC_DIM = int(os.environ.get("MINI_VEC_DIM", "64") or 64)
+# Lossless sparse lexical vector (no hash collisions)
+LEX_SPARSE_NAME = os.environ.get("LEX_SPARSE_NAME", "lex_sparse")
+LEX_SPARSE_MODE = os.environ.get("LEX_SPARSE_MODE", "0").strip().lower() in ("1", "true", "yes", "on")
 
 # Lightweight hashing-trick sparse vector (fixed-size dense) for lexical signals
 _STOP = {
@@ -874,6 +893,7 @@ def chunk_by_tokens(
 
 from scripts.utils import sanitize_vector_name as _sanitize_vector_name
 from scripts.utils import lex_hash_vector_text as _lex_hash_vector_text
+from scripts.utils import lex_sparse_vector_text as _lex_sparse_vector_text
 
 
 # Optional index-time pseudo descriptions for micro-chunks
@@ -1123,10 +1143,43 @@ def ensure_collection(client: QdrantClient, name: str, dim: int, vector_name: st
         # Prevent I/O storm - only update vectors if they actually don't exist
         try:
             cfg = getattr(info.config.params, "vectors", None)
+            sparse_cfg = getattr(info.config.params, "sparse_vectors", None)
             if isinstance(cfg, dict):
                 # Check if collection already has required vectors before updating
                 has_lex = LEX_VECTOR_NAME in cfg
                 has_mini = MINI_VECTOR_NAME in cfg
+                # Check if sparse vectors are configured when LEX_SPARSE_MODE is enabled
+                has_sparse = sparse_cfg and LEX_SPARSE_NAME in (sparse_cfg if isinstance(sparse_cfg, dict) else {})
+
+                # If LEX_SPARSE_MODE enabled but collection lacks sparse vectors, must recreate
+                if LEX_SPARSE_MODE and not has_sparse:
+                    print(f"[COLLECTION_INFO] Collection {name} lacks sparse vector '{LEX_SPARSE_NAME}' - recreating...")
+                    # Backup memories before recreating
+                    try:
+                        import tempfile
+                        import subprocess
+                        import sys
+                        with tempfile.NamedTemporaryFile(mode='w', suffix='_memories_backup.json', delete=False) as f:
+                            backup_file = f.name
+                        print(f"[MEMORY_BACKUP] Backing up memories from {name} to {backup_file}")
+                        backup_script = Path(__file__).parent / "memory_backup.py"
+                        result = subprocess.run([
+                            sys.executable, str(backup_script),
+                            "--collection", name,
+                            "--output", backup_file
+                        ], capture_output=True, text=True, cwd=Path(__file__).parent.parent)
+                        if result.returncode != 0:
+                            print(f"[MEMORY_BACKUP_WARNING] Backup script failed: {result.stderr}")
+                            backup_file = None
+                    except Exception as backup_e:
+                        print(f"[MEMORY_BACKUP_WARNING] Failed to backup memories: {backup_e}")
+                        backup_file = None
+                    try:
+                        client.delete_collection(name)
+                        print(f"[COLLECTION_INFO] Deleted existing collection {name}")
+                    except Exception:
+                        pass
+                    raise CollectionNeedsRecreateError(f"Collection {name} needs sparse vectors")
 
                 # Only add to missing if vector doesn't already exist
                 missing = {}
@@ -1240,12 +1293,22 @@ def ensure_collection(client: QdrantClient, name: str, dim: int, vector_name: st
             )
     except Exception:
         pass
+    # Sparse vectors config for lossless lexical matching
+    sparse_cfg = None
+    if LEX_SPARSE_MODE:
+        sparse_cfg = {
+            LEX_SPARSE_NAME: models.SparseVectorParams(
+                index=models.SparseIndexParams(full_scan_threshold=5000)
+            )
+        }
     client.create_collection(
         collection_name=name,
         vectors_config=vectors_cfg,
+        sparse_vectors_config=sparse_cfg,
         hnsw_config=models.HnswConfigDiff(m=16, ef_construct=256),
     )
-    print(f"[COLLECTION_INFO] Successfully created new collection {name} with vectors: {list(vectors_cfg.keys())}")
+    sparse_info = f", sparse: [{LEX_SPARSE_NAME}]" if sparse_cfg else ""
+    print(f"[COLLECTION_INFO] Successfully created new collection {name} with vectors: {list(vectors_cfg.keys())}{sparse_info}")
 
     # Restore memories if we have a backup from recreation using dedicated restore script
     strict_restore = False
@@ -1281,9 +1344,14 @@ def ensure_collection(client: QdrantClient, name: str, dim: int, vector_name: st
             if result.returncode == 0:
                 print(f"[MEMORY_RESTORE] Successfully restored memories using {restore_script.name}")
             else:
-                msg = result.stderr or result.stdout or "unknown error"
-                print(f"[MEMORY_RESTORE_WARNING] Restore script failed: {msg}")
+                # Log full output for debugging
+                print(f"[MEMORY_RESTORE_WARNING] Restore script failed (exit {result.returncode})")
+                if result.stdout:
+                    print(f"[MEMORY_RESTORE_STDOUT] {result.stdout}")
+                if result.stderr:
+                    print(f"[MEMORY_RESTORE_STDERR] {result.stderr}")
                 if strict_restore:
+                    msg = result.stderr or result.stdout or f"exit code {result.returncode}"
                     raise RuntimeError(f"Memory restore failed for collection {name}: {msg}")
 
             # Clean up backup file once we've attempted restore
@@ -1307,7 +1375,7 @@ def ensure_collection(client: QdrantClient, name: str, dim: int, vector_name: st
 
 
 def recreate_collection(client: QdrantClient, name: str, dim: int, vector_name: str):
-    """Drop and recreate collection with named vectors (dense + lex [+ mini when REFRAG_MODE=1])."""
+    """Drop and recreate collection with named vectors (dense + lex [+ mini when REFRAG_MODE=1] [+ sparse when LEX_SPARSE_MODE=1])."""
     try:
         client.delete_collection(name)
     except Exception:
@@ -1331,9 +1399,18 @@ def recreate_collection(client: QdrantClient, name: str, dim: int, vector_name: 
             )
     except Exception:
         pass
+    # Sparse vectors config for lossless lexical matching
+    sparse_cfg = None
+    if LEX_SPARSE_MODE:
+        sparse_cfg = {
+            LEX_SPARSE_NAME: models.SparseVectorParams(
+                index=models.SparseIndexParams(full_scan_threshold=5000)
+            )
+        }
     client.create_collection(
         collection_name=name,
         vectors_config=vectors_cfg,
+        sparse_vectors_config=sparse_cfg,
         hnsw_config=models.HnswConfigDiff(m=16, ef_construct=256),
     )
 
@@ -1549,6 +1626,12 @@ def pseudo_backfill_tick(
                 else:
                     # Fallback: collections without named vectors - leave dense vector as-is
                     new_vec = vec
+
+                # Add sparse vector to vecs dict if LEX_SPARSE_MODE enabled (new qdrant-client API)
+                if LEX_SPARSE_MODE and aug_text and isinstance(new_vec, dict):
+                    sparse_vec = _lex_sparse_vector_text(aug_text)
+                    if sparse_vec.get("indices"):
+                        new_vec[LEX_SPARSE_NAME] = models.SparseVector(**sparse_vec)
 
                 new_points.append(
                     models.PointStruct(
@@ -2424,7 +2507,90 @@ def _ts_extract_symbols(language: str, text: str) -> List[_Sym]:
 
         return _ts_extract_symbols_js(text)
 
+    if language == "yaml":
+        return _ts_extract_symbols_yaml(text)
+
     return []
+
+
+def _ts_extract_symbols_yaml(text: str) -> List[_Sym]:
+    """Tree-sitter based YAML symbol extraction.
+
+    Extracts top-level keys, anchors, and nested structure.
+    """
+    parser = _ts_parser("yaml")
+    if not parser:
+        return []
+    try:
+        tree = parser.parse(text.encode("utf-8"))
+        if tree is None:
+            return []
+        root = tree.root_node
+    except (ValueError, Exception):
+        return []
+
+    syms: List[_Sym] = []
+    text_bytes = text.encode("utf-8")
+    lines = text_bytes.split(b"\n")
+
+    def _node_text(node) -> str:
+        # Use byte offsets on the byte string, then decode, to handle non-ASCII correctly
+        return text_bytes[node.start_byte:node.end_byte].decode("utf-8", errors="replace")
+
+    def walk(node, path: list[str] | None = None):
+        path = path or []
+        ntype = node.type if hasattr(node, "type") else ""
+
+        # block_mapping_pair is a key-value pair in YAML
+        if ntype == "block_mapping_pair":
+            # First child is typically the key
+            key_node = None
+            for child in node.children:
+                if hasattr(child, "type") and child.type == "flow_node":
+                    key_node = child
+                    break
+                # Sometimes key is direct (plain_scalar, etc.)
+                if hasattr(child, "type") and child.type in (
+                    "plain_scalar",
+                    "double_quote_scalar",
+                    "single_quote_scalar",
+                ):
+                    key_node = child
+                    break
+            if key_node:
+                key = _node_text(key_node).strip().strip('"').strip("'")
+                if key:
+                    full_path = ".".join(path + [key])
+                    syms.append(
+                        _Sym(
+                            kind="key",
+                            name=full_path,
+                            start=node.start_point[0] + 1,
+                            end=node.end_point[0] + 1,
+                        )
+                    )
+                    # Recurse with updated path
+                    for child in node.children:
+                        walk(child, path + [key])
+                    return
+
+        # anchor_name or alias_name
+        if ntype in ("anchor", "alias"):
+            name = _node_text(node)
+            syms.append(
+                _Sym(
+                    kind="anchor" if ntype == "anchor" else "alias",
+                    name=name,
+                    start=node.start_point[0] + 1,
+                    end=node.end_point[0] + 1,
+                )
+            )
+
+        for child in node.children:
+            walk(child, path)
+
+    walk(root)
+    return syms
 
 
 def _ts_extract_imports_calls_python(text: str):
@@ -2716,6 +2882,48 @@ def index_single_file(
     except Exception:
         return False
 
+    # Try to acquire per-file lock - skip if another process is indexing this file
+    _file_lock_ctx = None
+    if file_indexing_lock is not None:
+        try:
+            _file_lock_ctx = file_indexing_lock(str(file_path))
+            _file_lock_ctx.__enter__()
+        except FileExistsError:
+            print(f"[FILE_LOCKED] Skipping {file_path} - another process is indexing it")
+            return False
+        except Exception:
+            pass  # Continue without lock if lock acquisition fails
+
+    # Wrap the rest in try/finally to ensure lock release
+    try:
+        return _index_single_file_inner(
+            client, model, collection, vector_name, file_path,
+            dedupe=dedupe, skip_unchanged=skip_unchanged, pseudo_mode=pseudo_mode,
+            trust_cache=trust_cache, repo_name_for_cache=repo_name_for_cache,
+        )
+    finally:
+        if _file_lock_ctx is not None:
+            try:
+                _file_lock_ctx.__exit__(None, None, None)
+            except Exception:
+                pass
+
+
+def _index_single_file_inner(
+    client: QdrantClient,
+    model: "TextEmbedding",
+    collection: str,
+    vector_name: str,
+    file_path: Path,
+    *,
+    dedupe: bool = True,
+    skip_unchanged: bool = True,
+    pseudo_mode: str = "full",
+    trust_cache: bool | None = None,
+    repo_name_for_cache: str | None = None,
+) -> bool:
+    """Inner implementation of index_single_file (after lock is acquired)."""
+
     # Resolve trust_cache from env when not explicitly provided. INDEX_TRUST_CACHE is intended
     # for debugging only and should not be enabled in normal indexing runs.
     if trust_cache is None:
@@ -2899,8 +3107,9 @@ def index_single_file(
     batch_meta: List[Dict] = []
     batch_ids: List[int] = []
     batch_lex: List[list[float]] = []
+    batch_lex_text: List[str] = []  # Raw text for sparse vector generation
 
-    def make_point(pid, dense_vec, lex_vec, payload):
+    def make_point(pid, dense_vec, lex_vec, payload, lex_text: str = ""):
         if vector_name:
             vecs = {vector_name: dense_vec, LEX_VECTOR_NAME: lex_vec}
             try:
@@ -2913,6 +3122,11 @@ def index_single_file(
                     vecs[MINI_VECTOR_NAME] = project_mini(list(dense_vec), MINI_VEC_DIM)
             except Exception:
                 pass
+            # Add sparse vector to vecs dict if LEX_SPARSE_MODE enabled (new qdrant-client API)
+            if LEX_SPARSE_MODE and lex_text:
+                sparse_vec = _lex_sparse_vector_text(lex_text)
+                if sparse_vec.get("indices"):
+                    vecs[LEX_SPARSE_NAME] = models.SparseVector(**sparse_vec)
             return models.PointStruct(id=pid, vector=vecs, payload=payload)
         else:
             # unnamed collection: store dense only
@@ -3066,6 +3280,7 @@ def index_single_file(
         batch_ids.append(hash_id(ch["text"], str(file_path), ch["start"], ch["end"]))
         aug_lex_text = (ch.get("text") or "") + (" " + pseudo if pseudo else "") + (" " + " ".join(tags) if tags else "")
         batch_lex.append(_lex_hash_vector_text(aug_lex_text))
+        batch_lex_text.append(aug_lex_text)
 
     if batch_texts:
         vectors = embed_batch(model, batch_texts)
@@ -3077,8 +3292,8 @@ def index_single_file(
             except Exception:
                 pass
         points = [
-            make_point(i, v, lx, m)
-            for i, v, lx, m in zip(batch_ids, vectors, batch_lex, batch_meta)
+            make_point(i, v, lx, m, lt)
+            for i, v, lx, m, lt in zip(batch_ids, vectors, batch_lex, batch_meta, batch_lex_text)
         ]
         upsert_points(client, collection, points)
         # Update local file-hash cache only after successful upsert
@@ -3104,6 +3319,11 @@ def index_repo(
     skip_unchanged: bool = True,
     pseudo_mode: str = "full",
 ):
+    """Index a repository into Qdrant.
+
+    Note: Caller is responsible for acquiring indexing_lock() if coordination
+    with watcher is required. See workspace_state.indexing_lock() for details.
+    """
     # Optional fast no-change precheck: when INDEX_FS_FASTPATH is enabled, use
     # fs metadata + cache.json to exit early before model/Qdrant setup when all
     # files are unchanged.
@@ -3284,6 +3504,7 @@ def index_repo(
     batch_meta: list[dict] = []
     batch_ids: list[int] = []
     batch_lex: list[list[float]] = []
+    batch_lex_text: list[str] = []  # Raw text for sparse vector generation
     BATCH_SIZE = int(os.environ.get("INDEX_BATCH_SIZE", "256") or 256)
     CHUNK_LINES = int(os.environ.get("INDEX_CHUNK_LINES", "120") or 120)
     CHUNK_OVERLAP = int(os.environ.get("INDEX_CHUNK_OVERLAP", "20") or 20)
@@ -3317,8 +3538,8 @@ def index_repo(
     skipped_cache = 0
     skipped_qdrant = 0
 
-    def make_point(pid, dense_vec, lex_vec, payload):
-        # Use named vectors if collection has names: store dense + lexical (+ mini if REFRAG_MODE)
+    def make_point(pid, dense_vec, lex_vec, payload, lex_text: str = ""):
+        # Use named vectors if collection has names: store dense + lexical (+ mini if REFRAG_MODE) (+ sparse if LEX_SPARSE_MODE)
         if vector_name:
             vecs = {vector_name: dense_vec, LEX_VECTOR_NAME: lex_vec}
             try:
@@ -3331,6 +3552,11 @@ def index_repo(
                     vecs[MINI_VECTOR_NAME] = project_mini(list(dense_vec), MINI_VEC_DIM)
             except Exception:
                 pass
+            # Add sparse vector to vecs dict if LEX_SPARSE_MODE enabled (new qdrant-client API)
+            if LEX_SPARSE_MODE and lex_text:
+                sparse_vec = _lex_sparse_vector_text(lex_text)
+                if sparse_vec.get("indices"):
+                    vecs[LEX_SPARSE_NAME] = models.SparseVector(**sparse_vec)
             return models.PointStruct(id=pid, vector=vecs, payload=payload)
         else:
             # unnamed collection: store dense only
@@ -3747,6 +3973,7 @@ def index_repo(
             )
             aug_lex_text = (ch.get("text") or "") + (" " + pseudo if pseudo else "") + (" " + " ".join(tags) if tags else "")
             batch_lex.append(_lex_hash_vector_text(aug_lex_text))
+            batch_lex_text.append(aug_lex_text)
             points_indexed += 1
             if len(batch_texts) >= BATCH_SIZE:
                 vectors = embed_batch(model, batch_texts)
@@ -3757,8 +3984,8 @@ def index_repo(
                     except Exception:
                         pass
                 points = [
-                    make_point(i, v, lx, m)
-                    for i, v, lx, m in zip(batch_ids, vectors, batch_lex, batch_meta)
+                    make_point(i, v, lx, m, lt)
+                    for i, v, lx, m, lt in zip(batch_ids, vectors, batch_lex, batch_meta, batch_lex_text)
                 ]
                 upsert_points(client, current_collection, points)
                 # Update local file-hash cache for any files that had chunks in this flush
@@ -3785,7 +4012,7 @@ def index_repo(
                 except Exception:
                     pass
 
-                batch_texts, batch_meta, batch_ids, batch_lex = [], [], [], []
+                batch_texts, batch_meta, batch_ids, batch_lex, batch_lex_text = [], [], [], [], []
 
         if PROGRESS_EVERY > 0 and files_seen % PROGRESS_EVERY == 0:
             print(
@@ -3828,8 +4055,8 @@ def index_repo(
             except Exception:
                 pass
         points = [
-            make_point(i, v, lx, m)
-            for i, v, lx, m in zip(batch_ids, vectors, batch_lex, batch_meta)
+            make_point(i, v, lx, m, lt)
+            for i, v, lx, m, lt in zip(batch_ids, vectors, batch_lex, batch_meta, batch_lex_text)
         ]
         upsert_points(client, current_collection, points)
         # Update local file-hash cache for any files that had chunks during this run (final flush)
@@ -4083,6 +4310,7 @@ def process_file_with_smart_reindexing(
         embed_payloads: list[dict] = []
         embed_ids: list[int] = []
         embed_lex: list[list[float]] = []
+        embed_lex_text: list[str] = []  # Raw text for sparse vectors
 
         imports, calls = _get_imports_calls(language, text)
         last_mod, churn_count, author_count = _git_metadata(file_path)
@@ -4319,16 +4547,18 @@ def process_file_with_smart_reindexing(
                 " " + pseudo if pseudo else ""
             ) + (" " + " ".join(tags) if tags else "")
             embed_lex.append(_lex_hash_vector_text(aug_lex_text))
+            embed_lex_text.append(aug_lex_text)
 
         # Embed changed/new chunks and build final point set
         new_points: list[models.PointStruct] = []
         if embed_texts:
             vectors = embed_batch(model, embed_texts)
-            for pid, v, lx, pl in zip(
+            for pid, v, lx, pl, lt in zip(
                 embed_ids,
                 vectors,
                 embed_lex,
                 embed_payloads,
+                embed_lex_text,
             ):
                 if vector_name:
                     vecs = {vector_name: v, LEX_VECTOR_NAME: lx}
@@ -4344,6 +4574,11 @@ def process_file_with_smart_reindexing(
                             )
                     except Exception:
                         pass
+                    # Add sparse vector to vecs dict if LEX_SPARSE_MODE enabled (new qdrant-client API)
+                    if LEX_SPARSE_MODE and lt:
+                        sparse_vec = _lex_sparse_vector_text(lt)
+                        if sparse_vec.get("indices"):
+                            vecs[LEX_SPARSE_NAME] = models.SparseVector(**sparse_vec)
                     new_points.append(
                         models.PointStruct(id=pid, vector=vecs, payload=pl)
                     )
@@ -4562,6 +4797,7 @@ def main():
     flag = (os.environ.get("PSEUDO_BACKFILL_ENABLED") or "").strip().lower()
     pseudo_mode = "off" if flag in {"1", "true", "yes", "on"} else "full"
 
+    # Per-file locking in index_single_file handles indexer/watcher coordination
     index_repo(
         Path(args.root).resolve(),
         qdrant_url,
@@ -4571,8 +4807,6 @@ def main():
         args.recreate,
         dedupe=(not args.no_dedupe),
         skip_unchanged=(not args.no_skip_unchanged),
-        # Pseudo/tags are inlined by default; when PSEUDO_BACKFILL_ENABLED=1 we run
-        # base-only and rely on the background backfill worker to add pseudo/tags.
         pseudo_mode=pseudo_mode,
     )
 

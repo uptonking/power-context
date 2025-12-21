@@ -131,6 +131,13 @@ services:
       - INDEX_UPSERT_BATCH=${INDEX_UPSERT_BATCH:-512}
       - INDEX_UPSERT_RETRIES=${INDEX_UPSERT_RETRIES:-5}
       - MAX_MICRO_CHUNKS_PER_FILE=${MAX_MICRO_CHUNKS_PER_FILE:-200}
+      # Lexical vector config - values from .env (code defaults to legacy-safe)
+      - LEX_VECTOR_DIM
+      - LEX_MULTI_HASH
+      - LEX_BIGRAMS
+      - LEX_BIGRAM_WEIGHT
+      - LEX_SPARSE_MODE
+      - LEX_SPARSE_NAME
       # Learning reranker configuration
       - RERANK_LEARNING=${RERANK_LEARNING:-1}
       - RERANKER_WEIGHTS_DIR=/tmp/rerank_weights
@@ -297,6 +304,13 @@ services:
       - INDEX_UPSERT_BATCH=${INDEX_UPSERT_BATCH:-512}
       - INDEX_UPSERT_RETRIES=${INDEX_UPSERT_RETRIES:-5}
       - MAX_MICRO_CHUNKS_PER_FILE=${MAX_MICRO_CHUNKS_PER_FILE:-200}
+      # Lexical vector config - values from .env (code defaults to legacy-safe)
+      - LEX_VECTOR_DIM
+      - LEX_MULTI_HASH
+      - LEX_BIGRAMS
+      - LEX_BIGRAM_WEIGHT
+      - LEX_SPARSE_MODE
+      - LEX_SPARSE_NAME
       # Learning reranker configuration
       - RERANK_LEARNING=${RERANK_LEARNING:-1}
       - RERANKER_WEIGHTS_DIR=/tmp/rerank_weights
@@ -368,6 +382,13 @@ services:
       - INDEX_UPSERT_BATCH=${INDEX_UPSERT_BATCH:-512}
       - INDEX_UPSERT_RETRIES=${INDEX_UPSERT_RETRIES:-5}
       - MAX_MICRO_CHUNKS_PER_FILE=${MAX_MICRO_CHUNKS_PER_FILE:-200}
+      # Lexical vector config - values from .env (code defaults to legacy-safe)
+      - LEX_VECTOR_DIM
+      - LEX_MULTI_HASH
+      - LEX_BIGRAMS
+      - LEX_BIGRAM_WEIGHT
+      - LEX_SPARSE_MODE
+      - LEX_SPARSE_NAME
     volumes:
       - workspace_pvc:/work:rw
       - codebase_pvc:/work/.codebase:rw
@@ -415,6 +436,13 @@ services:
       - MAX_MICRO_CHUNKS_PER_FILE=${MAX_MICRO_CHUNKS_PER_FILE:-200}
       - WATCH_DEBOUNCE_SECS=${WATCH_DEBOUNCE_SECS:-1.5}
       - REMOTE_UPLOAD_ENABLED=${REMOTE_UPLOAD_ENABLED:-0}
+      # Lexical vector config - values from .env (code defaults to legacy-safe)
+      - LEX_VECTOR_DIM
+      - LEX_MULTI_HASH
+      - LEX_BIGRAMS
+      - LEX_BIGRAM_WEIGHT
+      - LEX_SPARSE_MODE
+      - LEX_SPARSE_NAME
     volumes:
       - workspace_pvc:/work:rw
       - codebase_pvc:/work/.codebase:rw
@@ -520,6 +548,13 @@ services:
       - MAX_MICRO_CHUNKS_PER_FILE=${MAX_MICRO_CHUNKS_PER_FILE}
       - INDEX_UPSERT_BATCH=${INDEX_UPSERT_BATCH}
       - INDEX_UPSERT_RETRIES=${INDEX_UPSERT_RETRIES}
+      # Lexical vector config - values from .env (code defaults to legacy-safe)
+      - LEX_VECTOR_DIM
+      - LEX_MULTI_HASH
+      - LEX_BIGRAMS
+      - LEX_BIGRAM_WEIGHT
+      - LEX_SPARSE_MODE
+      - LEX_SPARSE_NAME
     ports:
       - "8004:8002"  # Map to different host port to avoid conflicts
       - "18004:18000"  # Health check port
