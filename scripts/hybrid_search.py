@@ -354,9 +354,23 @@ from scripts.ingest_code import project_mini as _project_mini
 # Process-local cache to avoid calling ensure_collection on every search
 _ENSURED_COLLECTIONS: set = set()
 
+def _get_client_endpoint(client) -> str:
+    """Extract endpoint identifier from Qdrant client for cache scoping."""
+    try:
+        # Try to get the URL from client's internal state
+        if hasattr(client, '_client') and hasattr(client._client, '_host'):
+            return f"{client._client._host}:{getattr(client._client, '_port', 6333)}"
+        if hasattr(client, 'rest_uri'):
+            return client.rest_uri
+        # Fallback to env var (covers most single-backend cases)
+        return os.environ.get("QDRANT_URL", "localhost:6333")
+    except Exception:
+        return os.environ.get("QDRANT_URL", "localhost:6333")
+
 def _ensure_collection(client, collection: str, dim: int, vec_name: str):
-    """Cached wrapper for ensure_collection - only calls once per (collection, vec_name) pair."""
-    cache_key = f"{collection}:{vec_name}:{dim}"
+    """Cached wrapper for ensure_collection - only calls once per (endpoint, collection, vec_name) pair."""
+    endpoint = _get_client_endpoint(client)
+    cache_key = f"{endpoint}:{collection}:{vec_name}:{dim}"
     if cache_key in _ENSURED_COLLECTIONS:
         return
     _ensure_collection_raw(client, collection, dim, vec_name)
@@ -2259,6 +2273,10 @@ def run_hybrid_search(
     try:
         _parallel_threshold = int(os.environ.get("PARALLEL_DENSE_THRESHOLD", "4") or 4)
     except (ValueError, TypeError):
+        logger.warning(
+            "Invalid PARALLEL_DENSE_THRESHOLD value %r, using default 4",
+            os.environ.get("PARALLEL_DENSE_THRESHOLD"),
+        )
         _parallel_threshold = 4
     if len(embedded) >= _parallel_threshold and os.environ.get("PARALLEL_DENSE_QUERIES", "1") == "1":
         executor = _get_query_executor()

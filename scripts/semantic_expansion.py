@@ -50,6 +50,7 @@ SEMANTIC_EXPANSION_TOP_K = int(os.environ.get("SEMANTIC_EXPANSION_TOP_K", "5") o
 SEMANTIC_EXPANSION_SIMILARITY_THRESHOLD = float(os.environ.get("SEMANTIC_EXPANSION_SIMILARITY_THRESHOLD", "0.7") or "0.7")
 SEMANTIC_EXPANSION_MAX_TERMS = int(os.environ.get("SEMANTIC_EXPANSION_MAX_TERMS", "3") or "3")
 SEMANTIC_EXPANSION_CACHE_SIZE = int(os.environ.get("SEMANTIC_EXPANSION_CACHE_SIZE", "1000") or "1000")
+SEMANTIC_EXPANSION_CACHE_TTL = float(os.environ.get("SEMANTIC_EXPANSION_CACHE_TTL", "3600") or "3600")
 
 # Use UnifiedCache for proper LRU eviction instead of simple FIFO
 try:
@@ -58,7 +59,7 @@ try:
         name="semantic_expansion",
         max_size=SEMANTIC_EXPANSION_CACHE_SIZE,
         eviction_policy=EvictionPolicy.LRU,
-        default_ttl=3600.0,  # 1 hour TTL
+        default_ttl=SEMANTIC_EXPANSION_CACHE_TTL,
     )
     _UNIFIED_CACHE = True
 except ImportError:
