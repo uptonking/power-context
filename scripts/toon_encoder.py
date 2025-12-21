@@ -4,10 +4,8 @@ TOON (Token-Oriented Object Notation) encoder for Context-Engine.
 Uses the official python-toon library for spec-compliant encoding.
 Provides helper functions for search result formatting.
 
-Feature flags:
-- TOON_ENABLED=1          Enable TOON encoding (default: 0)
-- TOON_DELIMITER=","      Field delimiter (default: ",", use "\t" for even fewer tokens)
-- TOON_INCLUDE_LENGTH=1   Include [N] length markers (default: 1)
+Feature flag:
+- TOON_ENABLED=1  Enable TOON encoding (default: 0)
 
 Reference: https://github.com/toon-format/toon
 """
@@ -20,8 +18,9 @@ from typing import Any, Dict, List, Optional
 # Use official python-toon library
 from toon import encode as toon_encode
 
+
 # -----------------------------------------------------------------------------
-# Feature Flags
+# Feature Flag
 # -----------------------------------------------------------------------------
 
 def is_toon_enabled() -> bool:
@@ -29,148 +28,43 @@ def is_toon_enabled() -> bool:
     return os.environ.get("TOON_ENABLED", "0").lower() in ("1", "true", "yes")
 
 
-def get_toon_delimiter() -> str:
-    """Get the field delimiter for TOON encoding."""
-    delim = os.environ.get("TOON_DELIMITER", ",")
-    # Handle escaped tab
-    if delim in ("\\t", "tab", "TAB"):
-        return "\t"
-    return delim
-
-
-def include_length_markers() -> bool:
-    """Check if [N] length markers should be included."""
-    return os.environ.get("TOON_INCLUDE_LENGTH", "1").lower() in ("1", "true", "yes")
-
-
 # -----------------------------------------------------------------------------
-# Value Encoding
+# Core Encoding (delegates to python-toon)
 # -----------------------------------------------------------------------------
 
-def _needs_quoting(value: str, delimiter: str) -> bool:
-    """Check if a string value needs quoting per TOON spec §7.2."""
-    if not value:
-        return True  # Empty string MUST be quoted
-    # Leading or trailing whitespace
-    if value[0].isspace() or value[-1].isspace():
-        return True
-    # Reserved literals (case-sensitive)
-    if value in ("true", "false", "null"):
-        return True
-    # Numeric-like patterns
-    if re.match(r'^-?\d+(?:\.\d+)?(?:e[+-]?\d+)?$', value, re.IGNORECASE):
-        return True
-    if re.match(r'^0\d+$', value):  # Leading zeros like "05"
-        return True
-    # Contains structural characters: colon, quote, backslash, brackets
-    if any(c in value for c in (':', '"', '\\', '[', ']', '{', '}')):
-        return True
-    # Contains control characters
-    if '\n' in value or '\r' in value or '\t' in value:
-        return True
-    # Contains the delimiter
-    if delimiter in value:
-        return True
-    # Hyphen cases: equals "-" or starts with "-"
-    if value == "-" or value.startswith("-"):
-        return True
-    return False
+def encode(
+    data: Any,
+    delimiter: str = ",",
+    include_length: bool = True,
+) -> str:
+    """Encode any JSON-compatible data to TOON format using official library.
 
+    Args:
+        data: JSON-compatible data (dict, list, or primitive)
+        delimiter: Field delimiter (default: ",")
+        include_length: Ignored (python-toon always includes length markers)
 
-def _escape_string(value: str) -> str:
-    """Escape a string per TOON spec §7.1 (only 5 escapes allowed)."""
-    result = value
-    result = result.replace('\\', '\\\\')  # Backslash first
-    result = result.replace('"', '\\"')    # Quote
-    result = result.replace('\n', '\\n')   # Newline
-    result = result.replace('\r', '\\r')   # Carriage return
-    result = result.replace('\t', '\\t')   # Tab
-    return result
-
-
-def _encode_number(value: Union[int, float]) -> str:
-    """Encode a number in canonical form per TOON spec §2."""
-    import math
-    # Handle special floats
-    if isinstance(value, float):
-        if math.isnan(value) or math.isinf(value):
-            return "null"
-        # Normalize -0 to 0
-        if value == 0.0:
-            return "0"
-        # Check if it's effectively an integer
-        if value == int(value) and abs(value) < 1e15:
-            return str(int(value))
-        # Format without exponent, removing trailing zeros
-        formatted = f"{value:.15g}"
-        # Ensure no exponent notation for reasonable ranges
-        if 'e' in formatted.lower() and abs(value) < 1e15 and abs(value) > 1e-6:
-            formatted = f"{value:.10f}".rstrip('0').rstrip('.')
-        return formatted
-    # Integers are straightforward
-    return str(value)
-
-
-def _encode_value(value: Any, delimiter: str) -> str:
-    """Encode a single value to TOON format per spec."""
-    if value is None:
-        return "null"
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, (int, float)):
-        return _encode_number(value)
-    if isinstance(value, str):
-        if _needs_quoting(value, delimiter):
-            escaped = _escape_string(value)
-            return f'"{escaped}"'
-        return value
-    # For nested objects/arrays in a table row, use compact JSON
-    import json
-    return json.dumps(value, separators=(",", ":"))
-
-
-# -----------------------------------------------------------------------------
-# Array Detection
-# -----------------------------------------------------------------------------
-
-def _is_uniform_array_of_objects(arr: List[Any]) -> bool:
-    """Check if array is uniform objects (same keys) - suitable for tabular format."""
-    if not arr or len(arr) < 1:
-        return False
-    if not all(isinstance(item, dict) for item in arr):
-        return False
-    # Check all have same keys
-    first_keys = set(arr[0].keys())
-    return all(set(item.keys()) == first_keys for item in arr)
-
-
-def _get_field_order(arr: List[Dict[str, Any]]) -> List[str]:
-    """Get consistent field order from first object."""
-    if not arr:
-        return []
-    return list(arr[0].keys())
-
-
-# -----------------------------------------------------------------------------
-# TOON Encoding
-# -----------------------------------------------------------------------------
-
-def _bracket_segment(length: int, delimiter: str, include_length: bool) -> str:
-    """Build bracket segment with optional delimiter symbol per spec §6.
-
-    - Comma (default): [N]
-    - Tab: [N<TAB>]  (actual tab character inside brackets)
-    - Pipe: [N|]
+    Returns:
+        TOON-formatted string
     """
-    if not include_length:
-        return ""
-    # Delimiter symbol inside brackets (comma is implicit/absent)
-    if delimiter == "\t":
-        return f"[{length}\t]"
-    elif delimiter == "|":
-        return f"[{length}|]"
-    else:
-        return f"[{length}]"
+    options = {"delimiter": delimiter}
+    return toon_encode(data, options)
+
+
+# For backwards compatibility
+def encode_object(
+    obj: Dict[str, Any],
+    delimiter: str = ",",
+    indent: int = 0,
+    include_length: bool = True,
+) -> List[str]:
+    """Encode an object to TOON format (backwards compat wrapper)."""
+    result = encode(obj, delimiter=delimiter)
+    # Add indentation if needed
+    if indent > 0:
+        prefix = "  " * indent
+        return [prefix + line for line in result.split("\n")]
+    return result.split("\n")
 
 
 def encode_tabular(
@@ -180,36 +74,12 @@ def encode_tabular(
     indent: int = 0,
     include_length: bool = True,
 ) -> List[str]:
-    """Encode a uniform array of objects as TOON tabular format.
-
-    Example output (comma delimiter):
-        users[3]{id,name,role}:
-          1,Alice,admin
-          2,Bob,user
-          3,Carol,viewer
-
-    Example output (tab delimiter):
-        users[3<TAB>]{id<TAB>name<TAB>role}:
-          1<TAB>Alice<TAB>admin
-    """
-    prefix = "  " * indent
-    bracket = _bracket_segment(len(arr), delimiter, include_length)
-
-    if not arr:
-        # Empty array: key[0]: (no values, no [])
-        return [f"{prefix}{key}{bracket}:"]
-
-    fields = _get_field_order(arr)
-    fields_part = "{" + delimiter.join(fields) + "}"
-
-    lines = [f"{prefix}{key}{bracket}{fields_part}:"]
-
-    row_indent = "  " * (indent + 1)
-    for item in arr:
-        values = [_encode_value(item.get(f), delimiter) for f in fields]
-        lines.append(f"{row_indent}{delimiter.join(values)}")
-
-    return lines
+    """Encode array as tabular (backwards compat wrapper)."""
+    result = encode({key: arr}, delimiter=delimiter)
+    if indent > 0:
+        prefix = "  " * indent
+        return [prefix + line for line in result.split("\n")]
+    return result.split("\n")
 
 
 def encode_simple_array(
@@ -219,106 +89,63 @@ def encode_simple_array(
     indent: int = 0,
     include_length: bool = True,
 ) -> List[str]:
-    """Encode a simple (non-object) array inline.
-
-    Example output:
-        tags[3]: python,async,api
-        empty[0]:
-    """
-    prefix = "  " * indent
-    bracket = _bracket_segment(len(arr), delimiter, include_length)
-
-    # Empty array: key[0]: (nothing after colon per spec)
-    if not arr:
-        return [f"{prefix}{key}{bracket}:"]
-    values = [_encode_value(v, delimiter) for v in arr]
-    return [f"{prefix}{key}{bracket}: {delimiter.join(values)}"]
+    """Encode simple array (backwards compat wrapper)."""
+    result = encode({key: arr}, delimiter=delimiter)
+    if indent > 0:
+        prefix = "  " * indent
+        return [prefix + line for line in result.split("\n")]
+    return result.split("\n")
 
 
-def encode_object(
-    obj: Dict[str, Any],
-    delimiter: str = ",",
-    indent: int = 0,
-    include_length: bool = True,
-) -> List[str]:
-    """Encode an object to TOON format.
-
-    - Simple key-value pairs become YAML-like lines
-    - Uniform arrays of objects become tabular
-    - Other arrays become inline
-    """
-    lines: List[str] = []
-    prefix = "  " * indent
-
-    for key, value in obj.items():
-        if value is None:
-            lines.append(f"{prefix}{key}:")
-        elif isinstance(value, bool):
-            lines.append(f"{prefix}{key}: {'true' if value else 'false'}")
-        elif isinstance(value, (int, float)):
-            lines.append(f"{prefix}{key}: {value}")
-        elif isinstance(value, str):
-            # Multi-line strings get block format
-            if "\n" in value:
-                lines.append(f"{prefix}{key}: |")
-                for line in value.split("\n"):
-                    lines.append(f"{prefix}  {line}")
-            else:
-                lines.append(f"{prefix}{key}: {value}")
-        elif isinstance(value, list):
-            if _is_uniform_array_of_objects(value):
-                lines.extend(encode_tabular(key, value, delimiter, indent, include_length))
-            elif value and all(isinstance(v, dict) for v in value):
-                # Non-uniform objects - encode each separately
-                length_part = f"[{len(value)}]" if include_length else ""
-                lines.append(f"{prefix}{key}{length_part}:")
-                for item in value:
-                    lines.append(f"{prefix}  -")
-                    lines.extend(encode_object(item, delimiter, indent + 2, include_length))
-            else:
-                lines.extend(encode_simple_array(key, value, delimiter, indent, include_length))
-        elif isinstance(value, dict):
-            lines.append(f"{prefix}{key}:")
-            lines.extend(encode_object(value, delimiter, indent + 1, include_length))
-        else:
-            # Fallback: stringify
-            lines.append(f"{prefix}{key}: {value}")
-
-    return lines
+# For backwards compatibility
+def _encode_value(value: Any, delimiter: str) -> str:
+    """Encode a single value (used by search result helpers)."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, str):
+        # Check if quoting needed
+        needs_quote = (
+            not value or
+            value[0].isspace() or value[-1].isspace() or
+            value in ("true", "false", "null") or
+            any(c in value for c in (':', '"', '\\', '[', ']', '{', '}', '\n', '\r', '\t')) or
+            delimiter in value
+        )
+        if needs_quote:
+            escaped = value.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n').replace('\r', '\\r').replace('\t', '\\t')
+            return f'"{escaped}"'
+        return value
+    # Nested objects/arrays: compact JSON
+    import json
+    return json.dumps(value, separators=(",", ":"))
 
 
-def encode(
-    data: Any,
-    delimiter: Optional[str] = None,
-    include_length: Optional[bool] = None,
-) -> str:
-    """Encode any JSON-compatible data to TOON format.
+def _is_uniform_array_of_objects(arr: List[Any]) -> bool:
+    """Check if array is uniform objects (same keys)."""
+    if not arr or len(arr) < 1:
+        return False
+    if not all(isinstance(item, dict) for item in arr):
+        return False
+    first_keys = set(arr[0].keys())
+    return all(set(item.keys()) == first_keys for item in arr)
 
-    Args:
-        data: JSON-compatible data (dict, list, or primitive)
-        delimiter: Field delimiter (default from env or ",")
-        include_length: Include [N] markers (default from env or True)
 
-    Returns:
-        TOON-formatted string
-    """
-    if delimiter is None:
-        delimiter = get_toon_delimiter()
-    if include_length is None:
-        include_length = include_length_markers()
-
-    if isinstance(data, dict):
-        lines = encode_object(data, delimiter, 0, include_length)
-    elif isinstance(data, list):
-        if _is_uniform_array_of_objects(data):
-            lines = encode_tabular("data", data, delimiter, 0, include_length)
-        else:
-            lines = encode_simple_array("data", data, delimiter, 0, include_length)
-    else:
-        # Primitive
-        return str(data)
-
-    return "\n".join(lines)
+def _bracket_segment(length: int, delimiter: str, include_length: bool) -> str:
+    """Build bracket segment for search results."""
+    if not include_length:
+        return ""
+    # python-toon uses [N,] format for comma delimiter
+    if delimiter == ",":
+        return f"[{length}]"
+    elif delimiter == "\t":
+        return f"[{length}\t]"
+    elif delimiter == "|":
+        return f"[{length}|]"
+    return f"[{length}]"
 
 
 # -----------------------------------------------------------------------------
@@ -327,8 +154,8 @@ def encode(
 
 def encode_search_results(
     results: List[Dict[str, Any]],
-    delimiter: Optional[str] = None,
-    include_length: Optional[bool] = None,
+    delimiter: str = ",",
+    include_length: bool = True,
     compact: bool = True,
 ) -> str:
     """Encode search results to TOON tabular format.
@@ -338,18 +165,13 @@ def encode_search_results(
 
     Args:
         results: List of search result dicts
-        delimiter: Field delimiter
-        include_length: Include [N] markers
+        delimiter: Field delimiter (default: ",")
+        include_length: Include [N] markers (default: True)
         compact: If True, only include core location fields (path/lines)
 
     Returns:
         TOON-formatted search results
     """
-    if delimiter is None:
-        delimiter = get_toon_delimiter()
-    if include_length is None:
-        include_length = include_length_markers()
-
     bracket = _bracket_segment(len(results), delimiter, include_length)
 
     if not results:
