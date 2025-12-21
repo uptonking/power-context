@@ -3602,6 +3602,7 @@ async def repo_search_compat(**arguments) -> Dict[str, Any]:
             "compact": args.get("compact"),
             "mode": args.get("mode"),
             "repo": args.get("repo"),  # Cross-codebase isolation
+            "output_format": args.get("output_format"),  # "json" or "toon"
             # Alias passthroughs captured by repo_search(**kwargs)
             "queries": queries,
             "q": args.get("q"),
