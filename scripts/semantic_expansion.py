@@ -51,8 +51,20 @@ SEMANTIC_EXPANSION_SIMILARITY_THRESHOLD = float(os.environ.get("SEMANTIC_EXPANSI
 SEMANTIC_EXPANSION_MAX_TERMS = int(os.environ.get("SEMANTIC_EXPANSION_MAX_TERMS", "3") or "3")
 SEMANTIC_EXPANSION_CACHE_SIZE = int(os.environ.get("SEMANTIC_EXPANSION_CACHE_SIZE", "1000") or "1000")
 
-# Global cache for expansion results
-_expansion_cache: Dict[str, List[str]] = {}
+# Use UnifiedCache for proper LRU eviction instead of simple FIFO
+try:
+    from scripts.cache_manager import UnifiedCache, EvictionPolicy
+    _expansion_cache = UnifiedCache(
+        name="semantic_expansion",
+        max_size=SEMANTIC_EXPANSION_CACHE_SIZE,
+        eviction_policy=EvictionPolicy.LRU,
+        default_ttl=3600.0,  # 1 hour TTL
+    )
+    _UNIFIED_CACHE = True
+except ImportError:
+    _expansion_cache: Dict[str, List[str]] = {}  # type: ignore
+    _UNIFIED_CACHE = False
+
 _cache_hits = 0
 _cache_misses = 0
 
@@ -86,27 +98,32 @@ def _get_expansion_cache_key(queries: List[str], language: Optional[str] = None)
 def _get_cached_expansion(cache_key: str) -> Optional[List[str]]:
     """Get cached expansion results."""
     global _cache_hits
-    if cache_key in _expansion_cache:
-        _cache_hits += 1
-        return _expansion_cache[cache_key].copy()
-    return None
+    if _UNIFIED_CACHE:
+        result = _expansion_cache.get(cache_key)
+        if result is not None:
+            _cache_hits += 1
+            return result.copy() if isinstance(result, list) else result
+        return None
+    else:
+        if cache_key in _expansion_cache:
+            _cache_hits += 1
+            return _expansion_cache[cache_key].copy()
+        return None
 
 
 def _cache_expansion(cache_key: str, expansions: List[str]) -> None:
     """Cache expansion results with LRU eviction."""
-    global _cache_misses, _expansion_cache
-    
+    global _cache_misses
     _cache_misses += 1
     
-    # Add to cache
-    _expansion_cache[cache_key] = expansions.copy()
-    
-    # Evict oldest entries if cache is full
-    if len(_expansion_cache) > SEMANTIC_EXPANSION_CACHE_SIZE:
-        # Simple FIFO eviction (could be improved to LRU)
-        keys_to_remove = list(_expansion_cache.keys())[:len(_expansion_cache) - SEMANTIC_EXPANSION_CACHE_SIZE]
-        for key in keys_to_remove:
-            del _expansion_cache[key]
+    if _UNIFIED_CACHE:
+        _expansion_cache.set(cache_key, expansions.copy())
+    else:
+        _expansion_cache[cache_key] = expansions.copy()
+        if len(_expansion_cache) > SEMANTIC_EXPANSION_CACHE_SIZE:
+            keys_to_remove = list(_expansion_cache.keys())[:len(_expansion_cache) - SEMANTIC_EXPANSION_CACHE_SIZE]
+            for key in keys_to_remove:
+                del _expansion_cache[key]
 
 
 def _extract_code_tokens(text: str) -> List[str]:
