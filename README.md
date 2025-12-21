@@ -31,7 +31,11 @@ Open-source, self-improving code search that gets smarter every time you use it.
 - Sets up MCP bridge configuration
 - Writes MCP configs for Claude Code, Windsurf, and Augment
 
-**Claude Code users:** Also install the skill plugin: `/plugin install https://github.com/m1rl0k/Context-Engine`
+**Claude Code users:** Install the skill plugin:
+```
+/plugin marketplace add m1rl0k/Context-Engine
+/plugin install context-engine
+```
 
 ### Manual Setup (Alternative)
 ```bash
