@@ -2256,7 +2256,10 @@ def run_hybrid_search(
     flt_gated = _sanitize_filter_obj(flt_gated)
 
     # Parallel dense query execution for multiple queries (threshold >= 4 to avoid thread overhead for small N)
-    _parallel_threshold = int(os.environ.get("PARALLEL_DENSE_THRESHOLD", "4") or 4)
+    try:
+        _parallel_threshold = int(os.environ.get("PARALLEL_DENSE_THRESHOLD", "4") or 4)
+    except (ValueError, TypeError):
+        _parallel_threshold = 4
     if len(embedded) >= _parallel_threshold and os.environ.get("PARALLEL_DENSE_QUERIES", "1") == "1":
         executor = _get_query_executor()
         futures = [

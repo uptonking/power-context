@@ -703,8 +703,10 @@ def chunk_semantic(
 ) -> List[Dict]:
     """AST-aware chunking that tries to keep complete functions/classes together."""
     # Try enhanced AST analyzer first (if available)
+    # Note: ast_analyzer can use Python's built-in ast module even without tree-sitter
     use_enhanced = os.environ.get("INDEX_USE_ENHANCED_AST", "1").lower() in {"1", "true", "yes", "on"}
-    if use_enhanced and _AST_ANALYZER_AVAILABLE and language in _TS_LANGUAGES:
+    _ast_supported = language in _TS_LANGUAGES or language == "python"  # Python has built-in ast fallback
+    if use_enhanced and _AST_ANALYZER_AVAILABLE and _ast_supported:
         try:
             chunks = chunk_code_semantically(text, language, max_lines, overlap)
             # Convert to expected format
