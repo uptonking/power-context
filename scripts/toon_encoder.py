@@ -98,6 +98,29 @@ def encode_simple_array(
 
 
 # For backwards compatibility
+def _looks_numeric(s: str) -> bool:
+    """Check if string looks like a number (would be parsed as numeric by TOON)."""
+    if not s:
+        return False
+    # Leading zeros like "05" (but not "0" alone)
+    if len(s) > 1 and s[0] == '0' and s[1].isdigit():
+        return True
+    # Try parsing as int/float
+    try:
+        float(s)
+        return True
+    except ValueError:
+        pass
+    # Scientific notation variants
+    if 'e' in s.lower():
+        try:
+            float(s)
+            return True
+        except ValueError:
+            pass
+    return False
+
+
 def _encode_value(value: Any, delimiter: str) -> str:
     """Encode a single value (used by search result helpers)."""
     if value is None:
@@ -107,11 +130,13 @@ def _encode_value(value: Any, delimiter: str) -> str:
     if isinstance(value, (int, float)):
         return str(value)
     if isinstance(value, str):
-        # Check if quoting needed
+        # Check if quoting needed per TOON spec
         needs_quote = (
             not value or
             value[0].isspace() or value[-1].isspace() or
             value in ("true", "false", "null") or
+            value == "-" or value.startswith("-") or
+            _looks_numeric(value) or
             any(c in value for c in (':', '"', '\\', '[', ']', '{', '}', '\n', '\r', '\t')) or
             delimiter in value
         )
