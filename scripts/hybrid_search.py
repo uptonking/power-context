@@ -440,6 +440,16 @@ LARGE_COLLECTION_THRESHOLD = _safe_int(os.environ.get("HYBRID_LARGE_THRESHOLD", 
 MAX_RRF_K_SCALE = _safe_float(os.environ.get("HYBRID_MAX_RRF_K_SCALE", "3.0"), 3.0)
 SCORE_NORMALIZE_ENABLED = os.environ.get("HYBRID_SCORE_NORMALIZE", "1").lower() in {"1", "true", "yes", "on"}
 
+# === Sparse lexical vector scoring ===
+# When LEX_SPARSE_MODE is enabled, normalize sparse scores to RRF-equivalent range.
+# This preserves the match quality signal while maintaining fusion balance.
+# Sparse scores map to same range as RRF(1) to RRF(max_rank), preserving ordering.
+# SPARSE_LEX_MAX_SCORE: expected max sparse score (for normalization ceiling)
+SPARSE_LEX_MAX_SCORE = _safe_float(os.environ.get("HYBRID_SPARSE_LEX_MAX", "15.0"), 15.0)
+# RRF range bounds (with k=30): rank 1 = 1/31 ≈ 0.0323, rank 50 = 1/80 ≈ 0.0125
+SPARSE_RRF_MAX = 1.0 / (RRF_K + 1)   # Best rank (1)
+SPARSE_RRF_MIN = 1.0 / (RRF_K + 50)  # Worst rank we care about (50)
+
 # Cache for collection stats (avoid repeated Qdrant calls)
 _COLL_STATS_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 _COLL_STATS_TTL = 300  # 5 minutes
@@ -1128,6 +1138,27 @@ def _env_truthy(val: str | None, default: bool) -> bool:
 
 def rrf(rank: int, k: int = RRF_K) -> float:
     return 1.0 / (k + rank)
+
+
+def sparse_lex_score(raw_score: float, weight: float = LEX_VECTOR_WEIGHT) -> float:
+    """Normalize sparse lexical vector score to RRF-equivalent range.
+
+    Maps sparse similarity scores to the same range as RRF(rank) scores,
+    preserving relative ordering while maintaining fusion balance.
+
+    Formula: weight * (RRF_MIN + (clamped_score / max_score) * (RRF_MAX - RRF_MIN))
+    - Sparse score 0 maps to RRF_MIN (like worst rank)
+    - Sparse score max maps to RRF_MAX (like rank 1)
+    - Quality ordering preserved, but doesn't dominate dense embedding scores
+    """
+    if raw_score <= 0:
+        return 0.0
+    # Clamp to expected range and normalize to 0-1
+    clamped = min(raw_score, SPARSE_LEX_MAX_SCORE)
+    ratio = clamped / SPARSE_LEX_MAX_SCORE
+    # Map to RRF range: higher sparse score = higher (better) RRF-equivalent
+    rrf_equiv = SPARSE_RRF_MIN + ratio * (SPARSE_RRF_MAX - SPARSE_RRF_MIN)
+    return weight * rrf_equiv
 
 
 def lexical_score(phrases: List[str], md: Dict[str, Any], token_weights: Dict[str, float] | None = None, bm25_weight: float | None = None) -> float:
@@ -2039,6 +2070,7 @@ def run_hybrid_search(
     # Lexical vector query (with scaled retrieval)
     # Use sparse vectors when LEX_SPARSE_MODE is enabled for lossless matching
     score_map: Dict[str, Dict[str, Any]] = {}
+    _used_sparse_lex = False  # Track if we actually used sparse (for scoring)
     try:
         if LEX_SPARSE_MODE:
             sparse_vec = lex_sparse_vector(qlist)
@@ -2049,6 +2081,8 @@ def run_hybrid_search(
                 lex_results = lex_query(client, lex_vec, flt, _scaled_per_query, collection)
                 if lex_results:
                     print(f"[hybrid_search] LEX_SPARSE_MODE enabled but sparse query returned empty; fell back to dense lex")
+            else:
+                _used_sparse_lex = True  # Actually used sparse vectors
         else:
             lex_vec = lex_hash_vector(qlist)
             lex_results = lex_query(client, lex_vec, flt, _scaled_per_query, collection)
@@ -2092,7 +2126,13 @@ def run_hybrid_search(
                 "test": 0.0,
             },
         )
-        lxs = (_AD_LEX_VEC_W * _scaled_rrf(rank)) if _USE_ADAPT else (LEX_VECTOR_WEIGHT * _scaled_rrf(rank))
+        # Sparse vectors: use actual similarity score (preserves match quality signal)
+        # Dense vectors: use RRF rank (backwards compatible)
+        if _used_sparse_lex:
+            _lex_w = _AD_LEX_VEC_W if _USE_ADAPT else LEX_VECTOR_WEIGHT
+            lxs = sparse_lex_score(float(getattr(p, 'score', 0) or 0), weight=_lex_w)
+        else:
+            lxs = (_AD_LEX_VEC_W * _scaled_rrf(rank)) if _USE_ADAPT else (LEX_VECTOR_WEIGHT * _scaled_rrf(rank))
         score_map[pid]["lx"] += lxs
         score_map[pid]["s"] += lxs
 
@@ -3392,6 +3432,7 @@ def main():
     queries = list(clean_queries)
     # Initialize score map early so we can accumulate from lex and dense
     score_map: Dict[str, Dict[str, Any]] = {}
+    _cli_used_sparse_lex = False  # Track if we actually used sparse (for scoring)
     # Server-side lexical vector search (use sparse when LEX_SPARSE_MODE enabled, with fallback)
     try:
         if LEX_SPARSE_MODE:
@@ -3402,6 +3443,8 @@ def main():
                 lex_results = lex_query(client, lex_vec, flt, _cli_scaled_per_query, eff_collection)
                 if lex_results:
                     print(f"[hybrid_search:cli] LEX_SPARSE_MODE sparse query returned empty; fell back to dense lex")
+            else:
+                _cli_used_sparse_lex = True  # Actually used sparse vectors
         else:
             lex_vec = lex_hash_vector(queries)
             lex_results = lex_query(client, lex_vec, flt, _cli_scaled_per_query, eff_collection)
@@ -3469,7 +3512,13 @@ def main():
                 "test": 0.0,
             },
         )
-        lxs = (_AD_LEX_VEC_W2 * _cli_scaled_rrf(rank)) if _USE_ADAPT2 else (LEX_VECTOR_WEIGHT * _cli_scaled_rrf(rank))
+        # Sparse vectors: use actual similarity score (preserves match quality signal)
+        # Dense vectors: use RRF rank (backwards compatible)
+        if _cli_used_sparse_lex:
+            _lex_w = _AD_LEX_VEC_W2 if _USE_ADAPT2 else LEX_VECTOR_WEIGHT
+            lxs = sparse_lex_score(float(getattr(p, 'score', 0) or 0), weight=_lex_w)
+        else:
+            lxs = (_AD_LEX_VEC_W2 * _cli_scaled_rrf(rank)) if _USE_ADAPT2 else (LEX_VECTOR_WEIGHT * _cli_scaled_rrf(rank))
         score_map[pid]["lx"] += lxs
         score_map[pid]["s"] += lxs
 
