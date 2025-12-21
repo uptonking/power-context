@@ -41,6 +41,7 @@ jobs:
         pip install tree_sitter tree_sitter_languages
         pip install mcp fastmcp
         pip install fastapi uvicorn[standard] python-multipart jinja2
+        pip install python-toon
         
     - name: Wait for Qdrant to be ready
       run: |
