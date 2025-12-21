@@ -2385,7 +2385,7 @@ def run_hybrid_search(
                     # Dense semantic PRF pass
                     embedded_sem_prf = _embed_queries_cached(_model, semantic_prf_qs)
                     result_sets_sem_prf: List[List[Any]] = [
-                        dense_query(client, vec_name, v, flt, max(8, limit // 3 or 4))
+                        dense_query(client, vec_name, v, flt, max(8, limit // 3 or 4), collection)
                         for v in embedded_sem_prf
                     ]
                     for res_sem_prf in result_sets_sem_prf:
