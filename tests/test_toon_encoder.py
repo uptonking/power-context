@@ -14,6 +14,7 @@ from scripts.toon_encoder import (
     encode_simple_array,
     encode_object,
     encode_search_results,
+    encode_context_results,
     compare_formats,
     is_toon_enabled,
     get_toon_delimiter,
@@ -330,4 +331,136 @@ class TestMCPIntegration:
 
         # Score should be in full output
         assert "0.95" in output
+
+
+class TestContextResults:
+    """Test encode_context_results for mixed code/memory results."""
+
+    def test_encode_empty_context_results(self):
+        """Test empty results return proper TOON format with marker."""
+        output = encode_context_results([])
+        assert "results[0]: []" in output
+
+    def test_encode_code_only_results(self):
+        """Test encoding results with only code entries."""
+        results = [
+            {"source": "code", "path": "/src/main.py", "start_line": 10, "end_line": 20, "score": 0.95},
+            {"source": "code", "path": "/src/utils.py", "start_line": 5, "end_line": 15, "score": 0.87},
+        ]
+
+        output = encode_context_results(results, compact=True)
+
+        # Should have code section
+        assert "code[2]{path,start_line,end_line}:" in output
+        assert "/src/main.py,10,20" in output
+        assert "/src/utils.py,5,15" in output
+        # Should not have memory section
+        assert "memory[" not in output
+
+    def test_encode_memory_only_results(self):
+        """Test encoding results with only memory entries."""
+        results = [
+            {"source": "memory", "content": "API uses OAuth2", "score": 0.92},
+            {"source": "memory", "content": "Database is PostgreSQL", "score": 0.85},
+        ]
+
+        output = encode_context_results(results, compact=True)
+
+        # Should have memory section
+        assert "memory[2]{content,score}:" in output
+        assert "API uses OAuth2" in output
+        assert "Database is PostgreSQL" in output
+        # Should not have code section
+        assert "code[" not in output
+
+    def test_encode_mixed_code_and_memory(self):
+        """Test encoding results with both code and memory entries."""
+        results = [
+            {"source": "code", "path": "/src/auth.py", "start_line": 100, "end_line": 150, "score": 0.95},
+            {"source": "memory", "content": "Auth uses JWT tokens", "score": 0.90},
+            {"source": "code", "path": "/src/jwt.py", "start_line": 20, "end_line": 40, "score": 0.88},
+        ]
+
+        output = encode_context_results(results, compact=True)
+
+        # Should have both sections
+        assert "code[2]{path,start_line,end_line}:" in output
+        assert "memory[1]{content,score}:" in output
+        assert "/src/auth.py,100,150" in output
+        assert "/src/jwt.py,20,40" in output
+        assert "Auth uses JWT tokens" in output
+
+    def test_encode_context_results_full_mode(self):
+        """Test full mode includes additional fields."""
+        results = [
+            {"source": "code", "path": "/src/main.py", "start_line": 10, "end_line": 20, "score": 0.95, "symbol": "main"},
+            {"source": "memory", "content": "Note about main", "score": 0.90, "id": "mem-123"},
+        ]
+
+        output = encode_context_results(results, compact=False)
+
+        # Full mode should include score and symbol for code
+        assert "code[1]{path,start_line,end_line,score,symbol}:" in output
+        # Full mode should include id for memory
+        assert "memory[1]{content,score,id}:" in output
+
+    def test_encode_context_results_with_delimiter(self):
+        """Test custom delimiter works correctly."""
+        results = [
+            {"source": "code", "path": "/src/main.py", "start_line": 10, "end_line": 20},
+        ]
+
+        output = encode_context_results(results, delimiter="\t", compact=True)
+
+        # Should use tab delimiter
+        assert "code[1]{path\tstart_line\tend_line}:" in output
+        assert "/src/main.py\t10\t20" in output
+
+
+class TestFormatContextResultsAsToon:
+    """Test _format_context_results_as_toon MCP helper."""
+
+    def test_format_empty_results_adds_marker(self):
+        """Test that empty results still get output_format marker."""
+        from scripts.mcp_indexer_server import _format_context_results_as_toon
+
+        response = {"results": [], "total": 0}
+        result = _format_context_results_as_toon(response.copy())
+
+        assert result["output_format"] == "toon"
+        assert "results[0]: []" in result["results"]
+
+    def test_format_mixed_results(self):
+        """Test formatting mixed code/memory results."""
+        from scripts.mcp_indexer_server import _format_context_results_as_toon
+
+        response = {
+            "results": [
+                {"source": "code", "path": "/src/api.py", "start_line": 1, "end_line": 10},
+                {"source": "memory", "content": "API docs here", "score": 0.9},
+            ],
+            "total": 2,
+        }
+        result = _format_context_results_as_toon(response.copy())
+
+        assert result["output_format"] == "toon"
+        assert isinstance(result["results"], str)
+        assert "code[1]" in result["results"]
+        assert "memory[1]" in result["results"]
+
+    def test_format_preserves_other_fields(self):
+        """Test that formatting preserves non-results fields."""
+        from scripts.mcp_indexer_server import _format_context_results_as_toon
+
+        response = {
+            "results": [{"source": "code", "path": "/a.py", "start_line": 1, "end_line": 5}],
+            "total": 1,
+            "diag": {"code_hits": 1, "mem_hits": 0},
+            "args": {"query": "test"},
+        }
+        result = _format_context_results_as_toon(response.copy())
+
+        assert result["total"] == 1
+        assert result["diag"] == {"code_hits": 1, "mem_hits": 0}
+        assert result["args"] == {"query": "test"}
 
