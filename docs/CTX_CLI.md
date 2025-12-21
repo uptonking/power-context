@@ -1,6 +1,6 @@
 # ctx.py - Prompt Enhancer CLI
 
-A thin CLI that retrieves code context and rewrites your input into a better, context-aware prompt using the local LLM decoder. Works with both questions and commands/instructions.
+CLI that retrieves code context and rewrites input into context-aware prompts using the local LLM decoder. Works with questions and commands/instructions.
 
 **Documentation:** [README](../README.md) · [Getting Started](GETTING_STARTED.md) · [Configuration](CONFIGURATION.md) · [IDE Clients](IDE_CLIENTS.md) · [MCP API](MCP_API.md) · [ctx CLI](CTX_CLI.md) · [Memory Guide](MEMORY_GUIDE.md) · [Architecture](ARCHITECTURE.md) · [Multi-Repo](MULTI_REPO_COLLECTIONS.md) · [Kubernetes](../deploy/kubernetes/README.md) · [VS Code Extension](vscode-extension.md) · [Troubleshooting](TROUBLESHOOTING.md) · [Development](DEVELOPMENT.md)
 
@@ -19,7 +19,7 @@ A thin CLI that retrieves code context and rewrites your input into a better, co
 ## Basic Usage
 
 ```bash
-# Questions: Enhanced with specific details and multiple aspects
+# Questions: Enhanced with specific details and aspects
 scripts/ctx.py "What is ReFRAG?"
 
 # Commands: Enhanced with concrete targets and implementation details
@@ -34,7 +34,7 @@ make ctx Q="Hybrid search details" ARGS="--language python --under scripts/ --li
 
 ## Detail Mode
 
-Include compact code snippets in the retrieved context for richer rewrites (trades speed for quality):
+Include compact code snippets in retrieved context for richer rewrites (trades speed for quality):
 
 ```bash
 # Enable detail mode (adds short snippets)
@@ -48,8 +48,8 @@ make ctx Q="Explain hybrid search" ARGS="--detail --context-lines 2"
 ```
 
 **Notes:**
-- Default behavior is header-only (fastest). `--detail` adds short snippets.
-- Detail mode is optimized for speed: automatically clamps to max 4 results and 1 result per file.
+- Default: header-only (fastest). `--detail` adds short snippets
+- Detail mode optimized for speed: clamps to max 4 results, 1 result per file
 
 ## Unicorn Mode
 

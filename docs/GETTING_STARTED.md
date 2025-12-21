@@ -1,153 +1,151 @@
-# Getting Started (VS Code + Dev-Remote)
+# Getting Started (VS Code Extension)
 
 **Documentation:** [README](../README.md) · [Getting Started](GETTING_STARTED.md) · [Configuration](CONFIGURATION.md) · [IDE Clients](IDE_CLIENTS.md) · [MCP API](MCP_API.md) · [ctx CLI](CTX_CLI.md) · [Memory Guide](MEMORY_GUIDE.md) · [Architecture](ARCHITECTURE.md) · [Multi-Repo](MULTI_REPO_COLLECTIONS.md) · [Kubernetes](../deploy/kubernetes/README.md) · [VS Code Extension](vscode-extension.md) · [Troubleshooting](TROUBLESHOOTING.md) · [Development](DEVELOPMENT.md)
 
-This guide is for developers who want the lowest-friction way to try Context-Engine:
-
-- Run a single Docker Compose stack
-- Install one VS Code extension
-- Open a project and start asking questions about your code
+This guide covers the detailed setup flow using the VS Code extension for the lowest-friction Context-Engine experience.
 
 ---
 
 ## 1. Prerequisites
 
 - **Docker** (Docker Desktop or equivalent)
-- **Git**
-- **VS Code** (to use the Context Engine Uploader extension)
-- **An MCP-enabled IDE or client** to talk to Context-Engine via MCP, for example:
+- **VS Code** (for the Context Engine Uploader extension)
+- **An MCP-enabled IDE or client** such as:
   - Claude Code, Windsurf, Cursor, Roo, Cline, Zed (via `mcp-remote`), etc.
 
-CLI-only workflows using `ctx.py` and hybrid search tools are supported but are documented separately. This guide assumes you will talk to Context-Engine through an MCP-enabled assistant.
+---
 
-You do *not* need to clone this repo into every project. You run Context-Engine once, then point it at whatever code you care about.
+## 2. Extension Setup
+
+### 2.1 Install Extension
+1. Install [Context Engine Uploader](https://marketplace.visualstudio.com/items?itemName=context-engine.context-engine-uploader) from VS Code Marketplace
+
+### 2.2 First-Time Setup
+2. Open any VS Code project
+3. Extension prompts to set up Context-Engine stack:
+   - Choose location to clone Context-Engine (keeps it separate from your project)
+   - Extension automatically starts the Docker stack
+   - Configures MCP bridge for unified endpoint and automatic path handling
+   - Writes MCP configs for Claude Code, Windsurf, and Augment
+
+**Stack Services Started:**
+- Qdrant: `http://localhost:6333`
+- Memory MCP: `http://localhost:8000/sse` (SSE) and `http://localhost:8002/mcp` (HTTP)
+- Indexer MCP: `http://localhost:8001/sse` (SSE) and `http://localhost:8003/mcp` (HTTP)
+- Upload Service: `http://localhost:8004`
+
+### 2.3 Index Your Workspace
+4. Click "Upload Workspace" in VS Code status bar
+5. Extension indexes your code automatically:
+   - Mirrors project to container workspace
+   - Chunks files into 5-50 line spans using ReFRAG-inspired micro-chunking
+   - Stores vectors + metadata in Qdrant for hybrid search
+   - Tracks file hashes for efficient reindexing
+   - **Smart path handling** automatically maps container paths to your local files
 
 ---
 
-## 2. Start the dev-remote stack
+## 3. IDE Configuration
 
-In a terminal (from wherever you want the stack to live):
+The extension automatically configures MCP settings for Claude Code, Windsurf, and Augment.
 
+### For Other IDEs or Manual Setup
+
+**Manual CLI indexing** (if you prefer not to use the extension):
 ```bash
-git clone https://github.com/m1rl0k/Context-Engine.git
-cd Context-Engine
-
-# Start the dev-remote stack (Qdrant, MCPs, upload service, watcher, etc.)
-docker compose -f docker-compose.yml up -d
+git clone https://github.com/m1rl0k/Context-Engine.git && cd Context-Engine
+make bootstrap  # One-shot setup, or step-by-step:
+HOST_INDEX_PATH=/path/to/your/project docker compose run --rm indexer
 ```
 
-This brings up, on your host machine:
-
-- Qdrant on `http://localhost:6333`
-- Memory MCP:
-  - SSE: `http://localhost:8000/sse`
-  - HTTP / RMCP: `http://localhost:8002/mcp`
-- Indexer MCP:
-  - SSE: `http://localhost:8001/sse`
-  - HTTP / RMCP: `http://localhost:8003/mcp`
-- Upload service (used by the VS Code extension) on `http://localhost:8004`
+**MCP configuration for other IDEs**:
+See [docs/IDE_CLIENTS.md](IDE_CLIENTS.md) for complete copy-paste configuration examples for:
+- Claude Code, Windsurf, Cursor, Cline, Codex, Augment, Zed (via mcp-remote)
+- Both HTTP and SSE transport options
+- Workspace-aware bridge configuration with npx
 
 ---
 
-## 3. Index your code (via VS Code extension)
+## 4. Usage Examples
 
-In the dev-remote flow, you normally do **not** run the indexer manually.
+Once your IDE is connected and indexing complete, ask your AI assistant questions like:
 
-Instead, the VS Code extension uploads your workspace to the dev-remote stack, and the `indexer` + `watcher` services handle:
-
-- Mirroring your project into the container under `/work` (in dev-workspace folder)
-- Walking files, chunking them, and writing vectors + metadata into Qdrant
-- Tracking per-file hashes under `.codebase` so unchanged files are skipped
-
-If you prefer CLI-based indexing, see the README and advanced docs (Multi-Repo, Kubernetes, etc.) for `docker compose run --rm indexer` usage.
-
----
-
-## 4. Connect your IDE
-
-The normal way to use Context-Engine is through an MCP-enabled assistant. The simplest config is via the HTTP MCP endpoints below; the VS Code extension can also scaffold these configs for you.
-
-### Example: Claude Code / generic RMCP client
-
-Add to your MCP config (for example `claude_code_config.json`):
-
-```json
-{
-  "mcpServers": {
-    "memory": { "url": "http://localhost:8002/mcp" },
-    "qdrant-indexer": { "url": "http://localhost:8003/mcp" }
-  }
-}
-```
-
-### Example: Windsurf / Cursor (SSE)
-
-If your client prefers SSE:
-
-```json
-{
-  "mcpServers": {
-    "memory": { "type": "sse", "url": "http://localhost:8000/sse", "disabled": false },
-    "qdrant-indexer": { "type": "sse", "url": "http://localhost:8001/sse", "disabled": false }
-  }
-}
-```
-
-See [docs/IDE_CLIENTS.md](IDE_CLIENTS.md) for copy-paste configs for specific IDEs.
-
----
-
-## 5. Try a few example queries
-
-Once your IDE MCP's are connected and indexing has finished, just *ask your assistant* questions like the ones below; it will call the MCP tools on your behalf.
-
-### Code search examples (qdrant-indexer)
-
-Ask your assistant to run something like:
+### Code Search Examples
 
 - "Find places where remote uploads are retried"
 - "Show functions that call ingest_code.index_repo"
-- "Search for performance bottlenecks in the upload_service script"
+- "Search for performance bottlenecks in upload_service script"
+- "How does the memory MCP store and retrieve entries?"
 
-Under the hood, the client will call tools such as `repo_search` or `context_answer` on the `qdrant-indexer` server.
-
-### Commit history / lineage examples (qdrant-indexer)
-
-If you have git history ingestion enabled, you can also ask:
+### Git History Examples (if enabled)
 
 - "When did we add git history ingestion to the upload client?"
-- "When did we optimize git history collection to fetch only commits since last upload?"
-- "What commits mention Windows UnicodeDecodeError in git history collection?"
+- "Show commits related to the chunking algorithm changes"
 
-These eventually call `search_commits_for` and related tools, which use the commit index and lineage summaries.
+Your AI assistant will call the appropriate MCP tools (`repo_search`, `context_answer`, `search_commits_for`) automatically.
 
 ---
 
-## 6. VS Code extension (recommended)
+## 5. Next Steps
 
-For this dev-remote flow, the **Context Engine Uploader** VS Code extension is the primary way to sync and index code:
+- **Memory Usage**: Store team knowledge alongside your code - see [Memory Guide](MEMORY_GUIDE.md)
+- **Advanced Configuration**: Fine-tune search and indexing - see [Configuration](CONFIGURATION.md)
+- **Troubleshooting**: Common issues and solutions - see [Troubleshooting](TROUBLESHOOTING.md)
+- **Development**: Contributing and local development - see [Development](DEVELOPMENT.md)
 
-- Install from the Marketplace: <https://marketplace.visualstudio.com/items?itemName=context-engine.context-engine-uploader>
-- Point it at your project (or let it auto-detect the current workspace root)
-- Configure the upload endpoint to `http://localhost:8004`
-- Start the uploader; it will force an initial upload and then watch for changes
+---
 
-Under **Settings → Extensions → Context Engine Uploader** you will typically use:
+## 6. Advanced Features
 
-- `endpoint`: `http://localhost:8004` (dev-remote upload_service)
-- Optional MCP settings: `mcpIndexerUrl`, `mcpMemoryUrl`, and `mcpTransportMode` (`sse-remote` or `http`) pointing at the dev-remote memory/indexer URLs listed above
-- Optional auto-config: enable `mcpClaudeEnabled` / `mcpWindsurfEnabled` and `autoWriteMcpConfigOnStartup` to have the extension write Claude Code/Windsurf MCP configs (and an optional `/ctx` hook) for you
+### Prompt+ Enhancement
+The extension includes a **Prompt+** button that enhances selected code or prompts using Context-Engine's built-in `ctx.py` system.
 
-Once running, your code is kept in sync with the dev-remote stack without any manual indexer commands.
+**How Prompt+ works:**
+- Select code or write a prompt in your editor
+- Click `Prompt+` in the status bar (or use the command palette)
+- Context-Engine retrieves relevant code context and rewrites your input into a more precise, context-aware prompt
+- Enhanced prompt is ready to send to your AI assistant with rich code context
 
-## 7. Where to go next
+**Example enhancement:**
+- **Original prompt**: "How do I handle errors?"
+- **Enhanced by Prompt+**: "How do I handle exceptions in the authentication flow in `src/auth/login.py`, considering the `ValidationError` class and the retry mechanism in `src/utils/retry.py`?"
 
-Once you have the basic flow working (dev-remote stack up → VS Code extension syncing → IDE connected via MCP → run a few queries), you can explore:
+### Memory System
+Store team knowledge alongside your code:
+- Installation notes, runbooks, decisions
+- Links, known issues, FAQs
+- "How we do X here" team knowledge
 
-- [Configuration](CONFIGURATION.md) — environment variables and tuning knobs
-- [IDE Clients](IDE_CLIENTS.md) — detailed configs for specific IDEs
-- [Multi-Repo](MULTI_REPO_COLLECTIONS.md) — multi-repo collections, remote servers, Kubernetes
-- [Memory Guide](MEMORY_GUIDE.md) — how to use the Memory MCP server alongside the indexer
-- [Architecture](ARCHITECTURE.md) — deeper dive into how the components fit together
-- [ctx CLI](CTX_CLI.md) — CLI workflows and prompt hooks; see `ctx/claude-hook-example.json` for a Claude Code `/ctx` hook wired to `ctx.py`
-- [VS Code Extension](vscode-extension.md) — full extension capabilities and settings
+See [Memory Guide](MEMORY_GUIDE.md) for detailed usage.
+
+### Enterprise Features
+
+**Unified MCP Bridge**
+- Combines indexer and memory services into a single endpoint
+- Automatic session management and workspace-aware collection injection
+- No need to configure multiple MCP servers manually
+
+**Authentication (Optional)**
+- Built-in authentication system for team deployments
+- Session management with automatic refresh
+- Secure credential storage in `~/.ctxce/auth.json`
+
+**Smart Path Handling**
+- Automatic conversion between container paths (`/work/`) and your local filesystem
+- Cross-platform compatibility (Windows/macOS/Linux)
+- No manual path configuration required
+
+---
+
+## 7. Troubleshooting
+
+If you encounter issues:
+
+1. **Stack not starting**: Check Docker Desktop is running
+2. **No search results**: Verify indexing completed (check extension logs)
+3. **MCP connection issues**: Confirm IDE configuration matches extension output
+4. **Performance**: Try the [Troubleshooting](TROUBLESHOOTING.md) guide for common optimizations
+
+Common fixes are usually in [Troubleshooting](TROUBLESHOOTING.md).
+
+For complete extension capabilities and settings, see [VS Code Extension](vscode-extension.md).

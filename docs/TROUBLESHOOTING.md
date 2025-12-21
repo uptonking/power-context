@@ -17,7 +17,7 @@ Common issues and solutions for Context Engine.
 
 ## Collection Health & Cache Sync
 
-The stack includes automatic health checks that detect and fix cache/collection sync issues.
+Automatic health checks detect and fix cache/collection sync issues.
 
 ### Check collection health
 ```bash
@@ -29,43 +29,41 @@ python scripts/collection_health.py --workspace . --collection codebase
 python scripts/collection_health.py --workspace . --collection codebase --auto-heal
 ```
 
-### What it detects
-- Empty collection with cached files (cache thinks files are indexed but they're not)
-- Significant mismatch between cached files and actual collection contents
+### Detection scope
+- Empty collection with cached files
+- Mismatch between cached files and collection contents
 - Missing metadata in collection points
 
 ### When to use
 - After manually deleting collections
-- If searches return no results despite indexing
+- Searches return no results despite indexing
 - After Qdrant crashes or data loss
 - When switching between collection names
 
 ### Automatic healing
-- Health checks run automatically on watcher and indexer startup
-- Cache is cleared when sync issues are detected
-- Files are reindexed on next run
+Health checks run on watcher/indexer startup, clearing cache and reindexing when sync issues detected.
 
 ---
 
 ## Common Issues
 
 ### Tree-sitter not found or parser errors
-Feature is optional. If you set `USE_TREE_SITTER=1` and see errors, unset it or install tree-sitter deps, then reindex.
+Optional feature. If `USE_TREE_SITTER=1` causes errors, unset it or install tree-sitter deps and reindex.
 
 ### Tokenizer missing for micro-chunks
-Run `make tokenizer` or set `TOKENIZER_JSON` to a valid tokenizer.json. Otherwise, falls back to line-based chunking.
+Run `make tokenizer` or set `TOKENIZER_JSON` to valid tokenizer.json. Falls back to line-based chunking.
 
 ### SSE "Invalid session ID" when POSTing /messages directly
-Expected if you didn't initiate an SSE session first. Use an MCP client (e.g., mcp-remote) to handle the handshake.
+Expected behavior without SSE session initiation. Use MCP client (e.g., mcp-remote) for handshake.
 
 ### llama.cpp platform warning on Apple Silicon
-Prefer the native path (`scripts/gpu_toggle.sh gpu`). If you stick with Docker, add `platform: linux/amd64` to the service or ignore the warning during local dev.
+Prefer native path (`scripts/gpu_toggle.sh gpu`). For Docker, add `platform: linux/amd64` to service or ignore during local dev.
 
-### Indexing feels stuck on very large files
+### Indexing stuck on large files
 Use `MAX_MICRO_CHUNKS_PER_FILE=200` during dev runs.
 
 ### Watcher timeouts (-9) or Qdrant "ResponseHandlingException: timed out"
-Set watcher-safe defaults to reduce payload size and add headroom during upserts:
+Set watcher-safe defaults to reduce payload size:
 
 ```ini
 QDRANT_TIMEOUT=60
@@ -76,17 +74,17 @@ INDEX_UPSERT_BACKOFF=0.5
 WATCH_DEBOUNCE_SECS=1.5
 ```
 
-If issues persist, try lowering `INDEX_UPSERT_BATCH` to 96 or raising `QDRANT_TIMEOUT` to 90.
+If issues persist, lower `INDEX_UPSERT_BATCH` to 96 or raise `QDRANT_TIMEOUT` to 90.
 
 ---
 
 ## Connectivity Issues
 
 ### MCP servers can't reach Qdrant
-Confirm both containers are up: `make ps`.
+Confirm containers are up: `make ps`.
 
 ### SSE port collides
-Change `FASTMCP_PORT` in `.env` and the mapped port in `docker-compose.yml`.
+Change `FASTMCP_PORT` in `.env` and mapped port in `docker-compose.yml`.
 
 ### Searches return no results
 Check collection health (see above).
@@ -96,7 +94,7 @@ Restart: `make restart`.
 
 ---
 
-## Verify Endpoints
+## Endpoint Verification
 
 ```bash
 # Qdrant DB
@@ -114,12 +112,10 @@ curl -sI http://localhost:8002/mcp | head -n1
 curl -sI http://localhost:8003/mcp | head -n1
 ```
 
----
+### Expected HTTP Behaviors
 
-## Expected HTTP Behaviors
-
-- **GET /mcp returns 400**: Normal - the RMCP endpoint is POST-only for JSON-RPC
-- **SSE requires session handshake**: Raw POST /messages without it will error (expected)
+- **GET /mcp returns 400**: Normal - RMCP endpoint is POST-only for JSON-RPC
+- **SSE requires session handshake**: Raw POST /messages without session will error (expected)
 
 ---
 
@@ -133,13 +129,11 @@ curl -sI http://localhost:8003/mcp | head -n1
 | MEMORY_AUTODETECT | Auto-detect memory collection | 1 |
 | MEMORY_COLLECTION_TTL_SECS | Cache TTL for collection detection | 300s |
 
-**Schema repair:** `ensure_collection` now repairs missing named vectors (lex, mini when REFRAG_MODE=1) on existing collections.
+**Schema repair:** `ensure_collection` repairs missing named vectors (lex, mini when REFRAG_MODE=1) on existing collections.
 
 ---
 
 ## Debug Logging
-
-Enable debug environment variables for detailed logging:
 
 ```bash
 export DEBUG_CONTEXT_ANSWER=1

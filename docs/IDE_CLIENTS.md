@@ -1,6 +1,6 @@
 # IDE & Client Configuration
 
-Connect your IDE to a running Context-Engine stack. No need to clone this repo into your project.
+Connect IDE to running Context-Engine stack. No need to clone this repo into your project.
 
 **Documentation:** [README](../README.md) · [Getting Started](GETTING_STARTED.md) · [Configuration](CONFIGURATION.md) · [IDE Clients](IDE_CLIENTS.md) · [MCP API](MCP_API.md) · [ctx CLI](CTX_CLI.md) · [Memory Guide](MEMORY_GUIDE.md) · [Architecture](ARCHITECTURE.md) · [Multi-Repo](MULTI_REPO_COLLECTIONS.md) · [Kubernetes](../deploy/kubernetes/README.md) · [VS Code Extension](vscode-extension.md) · [Troubleshooting](TROUBLESHOOTING.md) · [Development](DEVELOPMENT.md)
 
@@ -19,7 +19,7 @@ Connect your IDE to a running Context-Engine stack. No need to clone this repo i
 
 ## Quick Start
 
-**Prerequisites:** Context-Engine running somewhere (localhost, remote server, or Kubernetes).
+**Prerequisites:** Context-Engine running (localhost, remote server, or Kubernetes).
 
 **Minimal config (SSE)** — for clients that only understand SSE or use `mcp-remote`:
 ```json
@@ -30,7 +30,7 @@ Connect your IDE to a running Context-Engine stack. No need to clone this repo i
 }
 ```
 
-**HTTP (recommended for RMCP-capable IDEs)** — prefer this when your IDE supports HTTP MCP / RMCP (Claude Code, Windsurf, Qodo, etc.):
+**HTTP (recommended for RMCP-capable IDEs)** — prefer when IDE supports HTTP MCP / RMCP (Claude Code, Windsurf, Qodo, etc.):
 
 ```json
 {
@@ -41,15 +41,15 @@ Connect your IDE to a running Context-Engine stack. No need to clone this repo i
 }
 ```
 
-Using HTTP `/mcp` avoids a FastMCP initialization race that some SSE clients hit when they send `listTools` in parallel with `initialize`, which can log:
+HTTP `/mcp` avoids FastMCP initialization race that SSE clients hit when sending `listTools` in parallel with `initialize`, causing:
 
 ```text
 Failed to validate request: Received request before initialization was complete
 ```
 
-If you see tools/resources only appearing after a second reconnect when using SSE, switch your IDE configuration to these HTTP endpoints instead.
+If tools/resources appear only after second reconnect using SSE, switch to HTTP endpoints.
 
-Replace `localhost` with your server IP/hostname for remote setups.
+Replace `localhost` with server IP/hostname for remote setups.
 
 ---
 

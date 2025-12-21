@@ -8,58 +8,74 @@
 
 ## Context-Engine
 
-The open-source, self-improving code search that gets smarter every time you use it.
+Open-source, self-improving code search that gets smarter every time you use it.
 
 <p align="center">
   <img src="useage.png" alt="Context-Engine Usage" width="50%"/>
 </p>
 
-### Why Context-Engine?
-
-AI coding assistants are only as good as the context they retrieve. Most solutions chunk your code into large blocks and hope for the best—returning whole files when you need a single function, or missing the relevant code entirely. Context-Engine takes a different approach: ReFRAG-inspired micro-chunking returns precise 5-50 line spans, hybrid search combines semantic and lexical signals with cross-encoder reranking, and the system adapts to your codebase over time. No cloud dependency, no vendor lock-in—just a Docker Compose stack that works with any MCP-compatible tool.
-
-### What makes it different
-
-| Feature | What it does |
-|---------|--------------|
-| **Precision Retrieval** | Returns exact code spans (5-50 lines), not whole files |
-| **Hybrid Search** | Dense vectors + lexical matching + cross-encoder reranking |
-| **MCP Native** | Dual transport (SSE + HTTP) for any AI coding tool |
-| **Works Locally** | Docker Compose, runs on your machine |
-| **Adaptive** *(optional)* | Enable learning mode to improve ranking from usage patterns |
-
 ---
 
-## Quick Start
+## Quick Start: Stack in 30 Seconds
 
-### 1. Start the stack
+### VS Code Extension (Easiest)
+1. Install [Context Engine Uploader](https://marketplace.visualstudio.com/items?itemName=context-engine.context-engine-uploader)
+2. Open any project → extension prompts to set up Context-Engine stack
+3. Opened workspace is indexed
+4. MCP configs can configure your agent/IDE
 
+**That's it!** The extension handles everything:
+- Clones Context-Engine to your chosen location (keeps it separate from your project)
+- Starts the Docker stack automatically
+- Sets up MCP bridge configuration
+- Writes MCP configs for Claude Code, Windsurf, and Augment
+
+### Manual Setup (Alternative)
 ```bash
 git clone https://github.com/m1rl0k/Context-Engine.git && cd Context-Engine
-docker compose up -d
+make bootstrap  # One-shot: up → wait → index → warm → health
 ```
 
-That's it. The stack is running.
-
-### 2. Index your code
-
-**Option A: VS Code Extension (recommended)**
-
-Install [Context Engine Uploader](https://marketplace.visualstudio.com/items?itemName=context-engine.context-engine-uploader) from the VS Code Marketplace. Open your project, click "Upload Workspace". Done.
-
-The extension auto-syncs changes and configures your MCP clients.
-
-**Option B: CLI**
-
+Or step-by-step:
 ```bash
-# Index any project
+docker compose up -d
 HOST_INDEX_PATH=/path/to/your/project docker compose run --rm indexer
 ```
 
-### 3. Connect your IDE
+*See [Configuration](docs/CONFIGURATION.md) for environment variables and [IDE_CLIENTS.md](docs/IDE_CLIENTS.md) for MCP setup.*
 
-**HTTP endpoints** — for Claude Code, Windsurf, Qodo, and other RMCP-capable clients:
+---
 
+## Why This Stack Works Better
+
+| Problem | Context-Engine Solution |
+|---------|------------------------|
+| **Large file chunks** → returns entire files | **Precise spans**: Returns 5-50 line chunks, not whole files |
+| **Lost context** → missing relevant code | **Hybrid search**: Semantic + lexical + cross-encoder reranking |
+| **Cloud dependency** → vendor lock-in | **Local stack**: Docker Compose on your machine |
+| **Static knowledge** → never improves | **Adaptive learning**: Gets smarter with every use |
+| **Tool limits** → only works in specific IDEs | **MCP native**: Works with any MCP-compatible tool |
+
+---
+
+## What You Get Out of the Box
+
+- **ReFRAG-inspired micro-chunking**: Research-grade precision retrieval
+- **Self-hosted stack**: No cloud dependency, no vendor lock-in
+- **Universal compatibility**: Claude Code, Windsurf, Cursor, Cline, etc.
+- **Auto-syncing**: Extension watches for changes and re-indexes automatically
+- **Memory system**: Store team knowledge alongside your code
+- **Optional LLM features**: Local decoder (llama.cpp), cloud integration (GLM, MiniMax), adaptive rerank learning
+
+### Works With Your Local Files
+No complicated path setup - Context-Engine automatically handles the mapping between your local files and the search index.
+
+### Enterprise-Ready Features
+- **Built-in authentication** with session management (optional)
+- **Unified MCP endpoint** that combines indexer and memory services
+- **Automatic collection injection** for workspace-aware queries
+
+**Alternative: Direct HTTP endpoints**
 ```json
 {
   "mcpServers": {
@@ -69,27 +85,7 @@ HOST_INDEX_PATH=/path/to/your/project docker compose run --rm indexer
 }
 ```
 
-**stdio via npx (recommended)** — unified bridge with workspace awareness:
-
-```json
-{
-  "mcpServers": {
-    "context-engine": {
-      "type": "stdio",
-      "command": "npx",
-      "args": [
-        "@context-engine-bridge/context-engine-mcp-bridge",
-        "mcp-serve",
-        "--workspace", "/path/to/your/project",
-        "--indexer-url", "http://localhost:8003/mcp",
-        "--memory-url", "http://localhost:8002/mcp"
-      ]
-    }
-  }
-}
-```
-
-> See [docs/IDE_CLIENTS.md](docs/IDE_CLIENTS.md) for Cursor, Windsurf, Cline, Codex, Augment, and more.
+*Using other IDEs? See [docs/IDE_CLIENTS.md](docs/IDE_CLIENTS.md) for complete MCP configuration examples.*
 
 ---
 
@@ -125,14 +121,14 @@ HOST_INDEX_PATH=/path/to/your/project docker compose run --rm indexer
 
 ## VS Code Extension
 
-The [Context Engine Uploader](https://marketplace.visualstudio.com/items?itemName=context-engine.context-engine-uploader) extension provides:
+[Context Engine Uploader](https://marketplace.visualstudio.com/items?itemName=context-engine.context-engine-uploader) provides:
 
-- **One-click upload** — Sync your workspace to Context-Engine
+- **One-click upload** — Sync workspace to Context-Engine
 - **Auto-sync** — Watch for changes and re-index automatically
 - **Prompt+ button** — Enhance prompts with code context before sending
-- **MCP auto-config** — Writes Claude/Windsurf MCP configs for you
+- **MCP auto-config** — Writes Claude/Windsurf MCP configs
 
-> See [docs/vscode-extension.md](docs/vscode-extension.md) for full documentation.
+See [docs/vscode-extension.md](docs/vscode-extension.md) for full documentation.
 
 ---
 
@@ -153,7 +149,7 @@ The [Context Engine Uploader](https://marketplace.visualstudio.com/items?itemNam
 - `qdrant_status` — Check collection health
 - `qdrant_prune` — Remove stale entries
 
-> See [docs/MCP_API.md](docs/MCP_API.md) for complete API reference.
+See [docs/MCP_API.md](docs/MCP_API.md) for complete API reference.
 
 ---
 
@@ -197,8 +193,6 @@ flowchart LR
   I -.-> W
   W -.-> Q
 ```
-
-The VS Code extension syncs your workspace to the stack. Your IDE talks to the MCP servers, which query Qdrant for hybrid search. Optional features include a local LLM decoder (llama.cpp), cloud LLM integration (GLM, MiniMax M2), and adaptive learning that improves ranking over time.
 
 ---
 
