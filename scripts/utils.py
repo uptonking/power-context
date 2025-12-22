@@ -11,7 +11,6 @@ def sanitize_vector_name(model_name: str) -> str:
     if name in (
         "sentence-transformers/all-minilm-l6-v2",
         "sentence-transformers/all-minilm-l-6-v2",
-        "sentence-transformers/all-minilm-l6-v2",
     ):
         return "fast-all-minilm-l6-v2"
     # Common fastembed alias mapping for BGE base

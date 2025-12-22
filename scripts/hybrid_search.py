@@ -348,8 +348,33 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from scripts.utils import sanitize_vector_name as _sanitize_vector_name
-from scripts.ingest_code import ensure_collection as _ensure_collection
+from scripts.ingest_code import ensure_collection as _ensure_collection_raw
 from scripts.ingest_code import project_mini as _project_mini
+
+# Process-local cache to avoid calling ensure_collection on every search
+_ENSURED_COLLECTIONS: set = set()
+
+def _get_client_endpoint(client) -> str:
+    """Extract endpoint identifier from Qdrant client for cache scoping."""
+    try:
+        # Try to get the URL from client's internal state
+        if hasattr(client, '_client') and hasattr(client._client, '_host'):
+            return f"{client._client._host}:{getattr(client._client, '_port', 6333)}"
+        if hasattr(client, 'rest_uri'):
+            return client.rest_uri
+        # Fallback to env var (covers most single-backend cases)
+        return os.environ.get("QDRANT_URL", "localhost:6333")
+    except Exception:
+        return os.environ.get("QDRANT_URL", "localhost:6333")
+
+def _ensure_collection(client, collection: str, dim: int, vec_name: str):
+    """Cached wrapper for ensure_collection - only calls once per (endpoint, collection, vec_name) pair."""
+    endpoint = _get_client_endpoint(client)
+    cache_key = f"{endpoint}:{collection}:{vec_name}:{dim}"
+    if cache_key in _ENSURED_COLLECTIONS:
+        return
+    _ensure_collection_raw(client, collection, dim, vec_name)
+    _ENSURED_COLLECTIONS.add(cache_key)
 
 
 # RRF k: lower = denser score distribution (better for small repos)
@@ -2181,6 +2206,7 @@ def run_hybrid_search(
         except Exception:
             pass
 
+    _gate_first_ran = False
     if gate_first and refrag_on and not should_bypass_gate:
         try:
             # ReFRAG gate-first: Use MINI vectors to prefilter candidates
@@ -2221,6 +2247,8 @@ def run_hybrid_search(
             else:
                 # No candidates -> no gating
                 flt_gated = flt
+            # Mark gate-first as successful only after all logic completes
+            _gate_first_ran = True
         except Exception as e:
             if os.environ.get("DEBUG_HYBRID_SEARCH"):
                 logger.debug(f"ReFRAG gate-first failed: {e}, proceeding without gating")
@@ -2242,8 +2270,16 @@ def run_hybrid_search(
 
     flt_gated = _sanitize_filter_obj(flt_gated)
 
-    # Parallel dense query execution for multiple queries
-    if len(embedded) > 1 and os.environ.get("PARALLEL_DENSE_QUERIES", "1") == "1":
+    # Parallel dense query execution for multiple queries (threshold >= 4 to avoid thread overhead for small N)
+    try:
+        _parallel_threshold = int(os.environ.get("PARALLEL_DENSE_THRESHOLD", "4") or 4)
+    except (ValueError, TypeError):
+        logger.warning(
+            "Invalid PARALLEL_DENSE_THRESHOLD value %r, using default 4",
+            os.environ.get("PARALLEL_DENSE_THRESHOLD"),
+        )
+        _parallel_threshold = 4
+    if len(embedded) >= _parallel_threshold and os.environ.get("PARALLEL_DENSE_QUERIES", "1") == "1":
         executor = _get_query_executor()
         futures = [
             executor.submit(
@@ -2278,7 +2314,7 @@ def run_hybrid_search(
 
     # Optional ReFRAG-style mini-vector gating: add compact-vector RRF if enabled
     try:
-        if os.environ.get("REFRAG_MODE", "").strip().lower() in {
+        if not _gate_first_ran and os.environ.get("REFRAG_MODE", "").strip().lower() in {
             "1",
             "true",
             "yes",
@@ -2326,12 +2362,9 @@ def run_hybrid_search(
             prf_dw = 0.4
 
         try:
-            # Get top results for PRF context
-            top_results = []
-            for pid, rec in score_map.items():
-                top_results.append(rec["pt"])
-                if len(top_results) >= 8:  # Use top 8 for PRF
-                    break
+            # Get top results for PRF context (sorted by score, not arbitrary dict order)
+            sorted_items = sorted(score_map.items(), key=lambda x: x[1]["s"], reverse=True)
+            top_results = [rec["pt"] for _, rec in sorted_items[:8]]
 
             if top_results:
                 semantic_prf_terms = expand_queries_with_prf(
@@ -2352,7 +2385,7 @@ def run_hybrid_search(
                     # Dense semantic PRF pass
                     embedded_sem_prf = _embed_queries_cached(_model, semantic_prf_qs)
                     result_sets_sem_prf: List[List[Any]] = [
-                        dense_query(client, vec_name, v, flt, max(8, limit // 3 or 4))
+                        dense_query(client, vec_name, v, flt, max(8, limit // 3 or 4), collection)
                         for v in embedded_sem_prf
                     ]
                     for res_sem_prf in result_sets_sem_prf:
@@ -2578,6 +2611,8 @@ def run_hybrid_search(
         sym = str(md.get("symbol") or "").lower()
         sym_path = str(md.get("symbol_path") or "").lower()
         sym_text = f"{sym} {sym_path}"
+        # Pre-split symbol into parts for token-level matching (camelCase/snake_case)
+        sym_parts = set(p.lower() for p in _split_ident(md.get("symbol") or "") if len(p) >= 2)
         for q in qlist:
             ql = q.lower()
             if not ql:
@@ -2585,10 +2620,22 @@ def run_hybrid_search(
             if ql in sym_text:
                 rec["sym_sub"] += SYMBOL_BOOST
                 rec["s"] += SYMBOL_BOOST
-            if ql == sym or ql == sym_path:
+            # Exact match: full symbol OR any split part matches query
+            if ql == sym or ql == sym_path or ql in sym_parts:
                 rec["sym_eq"] += SYMBOL_EQUALITY_BOOST
                 rec["s"] += SYMBOL_EQUALITY_BOOST
         path = str(md.get("path") or "")
+        # Filename match boost: query matches file basename or stem parts
+        if path:
+            basename = path.rsplit("/", 1)[-1].lower()
+            stem = basename.rsplit(".", 1)[0] if "." in basename else basename
+            stem_parts = set(p.lower() for p in _split_ident(stem) if len(p) >= 2)
+            for q in qlist:
+                ql = q.lower()
+                if ql and len(ql) >= 3 and (ql == stem or ql in stem_parts or ql in basename):
+                    rec["sym_eq"] += SYMBOL_EQUALITY_BOOST * 0.5
+                    rec["s"] += SYMBOL_EQUALITY_BOOST * 0.5
+                    break
         if CORE_FILE_BOOST > 0.0 and path and is_core_file(path):
             rec["core"] += CORE_FILE_BOOST
             rec["s"] += CORE_FILE_BOOST
@@ -2698,9 +2745,6 @@ def run_hybrid_search(
             t = tok.strip()
             if len(t) >= 3:
                 kw.add(t)
-    # Add a few commonly relevant code tokens (helps for gate-first cases)
-    for t in ("hasidcondition", "pid_str", "matchany", "gate-first", "gatefirst"):
-        kw.add(t)
 
     import io as _io
 
@@ -2736,30 +2780,6 @@ def run_hybrid_search(
         except Exception:
             return 0
 
-    # Apply bump to top-N ranked (limited for speed)
-    topN = min(len(ranked), 200)
-    for i in range(topN):
-        m = ranked[i]
-        md = (m["pt"].payload or {}).get("metadata") or {}
-        hits = _snippet_contains(md)
-        if hits > 0 and kb > 0.0:
-            bump = min(kcap, kb * float(hits))
-            m["s"] += bump
-        # Apply comment-heavy penalty to de-emphasize comments/doc blocks
-        try:
-            if COMMENT_PENALTY > 0.0:
-                ratio = _snippet_comment_ratio(md)
-                thr = float(COMMENT_RATIO_THRESHOLD)
-                if ratio >= thr:
-                    # Scale penalty with how far ratio exceeds threshold (cap at COMMENT_PENALTY)
-                    scale = (ratio - thr) / max(1e-6, 1.0 - thr)
-                    pen = min(float(COMMENT_PENALTY), float(COMMENT_PENALTY) * max(0.0, scale))
-                    if pen > 0:
-                        m["cmt"] = float(m.get("cmt", 0.0)) - pen
-                        m["s"] -= pen
-        except Exception:
-            pass
-    # Re-sort after bump
     def _snippet_comment_ratio(md: dict) -> float:
         # Estimate fraction of non-blank lines that are comments (language-agnostic heuristics)
         try:
@@ -2826,7 +2846,29 @@ def run_hybrid_search(
             return 0.0
 
     # Apply bump to top-N ranked (limited for speed)
+    topN = min(len(ranked), 200)
+    for i in range(topN):
+        m = ranked[i]
+        md = (m["pt"].payload or {}).get("metadata") or {}
+        hits = _snippet_contains(md)
+        if hits > 0 and kb > 0.0:
+            bump = min(kcap, kb * float(hits))
+            m["s"] += bump
+        # Apply comment-heavy penalty to de-emphasize comments/doc blocks
+        try:
+            if COMMENT_PENALTY > 0.0:
+                ratio = _snippet_comment_ratio(md)
+                thr = float(COMMENT_RATIO_THRESHOLD)
+                if ratio >= thr:
+                    scale = (ratio - thr) / max(1e-6, 1.0 - thr)
+                    pen = min(float(COMMENT_PENALTY), float(COMMENT_PENALTY) * max(0.0, scale))
+                    if pen > 0:
+                        m["cmt"] = float(m.get("cmt", 0.0)) - pen
+                        m["s"] -= pen
+        except Exception:
+            pass
 
+    # Re-sort after bump
     ranked = sorted(ranked, key=_tie_key)
 
     # Cluster by path adjacency

@@ -269,12 +269,30 @@ CODE_EXTS = {
     ".ini": "ini",
     ".json": "json",
     ".tf": "terraform",
+    ".hcl": "hcl",
     ".csx": "csharp",
     ".cshtml": "razor",
     ".razor": "razor",
     ".csproj": "xml",
     ".config": "xml",
     ".resx": "xml",
+    ".dockerfile": "dockerfile",
+}
+
+# Files matched by name (no extension or special names)
+# Keys are lowercase filename patterns, values are language
+# NOTE: .env files are excluded to prevent leaking secrets to LLMs
+EXTENSIONLESS_FILES = {
+    "dockerfile": "dockerfile",
+    "makefile": "makefile",
+    "gemfile": "ruby",
+    "rakefile": "ruby",
+    "procfile": "yaml",
+    "vagrantfile": "ruby",
+    "jenkinsfile": "groovy",
+    ".gitignore": "gitignore",
+    ".dockerignore": "dockerignore",
+    ".editorconfig": "ini",
 }
 
 # --- Named vector config ---
@@ -637,10 +655,25 @@ class _Excluder:
         return False
 
 
+def _is_indexable_file(p: Path) -> bool:
+    """Check if a file should be indexed (by extension or name pattern)."""
+    # Check by extension first
+    if p.suffix.lower() in CODE_EXTS:
+        return True
+    # Check by filename (for Dockerfile, Makefile, etc.)
+    fname_lower = p.name.lower()
+    if fname_lower in EXTENSIONLESS_FILES:
+        return True
+    # Check for Dockerfile.* pattern (e.g., Dockerfile.dev, Dockerfile.prod)
+    if fname_lower.startswith("dockerfile"):
+        return True
+    return False
+
+
 def iter_files(root: Path) -> Iterable[Path]:
     # Allow passing a single file
     if root.is_file():
-        if root.suffix.lower() in CODE_EXTS and not _should_skip_explicit_file_by_excluder(root):
+        if _is_indexable_file(root) and not _should_skip_explicit_file_by_excluder(root):
             yield root
         return
 
@@ -674,7 +707,7 @@ def iter_files(root: Path) -> Iterable[Path]:
 
         for f in filenames:
             p = Path(dirpath) / f
-            if p.suffix.lower() not in CODE_EXTS:
+            if not _is_indexable_file(p):
                 continue
             relf = (rel_dir.rstrip("/") + "/" + f).replace("//", "/")
             if excl.exclude_file(relf):
@@ -703,8 +736,10 @@ def chunk_semantic(
 ) -> List[Dict]:
     """AST-aware chunking that tries to keep complete functions/classes together."""
     # Try enhanced AST analyzer first (if available)
+    # Note: ast_analyzer can use Python's built-in ast module even without tree-sitter
     use_enhanced = os.environ.get("INDEX_USE_ENHANCED_AST", "1").lower() in {"1", "true", "yes", "on"}
-    if use_enhanced and _AST_ANALYZER_AVAILABLE and language in ("python", "javascript", "typescript"):
+    _ast_supported = language in _TS_LANGUAGES or language == "python"  # Python has built-in ast fallback
+    if use_enhanced and _AST_ANALYZER_AVAILABLE and _ast_supported:
         try:
             chunks = chunk_code_semantically(text, language, max_lines, overlap)
             # Convert to expected format
@@ -721,7 +756,7 @@ def chunk_semantic(
             if os.environ.get("DEBUG_INDEXING"):
                 print(f"[DEBUG] Enhanced AST chunking failed, falling back: {e}")
     
-    if not _use_tree_sitter() or language not in ("python", "javascript", "typescript"):
+    if not _use_tree_sitter() or language not in _TS_LANGUAGES:
         # Fallback to line-based chunking
         return chunk_lines(text, max_lines, overlap)
 
@@ -1988,7 +2023,19 @@ def upsert_points(
 
 
 def detect_language(path: Path) -> str:
-    return CODE_EXTS.get(path.suffix.lower(), "unknown")
+    """Detect language from file extension or name pattern."""
+    # Check extension first
+    ext_lang = CODE_EXTS.get(path.suffix.lower())
+    if ext_lang:
+        return ext_lang
+    # Check extensionless files by name
+    fname_lower = path.name.lower()
+    if fname_lower in EXTENSIONLESS_FILES:
+        return EXTENSIONLESS_FILES[fname_lower]
+    # Handle Dockerfile.* pattern
+    if fname_lower.startswith("dockerfile"):
+        return "dockerfile"
+    return "unknown"
 
 
 def build_information(
