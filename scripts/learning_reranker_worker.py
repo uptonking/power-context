@@ -133,16 +133,36 @@ class CollectionLearner:
         self.query_expander = QueryExpander(lr=0.1)
         self.query_expander.set_collection(collection)
 
-        # GLM teacher for higher-quality supervision (optional)
-        self._glm_client = None
-        self._glm_calls = 0
+        # LLM teacher for higher-quality supervision (optional)
+        # Supports llama.cpp or GLM API - auto-detects based on env
+        self._llm_client = None
+        self._llm_runtime = None
+        self._llm_calls = 0
         if GLM_TEACHER_ENABLED:
             try:
-                from scripts.refrag_glm import GLMRefragClient
-                self._glm_client = GLMRefragClient()
-                logger.info(f"[{collection}] GLM teacher enabled (sample_rate={GLM_TEACHER_SAMPLE_RATE})")
+                # Auto-detect runtime: GLM_API_KEY -> glm, else -> llamacpp
+                runtime = os.environ.get("REFRAG_RUNTIME", "").strip().lower()
+                if not runtime:
+                    if os.environ.get("GLM_API_KEY", "").strip():
+                        runtime = "glm"
+                    else:
+                        runtime = "llamacpp"
+
+                if runtime == "glm":
+                    from scripts.refrag_glm import GLMRefragClient
+                    self._llm_client = GLMRefragClient()
+                else:
+                    from scripts.refrag_llamacpp import LlamaCppRefragClient, is_decoder_enabled
+                    if is_decoder_enabled():
+                        self._llm_client = LlamaCppRefragClient()
+                    else:
+                        logger.info(f"[{collection}] LLM teacher skipped (decoder disabled)")
+
+                if self._llm_client:
+                    self._llm_runtime = runtime
+                    logger.info(f"[{collection}] LLM teacher enabled ({runtime}, sample_rate={GLM_TEACHER_SAMPLE_RATE})")
             except Exception as e:
-                logger.warning(f"[{collection}] GLM teacher unavailable: {e}")
+                logger.warning(f"[{collection}] LLM teacher unavailable: {e}")
 
         # Metrics tracking for logging
         self._vicreg_loss_sum = 0.0
@@ -248,13 +268,15 @@ class CollectionLearner:
             parts.append(str(code)[:max_chars])
         return " ".join(parts) if parts else "empty"
 
-    def _glm_judge(self, query: str, candidates: List[Dict[str, Any]], top_k: int = 5) -> Optional[np.ndarray]:
-        """Get GLM relevance judgments for top candidates (online).
+    def _llm_judge(self, query: str, candidates: List[Dict[str, Any]], top_k: int = 5) -> Optional[np.ndarray]:
+        """Get LLM relevance judgments for top candidates.
+
+        Works with llama.cpp or GLM API (auto-detected at init).
 
         Returns:
-            scores: (n_candidates,) array with GLM-derived scores, or None if failed
+            scores: (n_candidates,) array with LLM-derived scores, or None if failed
         """
-        if not self._glm_client or not candidates:
+        if not self._llm_client or not candidates:
             return None
 
         # Only judge top-k to save API cost
@@ -275,7 +297,7 @@ class CollectionLearner:
 
         try:
             import json
-            response = self._glm_client.generate_with_soft_embeddings(
+            response = self._llm_client.generate_with_soft_embeddings(
                 prompt=prompt,
                 max_tokens=64,
                 temperature=0.1,
@@ -283,21 +305,21 @@ class CollectionLearner:
                 disable_thinking=True,  # Fast mode
             )
             data = json.loads(response)
-            glm_scores = data.get("scores", [])
+            llm_scores = data.get("scores", [])
 
-            if len(glm_scores) >= top_k:
+            if len(llm_scores) >= top_k:
                 # Normalize to 0-1 and extend to all candidates
                 scores = np.zeros(n, dtype=np.float32)
                 for i in range(top_k):
-                    scores[i] = float(glm_scores[i]) / 10.0
+                    scores[i] = float(llm_scores[i]) / 10.0
                 # Lower candidates get decaying scores
                 for i in range(top_k, n):
                     scores[i] = max(0, scores[top_k - 1] * 0.5 ** (i - top_k + 1))
 
-                self._glm_calls += 1
+                self._llm_calls += 1
                 return scores
         except Exception as e:
-            logger.debug(f"[{self.collection}] GLM judge failed: {e}")
+            logger.debug(f"[{self.collection}] LLM judge failed: {e}")
 
         return None
 
@@ -351,11 +373,11 @@ class CollectionLearner:
             hw_info = f" dense_w={self.hybrid_weights.dense_weight:.2f}"
             exp_stats = self.query_expander.get_stats()
             exp_info = f" terms={exp_stats['terms']}"
-            glm_info = f" glm={self._glm_calls}" if self._glm_client else ""
+            llm_info = f" llm={self._llm_calls}({self._llm_runtime})" if self._llm_client else ""
 
             logger.info(
                 f"[{self.collection}] Processed {processed} events | "
-                f"scorer_v{metrics['version']} refiner_v{self.refiner._version} proj_v{self.projection._version}{hw_info}{exp_info}{glm_info} | "
+                f"scorer_v{metrics['version']} refiner_v{self.refiner._version} proj_v{self.projection._version}{hw_info}{exp_info}{llm_info} | "
                 f"lr={metrics['learning_rate']:.6f} | "
                 f"avg_loss={metrics['avg_loss']:.4f}{extra_info} | converged={metrics['converged']}"
             )
@@ -404,12 +426,12 @@ class CollectionLearner:
                 doc_texts = [self._pack_doc(c) for c in candidates]
                 teacher_arr = np.array(teacher_scores, dtype=np.float32)
 
-                # ===== GLM TEACHER: Higher-quality supervision (sampled) =====
-                if self._glm_client and np.random.random() < GLM_TEACHER_SAMPLE_RATE:
-                    glm_scores = self._glm_judge(query, candidates, top_k=5)
-                    if glm_scores is not None:
-                        # Blend GLM with ONNX: GLM is more reliable, weight it higher
-                        teacher_arr = 0.3 * teacher_arr + 0.7 * glm_scores
+                # ===== LLM TEACHER: Higher-quality supervision (sampled) =====
+                if self._llm_client and np.random.random() < GLM_TEACHER_SAMPLE_RATE:
+                    llm_scores = self._llm_judge(query, candidates, top_k=5)
+                    if llm_scores is not None:
+                        # Blend LLM with ONNX: LLM is more reliable, weight it higher
+                        teacher_arr = 0.3 * teacher_arr + 0.7 * llm_scores
 
                 # ===== ENCODE WITH CACHE FOR PROJECTION LEARNING =====
                 # Query embedding with cache for gradient backprop
