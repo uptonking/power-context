@@ -36,7 +36,7 @@ QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
 DEFAULT_COLLECTION = (
     os.environ.get("DEFAULT_COLLECTION")
     or os.environ.get("COLLECTION_NAME")
-    or "my-collection"
+    or "codebase"
 )
 LEX_VECTOR_NAME = os.environ.get("LEX_VECTOR_NAME", "lex")
 LEX_VECTOR_DIM = int(os.environ.get("LEX_VECTOR_DIM", "4096") or 4096)

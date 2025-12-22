@@ -58,7 +58,7 @@ ROOT = Path(os.environ.get("WATCH_ROOT", "/work")).resolve()
 
 # Back-compat: legacy modules/tests expect a module-level COLLECTION constant.
 # It will be updated in main() once the resolved collection is known.
-COLLECTION = os.environ.get("COLLECTION_NAME", "my-collection")
+COLLECTION = os.environ.get("COLLECTION_NAME", "codebase")
 
 # Debounce interval
 DELAY_SECS = float(os.environ.get("WATCH_DEBOUNCE_SECS", "1.0"))
@@ -88,7 +88,7 @@ def _get_collection_for_repo(repo_path: Path) -> str:
     by consulting workspace_state. Falls back to the legacy per-repo hashed
     collection naming when no mapping exists.
     """
-    default_coll = os.environ.get("COLLECTION_NAME", "my-collection")
+    default_coll = os.environ.get("COLLECTION_NAME", "codebase")
     try:
         repo_name = _extract_repo_name_from_path(str(repo_path))
     except Exception:
@@ -154,11 +154,11 @@ def _get_collection_for_repo(repo_path: Path) -> str:
 
 def _get_collection_for_file(file_path: Path) -> str:
     if not is_multi_repo_mode():
-        return os.environ.get("COLLECTION_NAME", "my-collection")
+        return os.environ.get("COLLECTION_NAME", "codebase")
     repo_path = _detect_repo_for_file(file_path)
     if repo_path is not None:
         return _get_collection_for_repo(repo_path)
-    return os.environ.get("COLLECTION_NAME", "my-collection")
+    return os.environ.get("COLLECTION_NAME", "codebase")
 
 
 class ChangeQueue:
@@ -817,7 +817,7 @@ def main():
     except Exception:
         multi_repo_enabled = False
 
-    default_collection = os.environ.get("COLLECTION_NAME", "my-collection")
+    default_collection = os.environ.get("COLLECTION_NAME", "codebase")
     # In multi-repo mode, per-repo collections are resolved via _get_collection_for_file
     # and workspace_state; avoid deriving a root-level collection like "/work-<hash>".
     if _get_coll and not multi_repo_enabled:

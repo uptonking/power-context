@@ -134,7 +134,7 @@ def _collection(collection_name: str | None = None) -> str:
     except Exception:
         pass
 
-    return "my-collection"
+    return "codebase"
 
 
 MODEL_NAME = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
