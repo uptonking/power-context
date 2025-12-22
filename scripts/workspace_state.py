@@ -769,8 +769,9 @@ def get_collection_state_snapshot(
         "staging": None,
     }
 
+    staging_enabled = bool(is_staging_enabled() if callable(is_staging_enabled) else False)
     staging_info = state.get("staging")
-    if isinstance(staging_info, dict) and staging_info.get("collection"):
+    if staging_enabled and isinstance(staging_info, dict) and staging_info.get("collection"):
         snapshot["staging"] = {
             "collection": staging_info.get("collection"),
             "status": staging_info.get("status"),
@@ -779,9 +780,6 @@ def get_collection_state_snapshot(
             "env_hash": staging_info.get("env_hash"),
             "workspace_path": staging_info.get("workspace_path"),
             "repo_name": staging_info.get("repo_name") or repo_name,
-            "indexing_config": staging_info.get("indexing_config"),
-            "indexing_config_hash": staging_info.get("indexing_config_hash"),
-            "environment": staging_info.get("environment"),
         }
 
     return snapshot
