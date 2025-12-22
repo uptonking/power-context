@@ -123,7 +123,9 @@ def _collection(collection_name: str | None = None) -> str:
     # Read persisted qdrant_collection from .codebase/state.json (consistent with mcp_indexer_server)
     try:
         import json
-        state_file = Path("/work/.codebase/state.json")
+        # Use WORKSPACE_PATH / WATCH_ROOT env vars, fallback to /work for Docker compatibility
+        workspace_root = Path(os.environ.get("WORKSPACE_PATH") or os.environ.get("WATCH_ROOT") or "/work")
+        state_file = workspace_root / ".codebase" / "state.json"
         if state_file.exists():
             with open(state_file, "r", encoding="utf-8") as f:
                 state = json.load(f)
