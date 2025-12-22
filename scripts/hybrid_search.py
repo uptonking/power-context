@@ -120,12 +120,17 @@ def _collection(collection_name: str | None = None) -> str:
     if env_coll:
         return env_coll
 
-    # Check workspace state (consistent with mcp_indexer_server)
+    # Read persisted qdrant_collection from .codebase/state.json (consistent with mcp_indexer_server)
     try:
-        from scripts.workspace_state import get_collection_name
-        ws_coll = get_collection_name()
-        if ws_coll:
-            return ws_coll
+        import json
+        state_file = Path("/work/.codebase/state.json")
+        if state_file.exists():
+            with open(state_file, "r", encoding="utf-8") as f:
+                state = json.load(f)
+            if isinstance(state, dict):
+                coll = state.get("qdrant_collection")
+                if isinstance(coll, str) and coll.strip():
+                    return coll.strip()
     except Exception:
         pass
 

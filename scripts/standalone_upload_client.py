@@ -1567,7 +1567,7 @@ class RemoteUploadClient:
 
             # Single walk with early pruning and set-based matching to reduce IO
             ext_suffixes = {str(ext).lower() for ext in CODE_EXTS if str(ext).startswith('.')}
-            name_matches = {str(ext) for ext in CODE_EXTS if not str(ext).startswith('.')}
+            extensionless_names = set(EXTENSIONLESS_FILES.keys())
             # Always exclude dev-workspace to prevent recursive upload loops
             # (upload service creates dev-workspace/<collection>/ which would otherwise get re-uploaded)
             excluded = {
@@ -1584,14 +1584,15 @@ class RemoteUploadClient:
                 dirnames[:] = [d for d in dirnames if d not in excluded and not d.startswith('.')]
 
                 for filename in filenames:
-                    if filename.startswith('.'):
+                    # Allow dotfiles that are in EXTENSIONLESS_FILES (e.g., .gitignore)
+                    fname_lower = filename.lower()
+                    if filename.startswith('.') and fname_lower not in extensionless_names:
                         continue
                     candidate = Path(root) / filename
                     suffix = candidate.suffix.lower()
-                    fname_lower = filename.lower()
-                    # Match by extension, exact name, or Dockerfile.* prefix
+                    # Match by extension, extensionless name, or Dockerfile.* prefix
                     if (suffix in ext_suffixes or
-                        filename in name_matches or
+                        fname_lower in extensionless_names or
                         fname_lower.startswith("dockerfile")):
                         resolved = candidate.resolve()
                         if resolved not in seen:
