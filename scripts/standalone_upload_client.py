@@ -44,6 +44,7 @@ logger = logging.getLogger(__name__)
 
 # Language detection mapping (from ingest_code.py)
 CODE_EXTS = {
+    # Core languages
     ".py": "python",
     ".js": "javascript",
     ".ts": "typescript",
@@ -60,13 +61,18 @@ CODE_EXTS = {
     ".cc": "cpp",
     ".hpp": "cpp",
     ".cs": "csharp",
+    ".csx": "csharp",
     ".kt": "kotlin",
     ".swift": "swift",
     ".scala": "scala",
+    # Shell/scripting
     ".sh": "shell",
     ".ps1": "powershell",
     ".psm1": "powershell",
     ".psd1": "powershell",
+    ".pl": "perl",
+    ".lua": "lua",
+    # Data/config
     ".sql": "sql",
     ".md": "markdown",
     ".yml": "yaml",
@@ -75,30 +81,33 @@ CODE_EXTS = {
     ".ini": "ini",
     ".cfg": "ini",
     ".conf": "ini",
+    ".json": "json",
     ".xml": "xml",
+    ".csproj": "xml",
+    ".config": "xml",
+    ".resx": "xml",
+    # Web
     ".html": "html",
     ".htm": "html",
     ".css": "css",
     ".scss": "scss",
     ".sass": "sass",
     ".less": "less",
-    ".json": "json",
-    "Dockerfile": "dockerfile",
-    "Makefile": "makefile",
-    ".tf": "terraform",
-    ".tfvars": "terraform",
-    ".hcl": "terraform",
     ".vue": "vue",
     ".svelte": "svelte",
+    ".cshtml": "razor",
+    ".razor": "razor",
+    # Infrastructure
+    ".tf": "terraform",
+    ".tfvars": "terraform",
+    ".hcl": "hcl",
+    ".dockerfile": "dockerfile",
+    # Additional languages
     ".elm": "elm",
     ".dart": "dart",
-    ".lua": "lua",
     ".r": "r",
     ".R": "r",
     ".m": "matlab",
-    ".pl": "perl",
-    ".swift": "swift",
-    ".kt": "kotlin",
     ".cljs": "clojure",
     ".clj": "clojure",
     ".hs": "haskell",
@@ -110,8 +119,41 @@ CODE_EXTS = {
     ".vhdl": "vhdl",
     ".asm": "assembly",
     ".s": "assembly",
-    ". Dockerfile": "dockerfile",
 }
+
+# Files matched by name (no extension or special names)
+# Synced with ingest_code.py EXTENSIONLESS_FILES
+# NOTE: .env files are excluded to prevent leaking secrets to LLMs
+EXTENSIONLESS_FILES = {
+    "dockerfile": "dockerfile",
+    "makefile": "makefile",
+    "gemfile": "ruby",
+    "rakefile": "ruby",
+    "procfile": "yaml",
+    "vagrantfile": "ruby",
+    "jenkinsfile": "groovy",
+    ".gitignore": "gitignore",
+    ".dockerignore": "dockerignore",
+    ".editorconfig": "ini",
+}
+
+
+def detect_language(path: Path) -> str:
+    """Detect language from file path, handling extensionless files like Dockerfile.*"""
+    # Check extension first
+    lang = CODE_EXTS.get(path.suffix.lower())
+    if lang:
+        return lang
+    # Check extensionless files by name (lowercase)
+    fname_lower = path.name.lower()
+    lang = EXTENSIONLESS_FILES.get(fname_lower)
+    if lang:
+        return lang
+    # Check Dockerfile.* pattern
+    if fname_lower.startswith("dockerfile"):
+        return "dockerfile"
+    return "unknown"
+
 
 def hash_id(text: str, path: str, start: int, end: int) -> str:
     """Generate hash ID for content (from ingest_code.py)."""
@@ -879,7 +921,7 @@ class RemoteUploadClient:
 
                     # Get file info
                     stat = path.stat()
-                    language = CODE_EXTS.get(path.suffix.lower(), "unknown")
+                    language = detect_language(path)
 
                     operation = {
                         "operation": "created",
@@ -918,7 +960,7 @@ class RemoteUploadClient:
 
                     # Get file info
                     stat = path.stat()
-                    language = CODE_EXTS.get(path.suffix.lower(), "unknown")
+                    language = detect_language(path)
 
                     operation = {
                         "operation": "updated",
@@ -958,7 +1000,7 @@ class RemoteUploadClient:
 
                     # Get file info
                     stat = dest_path.stat()
-                    language = CODE_EXTS.get(dest_path.suffix.lower(), "unknown")
+                    language = detect_language(dest_path)
 
                     operation = {
                         "operation": "moved",
@@ -997,7 +1039,7 @@ class RemoteUploadClient:
                         "previous_hash": f"sha1:{previous_hash}" if previous_hash else None,
                         "file_hash": None,
                         "modified_time": datetime.now().isoformat(),
-                        "language": CODE_EXTS.get(path.suffix.lower(), "unknown")
+                        "language": detect_language(path)
                     }
                     operations.append(operation)
                     # Once a delete operation has been recorded, drop the cache entry
@@ -1546,7 +1588,11 @@ class RemoteUploadClient:
                         continue
                     candidate = Path(root) / filename
                     suffix = candidate.suffix.lower()
-                    if filename in name_matches or suffix in ext_suffixes:
+                    fname_lower = filename.lower()
+                    # Match by extension, exact name, or Dockerfile.* prefix
+                    if (suffix in ext_suffixes or
+                        filename in name_matches or
+                        fname_lower.startswith("dockerfile")):
                         resolved = candidate.resolve()
                         if resolved not in seen:
                             seen.add(resolved)

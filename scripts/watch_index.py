@@ -326,8 +326,8 @@ class IndexHandler(FileSystemEventHandler):
             rel_dir = "/"
         if self.excl.exclude_dir(rel_dir):
             return
-        # only code files
-        if p.suffix.lower() not in idx.CODE_EXTS:
+        # only code files (check extension AND extensionless files like Dockerfile)
+        if not idx.is_indexable_file(p):
             return
         # file-level excludes
         relf = (rel_dir.rstrip("/") + "/" + p.name).replace("//", "/")
@@ -353,7 +353,7 @@ class IndexHandler(FileSystemEventHandler):
         if any(part == ".codebase" for part in p.parts):
             return
         # Only attempt deletion for code files we would have indexed
-        if p.suffix.lower() not in idx.CODE_EXTS:
+        if not idx.is_indexable_file(p):
             return
         if self.client is not None:
             try:
@@ -413,11 +413,8 @@ class IndexHandler(FileSystemEventHandler):
             dest = Path(event.dest_path).resolve()
         except Exception:
             return
-        # Only react to code files
-        if (
-            dest.suffix.lower() not in idx.CODE_EXTS
-            and src.suffix.lower() not in idx.CODE_EXTS
-        ):
+        # Only react to code files (including extensionless like Dockerfile)
+        if not idx.is_indexable_file(dest) and not idx.is_indexable_file(src):
             return
         # If destination directory is ignored, treat as simple deletion
         try:
@@ -427,7 +424,7 @@ class IndexHandler(FileSystemEventHandler):
             if rel_dir == "/.":
                 rel_dir = "/"
             if self.excl.exclude_dir(rel_dir):
-                if src.suffix.lower() in idx.CODE_EXTS:
+                if idx.is_indexable_file(src):
                     try:
                         if is_multi_repo_mode():
                             coll = _get_collection_for_file(src)
@@ -509,7 +506,7 @@ class IndexHandler(FileSystemEventHandler):
             return
         if self.client is not None:
             try:
-                if src.suffix.lower() in idx.CODE_EXTS:
+                if idx.is_indexable_file(src):
                     try:
                         idx.delete_points_by_path(self.client, src_collection, str(src))
                     except Exception:
