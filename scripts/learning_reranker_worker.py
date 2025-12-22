@@ -29,7 +29,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -45,12 +45,28 @@ from scripts.rerank_events import (
     list_event_files,
     cleanup_old_events,
 )
-from scripts.rerank_recursive import TinyScorer, LatentRefiner, RecursiveReranker
+from scripts.rerank_recursive import (
+    TinyScorer,
+    LatentRefiner,
+    RecursiveReranker,
+    VICReg,
+    LearnedProjection,
+    LearnedHybridWeights,
+    QueryExpander,
+)
 
 # Configuration
 BATCH_SIZE = int(os.environ.get("RERANK_LEARNING_BATCH_SIZE", "32"))
 POLL_INTERVAL = float(os.environ.get("RERANK_LEARNING_POLL_INTERVAL", "30"))
 LEARNING_RATE = float(os.environ.get("RERANK_LEARNING_RATE", "0.001"))
+
+# VICReg configuration
+VICREG_WEIGHT = float(os.environ.get("RERANK_VICREG_WEIGHT", "0.1"))
+VICREG_MIN_BATCH = int(os.environ.get("RERANK_VICREG_MIN_BATCH", "4"))  # Need 4+ samples for covariance
+
+# GLM teacher configuration (online learning with LLM judgments)
+GLM_TEACHER_ENABLED = os.environ.get("RERANK_GLM_TEACHER", "0") == "1"
+GLM_TEACHER_SAMPLE_RATE = float(os.environ.get("RERANK_GLM_SAMPLE_RATE", "0.2"))  # 20% of queries get GLM judgment
 
 
 def get_logger():
@@ -81,7 +97,18 @@ class CollectionLearner:
         self.scorer.set_collection(collection)
         self.refiner = LatentRefiner(dim=self.scorer.dim, lr=LEARNING_RATE)
         self.refiner.set_collection(collection)
+
+        # Learned projection: BGE (768) → working dim (256)
+        # Lower LR than scorer/refiner - projection is more sensitive
+        self.projection = LearnedProjection(
+            input_dim=768,  # BGE base output dim
+            output_dim=self.scorer.dim,
+            lr=LEARNING_RATE * 0.5,  # Half the learning rate
+        )
+        self.projection.set_collection(collection)
+
         self._last_processed_ts = self._load_checkpoint()
+
         # Reuse the serving reranker's embed + project code path 1:1.
         # We only use its private feature helpers, not its scoring loop.
         self._feature_reranker = RecursiveReranker(
@@ -90,6 +117,40 @@ class CollectionLearner:
             early_stop=False,
             blend_with_initial=0.0,
         )
+
+        # VICReg for residual regularization (prevents collapse, decorrelates)
+        self.vicreg = VICReg(
+            lambda_var=1.0,
+            lambda_cov=0.04,
+            lambda_inv=0.1,
+        ) if VICREG_WEIGHT > 0 else None
+
+        # Learned hybrid weights: dense vs. lexical balance
+        self.hybrid_weights = LearnedHybridWeights(lr=0.01)
+        self.hybrid_weights.set_collection(collection)
+
+        # Query expander: learns synonyms/related terms from usage
+        self.query_expander = QueryExpander(lr=0.1)
+        self.query_expander.set_collection(collection)
+
+        # GLM teacher for higher-quality supervision (optional)
+        self._glm_client = None
+        self._glm_calls = 0
+        if GLM_TEACHER_ENABLED:
+            try:
+                from scripts.refrag_glm import GLMRefragClient
+                self._glm_client = GLMRefragClient()
+                logger.info(f"[{collection}] GLM teacher enabled (sample_rate={GLM_TEACHER_SAMPLE_RATE})")
+            except Exception as e:
+                logger.warning(f"[{collection}] GLM teacher unavailable: {e}")
+
+        # Metrics tracking for logging
+        self._vicreg_loss_sum = 0.0
+        self._vicreg_count = 0
+        self._proj_grad_norm_sum = 0.0
+        self._proj_grad_count = 0
+        self._hybrid_updates = 0
+        self._expander_updates = 0
 
     @staticmethod
     def _sanitize_collection(collection: str) -> str:
@@ -151,10 +212,28 @@ class CollectionLearner:
                 except Exception:
                     pass
 
+    def _encode(self, texts: List[str]) -> np.ndarray:
+        """Encode texts to BGE embeddings (768-dim, raw without projection)."""
+        return self._feature_reranker._encode_raw(texts)
+
     def _encode_project(self, texts: List[str]) -> np.ndarray:
-        """Encode + project via the serving reranker code path."""
-        embs = self._feature_reranker._encode(texts)
-        return self._feature_reranker._project_to_dim(embs)
+        """Encode + project via learned projection (for inference/serving compat)."""
+        embs = self._encode(texts)
+        return self.projection.forward(embs)
+
+    def _encode_project_with_cache(
+        self, texts: List[str]
+    ) -> Tuple[np.ndarray, Dict[str, Any]]:
+        """Encode + project with cache for gradient backprop through projection.
+
+        Returns:
+            projected: (batch, output_dim) projected embeddings
+            cache: dict with raw_embs and projection cache for backward pass
+        """
+        raw_embs = self._encode(texts)  # (batch, 768)
+        projected, proj_cache = self.projection.forward_with_cache(raw_embs)
+        cache = {"raw_embs": raw_embs, "proj_cache": proj_cache}
+        return projected, cache
 
     @staticmethod
     def _pack_doc(candidate: Dict[str, Any], max_chars: int = 500) -> str:
@@ -168,6 +247,59 @@ class CollectionLearner:
         if code:
             parts.append(str(code)[:max_chars])
         return " ".join(parts) if parts else "empty"
+
+    def _glm_judge(self, query: str, candidates: List[Dict[str, Any]], top_k: int = 5) -> Optional[np.ndarray]:
+        """Get GLM relevance judgments for top candidates (online).
+
+        Returns:
+            scores: (n_candidates,) array with GLM-derived scores, or None if failed
+        """
+        if not self._glm_client or not candidates:
+            return None
+
+        # Only judge top-k to save API cost
+        n = len(candidates)
+        top_k = min(top_k, n)
+
+        # Build prompt for GLM to rate relevance
+        prompt_parts = [f"Rate code search relevance 0-10 for query: \"{query}\"\n"]
+        for i in range(top_k):
+            c = candidates[i]
+            doc = self._pack_doc(c, max_chars=300)
+            prompt_parts.append(f"[{i}] {doc[:400]}")
+
+        prompt_parts.append(
+            "\nRespond with JSON: {\"scores\": [N, N, ...]} where each N is 0-10 relevance."
+        )
+        prompt = "\n".join(prompt_parts)
+
+        try:
+            import json
+            response = self._glm_client.generate_with_soft_embeddings(
+                prompt=prompt,
+                max_tokens=64,
+                temperature=0.1,
+                force_json=True,
+                disable_thinking=True,  # Fast mode
+            )
+            data = json.loads(response)
+            glm_scores = data.get("scores", [])
+
+            if len(glm_scores) >= top_k:
+                # Normalize to 0-1 and extend to all candidates
+                scores = np.zeros(n, dtype=np.float32)
+                for i in range(top_k):
+                    scores[i] = float(glm_scores[i]) / 10.0
+                # Lower candidates get decaying scores
+                for i in range(top_k, n):
+                    scores[i] = max(0, scores[top_k - 1] * 0.5 ** (i - top_k + 1))
+
+                self._glm_calls += 1
+                return scores
+        except Exception as e:
+            logger.debug(f"[{self.collection}] GLM judge failed: {e}")
+
+        return None
 
     def process_events(self, limit: int = 1000) -> int:
         """Process pending events and return count processed."""
@@ -200,19 +332,59 @@ class CollectionLearner:
             self.scorer._save_weights(checkpoint=True)
             self.refiner._save_weights(checkpoint=True)
             metrics = self.scorer.get_metrics()
+
+            # VICReg + projection info
+            extra_info = ""
+            if self._vicreg_count > 0:
+                avg_vicreg = self._vicreg_loss_sum / self._vicreg_count
+                extra_info += f" | vicreg={avg_vicreg:.4f}"
+                self._vicreg_loss_sum = 0.0
+                self._vicreg_count = 0
+
+            if self._proj_grad_count > 0:
+                avg_proj_grad = self._proj_grad_norm_sum / self._proj_grad_count
+                extra_info += f" | proj_grad={avg_proj_grad:.4f}"
+                self._proj_grad_norm_sum = 0.0
+                self._proj_grad_count = 0
+
+            # Hybrid weight, expander, and GLM stats
+            hw_info = f" dense_w={self.hybrid_weights.dense_weight:.2f}"
+            exp_stats = self.query_expander.get_stats()
+            exp_info = f" terms={exp_stats['terms']}"
+            glm_info = f" glm={self._glm_calls}" if self._glm_client else ""
+
             logger.info(
                 f"[{self.collection}] Processed {processed} events | "
-                f"scorer_v{metrics['version']} refiner_v{self.refiner._version} | "
+                f"scorer_v{metrics['version']} refiner_v{self.refiner._version} proj_v{self.projection._version}{hw_info}{exp_info}{glm_info} | "
                 f"lr={metrics['learning_rate']:.6f} | "
-                f"avg_loss={metrics['avg_loss']:.4f} | converged={metrics['converged']}"
+                f"avg_loss={metrics['avg_loss']:.4f}{extra_info} | converged={metrics['converged']}"
             )
 
         return processed
 
     def _learn_from_batch(self, events: List[Dict[str, Any]]):
-        """Learn from a batch of events (trains both TinyScorer and LatentRefiner)."""
+        """Learn from batch with 3-pass deep supervision + VICReg + projection learning.
+
+        Full end-to-end learning:
+        - Projection: BGE (768) → working dim (256), learns domain-specific subspace
+        - Scorer: learns to rank with current z
+        - Refiner: learns to improve z toward teacher-optimal state
+        - VICReg: regularizes residuals to prevent collapse
+
+        Deep Supervision (TRM-style):
+        - Each refinement pass gets a loss signal toward teacher_z
+        - Later passes have decaying weight (pass 1: 1.0, pass 2: 0.7, pass 3: 0.5)
+        """
         # Fill missing teacher scores in batch (amortizes ONNX overhead)
         self._maybe_fill_teacher_scores(events)
+
+        # Accumulate data for end-of-batch updates
+        vicreg_data: List[tuple] = []  # [(z, z_refined, refiner_cache), ...]
+        projection_grads: List[Tuple[np.ndarray, Dict[str, Any]]] = []  # [(grad, proj_cache), ...]
+
+        # Deep supervision weights: earlier passes contribute more
+        pass_weights = [1.0, 0.7, 0.5]
+        n_passes = 3
 
         for event in events:
             try:
@@ -225,37 +397,121 @@ class CollectionLearner:
 
                 # Validate alignment between candidates and teacher scores
                 if len(teacher_scores) != len(candidates):
-                    logger.warning(f"[{self.collection}] Skipping event: teacher_scores length {len(teacher_scores)} != candidates {len(candidates)}")
+                    logger.warning(f"[{self.collection}] Skipping event: mismatched lengths")
                     continue
 
-                # Build doc texts from candidates (same packing as teacher scoring)
+                # Build doc texts from candidates
                 doc_texts = [self._pack_doc(c) for c in candidates]
-
-                # Encode query and docs (1:1 with serving embed+project)
-                query_emb = self._encode_project([query])[0]
-                doc_embs = self._encode_project(doc_texts)
                 teacher_arr = np.array(teacher_scores, dtype=np.float32)
 
-                # Initialize latent state
-                z = query_emb.copy()
+                # ===== GLM TEACHER: Higher-quality supervision (sampled) =====
+                if self._glm_client and np.random.random() < GLM_TEACHER_SAMPLE_RATE:
+                    glm_scores = self._glm_judge(query, candidates, top_k=5)
+                    if glm_scores is not None:
+                        # Blend GLM with ONNX: GLM is more reliable, weight it higher
+                        teacher_arr = 0.3 * teacher_arr + 0.7 * glm_scores
 
-                # Train TinyScorer: learn to match teacher ranking
-                self.scorer.learn_from_teacher(query_emb, doc_embs, z, teacher_arr)
+                # ===== ENCODE WITH CACHE FOR PROJECTION LEARNING =====
+                # Query embedding with cache for gradient backprop
+                query_proj, query_proj_cache = self._encode_project_with_cache([query])
+                query_emb = query_proj[0]
 
-                # Train LatentRefiner: learn to refine z toward teacher-optimal state
+                # Doc embeddings with cache for gradient backprop
+                doc_embs, doc_proj_cache = self._encode_project_with_cache(doc_texts)
+
                 # Compute teacher-weighted document summary as target z
                 teacher_weights = np.exp(teacher_arr - teacher_arr.max())
                 teacher_weights = teacher_weights / (teacher_weights.sum() + 1e-8)
                 teacher_z = (teacher_weights[:, None] * doc_embs).sum(axis=0)
                 teacher_z = teacher_z / (np.linalg.norm(teacher_z) + 1e-8)
 
-                # Get current scores for refiner input
-                our_scores = self.scorer.forward(query_emb, doc_embs, z)
-                self.refiner.learn_from_teacher(z, query_emb, doc_embs, our_scores, teacher_z)
+                # Initialize latent state from query
+                z = query_emb.copy()
+
+                # ===== PROJECTION GRADIENT: Contrastive alignment loss =====
+                # Goal: projection should produce embeddings where query is close to
+                # high-scoring docs and far from low-scoring docs
+                # Gradient w.r.t. query: weighted by teacher scores
+                # Push query toward high-teacher-score docs
+                query_grad = (teacher_weights[:, None] * doc_embs).sum(axis=0) - query_emb
+                query_grad = query_grad / (np.linalg.norm(query_grad) + 1e-8)
+
+                # Gradient w.r.t. docs: each doc pulled/pushed based on teacher score
+                # High score docs: pull toward query, Low score docs: push away
+                centered_weights = teacher_weights - teacher_weights.mean()
+                doc_grad = centered_weights[:, None] * (query_emb - doc_embs)
+
+                projection_grads.append((query_grad.reshape(1, -1), query_proj_cache))
+                projection_grads.append((doc_grad, doc_proj_cache))
+
+                # ===== LEARN HYBRID WEIGHTS (dense vs. lexical) =====
+                # Extract dense/lexical scores if available in candidates
+                if candidates and "dense_score" in candidates[0] and "lexical_score" in candidates[0]:
+                    dense_scores = np.array([c.get("dense_score", 0) for c in candidates], dtype=np.float32)
+                    lexical_scores = np.array([c.get("lexical_score", 0) for c in candidates], dtype=np.float32)
+                    self.hybrid_weights.learn_from_teacher(dense_scores, lexical_scores, teacher_arr)
+                    self._hybrid_updates += 1
+
+                # ===== LEARN QUERY EXPANSIONS =====
+                # Learn term associations from high-scoring docs
+                self.query_expander.learn_from_teacher(query, doc_texts, teacher_arr)
+                self._expander_updates += 1
+
+                # ===== 3-PASS DEEP SUPERVISION =====
+                for pass_idx in range(n_passes):
+                    # Score with current z
+                    scores = self.scorer.forward(query_emb, doc_embs, z)
+
+                    # Train scorer at this pass (learns to rank with current z)
+                    self.scorer.learn_from_teacher(query_emb, doc_embs, z, teacher_arr)
+
+                    # Train refiner: z → z' toward teacher_z
+                    if self.vicreg is not None:
+                        # Get cache for VICReg backprop
+                        _, z_orig, z_refined, cache = self.refiner.learn_from_teacher_with_cache(
+                            z, query_emb, doc_embs, scores, teacher_z
+                        )
+                        cache["pass_weight"] = pass_weights[pass_idx]
+                        vicreg_data.append((z_orig, z_refined, cache))
+                    else:
+                        self.refiner.learn_from_teacher(z, query_emb, doc_embs, scores, teacher_z)
+
+                    # Update z for next pass (refinement chain)
+                    z = self.refiner.refine(z, query_emb, doc_embs, scores)
 
             except Exception as e:
                 logger.warning(f"[{self.collection}] Error processing event: {e}")
                 continue
+
+        # ===== PROJECTION LEARNING: batch update =====
+        if projection_grads:
+            try:
+                for grad, cache in projection_grads:
+                    self.projection.backward(grad, cache["proj_cache"], weight=0.1)
+                    self._proj_grad_norm_sum += np.linalg.norm(grad)
+                    self._proj_grad_count += 1
+            except Exception as e:
+                logger.warning(f"[{self.collection}] Projection update failed: {e}")
+
+        # ===== VICReg: batch-level residual regularization =====
+        if self.vicreg is not None and len(vicreg_data) >= VICREG_MIN_BATCH:
+            try:
+                z_batch = np.vstack([item[0] for item in vicreg_data])
+                z_refined_batch = np.vstack([item[1] for item in vicreg_data])
+
+                vicreg_loss, vicreg_grad, _ = self.vicreg.forward(z_batch, z_refined_batch)
+
+                self._vicreg_loss_sum += vicreg_loss
+                self._vicreg_count += 1
+
+                for i, (_, _, cache) in enumerate(vicreg_data):
+                    pass_weight = cache.get("pass_weight", 1.0)
+                    self.refiner.apply_vicreg_gradient(
+                        vicreg_grad[i], cache, weight=VICREG_WEIGHT * pass_weight
+                    )
+
+            except Exception as e:
+                logger.warning(f"[{self.collection}] VICReg failed: {e}")
 
     def _maybe_fill_teacher_scores(self, events: List[Dict[str, Any]]):
         """Compute teacher scores for events that don't already have them."""

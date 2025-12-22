@@ -78,7 +78,8 @@ def get_candidates(query: str, limit: int = 30) -> List[Dict[str, Any]]:
         from scripts.hybrid_search import run_hybrid_search
         from scripts.embedder import get_embedding_model
 
-        model_name = os.environ.get("EMBEDDING_MODEL", "Alibaba-NLP/gte-base-en-v1.5")
+        # Use BAAI/bge-base-en-v1.5 which is supported by fastembed
+        model_name = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
         model = get_embedding_model(model_name)
 
         results = run_hybrid_search(

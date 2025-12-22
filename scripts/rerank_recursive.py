@@ -1098,6 +1098,108 @@ class LatentRefiner:
         self._update_count += 1
         return loss
 
+    def learn_from_teacher_with_cache(
+        self,
+        z: np.ndarray,
+        query_emb: np.ndarray,
+        doc_embs: np.ndarray,
+        scores: np.ndarray,
+        teacher_z: np.ndarray,
+    ) -> Tuple[float, np.ndarray, np.ndarray, Dict[str, Any]]:
+        """
+        Online learning with cache for VICReg backprop.
+
+        Like learn_from_teacher(), but returns (z, z_refined, cache) for
+        batch-level VICReg regularization.
+
+        Returns:
+            (loss, z, z_refined, cache)
+        """
+        # Forward pass with cache
+        z_refined, cache = self.refine_with_cache(z, query_emb, doc_embs, scores)
+
+        # MSE loss: ||z_refined - teacher_z||^2
+        diff = z_refined - teacher_z
+        loss = float(np.sum(diff ** 2))
+
+        if loss >= 1e-8:
+            # Backward pass (gradient of MSE)
+            dz_refined = 2.0 * diff
+
+            # Through normalization (approx - assume near unit norm)
+            dz_new = cache["alpha"] * dz_refined
+
+            # Through W2, b2
+            dW2 = np.outer(cache["h"], dz_new)
+            db2 = dz_new
+
+            # Through ReLU and W1, b1
+            dh = dz_new @ self.W2.T
+            dh = dh * (cache["h"] > 0).astype(np.float32)
+            dW1 = np.outer(cache["x"], dh)
+            db1 = dh
+
+            # SGD with momentum
+            momentum = 0.9
+            if self._momentum_W1 is None:
+                self._momentum_W1 = np.zeros_like(self.W1)
+                self._momentum_b1 = np.zeros_like(self.b1)
+                self._momentum_W2 = np.zeros_like(self.W2)
+                self._momentum_b2 = np.zeros_like(self.b2)
+
+            self._momentum_W1 = momentum * self._momentum_W1 - self.lr * dW1
+            self._momentum_b1 = momentum * self._momentum_b1 - self.lr * db1
+            self._momentum_W2 = momentum * self._momentum_W2 - self.lr * dW2
+            self._momentum_b2 = momentum * self._momentum_b2 - self.lr * db2
+
+            self.W1 += self._momentum_W1
+            self.b1 += self._momentum_b1
+            self.W2 += self._momentum_W2
+            self.b2 += self._momentum_b2
+
+            self._update_count += 1
+
+        return loss, z, z_refined, cache
+
+    def apply_vicreg_gradient(
+        self,
+        grad_z_refined: np.ndarray,
+        cache: Dict[str, Any],
+        weight: float = 0.1,
+    ):
+        """
+        Apply VICReg gradient to refiner weights.
+
+        Called after VICReg.forward() computes gradient w.r.t. z_refined.
+        Backprops through the refiner network to update W1, b1, W2, b2.
+
+        Args:
+            grad_z_refined: (dim,) gradient from VICReg
+            cache: Cache from refine_with_cache() or learn_from_teacher_with_cache()
+            weight: Scaling factor for the regularization gradient
+        """
+        # Backprop through z_refined = alpha * z_new + (1-alpha) * z
+        # d/dz_new = alpha * grad_z_refined
+        dz_new = cache["alpha"] * grad_z_refined * weight
+
+        # Through W2, b2: z_new = h @ W2 + b2
+        dW2 = np.outer(cache["h"], dz_new)
+        db2 = dz_new
+
+        # Through ReLU: h = max(0, pre_h)
+        dh = dz_new @ self.W2.T
+        dh = dh * (cache["h"] > 0).astype(np.float32)
+
+        # Through W1, b1: pre_h = x @ W1 + b1
+        dW1 = np.outer(cache["x"], dh)
+        db1 = dh
+
+        # Apply gradients directly (VICReg uses same LR as main training)
+        self.W1 -= self.lr * dW1
+        self.b1 -= self.lr * db1
+        self.W2 -= self.lr * dW2
+        self.b2 -= self.lr * db2
+
     def _save_weights(self, checkpoint: bool = False):
         """Save weights to disk atomically with file locking.
 
@@ -1142,6 +1244,693 @@ class LatentRefiner:
                 except Exception:
                     pass
             raise
+
+
+# ---------------------------------------------------------------------------
+# VICReg: Variance-Invariance-Covariance Regularization for Latent Refinement
+# ---------------------------------------------------------------------------
+#
+# Adapted from VICReg (Bardes et al., 2021) for online 3-pass reranking.
+#
+# For a refiner that produces z' from z, we regularize the RESIDUAL Δz = z' - z.
+# This is appropriate for learned ranking because:
+#   - The residual represents "what the predictor learned to add"
+#   - Prevents representation collapse (all residuals becoming identical)
+#   - Encourages decorrelated, informative updates
+#
+# Three terms:
+#   1. VARIANCE: std(Δz) ≈ target per dimension → prevents collapse
+#   2. COVARIANCE: cov(Δz_i, Δz_j) ≈ 0 for i≠j → decorrelation
+#   3. INVARIANCE: ||Δz||² small → bounded updates (stability)
+#
+# Loss = λ_var * var_loss + λ_cov * cov_loss + λ_inv * inv_loss
+# ---------------------------------------------------------------------------
+
+
+class VICReg:
+    """
+    VICReg regularization for refinement residuals.
+
+    Regularizes the refiner's residual (z_refined - z) to have:
+    - Unit variance per dimension (prevents collapse)
+    - Decorrelated dimensions (prevents redundancy)
+    - Bounded magnitude (stable updates)
+
+    Designed for online learning: accumulate residuals across a batch,
+    then call forward() once at batch end.
+
+    Reference: VICReg (Bardes et al., 2021)
+    """
+
+    def __init__(
+        self,
+        lambda_var: float = 1.0,
+        lambda_cov: float = 0.04,
+        lambda_inv: float = 0.1,
+        var_target: float = 1.0,
+    ):
+        """
+        Args:
+            lambda_var: Weight for variance loss (prevent collapse)
+            lambda_cov: Weight for covariance loss (decorrelation)
+            lambda_inv: Weight for invariance loss (bounded updates)
+            var_target: Target std deviation per dimension (default 1.0)
+        """
+        self.lambda_var = lambda_var
+        self.lambda_cov = lambda_cov
+        self.lambda_inv = lambda_inv
+        self.var_target = var_target
+
+    def forward(
+        self, z_batch: np.ndarray, z_refined_batch: np.ndarray
+    ) -> Tuple[float, np.ndarray, Dict[str, float]]:
+        """
+        Compute VICReg loss and gradient w.r.t. z_refined.
+
+        Args:
+            z_batch: (N, dim) original latent states
+            z_refined_batch: (N, dim) refined latent states
+
+        Returns:
+            (total_loss, grad_z_refined, loss_components)
+            - grad_z_refined: gradient w.r.t. z_refined_batch (N, dim)
+            - loss_components: dict with var_loss, cov_loss, inv_loss
+        """
+        N, dim = z_batch.shape
+        eps = 1e-8
+
+        # Residual = what the refiner added
+        residual = z_refined_batch - z_batch  # (N, dim)
+        mean_res = residual.mean(axis=0, keepdims=True)  # (1, dim)
+        residual_centered = residual - mean_res  # (N, dim)
+
+        # ===== 1. VARIANCE LOSS =====
+        # Goal: std(residual) ≈ var_target per dimension
+        # Loss: mean(max(0, var_target - std))  [hinge loss]
+        std = residual.std(axis=0) + eps  # (dim,)
+        var_diff = self.var_target - std  # positive when std too small
+        var_loss = float(np.maximum(0, var_diff).mean())
+
+        # Gradient: d(hinge)/d(residual)
+        hinge_mask = (var_diff > 0).astype(np.float32)  # (dim,)
+        d_var = -hinge_mask[None, :] * residual_centered / (N * std[None, :] * dim)
+
+        # ===== 2. COVARIANCE LOSS =====
+        # Goal: off-diagonal covariance ≈ 0
+        # Loss: sum(cov_ij^2) / dim for i ≠ j
+        cov = (residual_centered.T @ residual_centered) / (N - 1 + eps)  # (dim, dim)
+        off_diag_mask = 1.0 - np.eye(dim, dtype=np.float32)
+        off_diag = cov * off_diag_mask
+        cov_loss = float((off_diag ** 2).sum() / dim)
+
+        # Gradient: d(L)/d(residual)
+        d_cov = 4 * residual_centered @ (off_diag * off_diag_mask) / ((N - 1 + eps) * dim)
+
+        # ===== 3. INVARIANCE LOSS =====
+        # Goal: residual magnitude bounded
+        # Loss: mean(||residual||²)
+        inv_loss = float((residual ** 2).mean())
+
+        # Gradient: d(mean(x²))/d(x) = 2x / (N * dim)
+        d_inv = 2 * residual / (N * dim)
+
+        # ===== TOTAL =====
+        total_loss = (
+            self.lambda_var * var_loss
+            + self.lambda_cov * cov_loss
+            + self.lambda_inv * inv_loss
+        )
+
+        # Gradient w.r.t. z_refined (residual = z_refined - z, so d/dz_refined = d/dresidual)
+        grad = (
+            self.lambda_var * d_var
+            + self.lambda_cov * d_cov
+            + self.lambda_inv * d_inv
+        ).astype(np.float32)
+
+        components = {
+            "var_loss": var_loss,
+            "cov_loss": cov_loss,
+            "inv_loss": inv_loss,
+        }
+
+        return total_loss, grad, components
+
+
+class LearnedProjection:
+    """
+    Learnable linear projection from embedding dim to working dim.
+
+    Replaces fixed random projection with a learnable layer that adapts
+    to domain-specific semantics. Key for true "self-learning search".
+
+    Features:
+    - Per-collection weights (like TinyScorer/LatentRefiner)
+    - Gradient from downstream scorer/refiner backprops through
+    - VICReg-compatible: can receive regularization gradients
+    - Hot-reload from background worker updates
+
+    Architecture:
+        input (768) → linear → normalize → output (256)
+
+    The projection learns which subspace of BGE is most useful for code search.
+    """
+
+    WEIGHTS_DIR = os.environ.get("RERANKER_WEIGHTS_DIR", "/tmp/rerank_weights")
+    WEIGHTS_RELOAD_INTERVAL = float(os.environ.get("RERANKER_WEIGHTS_RELOAD_INTERVAL", "60"))
+
+    def __init__(
+        self,
+        input_dim: int = 768,
+        output_dim: int = 256,
+        lr: float = 0.0005,  # Lower LR than scorer - projection is more sensitive
+    ):
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.base_lr = lr
+        self.lr = lr
+        self._collection = "default"
+        self._weights_path = self._get_weights_path("default")
+        self._weights_mtime = 0.0
+        self._last_reload_check = 0.0
+        self._weights_loaded = False
+
+        # Training metrics
+        self._update_count = 0
+        self._version = 0
+
+        # Momentum for SGD
+        self._momentum_W: Optional[np.ndarray] = None
+        self._momentum = 0.9
+
+        # Try to load saved weights, otherwise init random
+        if os.path.exists(self._weights_path):
+            try:
+                self._load_weights()
+                return
+            except Exception as e:
+                from scripts.logger import get_logger
+                get_logger(__name__).warning(f"LearnedProjection: failed to load {self._weights_path}: {e}")
+
+        self._init_random_weights()
+
+    @staticmethod
+    def _sanitize_collection(collection: str) -> str:
+        return "".join(c if c.isalnum() or c in "-_" else "_" for c in collection)
+
+    def _get_weights_path(self, collection: str) -> str:
+        safe_name = self._sanitize_collection(collection)
+        return os.path.join(self.WEIGHTS_DIR, f"projection_{safe_name}.npz")
+
+    def _init_random_weights(self):
+        """Initialize with scaled random weights (Xavier-style)."""
+        scale = np.sqrt(2.0 / (self.input_dim + self.output_dim))
+        rng = np.random.RandomState(44)  # Deterministic init
+        self.W = (rng.randn(self.input_dim, self.output_dim) * scale).astype(np.float32)
+        self._momentum_W = np.zeros_like(self.W)
+
+    def set_collection(self, collection: str):
+        """Set collection and load corresponding weights."""
+        self._collection = collection
+        self._weights_path = self._get_weights_path(collection)
+        if os.path.exists(self._weights_path):
+            try:
+                self._load_weights()
+            except Exception:
+                pass
+
+    def maybe_reload_weights(self):
+        """Check if weights file changed and reload if needed."""
+        now = time.time()
+        if now - self._last_reload_check < self.WEIGHTS_RELOAD_INTERVAL:
+            return
+        self._last_reload_check = now
+
+        try:
+            if os.path.exists(self._weights_path):
+                mtime = os.path.getmtime(self._weights_path)
+                if mtime > self._weights_mtime:
+                    self._load_weights()
+        except Exception:
+            pass
+
+    def _load_weights(self):
+        """Load weights from disk."""
+        import fcntl
+        lock_path = self._weights_path + ".lock"
+        try:
+            os.makedirs(os.path.dirname(lock_path) or ".", exist_ok=True)
+            with open(lock_path, "w") as lock_file:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_SH)
+                data = np.load(self._weights_path)
+                self.W = data["W"].astype(np.float32)
+                self._version = int(data.get("version", 0))
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            self._weights_mtime = os.path.getmtime(self._weights_path)
+            self._weights_loaded = True
+            self._momentum_W = np.zeros_like(self.W)
+        except Exception as e:
+            from scripts.logger import get_logger
+            get_logger(__name__).warning(f"LearnedProjection: load failed: {e}")
+
+    def _save_weights(self):
+        """Save weights to disk atomically."""
+        import fcntl
+        os.makedirs(os.path.dirname(self._weights_path) or ".", exist_ok=True)
+        lock_path = self._weights_path + ".lock"
+        # np.savez adds .npz extension, so use base path without extension for tmp
+        base_path = self._weights_path.rsplit(".npz", 1)[0]
+        tmp_path = base_path + ".tmp.npz"
+
+        try:
+            with open(lock_path, "w") as lock_file:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                np.savez(tmp_path, W=self.W, version=self._version)
+                os.replace(tmp_path, self._weights_path)
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            self._weights_mtime = os.path.getmtime(self._weights_path)
+        except Exception as e:
+            from scripts.logger import get_logger
+            get_logger(__name__).warning(f"LearnedProjection: save failed: {e}")
+
+    def forward(self, embeddings: np.ndarray) -> np.ndarray:
+        """Project embeddings to output dim (normalized).
+
+        Args:
+            embeddings: (batch, input_dim) or (input_dim,)
+
+        Returns:
+            projected: (batch, output_dim) or (output_dim,), L2-normalized
+        """
+        squeeze = embeddings.ndim == 1
+        if squeeze:
+            embeddings = embeddings.reshape(1, -1)
+
+        # Linear projection
+        projected = embeddings @ self.W  # (batch, output_dim)
+
+        # L2 normalize
+        norms = np.linalg.norm(projected, axis=-1, keepdims=True) + 1e-8
+        projected = projected / norms
+
+        if squeeze:
+            projected = projected[0]
+
+        return projected
+
+    def forward_with_cache(
+        self, embeddings: np.ndarray
+    ) -> Tuple[np.ndarray, Dict[str, Any]]:
+        """Forward pass with cache for backprop.
+
+        Returns:
+            projected: (batch, output_dim), L2-normalized
+            cache: dict with inputs for backward pass
+        """
+        squeeze = embeddings.ndim == 1
+        if squeeze:
+            embeddings = embeddings.reshape(1, -1)
+
+        # Linear projection
+        pre_norm = embeddings @ self.W  # (batch, output_dim)
+
+        # L2 normalize
+        norms = np.linalg.norm(pre_norm, axis=-1, keepdims=True) + 1e-8
+        projected = pre_norm / norms
+
+        cache = {
+            "input": embeddings,
+            "pre_norm": pre_norm,
+            "norms": norms,
+            "projected": projected,
+        }
+
+        if squeeze:
+            projected = projected[0]
+
+        return projected, cache
+
+    def backward(
+        self, grad_output: np.ndarray, cache: Dict[str, Any], weight: float = 1.0
+    ):
+        """Backprop gradient through projection and update weights.
+
+        Args:
+            grad_output: gradient w.r.t. projected output (batch, output_dim) or (output_dim,)
+            cache: from forward_with_cache
+            weight: gradient scaling factor
+        """
+        if grad_output.ndim == 1:
+            grad_output = grad_output.reshape(1, -1)
+
+        embeddings = cache["input"]
+        norms = cache["norms"]
+
+        batch_size = embeddings.shape[0]
+
+        # Backprop through L2 normalization
+        # d/dx (x/||x||) = (I - x*x^T/||x||^2) / ||x||
+        # Simplified: grad_pre_norm = (grad_output - projected * (grad_output · projected)) / norms
+        projected = cache["projected"]
+        dot = np.sum(grad_output * projected, axis=-1, keepdims=True)
+        grad_pre_norm = (grad_output - projected * dot) / norms
+
+        # Gradient w.r.t. W: dL/dW = input^T @ grad_pre_norm
+        dW = embeddings.T @ grad_pre_norm / batch_size
+
+        # Apply weight and update with momentum SGD
+        dW = dW * weight
+        self._momentum_W = self._momentum * self._momentum_W + dW
+        self.W -= self.lr * self._momentum_W
+
+        self._update_count += 1
+
+        # Periodic save
+        if self._update_count % 100 == 0:
+            self._version += 1
+            self._save_weights()
+
+
+class LearnedHybridWeights:
+    """
+    Learns optimal dense vs. lexical balance per-collection.
+
+    The hybrid score is: score = sigmoid(alpha) * dense + (1 - sigmoid(alpha)) * lexical
+
+    Where alpha is learned from teacher feedback:
+    - If teacher prefers results that dense ranked higher → increase alpha
+    - If teacher prefers results that lexical ranked higher → decrease alpha
+
+    Features:
+    - Per-collection weights
+    - Online gradient updates from teacher signal
+    - Bounded between 0 and 1 via sigmoid
+    """
+
+    WEIGHTS_DIR = os.environ.get("RERANKER_WEIGHTS_DIR", "/tmp/rerank_weights")
+
+    def __init__(self, lr: float = 0.01):
+        self.lr = lr
+        self._collection = "default"
+        self._weights_path = self._get_weights_path("default")
+
+        # Alpha controls dense weight: dense_w = sigmoid(alpha)
+        # Initialize at 0 → sigmoid(0) = 0.5 (equal weighting)
+        self.alpha = 0.0
+
+        # Momentum
+        self._momentum_alpha = 0.0
+        self._momentum = 0.9
+
+        # Metrics
+        self._update_count = 0
+        self._version = 0
+
+        # Try to load saved weights
+        if os.path.exists(self._weights_path):
+            try:
+                self._load_weights()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _sanitize_collection(collection: str) -> str:
+        return "".join(c if c.isalnum() or c in "-_" else "_" for c in collection)
+
+    def _get_weights_path(self, collection: str) -> str:
+        safe_name = self._sanitize_collection(collection)
+        return os.path.join(self.WEIGHTS_DIR, f"hybrid_{safe_name}.npz")
+
+    def set_collection(self, collection: str):
+        self._collection = collection
+        self._weights_path = self._get_weights_path(collection)
+        if os.path.exists(self._weights_path):
+            try:
+                self._load_weights()
+            except Exception:
+                pass
+
+    def _load_weights(self):
+        import fcntl
+        lock_path = self._weights_path + ".lock"
+        os.makedirs(os.path.dirname(lock_path) or ".", exist_ok=True)
+        with open(lock_path, "w") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_SH)
+            data = np.load(self._weights_path)
+            self.alpha = float(data["alpha"])
+            self._version = int(data.get("version", 0))
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    def _save_weights(self):
+        import fcntl
+        os.makedirs(os.path.dirname(self._weights_path) or ".", exist_ok=True)
+        lock_path = self._weights_path + ".lock"
+        tmp_path = self._weights_path + ".tmp"
+        with open(lock_path, "w") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            np.savez(tmp_path, alpha=self.alpha, version=self._version)
+            os.replace(tmp_path, self._weights_path)
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    @property
+    def dense_weight(self) -> float:
+        """Current dense weight (0-1)."""
+        return 1.0 / (1.0 + np.exp(-self.alpha))
+
+    @property
+    def lexical_weight(self) -> float:
+        """Current lexical weight (0-1)."""
+        return 1.0 - self.dense_weight
+
+    def blend(
+        self, dense_scores: np.ndarray, lexical_scores: np.ndarray
+    ) -> np.ndarray:
+        """Blend dense and lexical scores with learned weights."""
+        w = self.dense_weight
+        return w * dense_scores + (1 - w) * lexical_scores
+
+    def learn_from_teacher(
+        self,
+        dense_scores: np.ndarray,
+        lexical_scores: np.ndarray,
+        teacher_scores: np.ndarray,
+    ):
+        """Update alpha based on which modality better matches teacher.
+
+        Gradient: d_loss/d_alpha = (teacher - blended) * (dense - lexical) * sigmoid'(alpha)
+        If teacher prefers dense-high docs more than blended → increase alpha
+        """
+        w = self.dense_weight
+        blended = self.blend(dense_scores, lexical_scores)
+
+        # Normalize scores for comparison
+        teacher_norm = (teacher_scores - teacher_scores.mean()) / (teacher_scores.std() + 1e-8)
+        blended_norm = (blended - blended.mean()) / (blended.std() + 1e-8)
+        dense_norm = (dense_scores - dense_scores.mean()) / (dense_scores.std() + 1e-8)
+        lexical_norm = (lexical_scores - lexical_scores.mean()) / (lexical_scores.std() + 1e-8)
+
+        # Error: how much blended differs from teacher ranking
+        error = teacher_norm - blended_norm  # (n_docs,)
+
+        # Modality difference: positive where dense > lexical
+        modality_diff = dense_norm - lexical_norm  # (n_docs,)
+
+        # Gradient: push alpha toward modality that matches teacher better
+        # sigmoid'(alpha) = w * (1 - w)
+        sigmoid_grad = w * (1 - w)
+        grad = (error * modality_diff).mean() * sigmoid_grad
+
+        # Momentum SGD
+        self._momentum_alpha = self._momentum * self._momentum_alpha + grad
+        self.alpha += self.lr * self._momentum_alpha
+
+        # Clamp to prevent extreme values
+        self.alpha = np.clip(self.alpha, -5.0, 5.0)
+
+        self._update_count += 1
+        if self._update_count % 50 == 0:
+            self._version += 1
+            self._save_weights()
+
+
+class QueryExpander:
+    """
+    Learns query expansions (synonyms/related terms) from usage patterns.
+
+    Observes which terms co-occur with successful retrievals and builds
+    a lightweight term→expansion mapping per-collection.
+
+    Features:
+    - Learns from teacher feedback: which doc terms appear in high-scoring results
+    - Per-collection expansion vocabulary
+    - Confidence-weighted: only expands with high-confidence associations
+    - Decay: old associations fade without reinforcement
+    """
+
+    WEIGHTS_DIR = os.environ.get("RERANKER_WEIGHTS_DIR", "/tmp/rerank_weights")
+    MAX_EXPANSIONS_PER_TERM = 5
+    MIN_CONFIDENCE = 0.3
+    DECAY_RATE = 0.995  # Per-update decay for old associations
+
+    def __init__(self, lr: float = 0.1):
+        self.lr = lr
+        self._collection = "default"
+        self._weights_path = self._get_weights_path("default")
+
+        # term → {expansion_term: confidence}
+        # confidence in [0, 1], higher = stronger association
+        self.expansions: Dict[str, Dict[str, float]] = {}
+
+        self._update_count = 0
+        self._version = 0
+
+        if os.path.exists(self._weights_path):
+            try:
+                self._load_weights()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _sanitize_collection(collection: str) -> str:
+        return "".join(c if c.isalnum() or c in "-_" else "_" for c in collection)
+
+    def _get_weights_path(self, collection: str) -> str:
+        safe_name = self._sanitize_collection(collection)
+        return os.path.join(self.WEIGHTS_DIR, f"expander_{safe_name}.json")
+
+    def set_collection(self, collection: str):
+        self._collection = collection
+        self._weights_path = self._get_weights_path(collection)
+        if os.path.exists(self._weights_path):
+            try:
+                self._load_weights()
+            except Exception:
+                pass
+
+    def _load_weights(self):
+        import json
+        import fcntl
+        lock_path = self._weights_path + ".lock"
+        os.makedirs(os.path.dirname(lock_path) or ".", exist_ok=True)
+        with open(lock_path, "w") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_SH)
+            with open(self._weights_path, "r") as f:
+                data = json.load(f)
+            self.expansions = data.get("expansions", {})
+            self._version = data.get("version", 0)
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    def _save_weights(self):
+        import json
+        import fcntl
+        os.makedirs(os.path.dirname(self._weights_path) or ".", exist_ok=True)
+        lock_path = self._weights_path + ".lock"
+        tmp_path = self._weights_path + ".tmp"
+        with open(lock_path, "w") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            with open(tmp_path, "w") as f:
+                json.dump({"expansions": self.expansions, "version": self._version}, f)
+            os.replace(tmp_path, self._weights_path)
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    def _tokenize(self, text: str) -> List[str]:
+        """Simple tokenization for expansion learning."""
+        # Use the same tokenizer as the rest of the system
+        tokens = re.findall(r'[a-zA-Z_][a-zA-Z0-9_]*', text.lower())
+        # Filter common tokens
+        return [t for t in tokens if len(t) > 2 and t not in _COMMON_TOKENS]
+
+    def expand(self, query: str, max_expansions: int = 3) -> List[str]:
+        """Return expansion terms for the query.
+
+        Args:
+            query: Original query string
+            max_expansions: Max terms to add
+
+        Returns:
+            List of expansion terms (may be empty)
+        """
+        query_tokens = set(self._tokenize(query))
+        candidates: List[Tuple[str, float]] = []
+
+        for token in query_tokens:
+            if token in self.expansions:
+                for exp_term, conf in self.expansions[token].items():
+                    if exp_term not in query_tokens and conf >= self.MIN_CONFIDENCE:
+                        candidates.append((exp_term, conf))
+
+        # Sort by confidence, take top
+        candidates.sort(key=lambda x: -x[1])
+        return [term for term, _ in candidates[:max_expansions]]
+
+    def learn_from_teacher(
+        self,
+        query: str,
+        doc_texts: List[str],
+        teacher_scores: np.ndarray,
+    ):
+        """Learn term associations from teacher-scored documents.
+
+        High-scoring docs contribute their terms as expansions for query terms.
+        """
+        query_tokens = set(self._tokenize(query))
+        if not query_tokens:
+            return
+
+        # Normalize teacher scores to weights
+        weights = np.exp(teacher_scores - teacher_scores.max())
+        weights = weights / (weights.sum() + 1e-8)
+
+        # Collect doc terms weighted by teacher score
+        doc_term_weights: Dict[str, float] = {}
+        for doc_text, weight in zip(doc_texts, weights):
+            for token in self._tokenize(doc_text):
+                if token not in query_tokens:  # Only non-query terms
+                    doc_term_weights[token] = doc_term_weights.get(token, 0.0) + weight
+
+        # Update expansion associations
+        for query_term in query_tokens:
+            if query_term not in self.expansions:
+                self.expansions[query_term] = {}
+
+            term_expansions = self.expansions[query_term]
+
+            # Decay existing associations
+            for exp in list(term_expansions.keys()):
+                term_expansions[exp] = float(term_expansions[exp] * self.DECAY_RATE)
+                if term_expansions[exp] < 0.01:
+                    del term_expansions[exp]
+
+            # Reinforce associations from high-scoring docs
+            for doc_term, weight in doc_term_weights.items():
+                if weight > 0.1:  # Only significant weights
+                    old_conf = term_expansions.get(doc_term, 0.0)
+                    # EMA update
+                    new_conf = old_conf + self.lr * (weight - old_conf)
+                    # Convert to native float for JSON serialization
+                    term_expansions[doc_term] = float(min(new_conf, 1.0))
+
+            # Prune to max expansions per term
+            if len(term_expansions) > self.MAX_EXPANSIONS_PER_TERM * 2:
+                sorted_exp = sorted(term_expansions.items(), key=lambda x: -x[1])
+                self.expansions[query_term] = dict(sorted_exp[:self.MAX_EXPANSIONS_PER_TERM])
+
+        self._update_count += 1
+        if self._update_count % 20 == 0:
+            self._version += 1
+            self._save_weights()
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Return stats about learned expansions."""
+        total_terms = len(self.expansions)
+        total_expansions = sum(len(v) for v in self.expansions.values())
+        avg_expansions = total_expansions / max(total_terms, 1)
+        return {
+            "terms": total_terms,
+            "expansions": total_expansions,
+            "avg_per_term": avg_expansions,
+            "version": self._version,
+        }
 
 
 class ConfidenceEstimator:
@@ -1317,6 +2106,46 @@ class RecursiveReranker:
             result[idx] = new_embeddings[i]
 
         return np.array(result, dtype=np.float32)
+
+    def _encode_raw(self, texts: List[str]) -> np.ndarray:
+        """Encode texts to raw embeddings WITHOUT projection (for learner).
+
+        Returns embeddings in the model's native dimension (e.g., 768 for BGE).
+        Used by CollectionLearner to learn the projection matrix.
+        """
+        embedder = self._get_embedder()
+        if embedder is None:
+            # Fallback to random embeddings
+            import hashlib
+            result = []
+            for text in texts:
+                text_hash = hashlib.sha256(text.encode("utf-8", errors="replace")).digest()
+                seed = int.from_bytes(text_hash[:4], "big")
+                rng = np.random.RandomState(seed)
+                vec = rng.randn(768).astype(np.float32)  # BGE base dim
+                vec = vec / (np.linalg.norm(vec) + 1e-8)
+                result.append(vec)
+            return np.array(result, dtype=np.float32)
+
+        try:
+            embeddings = list(embedder.embed(texts))
+            result = []
+            for emb in embeddings:
+                emb_arr = np.array(emb, dtype=np.float32)
+                result.append(emb_arr)
+            return np.array(result, dtype=np.float32)
+        except Exception:
+            # Fallback
+            import hashlib
+            result = []
+            for text in texts:
+                text_hash = hashlib.sha256(text.encode("utf-8", errors="replace")).digest()
+                seed = int.from_bytes(text_hash[:4], "big")
+                rng = np.random.RandomState(seed)
+                vec = rng.randn(768).astype(np.float32)
+                vec = vec / (np.linalg.norm(vec) + 1e-8)
+                result.append(vec)
+            return np.array(result, dtype=np.float32)
 
     def _project_to_dim(self, embeddings: np.ndarray) -> np.ndarray:
         """Project embeddings to target dimension if needed (cached for efficiency)."""
