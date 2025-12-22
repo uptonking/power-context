@@ -398,7 +398,7 @@ def copy_collection_qdrant(
                         except Exception as exc:
                             raise RuntimeError(f"Failed to upsert points into {dest}: {exc}") from exc
 
-                if not next_offset:
+                if next_offset is None:
                     break
                 offset = next_offset
         finally:

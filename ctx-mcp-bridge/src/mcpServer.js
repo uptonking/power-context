@@ -251,7 +251,7 @@ function isTransientToolError(error) {
 // to the remote qdrant-indexer MCP server while adding a local `ping` tool.
 
 const ADMIN_SESSION_COOKIE_NAME = "ctxce_session";
-const SLUGGED_REPO_RE = /.+-[0-9a-f]{16}$/i;
+const SLUGGED_REPO_RE = /.+-[0-9a-f]{16}(?:_old)?$/i;
 const BRIDGE_STATE_TOKEN = (process.env.CTXCE_BRIDGE_STATE_TOKEN || "").trim();
 
 function normalizeBackendUrl(candidate) {

@@ -316,7 +316,7 @@ def process_delta_bundle(workspace_path: str, bundle_path: Path, manifest: Dict[
                             target_path.unlink(missing_ok=True)
                             return True
                         else:
-                            return False  # Already deleted
+                            return True  # Already deleted
 
                     elif op_type == "moved":
                         if safe_source_path and safe_source_path.exists():

@@ -477,7 +477,7 @@ async def auth_status():
             )
         return AuthStatusResponse(
             enabled=True,
-            has_users=has_users(),
+            has_users=users_exist,
             session_ttl_seconds=AUTH_SESSION_TTL_SECONDS,
         )
     except Exception as e:
