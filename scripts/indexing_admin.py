@@ -350,9 +350,10 @@ def build_admin_collections_view(*, collections: Any, work_dir: str) -> List[Dic
             except Exception:
                 staging_status = "none"
 
+        # "maintenance needed" should reflect actual config drift requiring a maintenance reindex.
+        # Pending hashes can exist during staging / queued rebuild flows; keep them visible in the UI
+        # but do not treat them as drift.
         needs_reindex = bool(env_hash and applied_hash and env_hash != applied_hash)
-        if pending_hash:
-            needs_reindex = True
 
         try:
             cid = getattr(c, "id", None) if hasattr(c, "id") else c.get("id")  # type: ignore[union-attr]

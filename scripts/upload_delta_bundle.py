@@ -323,8 +323,22 @@ def process_delta_bundle(workspace_path: str, bundle_path: Path, manifest: Dict[
                             target_path.parent.mkdir(parents=True, exist_ok=True)
                             safe_source_path.rename(target_path)
                             return True
-                        else:
+                        # Remote uploads may not have the source file on the server (e.g. staging
+                        # mirrors). In that case, clients can embed the destination content under
+                        # files/moved/<dest>.
+                        file_member = None
+                        for member in tar.getnames():
+                            if member.endswith(f"files/moved/{rel_path}"):
+                                file_member = member
+                                break
+                        if file_member:
+                            file_content = tar.extractfile(file_member)
+                            if file_content:
+                                target_path.parent.mkdir(parents=True, exist_ok=True)
+                                target_path.write_bytes(file_content.read())
+                                return True
                             return False
+                        return False
 
                     else:
                         logger.warning(f"[upload_service] Unknown operation type: {op_type}")
