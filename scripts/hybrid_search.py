@@ -111,7 +111,7 @@ logger = logging.getLogger("hybrid_search")
 
 
 def _collection(collection_name: str | None = None) -> str:
-    """Determine collection name with priority: CLI arg > env > default."""
+    """Determine collection name with priority: CLI arg > env > workspace state > default."""
 
     if collection_name and collection_name.strip():
         return collection_name.strip()
@@ -119,6 +119,15 @@ def _collection(collection_name: str | None = None) -> str:
     env_coll = os.environ.get("COLLECTION_NAME", "").strip()
     if env_coll:
         return env_coll
+
+    # Check workspace state (consistent with mcp_indexer_server)
+    try:
+        from scripts.workspace_state import get_collection_name
+        ws_coll = get_collection_name()
+        if ws_coll:
+            return ws_coll
+    except Exception:
+        pass
 
     return "my-collection"
 
