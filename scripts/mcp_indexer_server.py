@@ -257,7 +257,7 @@ QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
 DEFAULT_COLLECTION = (
     os.environ.get("DEFAULT_COLLECTION")
     or os.environ.get("COLLECTION_NAME")
-    or "my-collection"
+    or "codebase"
 )
 try:
     from scripts.workspace_state import get_collection_name as _ws_get_collection_name  # type: ignore
@@ -2565,7 +2565,7 @@ async def repo_search(
         coll_hint = env_coll
 
     # Final fallback
-    env_fallback = (os.environ.get("DEFAULT_COLLECTION") or os.environ.get("COLLECTION_NAME") or "my-collection").strip()
+    env_fallback = (os.environ.get("DEFAULT_COLLECTION") or os.environ.get("COLLECTION_NAME") or "codebase").strip()
     collection = coll_hint or env_fallback
 
     _require_collection_access((sess or {}).get("user_id") if sess else None, collection, "read")

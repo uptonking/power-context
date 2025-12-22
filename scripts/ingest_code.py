@@ -238,6 +238,7 @@ def _use_tree_sitter() -> bool:
 
 
 CODE_EXTS = {
+    # Core languages
     ".py": "python",
     ".js": "javascript",
     ".ts": "typescript",
@@ -254,29 +255,64 @@ CODE_EXTS = {
     ".cc": "cpp",
     ".hpp": "cpp",
     ".cs": "csharp",
+    ".csx": "csharp",
     ".kt": "kotlin",
     ".swift": "swift",
     ".scala": "scala",
+    # Shell/scripting
     ".sh": "shell",
     ".ps1": "powershell",
     ".psm1": "powershell",
     ".psd1": "powershell",
+    ".pl": "perl",
+    ".lua": "lua",
+    # Data/config
     ".sql": "sql",
     ".md": "markdown",
     ".yml": "yaml",
     ".yaml": "yaml",
     ".toml": "toml",
     ".ini": "ini",
+    ".cfg": "ini",
+    ".conf": "ini",
     ".json": "json",
-    ".tf": "terraform",
-    ".hcl": "hcl",
-    ".csx": "csharp",
-    ".cshtml": "razor",
-    ".razor": "razor",
+    ".xml": "xml",
     ".csproj": "xml",
     ".config": "xml",
     ".resx": "xml",
+    # Web
+    ".html": "html",
+    ".htm": "html",
+    ".css": "css",
+    ".scss": "scss",
+    ".sass": "sass",
+    ".less": "less",
+    ".vue": "vue",
+    ".svelte": "svelte",
+    ".cshtml": "razor",
+    ".razor": "razor",
+    # Infrastructure
+    ".tf": "terraform",
+    ".tfvars": "terraform",
+    ".hcl": "hcl",
     ".dockerfile": "dockerfile",
+    # Additional languages
+    ".elm": "elm",
+    ".dart": "dart",
+    ".r": "r",
+    ".R": "r",
+    ".m": "matlab",
+    ".cljs": "clojure",
+    ".clj": "clojure",
+    ".hs": "haskell",
+    ".ml": "ocaml",
+    ".zig": "zig",
+    ".nim": "nim",
+    ".v": "verilog",
+    ".sv": "verilog",
+    ".vhdl": "vhdl",
+    ".asm": "assembly",
+    ".s": "assembly",
 }
 
 # Files matched by name (no extension or special names)
@@ -655,8 +691,11 @@ class _Excluder:
         return False
 
 
-def _is_indexable_file(p: Path) -> bool:
-    """Check if a file should be indexed (by extension or name pattern)."""
+def is_indexable_file(p: Path) -> bool:
+    """Check if a file should be indexed (by extension or name pattern).
+
+    Public API for use by watch_index and other modules.
+    """
     # Check by extension first
     if p.suffix.lower() in CODE_EXTS:
         return True
@@ -668,6 +707,10 @@ def _is_indexable_file(p: Path) -> bool:
     if fname_lower.startswith("dockerfile"):
         return True
     return False
+
+
+# Backward-compatible alias
+_is_indexable_file = is_indexable_file
 
 
 def iter_files(root: Path) -> Iterable[Path]:

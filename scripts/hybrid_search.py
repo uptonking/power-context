@@ -111,7 +111,7 @@ logger = logging.getLogger("hybrid_search")
 
 
 def _collection(collection_name: str | None = None) -> str:
-    """Determine collection name with priority: CLI arg > env > default."""
+    """Determine collection name with priority: CLI arg > env > workspace state > default."""
 
     if collection_name and collection_name.strip():
         return collection_name.strip()
@@ -120,7 +120,23 @@ def _collection(collection_name: str | None = None) -> str:
     if env_coll:
         return env_coll
 
-    return "my-collection"
+    # Read persisted qdrant_collection from .codebase/state.json (consistent with mcp_indexer_server)
+    try:
+        import json
+        # Use WORKSPACE_PATH / WATCH_ROOT env vars, fallback to /work for Docker compatibility
+        workspace_root = Path(os.environ.get("WORKSPACE_PATH") or os.environ.get("WATCH_ROOT") or "/work")
+        state_file = workspace_root / ".codebase" / "state.json"
+        if state_file.exists():
+            with open(state_file, "r", encoding="utf-8") as f:
+                state = json.load(f)
+            if isinstance(state, dict):
+                coll = state.get("qdrant_collection")
+                if isinstance(coll, str) and coll.strip():
+                    return coll.strip()
+    except Exception:
+        pass
+
+    return "codebase"
 
 
 MODEL_NAME = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
