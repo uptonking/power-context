@@ -77,6 +77,45 @@ def test_process_delta_bundle_slugged_workspace_creates_marker(tmp_path, monkeyp
     assert (work_dir / ".codebase" / "repos" / slug / ".ctxce_managed_upload").exists()
 
 
+def test_process_delta_bundle_mirrors_to_old_slug_when_staging_active(tmp_path, monkeypatch):
+    import scripts.upload_delta_bundle as us
+
+    work_dir = tmp_path / "work"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(us, "WORK_DIR", str(work_dir))
+
+    canonical_slug = "repo1-0123456789abcdef"
+    old_slug = f"{canonical_slug}_old"
+
+    monkeypatch.setenv("CTXCE_STAGING_ENABLED", "1")
+    monkeypatch.setattr(us, "is_staging_enabled", lambda: True)
+    monkeypatch.setattr(us, "_extract_repo_name_from_path", lambda path: canonical_slug)
+    monkeypatch.setattr(
+        us,
+        "get_collection_state_snapshot",
+        lambda workspace_path=None, repo_name=None: {
+            "serving_repo_slug": old_slug,
+            "active_repo_slug": canonical_slug,
+        },
+    )
+
+    bundle = _write_bundle_with_created_file(tmp_path, "src/file.txt", b"payload")
+
+    counts = us.process_delta_bundle(
+        workspace_path="/work/random",
+        bundle_path=bundle,
+        manifest={"bundle_id": "b-dual"},
+    )
+
+    assert counts.get("created") == 1
+
+    for slug in (canonical_slug, old_slug):
+        target = work_dir / slug / "src" / "file.txt"
+        assert target.exists(), f"expected write for {slug}"
+        marker = work_dir / ".codebase" / "repos" / slug / ".ctxce_managed_upload"
+        assert marker.exists(), f"expected marker for {slug}"
+
+
 def test_process_delta_bundle_rejects_absolute_paths(tmp_path, monkeypatch):
     import scripts.upload_delta_bundle as us
 

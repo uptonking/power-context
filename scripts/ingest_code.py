@@ -99,6 +99,7 @@ try:
         get_indexing_config_snapshot,
         compute_indexing_config_hash,
         persist_indexing_config,
+        promote_pending_indexing_config,
     )
 except ImportError:
     # State integration is optional; continue if not available
@@ -120,6 +121,37 @@ except ImportError:
     get_indexing_config_snapshot = None  # type: ignore
     compute_indexing_config_hash = None  # type: ignore
     persist_indexing_config = None  # type: ignore
+    promote_pending_indexing_config = None  # type: ignore
+
+# Helper: mark staging ready/idle after rebuild completes
+def _mark_staging_idle(target_ws: str, repo_name: str, files_indexed: int) -> None:
+    if not (get_workspace_state and update_workspace_state):
+        return
+    try:
+        st = get_workspace_state(target_ws, repo_name) or {}
+        staging = st.get("staging") or {}
+        if not (isinstance(staging, dict) and staging.get("collection")):
+            return
+        status = staging.get("status") or {}
+        if not isinstance(status, dict):
+            status = {}
+        status.setdefault("started_at", status.get("started_at") or datetime.now().isoformat())
+        status["state"] = "idle"
+        status["progress"] = {
+            "files_processed": files_indexed,
+            "total_files": None,
+            "current_file": None,
+        }
+        staging["status"] = status
+        staging["updated_at"] = datetime.now().isoformat()
+        update_workspace_state(
+            workspace_path=target_ws,
+            repo_name=repo_name,
+            updates={"staging": staging},
+        )
+    except Exception:
+        pass
+
 
 # Optional Tree-sitter import (graceful fallback) - tree-sitter 0.25+ API
 _TS_LANGUAGES: Dict[str, Any] = {}
@@ -3101,8 +3133,8 @@ def index_single_file(
 def index_repo(
     root: Path,
     qdrant_url: str,
-    api_key: str,
-    collection: str,
+    api_key: Optional[str],
+    collection: Optional[str],
     model_name: str,
     recreate: bool,
     *,
@@ -3203,8 +3235,21 @@ def index_repo(
         ws_path = str(root)
         repo_tag = _detect_repo_name_from_path(root) if _detect_repo_name_from_path else None
 
+        force_collection = False
+        try:
+            force_collection = str(os.environ.get("CTXCE_FORCE_COLLECTION_NAME", "")).strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+        except Exception:
+            force_collection = False
+
         is_multi_repo = bool(is_multi_repo_mode and is_multi_repo_mode())
         use_per_repo_collections = bool(is_multi_repo and _get_collection_for_file)
+        if force_collection and collection:
+            use_per_repo_collections = False
 
         if use_per_repo_collections:
             collection = None  # Determined per file later
@@ -3212,7 +3257,8 @@ def index_repo(
         else:
             if 'get_collection_name' in globals() and get_collection_name:
                 try:
-                    resolved = get_collection_name(ws_path)
+                    # get_collection_name expects a repo identifier/slug, not a filesystem path.
+                    resolved = get_collection_name(repo_tag or ws_path)
                     placeholders = {"", "default-collection", "my-collection", "codebase"}
                     if resolved and collection in placeholders:
                         collection = resolved
@@ -3917,7 +3963,9 @@ def index_repo(
                 try:
                     target_ws = repo_roots.get(repo_name) or ws_path
                     try:
-                        if persist_indexing_config:
+                        if promote_pending_indexing_config:
+                            promote_pending_indexing_config(workspace_path=target_ws, repo_name=repo_name)
+                        elif persist_indexing_config:
                             persist_indexing_config(workspace_path=target_ws, repo_name=repo_name)
                     except Exception:
                         pass
@@ -3929,6 +3977,9 @@ def index_repo(
                         },
                         repo_name=repo_name,
                     )
+
+                    # If staging is active, advance staging status out of "initializing".
+                    _mark_staging_idle(target_ws, repo_name, files_indexed)
                 except Exception:
                     continue
     except Exception as e:
@@ -4558,9 +4609,20 @@ def main():
     collection = os.environ.get("COLLECTION_NAME") or os.environ.get("DEFAULT_COLLECTION") or "codebase"
     model_name = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
 
+    force_collection = False
+    try:
+        force_collection = str(os.environ.get("CTXCE_FORCE_COLLECTION_NAME", "")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+    except Exception:
+        force_collection = False
+
     # Resolve collection name based on multi-repo mode
     multi_repo = bool(is_multi_repo_mode and is_multi_repo_mode())
-    if multi_repo:
+    if multi_repo and not force_collection:
         # Multi-repo mode: pass collection=None to trigger per-repo collection resolution
         collection = None
         print("[multi_repo] Multi-repo mode enabled - will create separate collections per repository")
@@ -4568,7 +4630,13 @@ def main():
         # Single-repo mode: use environment variable
         if 'get_collection_name' in globals() and get_collection_name:
             try:
-                resolved = get_collection_name(str(Path(args.root).resolve()))
+                # get_collection_name expects a repo identifier/slug, not a filesystem path.
+                root_repo = None
+                try:
+                    root_repo = _detect_repo_name_from_path(Path(args.root).resolve())
+                except Exception:
+                    root_repo = None
+                resolved = get_collection_name(root_repo or str(Path(args.root).resolve()))
                 placeholders = {"", "default-collection", "my-collection", "codebase"}
                 if resolved and collection in placeholders:
                     collection = resolved

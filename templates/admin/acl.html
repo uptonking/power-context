@@ -1,7 +1,7 @@
 {% extends "admin/base.html" %}
 
 {% block content %}
-  <div class="card">
+  <div class="card" data-staging-enabled="{{ '1' if staging_enabled else '0' }}">
     <h2>Users</h2>
 
     <table>
@@ -54,8 +54,9 @@
           <th>qdrant_collection</th>
           <th>indexing_status</th>
           <th>mapping</th>
-          <th>applied_hash</th>
-          <th>current_hash</th>
+          <th>applied hash</th>
+          <th>pending hash</th>
+          <th>current hash</th>
           <th>actions</th>
         </tr>
       </thead>
@@ -102,6 +103,13 @@
               {% endif %}
             </td>
             <td><span class="muted">{{ c.applied_indexing_hash }}</span></td>
+            <td>
+              {% if c.pending_indexing_hash %}
+                <span class="error">{{ c.pending_indexing_hash }}</span>
+              {% else %}
+                <span class="muted">—</span>
+              {% endif %}
+            </td>
             <td><span class="muted">{{ c.current_indexing_hash }}</span></td>
             <td>
               {% if c.has_mapping %}
@@ -109,7 +117,7 @@
                   <input type="hidden" name="collection" value="{{ c.qdrant_collection }}" />
                   <button type="submit">Reindex</button>
                 </form>
-                <form class="inline" method="post" action="/admin/collections/recreate" onsubmit="return confirm('Recreate collection ' + '{{ c.qdrant_collection }}' + '? This will recreate Qdrant collection and reindex all files.');">
+                <form class="inline" method="post" action="/admin/collections/recreate" onsubmit="return confirm('Recreate collection ' + c.qdrant_collection + '? This will recreate Qdrant collection and reindex all files.');">
                   <input type="hidden" name="collection" value="{{ c.qdrant_collection }}" />
                   <button type="submit">Recreate</button>
                 </form>
@@ -128,7 +136,7 @@
           </tr>
         {% endfor %}
       {% else %}
-        <tr><td colspan="7">(none)</td></tr>
+        <tr><td colspan="8">(none)</td></tr>
       {% endif %}
       </tbody>
     </table>
@@ -196,6 +204,9 @@
       if (!bodyEl) {
         return;
       }
+      const stagingCard = document.querySelector(".card[data-staging-enabled]");
+      const stagingEnabled =
+        stagingCard && stagingCard.dataset && stagingCard.dataset.stagingEnabled === "1";
       const deletionEnabled =
         tableEl && tableEl.dataset && tableEl.dataset.deletionEnabled === "1";
       const workDir = (tableEl && tableEl.dataset && tableEl.dataset.workDir) || "";
@@ -249,6 +260,37 @@
               <input type="hidden" name="collection" value="${escapeHtml(c.qdrant_collection)}" />
               <button type="submit">Recreate</button>
             </form>
+            ${stagingEnabled && c.staging_status === 'active' ? `
+              <div style="margin: 6px 0;">
+                <div class="muted small">Staging: ${escapeHtml(c.staging_collection || "")}</div>
+                <div class="muted small">State: ${escapeHtml(c.staging_state || "unknown")}</div>
+                <form class="inline" method="post" action="/admin/staging/activate" onsubmit="return confirm('Activate staging for ${escapeHtml(
+                  c.qdrant_collection
+                )}? This will replace the active collection with the staging collection.');">
+                  <input type="hidden" name="collection" value="${escapeHtml(c.qdrant_collection)}" />
+                  <button type="submit" style="background: #28a745; color: white;">Activate</button>
+                </form>
+                <form class="inline" method="post" action="/admin/staging/abort" onsubmit="return confirm('Abort staging for ${escapeHtml(
+                  c.qdrant_collection
+                )}? This will delete the staging collection.');">
+                  <input type="hidden" name="collection" value="${escapeHtml(c.qdrant_collection)}" />
+                  <button type="submit" style="background: #dc3545; color: white;">Abort</button>
+                </form>
+              </div>
+            ` : stagingEnabled && c.staging_status === 'none' ? `
+              <form class="inline" method="post" action="/admin/staging/start" onsubmit="return confirm('Start staging rebuild for ${escapeHtml(
+                c.qdrant_collection
+              )}? This will create a staging collection and reindex with current configuration.');">
+                <input type="hidden" name="collection" value="${escapeHtml(c.qdrant_collection)}" />
+                <button type="submit" style="background: #007bff; color: white;">Start Staging</button>
+              </form>
+            ` : ''}
+            <form class="inline" method="post" action="/admin/staging/copy" onsubmit="return confirm('Copy collection ${escapeHtml(
+              c.qdrant_collection
+            )}? This will create a full copy of the collection.');">
+              <input type="hidden" name="collection" value="${escapeHtml(c.qdrant_collection)}" />
+              <button type="submit">Copy</button>
+            </form>
           `
           : "";
         const deleteHtml = deletionEnabled
@@ -285,6 +327,13 @@
               ${maintenance}
             </td>
             <td><span class="muted">${escapeHtml(c.applied_indexing_hash || "")}</span></td>
+            <td>
+              ${
+                c.pending_indexing_hash
+                  ? `<span class="error">${escapeHtml(c.pending_indexing_hash)}</span>`
+                  : '<span class="muted">—</span>'
+              }
+            </td>
             <td><span class="muted">${escapeHtml(c.current_indexing_hash || "")}</span></td>
             <td>
               ${actions}

@@ -9,6 +9,10 @@ from fastapi import Request
 from starlette.templating import Jinja2Templates
 from jinja2 import select_autoescape
 
+try:
+    from scripts.workspace_state import is_staging_enabled
+except Exception:
+    is_staging_enabled = None  # type: ignore
 
 _TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
 _templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
@@ -58,6 +62,7 @@ def render_admin_acl(
             "grants": grants,
             "deletion_enabled": bool(deletion_enabled),
             "work_dir": work_dir,
+            "staging_enabled": bool(is_staging_enabled() if callable(is_staging_enabled) else False),
         },
         status_code=status_code,
     )
