@@ -65,8 +65,8 @@ VICREG_WEIGHT = float(os.environ.get("RERANK_VICREG_WEIGHT", "0.1"))
 VICREG_MIN_BATCH = int(os.environ.get("RERANK_VICREG_MIN_BATCH", "4"))  # Need 4+ samples for covariance
 
 # GLM teacher configuration (online learning with LLM judgments)
-GLM_TEACHER_ENABLED = os.environ.get("RERANK_GLM_TEACHER", "0") == "1"
-GLM_TEACHER_SAMPLE_RATE = float(os.environ.get("RERANK_GLM_SAMPLE_RATE", "0.2"))  # 20% of queries get GLM judgment
+LLM_TEACHER_ENABLED = os.environ.get("RERANK_LLM_TEACHER", "0") == "1"
+LLM_TEACHER_SAMPLE_RATE = float(os.environ.get("RERANK_LLM_SAMPLE_RATE", "1.0"))  # 100% when enabled (background anyway)
 
 
 def get_logger():
@@ -138,7 +138,7 @@ class CollectionLearner:
         self._llm_client = None
         self._llm_runtime = None
         self._llm_calls = 0
-        if GLM_TEACHER_ENABLED:
+        if LLM_TEACHER_ENABLED:
             try:
                 # Auto-detect runtime: GLM_API_KEY -> glm, else -> llamacpp
                 runtime = os.environ.get("REFRAG_RUNTIME", "").strip().lower()
@@ -160,7 +160,7 @@ class CollectionLearner:
 
                 if self._llm_client:
                     self._llm_runtime = runtime
-                    logger.info(f"[{collection}] LLM teacher enabled ({runtime}, sample_rate={GLM_TEACHER_SAMPLE_RATE})")
+                    logger.info(f"[{collection}] LLM teacher enabled ({runtime}, sample_rate={LLM_TEACHER_SAMPLE_RATE})")
             except Exception as e:
                 logger.warning(f"[{collection}] LLM teacher unavailable: {e}")
 
@@ -427,7 +427,7 @@ class CollectionLearner:
                 teacher_arr = np.array(teacher_scores, dtype=np.float32)
 
                 # ===== LLM TEACHER: Higher-quality supervision (sampled) =====
-                if self._llm_client and np.random.random() < GLM_TEACHER_SAMPLE_RATE:
+                if self._llm_client and np.random.random() < LLM_TEACHER_SAMPLE_RATE:
                     llm_scores = self._llm_judge(query, candidates, top_k=5)
                     if llm_scores is not None:
                         # Blend LLM with ONNX: LLM is more reliable, weight it higher
