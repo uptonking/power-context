@@ -1041,6 +1041,9 @@ def _llm_expand_queries(
     import re
     import ast
 
+    if not queries or max_new <= 0:
+        return []
+
     # If REFRAG_RUNTIME is explicitly set, use it; otherwise default to llamacpp
     runtime_kind = os.environ.get("REFRAG_RUNTIME", "").strip().lower() or "llamacpp"
     
@@ -1987,11 +1990,12 @@ def run_hybrid_search(
     try:
         llm_max = int(os.environ.get("LLM_EXPAND_MAX", "0") or 0)
     except (ValueError, TypeError):
-        llm_max = 4
-    _llm_more = _llm_expand_queries(qlist, eff_language, max_new=llm_max)
-    for s in _llm_more:
-        if s and s not in qlist:
-            qlist.append(s)
+        llm_max = 0
+    if llm_max > 0:
+        _llm_more = _llm_expand_queries(qlist, eff_language, max_new=llm_max)
+        for s in _llm_more:
+            if s and s not in qlist:
+                qlist.append(s)
     if expand:
         # Use enhanced expansion with semantic similarity if available
         if SEMANTIC_EXPANSION_AVAILABLE:
