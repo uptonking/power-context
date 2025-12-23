@@ -755,8 +755,9 @@ export async function runHttpMcpServer(options) {
     }
   });
 
-  httpServer.listen(port, () => {
-    debugLog(`[ctxce] HTTP MCP bridge listening on port ${port}`);
+  // Bind to 127.0.0.1 only (localhost) for local-only OAuth security
+  httpServer.listen(port, '127.0.0.1', () => {
+    debugLog(`[ctxce] HTTP MCP bridge listening on 127.0.0.1:${port}`);
   });
 }
 

@@ -53,7 +53,7 @@ export function getOAuthMetadata(issuerUrl) {
     registration_endpoint: `${issuerUrl}/oauth/register`, // RFC7591 Dynamic Client Registration
     response_types_supported: ["code"],
     grant_types_supported: ["authorization_code"],
-    token_endpoint_auth_methods_supported: ["none", "client_secret_post"],
+    token_endpoint_auth_methods_supported: ["none"],
     code_challenge_methods_supported: ["S256"],
     scopes_supported: ["mcp"],
   };
@@ -62,6 +62,17 @@ export function getOAuthMetadata(issuerUrl) {
 // ============================================================================
 // HTML Login Page
 // ============================================================================
+
+/**
+ * Safely escape JSON for embedding in HTML script context
+ * Escapes special characters that could break out of a script tag
+ */
+function escapeJsonForHtml(obj) {
+  const json = JSON.stringify(obj);
+  // Replace dangerous characters with HTML-safe equivalents
+  // </script> can break out of script tag, so replace </ with \u003C/
+  return json.replace(/</g, '\\u003C').replace(/>/g, '\\u003E');
+}
 
 export function getLoginPage(redirectUri, clientId, state, codeChallenge, codeChallengeMethod) {
   const params = new URLSearchParams({
@@ -118,7 +129,7 @@ export function getLoginPage(redirectUri, clientId, state, codeChallenge, codeCh
   </form>
 
   <script>
-  const params = ${JSON.stringify(Object.fromEntries(params))};
+  const params = ${escapeJsonForHtml(Object.fromEntries(params))};
   document.getElementById('loginForm').addEventListener('submit', async (e) => {
     e.preventDefault();
     const result = document.getElementById('result');
@@ -163,7 +174,8 @@ export function getLoginPage(redirectUri, clientId, state, codeChallenge, codeCh
           redirect_uri: params.redirect_uri,
           state: params.state,
           code_challenge: params.code_challenge,
-          code_challenge_method: params.code_challenge_method
+          code_challenge_method: params.code_challenge_method,
+          client_id: params.client_id
         })
       });
 
@@ -189,6 +201,25 @@ export function getLoginPage(redirectUri, clientId, state, codeChallenge, codeCh
 // ============================================================================
 // OAuth Endpoint Handlers
 // ============================================================================
+
+/**
+ * Validate client_id and redirect_uri against registered clients
+ * @param {string} clientId - OAuth client_id
+ * @param {string} redirectUri - OAuth redirect_uri
+ * @returns {boolean} - true if both client_id and redirect_uri are valid
+ */
+function validateClientAndRedirect(clientId, redirectUri) {
+  if (!clientId || !redirectUri) {
+    return false;
+  }
+  const client = registeredClients.get(clientId);
+  if (!client) {
+    return false;
+  }
+  // Check if redirect_uri exactly matches one of the registered URIs
+  const redirectUris = client.redirectUris || [];
+  return redirectUris.includes(redirectUri);
+}
 
 /**
  * Handle OAuth metadata endpoint (RFC9728)
@@ -219,13 +250,11 @@ export function handleOAuthRegister(req, res) {
       }
 
       // Auto-approve any client registration for local bridge
-      const clientId = generateToken().slice(0, 32); // Shorter client ID
-      const clientSecret = generateToken();
+      const clientId = generateToken().slice(0, 32);
       const client_id = `mcp_${clientId}`;
 
       registeredClients.set(client_id, {
         clientId: client_id,
-        clientSecret,
         redirectUris: data.redirect_uris,
         grantTypes: data.grant_types || ["authorization_code"],
         createdAt: Date.now(),
@@ -235,9 +264,7 @@ export function handleOAuthRegister(req, res) {
       res.statusCode = 201;
       res.end(JSON.stringify({
         client_id: client_id,
-        client_secret: clientSecret,
         client_id_issued_at: Math.floor(Date.now() / 1000),
-        client_secret_expires_at: 0, // Never expires
         grant_types: ["authorization_code"],
         redirect_uris: data.redirect_uris,
         response_types: ["code"],
@@ -264,6 +291,14 @@ export function handleOAuthAuthorize(_req, res, searchParams) {
   const codeChallengeMethod = searchParams.get("code_challenge_method") || "S256";
   // responseType is validated but not used further
   searchParams.get("response_type");
+
+  // Validate client_id and redirect_uri against registered clients
+  if (!validateClientAndRedirect(clientId, redirectUri)) {
+    res.statusCode = 400;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "invalid_client", error_description: "Unknown client_id or unauthorized redirect_uri" }));
+    return;
+  }
 
   // If already logged in (has valid session), auto-approve
   const existingAuth = loadAnyAuthEntry();
@@ -296,6 +331,11 @@ export function handleOAuthAuthorize(_req, res, searchParams) {
 /**
  * Handle OAuth store-session endpoint (helper for login page)
  * POST /oauth/store-session
+ *
+ * Security note: This endpoint is called from the browser after login.
+ * Since the HTTP server binds to 127.0.0.1 only, this is only accessible from localhost.
+ * For additional CSRF protection, we validate client_id and redirect_uri match a
+ * previously registered client.
  */
 export function handleOAuthStoreSession(req, res) {
   let body = "";
@@ -303,12 +343,44 @@ export function handleOAuthStoreSession(req, res) {
   req.on("end", () => {
     try {
       const data = JSON.parse(body);
-      const { session_id, backend_url, redirect_uri, state, code_challenge, code_challenge_method } = data;
+      const { session_id, backend_url, redirect_uri, state, code_challenge, code_challenge_method, client_id } = data;
 
       if (!session_id || !backend_url) {
         res.statusCode = 400;
         res.end(JSON.stringify({ error: "Missing session_id or backend_url" }));
         return;
+      }
+
+      // Validate client_id and redirect_uri against registered clients
+      // Note: client_id is passed from the login page which gets it from the initial auth request
+      if (!validateClientAndRedirect(client_id, redirect_uri)) {
+        res.statusCode = 400;
+        res.setHeader("Content-Type", "application/json");
+        res.end(JSON.stringify({ error: "invalid_client", error_description: "Unknown client_id or unauthorized redirect_uri" }));
+        return;
+      }
+
+      // Additional CSRF protection: verify request came from a local browser origin
+      // Only allow requests from localhost origins (127.0.0.1 or localhost)
+      const origin = req.headers["origin"] || req.headers["referer"];
+      if (origin) {
+        try {
+          const originUrl = new URL(origin);
+          const hostname = originUrl.hostname;
+          // Only allow localhost or 127.0.0.1 origins
+          if (hostname !== "localhost" && hostname !== "127.0.0.1") {
+            res.statusCode = 403;
+            res.setHeader("Content-Type", "application/json");
+            res.end(JSON.stringify({ error: "forbidden", error_description: "Request must originate from localhost" }));
+            return;
+          }
+        } catch {
+          // If origin parsing fails, reject the request
+          res.statusCode = 403;
+          res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({ error: "forbidden", error_description: "Invalid origin" }));
+          return;
+        }
       }
 
       // Save the auth entry
