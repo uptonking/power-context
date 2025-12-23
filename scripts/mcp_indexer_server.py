@@ -8004,6 +8004,15 @@ async def context_answer(
     not_glob = _flt.get("not_glob")
     case = _flt.get("case")
     not_ = _flt.get("not_")
+
+    used: Dict[str, Any] = {
+        "refrag": True,
+        "gate_first": True,
+        "repo": repo,
+        "under": under,
+        "language": req_language,
+        "mode": mode,
+    }
     # Enforce sane minimums to avoid empty span selection
     try:
         lim = int(lim)
@@ -8027,6 +8036,28 @@ async def context_answer(
             extra={"normalized_queries": queries, "limit": lim, "per_path": ppath},
         )
 
+    used.update(
+        {
+            "limit": int(lim),
+            "per_path": int(ppath),
+            "include_snippet": bool(include_snippet),
+        }
+    )
+
+    def _has_repo_scope(r: Any) -> bool:
+        try:
+            if r is None:
+                return False
+            if isinstance(r, (list, tuple, set)):
+                vals = [str(x).strip() for x in r if str(x).strip()]
+                if not vals:
+                    return False
+                return not (len(vals) == 1 and vals[0] == "*")
+            v = str(r).strip()
+            return bool(v) and v != "*"
+        except Exception:
+            return False
+
     # Broad-query budget bump (gated). If user didn't pass budget, scale env default; else scale provided value.
     try:
         _qtext = " ".join([q for q in (queries or []) if isinstance(q, str)]).lower()
@@ -8044,11 +8075,24 @@ async def context_answer(
         _broad = any(t in _qtext for t in _broad_tokens)
     except Exception:
         _broad = False
+    used["broad_query"] = bool(_broad)
+    _broad_scoped = bool(under) or bool(req_language) or _has_repo_scope(repo)
+    used["broad_scoped"] = bool(_broad_scoped)
+    used["broad_budget_bump"] = False
     if _broad:
         try:
             _factor = float(os.environ.get("CTX_BROAD_BUDGET_FACTOR", "1.4"))
         except Exception:
             _factor = 1.0
+        if not _broad_scoped:
+            try:
+                _cap = float(
+                    os.environ.get("CTX_BROAD_BUDGET_FACTOR_UNSCOPED", "1.1")
+                )
+            except Exception:
+                _cap = 1.0
+            if _cap > 0:
+                _factor = min(_factor, _cap)
         if _factor > 1.0:
             if budget_tokens is not None and str(budget_tokens).strip() != "":
                 try:
@@ -8061,9 +8105,29 @@ async def context_answer(
                     budget_tokens = int(max(128, int(_base * _factor)))
                 except Exception:
                     pass
+            used["broad_budget_bump"] = True
+            used["broad_budget_factor"] = float(_factor)
+
+        # If still unscoped, cap the absolute budget to avoid runaway cost.
+        if not _broad_scoped:
+            try:
+                _max_unscoped = int(
+                    float(os.environ.get("CTX_BROAD_BUDGET_MAX_UNSCOPED", "1024"))
+                )
+            except Exception:
+                _max_unscoped = 1024
+            if (
+                budget_tokens is not None
+                and str(budget_tokens).strip() != ""
+                and int(budget_tokens) > int(_max_unscoped)
+            ):
+                budget_tokens = int(_max_unscoped)
+                used["broad_budget_capped"] = True
 
     # Collection + model setup (reuse indexer defaults)
     coll = (collection or _default_collection()) or ""
+    used["collection"] = coll
+    used["budget_tokens"] = budget_tokens
     model_name = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
     model = _get_embedding_model(model_name)
 
@@ -8080,6 +8144,7 @@ async def context_answer(
         "MICRO_BUDGET_TOKENS": os.environ.get("MICRO_BUDGET_TOKENS"),
     }
     err: Optional[str] = None
+    did_local_expand = False
     try:
         # Enable ReFRAG gate-first for context compression
         os.environ["REFRAG_MODE"] = "1"
@@ -8094,9 +8159,7 @@ async def context_answer(
         # For LLM answering, default to include snippets so the model sees actual code
         if include_snippet in (None, ""):
             include_snippet = True
-        did_local_expand = (
-            False  # Ensure defined even if expansion is disabled or fails
-        )
+        did_local_expand = False
 
         do_expand = safe_bool(
             expand, default=False, logger=logger, context="expand"
@@ -8211,6 +8274,15 @@ async def context_answer(
             case = _retr["case"]
             req_language = eff_language
 
+            used.update(
+                {
+                    "expanded_queries": bool(did_local_expand),
+                    "language": req_language,
+                    "eff_language": eff_language,
+                    "override_under": override_under,
+                }
+            )
+
             fallback_kwargs = dict(kwargs or {})
             for key in ("path_glob", "language", "under"):
                 fallback_kwargs.pop(key, None)
@@ -8267,6 +8339,7 @@ async def context_answer(
             "error": f"hybrid search failed: {err}",
             "citations": [],
             "query": queries,
+            "used": dict(used),
         }
 
     # Ensure final retrieval call reflects Tier-2 relaxed filters for tests/introspection
@@ -8327,7 +8400,7 @@ async def context_answer(
             "answer": "insufficient context",
             "citations": [],
             "query": queries,
-            "used": {"gate_first": True, "refrag": True, "no_citations": True},
+            "used": {**dict(used), "no_citations": True},
         }
 
     # If an identifier was asked and we didn't capture its definition yet,
@@ -8472,6 +8545,21 @@ async def context_answer(
     # Decoder params and stops
     mtok, temp, top_k, top_p, stops = _ca_decoder_params(max_tokens)
 
+    # Record decoder runtime selection (best-effort)
+    try:
+        runtime_kind = str(os.environ.get("REFRAG_RUNTIME", "")).strip().lower()
+        if not runtime_kind:
+            if os.environ.get("MINIMAX_API_KEY", "").strip():
+                runtime_kind = "minimax"
+            elif os.environ.get("GLM_API_KEY", "").strip():
+                runtime_kind = "glm"
+            else:
+                runtime_kind = "llamacpp"
+        used["decoder_runtime"] = runtime_kind
+        used["decoder_max_tokens"] = int(mtok)
+    except Exception:
+        pass
+
     # Call llama.cpp decoder (requires REFRAG_DECODER=1)
     try:
         from scripts.refrag_llamacpp import is_decoder_enabled  # type: ignore
@@ -8494,8 +8582,10 @@ async def context_answer(
                 "answer": _fallback_txt.strip(),
                 "citations": citations,
                 "query": queries,
-                "used": {"decoder": False, "extractive_fallback": True},
+                "used": {**dict(used), "decoder": False, "extractive_fallback": True},
             }
+
+        used["decoder"] = True
 
         # SIMPLE APPROACH: One LLM call with all context
         all_context = (
@@ -8533,7 +8623,7 @@ async def context_answer(
                 "answer": _fallback_txt.strip(),
                 "citations": citations,
                 "query": queries,
-                "used": {"gate_first": True, "refrag": True, "deadline_fallback": True},
+                "used": {**dict(used), "deadline_fallback": True},
             }
         # Tighten max_tokens and decoder HTTP timeout to fit remaining time
         try:
@@ -8580,6 +8670,7 @@ async def context_answer(
             "error": f"decoder call failed: {e}",
             "citations": citations,
             "query": queries,
+            "used": dict(used),
         }
 
     # Final introspection call to ensure last search reflects relaxed filters
@@ -8703,7 +8794,7 @@ async def context_answer(
         "answer": answer.strip(),
         "citations": citations,
         "query": queries,
-        "used": {"gate_first": True, "refrag": True},
+        "used": dict(used),
     }
     if answers_by_query:
         out["answers_by_query"] = answers_by_query

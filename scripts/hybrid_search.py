@@ -616,25 +616,52 @@ def _merge_and_budget_spans(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]
         if not path or start_line <= 0 or end_line <= 0:
             # skip invalid entries
             continue
-        lst = clusters.setdefault(path, [])
-        merged = False
         # Fix: use "raw_score" field (what run_hybrid_search emits) not "s"
         item_score = float(m.get("raw_score") or m.get("score") or m.get("s") or 0.0)
-        for c in lst:
-            if (
-                start_line <= c["end"] + merge_lines
-                and end_line >= c["start"] - merge_lines
-            ):
-                # expand bounds; keep higher-score rep
-                cluster_score = float(c["m"].get("raw_score") or c["m"].get("score") or c["m"].get("s") or 0.0)
-                if item_score > cluster_score:
-                    c["m"] = m
-                c["start"] = min(c["start"], start_line)
-                c["end"] = max(c["end"], end_line)
-                merged = True
-                break
-        if not merged:
-            lst.append({"start": start_line, "end": end_line, "m": m, "p": path})
+        clusters.setdefault(path, []).append(
+            {"start": start_line, "end": end_line, "m": m, "p": path, "_score": item_score}
+        )
+
+    # Merge adjacent spans per path using a sort + linear sweep (avoid O(n^2) insertion merging)
+    merged_by_path: Dict[str, List[Dict[str, Any]]] = {}
+    for path, spans in clusters.items():
+        if not spans:
+            continue
+        spans.sort(key=lambda c: (int(c.get("start") or 0), int(c.get("end") or 0)))
+        merged: List[Dict[str, Any]] = []
+        for c in spans:
+            if not merged:
+                merged.append(
+                    {
+                        "start": c["start"],
+                        "end": c["end"],
+                        "m": c["m"],
+                        "p": path,
+                        "_best_score": float(c.get("_score") or 0.0),
+                    }
+                )
+                continue
+            last = merged[-1]
+            if int(c["start"]) <= int(last["end"]) + merge_lines:
+                # expand bounds; keep higher-score representative item
+                item_score = float(c.get("_score") or 0.0)
+                if item_score > float(last.get("_best_score") or 0.0):
+                    last["m"] = c["m"]
+                    last["_best_score"] = item_score
+                last["end"] = max(int(last["end"]), int(c["end"]))
+            else:
+                merged.append(
+                    {
+                        "start": c["start"],
+                        "end": c["end"],
+                        "m": c["m"],
+                        "p": path,
+                        "_best_score": float(c.get("_score") or 0.0),
+                    }
+                )
+        for m in merged:
+            m.pop("_best_score", None)
+        merged_by_path[path] = merged
 
     # Now budget per path with a global token budget
     budget = budget_tokens
@@ -646,7 +673,7 @@ def _merge_and_budget_spans(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]
 
     # Flatten clusters preserving original score order
     flattened = []
-    for lst in clusters.values():
+    for lst in merged_by_path.values():
         for c in lst:
             flattened.append(c)
 
