@@ -40,9 +40,13 @@ except ImportError:
 
 # Import local utilities
 try:
-    from scripts.utils import lex_hash_vector_queries as _lex_hash_vector_queries
+    from scripts.utils import (
+        lex_hash_vector_queries as _lex_hash_vector_queries,
+        sanitize_vector_name as _sanitize_vector_name,
+    )
 except ImportError:
     _lex_hash_vector_queries = None
+    _sanitize_vector_name = None
 
 # Configuration defaults
 SEMANTIC_EXPANSION_ENABLED = os.environ.get("SEMANTIC_EXPANSION_ENABLED", "1").lower() in {"1", "true", "yes", "on"}
@@ -269,6 +273,18 @@ def expand_queries_semantically(
                 model = _get_embedding_model(model_name)
             else:
                 model = TextEmbedding(model_name=model_name)
+        else:
+            # When caller injects a model, prefer its name for vector selection if available
+            model_name = getattr(model, "model_name", os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5"))
+        
+        # Qdrant collections with multiple vectors require the vector name
+        vector_name = None
+        try:
+            vector_name = _sanitize_vector_name(model_name) if _sanitize_vector_name else None
+        except Exception:
+            vector_name = None
+        if not vector_name and model_name:
+            vector_name = str(model_name).replace("/", "-").replace("_", "-")[:64]
         
         if collection is None:
             collection = os.environ.get("COLLECTION_NAME", "codebase")
@@ -297,9 +313,16 @@ def expand_queries_semantically(
 
         # Search for similar documents
         try:
+            search_vector = query_vector
+            if vector_name:
+                try:
+                    search_vector = models.NamedVector(name=vector_name, vector=query_vector)
+                except Exception:
+                    search_vector = query_vector
+
             search_results = client.search(
                 collection_name=collection,
-                query_vector=query_vector,
+                query_vector=search_vector,
                 limit=SEMANTIC_EXPANSION_TOP_K,
                 with_payload=True,
                 with_vectors=False  # We don't need vectors for term extraction
