@@ -1775,7 +1775,10 @@ def run_hybrid_search(
                     continue
                 out.append(s)
                 if not s.startswith("/"):
-                    out.append("/work/" + s.lstrip("/"))
+                    # /work/<slug>/... is common; include both direct /work and slug-aware variants
+                    stripped = s.lstrip("/")
+                    out.append("/work/" + stripped)
+                    out.append("/work/*/" + stripped)
         except Exception:
             pass
         # Dedup while preserving order
@@ -1806,13 +1809,28 @@ def run_hybrid_search(
 
     eff_under = _norm_under(eff_under)
 
+    # Expansion knobs that affect query construction/results (must be part of cache key)
+    try:
+        llm_max = int(os.environ.get("LLM_EXPAND_MAX", "0") or 0)
+    except (ValueError, TypeError):
+        llm_max = 0
+    try:
+        _semantic_enabled = _env_truthy(os.environ.get("SEMANTIC_EXPANSION_ENABLED"), True)
+    except Exception:
+        _semantic_enabled = True
+    try:
+        _semantic_max_terms = int(os.environ.get("SEMANTIC_EXPANSION_MAX_TERMS", "3") or 3)
+    except (ValueError, TypeError):
+        _semantic_max_terms = 3
+    _code_signal_syms = os.environ.get("CODE_SIGNAL_SYMBOLS", "").strip()
+
     # Results cache: return cached results for identical (queries, filters, knobs)
     _USE_CACHE = (MAX_RESULTS_CACHE > 0) and _env_truthy(os.environ.get("HYBRID_RESULTS_CACHE_ENABLED"), True)
     cache_key = None
     if _USE_CACHE:
         try:
             cache_key = (
-                "v1",
+                "v2",
                 tuple(clean_queries),
                 int(limit or 0),
                 int(per_path or 0),
@@ -1828,6 +1846,10 @@ def run_hybrid_search(
                 str(eff_repo or ""),
                 str(eff_path_regex or ""),
                 bool(expand),
+                int(llm_max),
+                bool(_semantic_enabled),
+                int(_semantic_max_terms),
+                str(_code_signal_syms),
                 str(vec_name),
                 str(_collection()),
                 _env_truthy(os.environ.get("HYBRID_ADAPTIVE_WEIGHTS"), True),
@@ -1990,10 +2012,6 @@ def run_hybrid_search(
 
     # Build query list (LLM-assisted first, then synonym expansion)
     qlist = list(clean_queries)
-    try:
-        llm_max = int(os.environ.get("LLM_EXPAND_MAX", "0") or 0)
-    except (ValueError, TypeError):
-        llm_max = 0
     if llm_max > 0:
         _llm_more = _llm_expand_queries(qlist, eff_language, max_new=llm_max)
         for s in _llm_more:
@@ -2004,7 +2022,7 @@ def run_hybrid_search(
         if SEMANTIC_EXPANSION_AVAILABLE:
             qlist = expand_queries_enhanced(
                 qlist, eff_language,
-                max_extra=max(2, int(os.environ.get("SEMANTIC_EXPANSION_MAX_TERMS", "3") or "3")),
+                max_extra=max(2, _semantic_max_terms),
                 client=client,
                 model=_model,
                 collection=_collection()

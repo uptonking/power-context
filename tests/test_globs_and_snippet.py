@@ -88,6 +88,33 @@ def test_run_hybrid_search_list_globs(monkeypatch):
 
 
 @pytest.mark.unit
+def test_run_hybrid_search_slugged_path_globs(monkeypatch):
+    # Ensure path_glob matches slugged /work/<slug>/ paths
+    pts = [
+        _Pt("1", "/work/repo-slug/src/a.py"),
+        _Pt("2", "/work/other/docs/readme.md"),
+    ]
+    monkeypatch.setattr(hyb, "QdrantClient", lambda *a, **k: FakeQdrant(pts))
+    monkeypatch.setenv("EMBEDDING_MODEL", "unit-test")
+    monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
+    monkeypatch.setattr(hyb, "TextEmbedding", lambda *a, **k: FakeEmbed())
+    monkeypatch.setattr(hyb, "_get_embedding_model", lambda *a, **k: FakeEmbed())
+
+    items = hyb.run_hybrid_search(
+        queries=["foo"],
+        limit=10,
+        per_path=2,
+        path_glob=["src/*.py"],  # repo-relative glob
+        not_glob=None,
+        expand=False,
+        model=FakeEmbed(),
+    )
+    paths = {it.get("path") for it in items}
+    assert "/work/repo-slug/src/a.py" in paths
+    assert "/work/other/docs/readme.md" not in paths
+
+
+@pytest.mark.unit
 def test_dense_query_preserves_collection_on_filter_drop(monkeypatch):
     calls = []
 
