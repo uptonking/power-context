@@ -1325,41 +1325,6 @@ def _process_paths(paths, client, model, vector_name: str, model_dim: int, works
                 print(f"Not processing locally: {p}")
                 _log_activity(repo_key, "skipped", p, {"reason": "remote-mode"})
 
-            repo_progress[repo_key] = repo_progress.get(repo_key, 0) + 1
-            try:
-                _update_progress(
-                    repo_key,
-                    started_at,
-                    repo_progress[repo_key],
-                    len(repo_files),
-                    p,
-                )
-            except Exception:
-                pass
-            if client is not None:
-                try:
-                    idx.delete_points_by_path(client, collection, str(p))
-                    print(f"[deleted] {p} -> {collection}")
-                except Exception:
-                    pass
-            try:
-                remove_cached_file(str(p), repo_name)
-            except Exception:
-                pass
-            _log_activity(repo_key, "deleted", p)
-            repo_progress[repo_key] = repo_progress.get(repo_key, 0) + 1
-            try:
-                _update_progress(
-                    repo_key,
-                    started_at,
-                    repo_progress[repo_key],
-                    len(repo_files),
-                    p,
-                )
-            except Exception:
-                pass
-            continue
-
         if client is not None and model is not None:
             try:
                 idx.ensure_collection_and_indexes_once(client, collection, model_dim, vector_name)
