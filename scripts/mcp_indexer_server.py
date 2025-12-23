@@ -5550,16 +5550,25 @@ async def expand_query(query: Any = None, max_new: Any = None, session: Optional
             return {"alternates": []}
         original_q = qlist[0] if qlist else ""
         # Select decoder runtime: explicit REFRAG_RUNTIME takes priority,
-        # otherwise auto-detect based on which API keys are configured
+        # otherwise auto-detect based on which API keys are configured.
+        # Prefer GLM when available so expand_query stays aligned with GLM
+        # context_answer behavior and TOON-optimised paths.
         runtime_kind = str(os.environ.get("REFRAG_RUNTIME", "")).strip().lower()
         if not runtime_kind:
             # Auto-detect based on available API keys
-            if os.environ.get("MINIMAX_API_KEY", "").strip():
-                runtime_kind = "minimax"
-            elif os.environ.get("GLM_API_KEY", "").strip():
-                runtime_kind = "glm"
-            else:
-                runtime_kind = "llamacpp"
+            try:
+                from scripts.refrag_glm import detect_glm_runtime  # type: ignore
+                if detect_glm_runtime():
+                    runtime_kind = "glm"
+                elif os.environ.get("MINIMAX_API_KEY", "").strip():
+                    runtime_kind = "minimax"
+                else:
+                    runtime_kind = "llamacpp"
+            except Exception:
+                if os.environ.get("MINIMAX_API_KEY", "").strip():
+                    runtime_kind = "minimax"
+                else:
+                    runtime_kind = "llamacpp"
         print(f"[EXPAND] runtime_kind={runtime_kind}", flush=True)
 
         # Build prompt per runtime - each model needs different prompting style
@@ -5587,7 +5596,7 @@ async def expand_query(query: Any = None, max_new: Any = None, session: Optional
 
         out = client.generate_with_soft_embeddings(
             prompt=prompt,
-            max_tokens=int(os.environ.get("EXPAND_MAX_TOKENS", "128") or 128),
+            max_tokens=int(os.environ.get("EXPAND_MAX_TOKENS", "512") or 512),
             temperature=0.7 if runtime_kind == "llamacpp" else 1.0,
             top_k=int(os.environ.get("EXPAND_TOP_K", "30") or 30),
             top_p=float(os.environ.get("EXPAND_TOP_P", "0.9") or 0.9),
@@ -7069,11 +7078,11 @@ def _ca_fallback_and_budget(
                 # GLM models have much larger context windows - use higher budgets
                 try:
                     from scripts.refrag_glm import detect_glm_runtime
-                    _is_glm = detect_glm_runtime()
+                    is_glm = detect_glm_runtime()
                 except ImportError:
-                    _is_glm = False
+                    is_glm = False
                 
-                if _is_glm:
+                if is_glm:
                     # GLM: 200K context allows much more code context
                     _default_budget = "8192"  # 8x more than Granite
                     _default_spans = "24"     # 3x more spans
@@ -7553,19 +7562,16 @@ def _ca_decoder_params(max_tokens: Any) -> tuple[int, float, int, float, list[st
         is_glm = False
     
     if is_glm:
-        # Pull dynamic limit from GLM model config
-        try:
-            glm_model = get_glm_model_name()
-            model_config = get_model_config(glm_model)
-            # Respect env override if set, otherwise use model's max output
-            env_override = os.environ.get("DECODER_MAX_TOKENS", "").strip()
-            if env_override:
-                default_max_tokens = _to_int(env_override, model_config.get("max_output_tokens", 4000))
-            else:
-                # Use model's actual max output capability
-                default_max_tokens = model_config.get("max_output_tokens", 4000)
-        except ImportError:
-            default_max_tokens = 4000  # Fallback
+        # Pull dynamic limit from GLM model config (imports already succeeded above)
+        glm_model = get_glm_model_name()
+        model_config = get_model_config(glm_model)
+        # Respect env override if set, otherwise use model's max output
+        env_override = os.environ.get("DECODER_MAX_TOKENS", "").strip()
+        if env_override:
+            default_max_tokens = _to_int(env_override, model_config.get("max_output_tokens", 4000))
+        else:
+            # Use model's actual max output capability
+            default_max_tokens = model_config.get("max_output_tokens", 4000)
     else:
         # Granite/llamacpp
         default_max_tokens = 2000

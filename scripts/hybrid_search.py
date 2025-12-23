@@ -461,6 +461,8 @@ def _detect_implementation_intent(queries: List[str]) -> bool:
 
 # Micro-span compaction and budgeting (ReFRAG-lite output shaping)
 # Defaults vary by: (1) whether micro chunking is enabled, (2) runtime (GLM vs llamacpp)
+# NOTE: These constants are computed at import time from environment variables.
+# If env vars change after import, restart the process or set explicit overrides.
 def _get_micro_defaults() -> tuple[int, int, int, int]:
     """Return (max_spans, merge_lines, budget_tokens, tokens_per_line) based on runtime and micro chunk mode."""
     # Check if micro chunking is enabled
@@ -1030,136 +1032,86 @@ def expand_queries_enhanced(
 def _llm_expand_queries(
     queries: List[str], language: str | None = None, max_new: int = 4
 ) -> List[str]:
-    """Best-effort LLM expansion with preference for a local runtime (Ollama).
-    Providers (by env):
-      - LLM_PROVIDER=ollama (preferred if OLLAMA_HOST set; default http://localhost:11434)
-      - fallback: OPENAI_API_KEY + LLM_EXPAND_MODEL
-    On any error or if not configured, returns []."""
+    """Best-effort LLM expansion using configured decoder (GLM or llama.cpp/Granite).
+    
+    Uses the existing refrag infrastructure:
+      - GLM if detected via detect_glm_runtime()
+      - llama.cpp (Granite 4.0) otherwise
+    On any error or if decoder not configured, returns []."""
     import json
-    import urllib.request
+    import re
+    import ast
 
-    model = os.environ.get("LLM_EXPAND_MODEL", "glm4")
-    prompt = (
-        "You are a code search expert. Given one or more short queries, suggest up to "
-        f"{max_new} semantically diverse, code-oriented expansions. Only return a JSON list of strings.\n"
-        f"Language hint: {language or 'any'}. Queries: {queries}"
-    )
-
-    # 1) Prefer local Ollama
-    prov = (os.environ.get("LLM_PROVIDER") or "").strip().lower()
-    ollama_host = (
-        os.environ.get("OLLAMA_HOST", "http://localhost:11434").strip()
-        or "http://localhost:11434"
-    )
-    if prov in {"", "ollama"}:  # default to ollama if reachable
+    # Detect runtime kind (same logic as mcp_indexer_server.py expand_query)
+    runtime_kind = os.environ.get("REFRAG_RUNTIME", "").strip().lower()
+    if not runtime_kind:
         try:
-            payload = {
-                "model": model,
-                "prompt": prompt,
-                "stream": False,
-                "format": "json",
-                "options": {"temperature": 0.2, "num_predict": 128},
-            }
-            req = urllib.request.Request(
-                ollama_host.rstrip("/") + "/api/generate",
-                data=json.dumps(payload).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
-            )
-            with urllib.request.urlopen(req, timeout=8) as resp:
-                body = json.loads(resp.read().decode("utf-8", "ignore"))
-            txt = body.get("response", "")
-
-            def _parse_list(t: str):
-                t = t.strip().strip("`")
-                import re, json as _json
-
-                try:
-                    v = _json.loads(t)
-                    if isinstance(v, list):
-                        return v
-                except Exception:
-                    pass
-                if t.startswith("```"):
-                    t = t.strip("`")
-                m = re.search(r"\[.*?\]", t, flags=re.S)
-                if m:
-                    try:
-                        v = _json.loads(m.group(0))
-                        if isinstance(v, list):
-                            return v
-                    except Exception:
-                        pass
-                return None
-
-            arr = _parse_list(txt)
-            if isinstance(arr, list):
-                return [str(x) for x in arr[:max_new] if str(x).strip()]
-            out: List[str] = []
-            for line in txt.splitlines():
-                s = line.strip().strip("- ").strip("`")
-                if s:
-                    out.append(s)
-                if len(out) >= max_new:
-                    break
-            return out
+            from scripts.refrag_glm import detect_glm_runtime
+            if detect_glm_runtime():
+                runtime_kind = "glm"
+            else:
+                runtime_kind = "llamacpp"
+        except Exception:
+            runtime_kind = "llamacpp"
+    
+    original_q = " ".join(queries)
+    
+    def _parse_alts(out: str) -> List[str]:
+        """Parse alternatives from LLM output (same logic as mcp_indexer_server.py)."""
+        alts: List[str] = []
+        # Try direct JSON parse
+        try:
+            parsed = json.loads(out)
+            if isinstance(parsed, list):
+                for s in parsed:
+                    if isinstance(s, str) and s.strip() and s not in queries:
+                        alts.append(s.strip())
+                        if len(alts) >= max_new:
+                            return alts
         except Exception:
             pass
+        # Try ast.literal_eval for single-quoted lists
+        try:
+            parsed = ast.literal_eval(out)
+            if isinstance(parsed, list):
+                for s in parsed:
+                    if isinstance(s, str) and s.strip() and s not in queries:
+                        alts.append(s.strip())
+                        if len(alts) >= max_new:
+                            return alts
+        except Exception:
+            pass
+        # Try regex extraction from verbose output - only keep multi-word phrases
+        for m in re.finditer(r'"([^"]+)"', out):
+            candidate = m.group(1).strip()
+            # Skip single words and duplicates - we want complete search phrases
+            if candidate and " " in candidate and candidate not in queries and candidate not in alts:
+                alts.append(candidate)
+                if len(alts) >= max_new:
+                    break
+        return alts
 
-    # 2) Fallback to OpenAI if configured
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        return []
     try:
-        data = {
-            "model": model,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.2,
-        }
-        req = urllib.request.Request(
-            "https://api.openai.com/v1/chat/completions",
-            data=json.dumps(data).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-        )
-        with urllib.request.urlopen(req, timeout=6) as resp:
-            body = json.loads(resp.read().decode("utf-8", "ignore"))
-        txt = body.get("choices", [{}])[0].get("message", {}).get("content", "")
-
-        def _parse_list(t: str):
-            t = t.strip().strip("`")
-            import re, json as _json
-
-            try:
-                v = _json.loads(t)
-                if isinstance(v, list):
-                    return v
-            except Exception:
-                pass
-            if t.startswith("```"):
-                t = t.strip("`")
-            m = re.search(r"\[.*?\]", t, flags=re.S)
-            if m:
-                try:
-                    v = _json.loads(m.group(0))
-                    if isinstance(v, list):
-                        return v
-                except Exception:
-                    pass
-            return None
-
-        arr = _parse_list(txt)
-        if isinstance(arr, list):
-            return [str(x) for x in arr[:max_new] if str(x).strip()]
-        out = []
-        for line in txt.splitlines():
-            s = line.strip().strip("- ").strip("`")
-            if s:
-                out.append(s)
-            if len(out) >= max_new:
-                break
-        return out
+        if runtime_kind == "glm":
+            from scripts.refrag_glm import GLMRefragClient
+            client = GLMRefragClient()
+            prompt = f'Rewrite "{original_q}" as {max_new} different code search queries using synonyms or related terms. Each query should be a complete phrase, not single words. Output as JSON array:'
+            glm_max_tokens = int(os.environ.get("EXPAND_MAX_TOKENS", "512"))
+            txt = client.generate_with_soft_embeddings(
+                prompt, max_tokens=glm_max_tokens, temperature=1.0, top_p=0.9,
+                disable_thinking=True, force_json=False
+            )
+        else:
+            from scripts.refrag_llamacpp import LlamaCppRefragClient, is_decoder_enabled
+            if not is_decoder_enabled():
+                return []
+            client = LlamaCppRefragClient()
+            prompt = (
+                f"Rewrite this code search query using different words: {original_q}\n"
+                f'Give {max_new} short alternative phrasings as a JSON array. Example: ["alt1", "alt2"]'
+            )
+            txt = client.generate_with_soft_embeddings(prompt, max_tokens=512, temperature=0.7)
+        return _parse_alts(txt)
     except Exception:
         return []
 

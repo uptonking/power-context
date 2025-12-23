@@ -76,6 +76,8 @@ def get_model_config(model: str) -> dict[str, Any]:
         if model_lower.startswith(base_model):
             return config
     # Check for version pattern (glm-4.X)
+    # Note: This assumes GLM uses glm-4.X versioning. Future major versions
+    # (e.g., glm-5.X) will fall through to GLM_DEFAULT_CONFIG until explicitly added.
     match = re.match(r"glm-4\.(\d+)", model_lower)
     if match:
         version = int(match.group(1))
@@ -91,11 +93,16 @@ def get_model_config(model: str) -> dict[str, Any]:
 
 
 def detect_glm_runtime() -> bool:
-    """Detect if GLM runtime is active (shared helper to reduce duplication).
+    """Detect whether the GLM runtime should be considered active.
     
-    Returns True if:
-    - REFRAG_RUNTIME is explicitly set to 'glm', OR
-    - REFRAG_RUNTIME is not set but GLM_API_KEY is present
+    Shared helper to centralise the environment-variable logic used to decide
+    if GLM-based behaviour should be enabled.
+    
+    Returns:
+        True if GLM runtime is active under either condition:
+            - REFRAG_RUNTIME is explicitly set to 'glm' (case-insensitive), or
+            - REFRAG_RUNTIME is unset/empty and GLM_API_KEY is non-empty.
+        False otherwise (e.g., REFRAG_RUNTIME='openai', or both vars unset).
     """
     runtime = os.environ.get("REFRAG_RUNTIME", "").strip().lower()
     if runtime == "glm":

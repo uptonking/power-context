@@ -182,9 +182,9 @@ class TestGLMToolStreamSupport:
         client.generate_with_soft_embeddings("test prompt", tools=tools, tool_stream=True)
         
         call_kwargs = mock_client.chat.completions.create.call_args[1]
-        # tool_stream should not be set for 4.6
+        # tool_stream should not be set for 4.6; if present, must be False
         extra_body = call_kwargs.get("extra_body", {})
-        assert extra_body.get("tool_stream") is not True
+        assert "tool_stream" not in extra_body or extra_body["tool_stream"] is False
 
 
 class TestGLMThinkingSupport:

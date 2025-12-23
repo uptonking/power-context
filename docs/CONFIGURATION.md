@@ -261,7 +261,15 @@ To use legacy settings (pre-v2): `LEX_VECTOR_DIM=4096 LEX_MULTI_HASH=1 LEX_BIGRA
 | Name | Description | Default |
 |------|-------------|---------|
 | HYBRID_EXPAND | Enable heuristic multi-query expansion | 0 (off) |
-| LLM_EXPAND_MAX | Max alternate queries via LLM | 0 |
+| EXPAND_MAX_TOKENS | Max tokens for LLM query expansion response | 512 |
+
+### LLM Query Expansion
+
+Query expansion uses the existing decoder infrastructure (GLM or llama.cpp/Granite):
+- **GLM**: Auto-detected when `GLM_API_KEY` is set
+- **llama.cpp/Granite**: Used when `REFRAG_DECODER=1` and GLM not detected
+
+No separate Ollama configuration needed—expansion shares the same decoder as `context_answer`.
 
 ### Filename Boost
 
