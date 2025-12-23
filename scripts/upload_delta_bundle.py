@@ -94,9 +94,11 @@ def process_delta_bundle(workspace_path: str, bundle_path: Path, manifest: Dict[
                 active_slug = None
 
         slug_order: list[str] = []
-        for candidate in (serving_slug, active_slug):
-            if candidate and _SLUGGED_REPO_RE.match(candidate) and candidate not in slug_order:
-                slug_order.append(candidate)
+        serving_candidate: Optional[str] = None
+        if serving_slug and _SLUGGED_REPO_RE.match(serving_slug):
+            serving_candidate = serving_slug
+        if active_slug and _SLUGGED_REPO_RE.match(active_slug) and active_slug not in slug_order:
+            slug_order.append(active_slug)
 
         # If staging is active, we must mirror uploads into BOTH the canonical slug and
         # the "*_old" slug. Relying purely on snapshot detection is brittle (e.g. when
@@ -178,6 +180,10 @@ def process_delta_bundle(workspace_path: str, bundle_path: Path, manifest: Dict[
                 old_slug = primary if primary.endswith("_old") else f"{canonical}_old"
                 desired = [canonical, old_slug]
                 slug_order = [s for s in desired if _SLUGGED_REPO_RE.match(s)]
+        elif staging_gate and not staging_active and serving_candidate:
+            # Ignore serving slugs when staging is disabled; keep deterministic non-staging writes.
+            if serving_candidate in slug_order:
+                slug_order = [s for s in slug_order if s != serving_candidate]
 
         if staging_gate:
             try:
