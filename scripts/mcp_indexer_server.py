@@ -5527,12 +5527,12 @@ async def expand_query(query: Any = None, max_new: Any = None, session: Optional
             qlist = [str(x) for x in query if str(x).strip()]
         elif query is not None:
             qlist = [str(query)] if str(query).strip() else []
-        cap = 2
+        cap = 3
         if max_new not in (None, ""):
             try:
-                cap = max(0, min(2, int(max_new)))
+                cap = max(0, min(5, int(max_new)))
             except (ValueError, TypeError):
-                cap = 2
+                cap = 3
 
         if not qlist or cap <= 0:
             return {
@@ -5567,36 +5567,49 @@ async def expand_query(query: Any = None, max_new: Any = None, session: Optional
 
         # Build prompt per runtime - each model needs different prompting style
         extra_kwargs = {}
+        use_force_json = False
+        stop_tokens = ["\n\n"]
         if runtime_kind == "minimax":
             from scripts.refrag_minimax import MiniMaxRefragClient  # type: ignore
             client = MiniMaxRefragClient()
-            # MiniMax M2: direct instruction - the model struggles with few-shot
-            extra_kwargs["system"] = "You rewrite search queries using synonyms. Output format: JSON array with exactly 2 strings. No other text."
-            prompt = f'Rewrite "{original_q}" as 2 different search queries using synonyms:'
+            extra_kwargs["system"] = f"You rewrite code search queries. Output a JSON array with exactly {cap} alternative queries. Use different terminology - do NOT repeat any words from the original."
+            prompt = f'Rewrite "{original_q}" using completely different technical terms:'
         elif runtime_kind == "glm":
             from scripts.refrag_glm import GLMRefragClient  # type: ignore
             client = GLMRefragClient()
-            extra_kwargs["disable_thinking"] = True  # GLM-4.6: skip deep thinking for expand
-            # GLM: simple instruction works well
-            prompt = f'Generate 2 alternative search queries for: "{original_q}"\nOutput as JSON array:'
+            # no_thinking=True: use configured GLM_MODEL but skip thinking for fast response
+            # All GLM models (4.5, 4.6, 4.7) support thinking: {type: "disabled"}
+            extra_kwargs["no_thinking"] = True
+            use_force_json = True  # GLM works best with response_format: json_object
+            # Focus on IMPLEMENTATIONS not concepts - gets more diverse results
+            prompt = (
+                f'For code search "{original_q}", suggest {cap} alternative queries focusing on:\n'
+                f'- Library/package names (e.g., "nltk wordnet", "gensim vectors")\n'
+                f'- Specific algorithms/techniques used internally\n'
+                f'- Data structures or patterns\n\n'
+                f'Output JSON array with {cap} implementation-focused queries:'
+            )
         else:
             from scripts.refrag_llamacpp import LlamaCppRefragClient  # type: ignore
             client = LlamaCppRefragClient()
-            # Local llama.cpp: original simple prompt
+            # llama.cpp / Granite: structured prompt with stop tokens
+            stop_tokens = ["\n\n", "```", "]"]  # Stop after first array closes
             prompt = (
-                f"Rewrite this code search query using different words: {original_q}\n"
-                'Give 2 short alternative phrasings as a JSON array. Example: ["alt1", "alt2"]'
+                f'Rewrite this code search query using different technical terms.\n'
+                f'Do NOT repeat words from the original. Use alternative concepts.\n'
+                f'Original: {original_q}\n\n'
+                f'Output {cap} alternatives as JSON array:\n['
             )
 
         out = client.generate_with_soft_embeddings(
             prompt=prompt,
-            max_tokens=int(os.environ.get("EXPAND_MAX_TOKENS", "512") or 512),
-            # Prefer deterministic expansions where possible
-            temperature=0.0 if runtime_kind in {"llamacpp", "glm"} else 1.0,
-            top_k=int(os.environ.get("EXPAND_TOP_K", "30") or 30),
+            max_tokens=int(os.environ.get("EXPAND_MAX_TOKENS", "256") or 256),
+            # Some creativity needed for diverse expansions
+            temperature=float(os.environ.get("EXPAND_TEMPERATURE", "0.7") or 0.7),
+            top_k=int(os.environ.get("EXPAND_TOP_K", "40") or 40),
             top_p=float(os.environ.get("EXPAND_TOP_P", "0.9") or 0.9),
-            stop=["\n\n"],
-            force_json=False,
+            stop=stop_tokens,
+            force_json=use_force_json,
             **extra_kwargs,
         )
         import json as _json
@@ -5622,15 +5635,51 @@ async def expand_query(query: Any = None, max_new: Any = None, session: Optional
             seen.add(ss)
             alts.append(ss)
 
-        try:
-            # First try direct JSON parse
-            parsed = _json.loads(out)
+        # For llama.cpp, prompt ends with '[' so we need to prepend it and append ']'
+        if runtime_kind == "llamacpp" and out:
+            out = out.strip()
+            if not out.startswith("["):
+                out = "[" + out
+            if not out.endswith("]"):
+                out = out + "]"
+        # Strip markdown code blocks if present
+        out = _re.sub(r'^```(?:json)?\s*', '', out.strip())
+        out = _re.sub(r'\s*```$', '', out)
+
+        def _extract_strings_from_parsed(parsed: Any) -> None:
+            """Extract strings from parsed JSON - handles list or dict with common keys."""
+            nonlocal alts
+            # If it's a list, iterate directly
             if isinstance(parsed, list):
                 for s in parsed:
                     if isinstance(s, str):
                         _maybe_add(s)
                         if len(alts) >= cap:
-                            break
+                            return
+            # If it's a dict, look for common keys that contain the array
+            elif isinstance(parsed, dict):
+                for key in ["answer", "alternatives", "queries", "results", "data"]:
+                    if key in parsed and isinstance(parsed[key], list):
+                        for s in parsed[key]:
+                            if isinstance(s, str):
+                                _maybe_add(s)
+                                if len(alts) >= cap:
+                                    return
+                        return  # Found and processed a key
+                # Last resort: try any list value in the dict
+                for v in parsed.values():
+                    if isinstance(v, list):
+                        for s in v:
+                            if isinstance(s, str):
+                                _maybe_add(s)
+                                if len(alts) >= cap:
+                                    return
+                        return  # Used first list found
+
+        try:
+            # First try direct JSON parse
+            parsed = _json.loads(out)
+            _extract_strings_from_parsed(parsed)
         except Exception as parse_err:
             logger.debug(f"expand_query direct parse failed: {parse_err}")
             # Fallback: try Python literal eval for single-quoted lists
