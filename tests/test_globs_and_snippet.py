@@ -1,6 +1,9 @@
 import importlib
 import builtins
+import json
 import types
+from pathlib import Path
+
 import pytest
 
 # Import targets
@@ -82,6 +85,77 @@ def test_run_hybrid_search_list_globs(monkeypatch):
     assert "src/a.py" in paths
     assert "tests/b_test.py" in paths
     assert "docs/readme.md" not in paths
+
+
+@pytest.mark.unit
+def test_run_hybrid_search_slugged_path_globs(monkeypatch):
+    # Ensure path_glob matches slugged /work/<slug>/ paths
+    pts = [
+        _Pt("1", "/work/repo-slug/src/a.py"),
+        _Pt("2", "/work/other/docs/readme.md"),
+    ]
+    monkeypatch.setattr(hyb, "QdrantClient", lambda *a, **k: FakeQdrant(pts))
+    monkeypatch.setenv("EMBEDDING_MODEL", "unit-test")
+    monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
+    monkeypatch.setattr(hyb, "TextEmbedding", lambda *a, **k: FakeEmbed())
+    monkeypatch.setattr(hyb, "_get_embedding_model", lambda *a, **k: FakeEmbed())
+
+    items = hyb.run_hybrid_search(
+        queries=["foo"],
+        limit=10,
+        per_path=2,
+        path_glob=["src/*.py"],  # repo-relative glob
+        not_glob=None,
+        expand=False,
+        model=FakeEmbed(),
+    )
+    paths = {it.get("path") for it in items}
+    assert "/work/repo-slug/src/a.py" in paths
+    assert "/work/other/docs/readme.md" not in paths
+
+
+@pytest.mark.unit
+def test_dense_query_preserves_collection_on_filter_drop(monkeypatch):
+    calls = []
+
+    class RecordingClient:
+        def __init__(self):
+            self._fail_once = True
+
+        def query_points(self, **kwargs):
+            calls.append(kwargs)
+            if self._fail_once:
+                self._fail_once = False
+                raise Exception("boom")
+            return types.SimpleNamespace(points=["ok"])
+
+    # Avoid pulling real qdrant models
+    monkeypatch.setattr(
+        hyb,
+        "models",
+        types.SimpleNamespace(SearchParams=lambda hnsw_ef: {"hnsw_ef": hnsw_ef}),
+    )
+
+    client = RecordingClient()
+    out = hyb.dense_query(client, "vec", [0.1], flt=None, per_query=1, collection_name="explicit-coll")
+
+    assert out == ["ok"]
+    assert len(calls) == 2  # first fails, second succeeds after filter drop
+    assert calls[1]["collection_name"] == "explicit-coll"
+    assert calls[1].get("query_filter") is None or calls[1].get("filter") is None
+
+
+@pytest.mark.unit
+def test_collection_prefers_env_over_state(monkeypatch, tmp_path):
+    # State file should be ignored when COLLECTION_NAME env var is set
+    state_dir = tmp_path / ".codebase"
+    state_dir.mkdir()
+    (state_dir / "state.json").write_text(json.dumps({"qdrant_collection": "state-coll"}), encoding="utf-8")
+
+    monkeypatch.setenv("WORKSPACE_PATH", str(tmp_path))
+    monkeypatch.setenv("COLLECTION_NAME", "env-coll")
+
+    assert hyb._collection(None) == "env-coll"
 
 
 @pytest.mark.unit

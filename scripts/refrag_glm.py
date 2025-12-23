@@ -43,9 +43,9 @@ GLM_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
     "glm-4.5": {
         "temperature": 1.0,
         "top_p": 0.95,
-        "max_output_tokens": 8192,
-        "max_context_tokens": 131072,
-        "supports_thinking": False,
+        "max_output_tokens": 96000,  # Per docs: 96K max output
+        "max_context_tokens": 131072,  # 128K context
+        "supports_thinking": True,  # Supports hybrid thinking modes with enabled/disabled
         "supports_tool_stream": False,
     },
 }
@@ -94,22 +94,20 @@ def get_model_config(model: str) -> dict[str, Any]:
 
 def detect_glm_runtime() -> bool:
     """Detect whether the GLM runtime should be considered active.
-    
+
     Shared helper to centralise the environment-variable logic used to decide
     if GLM-based behaviour should be enabled.
-    
+
     Returns:
-        True if GLM runtime is active under either condition:
-            - REFRAG_RUNTIME is explicitly set to 'glm' (case-insensitive), or
-            - REFRAG_RUNTIME is unset/empty and GLM_API_KEY is non-empty.
-        False otherwise (e.g., REFRAG_RUNTIME='openai', or both vars unset).
+        True only if REFRAG_RUNTIME is explicitly set to 'glm' (case-insensitive).
+        False otherwise (e.g., REFRAG_RUNTIME='llamacpp', 'minimax', or unset).
+
+    Note:
+        The presence of GLM_API_KEY alone does NOT auto-enable GLM.
+        You must explicitly set REFRAG_RUNTIME=glm to use the GLM runtime.
     """
     runtime = os.environ.get("REFRAG_RUNTIME", "").strip().lower()
-    if runtime == "glm":
-        return True
-    if not runtime and os.environ.get("GLM_API_KEY", "").strip():
-        return True
-    return False
+    return runtime == "glm"
 
 
 def get_glm_model_name() -> str:
@@ -146,37 +144,50 @@ class GLMRefragClient:
         max_tokens: int = 256,
         **gen_kwargs: Any,
     ) -> str:
-        # Use fast model for simple tasks (expand_query), full model for context_answer
+        # Model selection priority:
+        # 1. Explicit model= parameter
+        # 2. disable_thinking=True -> GLM_MODEL_FAST (backwards compat for expand_query)
+        # 3. GLM_MODEL env var
+        # 4. Default: glm-4.6
         disable_thinking = bool(gen_kwargs.pop("disable_thinking", False))
-        if disable_thinking:
+        explicit_model = gen_kwargs.pop("model", None)
+        if explicit_model:
+            model = explicit_model
+        elif disable_thinking:
             model = os.environ.get("GLM_MODEL_FAST", "glm-4.5")
         else:
             model = os.environ.get("GLM_MODEL", "glm-4.6")
-        
+
+        # no_thinking: disable thinking on current model WITHOUT switching models
+        # Useful when you want to use GLM-4.7 but skip reasoning for simple tasks
+        no_thinking = bool(gen_kwargs.pop("no_thinking", False))
+
         # Get model-specific configuration for backwards compatibility
         model_config = get_model_config(model)
-        
+
         # Use model-specific defaults, allow override via gen_kwargs
         # For GLM-4.7: temp=1.0, top_p=0.95 (per migration guide)
         # For backwards compat: caller can still override with lower values for stable output
         temperature = float(gen_kwargs.get("temperature", model_config["temperature"]))
         top_p = float(gen_kwargs.get("top_p", model_config["top_p"]))
-        
+
         # Cap max_tokens to model's output limit
         requested_max = int(gen_kwargs.get("max_tokens", max_tokens))
         effective_max = min(requested_max, model_config["max_output_tokens"])
-        
+
         stop = gen_kwargs.get("stop")
         timeout = gen_kwargs.pop("timeout", None)
         force_json = bool(gen_kwargs.pop("force_json", False))
-        
+
         # Streaming options (GLM-4.7+ supports tool_stream)
         stream = bool(gen_kwargs.pop("stream", False))
         tool_stream = bool(gen_kwargs.pop("tool_stream", False))
         tools = gen_kwargs.pop("tools", None)
-        
+
         # Thinking/reasoning options
         enable_thinking = gen_kwargs.pop("enable_thinking", None)
+        # Combine disable_thinking and no_thinking flags for thinking control
+        should_disable_thinking = disable_thinking or no_thinking
         
         try:
             timeout_val = float(timeout) if timeout is not None else None
@@ -212,9 +223,10 @@ class GLMRefragClient:
             if force_json:
                 create_kwargs["response_format"] = {"type": "json_object"}
             
-            # Thinking/deep reasoning control (GLM-4.6+ with thinking support)
+            # Thinking/deep reasoning control (GLM-4.5/4.6/4.7 all support thinking param)
+            # All three models support thinking: {type: "disabled"} for fast responses
             if model_config["supports_thinking"]:
-                if disable_thinking:
+                if should_disable_thinking:
                     create_kwargs["extra_body"] = create_kwargs.get("extra_body", {})
                     create_kwargs["extra_body"]["thinking"] = {"type": "disabled"}
                 elif enable_thinking:
