@@ -151,6 +151,39 @@ def _cleanup_old_clone(
 
     old_slug = f"{repo_name}_old"
 
+    def _resolve_base_work_root() -> Path:
+        env_work = work_dir or os.environ.get("WORK_DIR") or os.environ.get("WORKDIR") or "/work"
+        try:
+            return Path(env_work).resolve()
+        except Exception:
+            return Path(env_work)
+
+    base_work_root = _resolve_base_work_root()
+
+    def _clamp_to_base(candidate: Optional[Path]) -> Path:
+        if candidate is None:
+            return base_work_root
+        try:
+            resolved_candidate = candidate.resolve()
+        except Exception:
+            resolved_candidate = candidate
+        try:
+            resolved_base = base_work_root.resolve()
+        except Exception:
+            resolved_base = base_work_root
+        try:
+            if resolved_base == resolved_candidate or resolved_base in resolved_candidate.parents:
+                return resolved_candidate
+        except Exception:
+            pass
+        try:
+            print(
+                f"[staging] refusing to treat {resolved_candidate} as work root; falling back to {resolved_base}"
+            )
+        except Exception:
+            pass
+        return resolved_base
+
     work_root: Optional[Path] = None
     if workspace_root:
         try:
@@ -168,25 +201,44 @@ def _cleanup_old_clone(
                 work_root = Path(os.environ.get("WORK_DIR") or os.environ.get("WORKDIR") or "/work").resolve()
         except Exception:
             work_root = Path("/work")
+    work_root = _clamp_to_base(work_root)
 
     codebase_root = _resolve_codebase_root(work_root)
 
+    def _safe_delete(target: Path) -> None:
+        try:
+            resolved_target = target.resolve()
+            resolved_base = work_root.resolve()
+        except Exception:
+            try:
+                resolved_target = target
+                resolved_base = work_root
+            except Exception:
+                return
+        try:
+            if resolved_base == resolved_target or resolved_base in resolved_target.parents:
+                _delete_path_tree(resolved_target)
+            else:
+                print(f"[staging] refusing to delete {resolved_target}: outside work root {resolved_base}")
+        except Exception:
+            pass
+
     # Workspace clone dir
     try:
-        _delete_path_tree((work_root / old_slug).resolve())
+        _safe_delete((work_root / old_slug).resolve())
     except Exception:
         pass
 
     # Repo metadata dir
     try:
-        _delete_path_tree((codebase_root / ".codebase" / "repos" / old_slug).resolve())
+        _safe_delete((codebase_root / ".codebase" / "repos" / old_slug).resolve())
     except Exception:
         pass
 
     # If codebase_root differs from work_root, also try under work_root for safety.
     try:
         if str(codebase_root.resolve()) != str(work_root.resolve()):
-            _delete_path_tree((work_root / ".codebase" / "repos" / old_slug).resolve())
+            _safe_delete((work_root / ".codebase" / "repos" / old_slug).resolve())
     except Exception:
         pass
 
@@ -794,36 +846,38 @@ def activate_staging_rebuild(*, collection: str, work_dir: str) -> None:
     # This staging workflow serves reads from <collection>_old while recreating/reindexing
     # the primary <collection>. "Activate" means: switch serving back to the rebuilt primary
     # and remove the *_old clone.
+    cleanup_kwargs = {
+        "collection": collection,
+        "repo_name": repo_name,
+        "delete_collection": True,
+        "work_dir": work_dir,
+        "workspace_root": root,
+    }
 
-    _cleanup_old_clone(
-        collection=collection,
-        repo_name=repo_name,
-        delete_collection=True,
-        work_dir=work_dir,
-        workspace_root=root,
-    )
+    try:
+        # Reset serving state back to the primary collection and clear staging metadata.
+        if update_workspace_state and repo_name:
+            try:
+                update_workspace_state(
+                    workspace_path=root,
+                    repo_name=repo_name,
+                    updates={
+                        "serving_collection": collection,
+                        "serving_repo_slug": repo_name,
+                        "active_repo_slug": repo_name,
+                        "qdrant_collection": collection,
+                    },
+                )
+            except Exception:
+                pass
 
-    # Reset serving state back to the primary collection and clear staging metadata.
-    if update_workspace_state and repo_name:
-        try:
-            update_workspace_state(
-                workspace_path=root,
-                repo_name=repo_name,
-                updates={
-                    "serving_collection": collection,
-                    "serving_repo_slug": repo_name,
-                    "active_repo_slug": repo_name,
-                    "qdrant_collection": collection,
-                },
-            )
-        except Exception:
-            pass
-
-    if clear_staging_collection:
-        try:
-            clear_staging_collection(workspace_path=root, repo_name=repo_name)
-        except Exception:
-            pass
+        if clear_staging_collection:
+            try:
+                clear_staging_collection(workspace_path=root, repo_name=repo_name)
+            except Exception:
+                pass
+    finally:
+        _cleanup_old_clone(**cleanup_kwargs)
 
 
 def abort_staging_rebuild(
@@ -867,30 +921,31 @@ def abort_staging_rebuild(
 
     # Staging rebuild serves traffic from <collection>_old while recreating <collection>.
     # Abort should restore serving state to the primary collection and remove the *_old clone.
-    _cleanup_old_clone(
-        collection=collection,
-        repo_name=repo_name,
-        delete_collection=delete_collection,
-        work_dir=work_dir,
-        workspace_root=root,
-    )
+    cleanup_kwargs = {
+        "collection": collection,
+        "repo_name": repo_name,
+        "delete_collection": delete_collection,
+        "work_dir": work_dir,
+        "workspace_root": root,
+    }
 
-    # Reset serving state back to the primary collection.
-    if update_workspace_state and repo_name:
-        try:
-            update_workspace_state(
-                workspace_path=root,
-                repo_name=repo_name,
-                updates={
-                    "serving_collection": collection,
-                    "serving_repo_slug": repo_name,
-                    "active_repo_slug": repo_name,
-                    "qdrant_collection": collection,
-                },
-            )
-        except Exception:
-            pass
+    try:
+        # Reset serving state back to the primary collection.
+        if update_workspace_state and repo_name:
+            try:
+                update_workspace_state(
+                    workspace_path=root,
+                    repo_name=repo_name,
+                    updates={
+                        "serving_collection": collection,
+                        "serving_repo_slug": repo_name,
+                        "active_repo_slug": repo_name,
+                        "qdrant_collection": collection,
+                    },
+                )
+            except Exception:
+                pass
 
-    clear_staging_collection(workspace_path=root, repo_name=repo_name)
-
-    # Cleanup handled by _cleanup_old_clone
+        clear_staging_collection(workspace_path=root, repo_name=repo_name)
+    finally:
+        _cleanup_old_clone(**cleanup_kwargs)

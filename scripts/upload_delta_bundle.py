@@ -15,11 +15,10 @@ try:
         get_collection_state_snapshot,
         is_staging_enabled,
     )
-except ImportError:
-    _extract_repo_name_from_path = None
-    get_staging_targets = None
-    get_collection_state_snapshot = None
-    is_staging_enabled = None
+except ImportError as exc:
+    raise ImportError(
+        "upload_delta_bundle requires scripts.workspace_state; ensure the module is available"
+    ) from exc
 
 
 logger = logging.getLogger(__name__)

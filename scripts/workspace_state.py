@@ -785,6 +785,46 @@ def get_collection_state_snapshot(
     return snapshot
 
 
+def get_staging_targets(
+    *,
+    workspace_path: Optional[str],
+    repo_name: Optional[str],
+) -> Dict[str, Any]:
+    """Return canonical/old slug hints plus staging metadata if staging is active."""
+
+    snapshot = get_collection_state_snapshot(workspace_path=workspace_path, repo_name=repo_name)
+    if not snapshot:
+        return {}
+
+    active_slug = snapshot.get("active_repo_slug") or repo_name
+    serving_slug = snapshot.get("serving_repo_slug") or active_slug
+    staging_info = snapshot.get("staging")
+
+    canonical_slug: Optional[str] = None
+    if isinstance(active_slug, str) and active_slug.strip():
+        canonical_slug = active_slug[:-4] if active_slug.endswith("_old") else active_slug
+    elif isinstance(serving_slug, str) and serving_slug.strip():
+        canonical_slug = serving_slug[:-4] if serving_slug.endswith("_old") else serving_slug
+    elif repo_name:
+        canonical_slug = str(repo_name)
+
+    result: Dict[str, Any] = {
+        "workspace_path": snapshot.get("workspace_path") or workspace_path,
+        "repo_name": repo_name,
+        "active_slug": active_slug,
+        "serving_slug": serving_slug,
+        "staging": staging_info if isinstance(staging_info, dict) else None,
+    }
+
+    if canonical_slug:
+        result["canonical_slug"] = canonical_slug
+        result["old_slug"] = (
+            canonical_slug if canonical_slug.endswith("_old") else f"{canonical_slug}_old"
+        )
+
+    return result
+
+
 def update_staging_status(
     *,
     workspace_path: Optional[str],
