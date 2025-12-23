@@ -20,6 +20,20 @@ const registeredClients = new Map();
 // OAuth Utilities
 // ============================================================================
 
+/**
+ * Clean up expired tokens from tokenStore
+ * Called periodically to prevent unbounded memory growth
+ */
+function cleanupExpiredTokens() {
+  const now = Date.now();
+  const expiryMs = 86400000; // 24 hours
+  for (const [token, data] of tokenStore.entries()) {
+    if (now - data.createdAt > expiryMs) {
+      tokenStore.delete(token);
+    }
+  }
+}
+
 function generateToken() {
   return randomBytes(32).toString("hex");
 }
@@ -361,8 +375,14 @@ export function handleOAuthStoreSession(req, res) {
       }
 
       // Validate backend_url is a valid URL string (prevent prototype pollution)
+      // Only allow http/https schemes for backend API URLs
       try {
-        new URL(backend_url);
+        const url = new URL(backend_url);
+        if (url.protocol !== "http:" && url.protocol !== "https:") {
+          res.statusCode = 400;
+          res.end(JSON.stringify({ error: "Invalid backend_url", error_description: "Only http/https URLs are allowed" }));
+          return;
+        }
       } catch {
         res.statusCode = 400;
         res.end(JSON.stringify({ error: "Invalid backend_url" }));
@@ -494,6 +514,9 @@ export function handleOAuthToken(req, res) {
 
       // TODO: Validate PKCE code_verifier against code_challenge
       // For now, skip validation (local bridge, trusted)
+
+      // Clean up expired tokens periodically to prevent unbounded growth
+      cleanupExpiredTokens();
 
       // Generate access token
       const accessToken = generateToken();
