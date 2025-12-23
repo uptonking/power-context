@@ -5511,106 +5511,175 @@ async def expand_query(query: Any = None, max_new: Any = None, session: Optional
 
     Parameters:
     - query: str or list[str]
-    - max_new: int in [0,2] (default 2)
+    - max_new: int in [0,5] (default 3)
 
     Returns:
     - {"alternates": list[str]} or {"alternates": [], "hint": "..."} if decoder disabled
     """
-    logger.info(f"expand_query called with query={query!r}, max_new={max_new!r}")
-    print(f"[EXPAND] expand_query called with query={query!r}, max_new={max_new!r}", flush=True)
-    import sys; sys.stderr.write(f"[EXPAND] expand_query called with query={query!r}, max_new={max_new!r}\n"); sys.stderr.flush()
+    # NOTE: Do not print to stdout/stderr in MCP stdio mode; it can corrupt the JSON-RPC stream.
+    # Use logger at DEBUG level when explicitly enabled.
+    debug_expand = str(os.environ.get("DEBUG_EXPAND", "")).strip().lower() in ("1", "true", "yes")
+    if debug_expand:
+        logger.debug("expand_query called", extra={"query": repr(query), "max_new": repr(max_new)})
     try:
         qlist: list[str] = []
         if isinstance(query, (list, tuple)):
             qlist = [str(x) for x in query if str(x).strip()]
         elif query is not None:
             qlist = [str(query)] if str(query).strip() else []
-        cap = 2
+        cap = 3
         if max_new not in (None, ""):
             try:
-                cap = max(0, min(2, int(max_new)))
+                cap = max(0, min(5, int(max_new)))
             except (ValueError, TypeError):
-                cap = 2
+                cap = 3
 
-        print(f"[EXPAND] qlist={qlist!r}, cap={cap}", flush=True)
-
-        from scripts.refrag_llamacpp import is_decoder_enabled  # type: ignore
-
-        decoder_enabled = is_decoder_enabled()
-        print(f"[EXPAND] decoder_enabled={decoder_enabled}", flush=True)
-
-        if not decoder_enabled:
-            print("[EXPAND] returning decoder disabled hint", flush=True)
+        if not qlist or cap <= 0:
             return {
+                "ok": True,
+                "original_query": qlist[0] if qlist else "",
                 "alternates": [],
-                "hint": "decoder disabled: set REFRAG_DECODER=1 and configure runtime",
+                "total_queries": 1 if qlist else 0,
+                "decoder_used": "none",
             }
-        if not qlist:
-            print("[EXPAND] returning empty qlist", flush=True)
-            return {"alternates": []}
         original_q = qlist[0] if qlist else ""
         # Select decoder runtime: explicit REFRAG_RUNTIME takes priority,
-        # otherwise auto-detect based on which API keys are configured
+        # otherwise fall back to llamacpp (local).
+        # GLM requires explicit REFRAG_RUNTIME=glm to avoid accidental API calls.
         runtime_kind = str(os.environ.get("REFRAG_RUNTIME", "")).strip().lower()
         if not runtime_kind:
-            # Auto-detect based on available API keys
-            if os.environ.get("MINIMAX_API_KEY", "").strip():
-                runtime_kind = "minimax"
-            elif os.environ.get("GLM_API_KEY", "").strip():
-                runtime_kind = "glm"
-            else:
-                runtime_kind = "llamacpp"
-        print(f"[EXPAND] runtime_kind={runtime_kind}", flush=True)
+            # Default to llamacpp when no runtime is specified
+            runtime_kind = "llamacpp"
+
+        # Only llama.cpp expansion requires the local decoder to be enabled.
+        if runtime_kind == "llamacpp":
+            from scripts.refrag_llamacpp import is_decoder_enabled  # type: ignore
+
+            if not is_decoder_enabled():
+                return {
+                    "ok": True,
+                    "original_query": original_q,
+                    "alternates": [],
+                    "total_queries": 1,
+                    "decoder_used": "none",
+                    "hint": "decoder disabled: set REFRAG_DECODER=1 to enable local llamacpp expansion",
+                }
 
         # Build prompt per runtime - each model needs different prompting style
         extra_kwargs = {}
+        use_force_json = False
+        stop_tokens = ["\n\n"]
         if runtime_kind == "minimax":
             from scripts.refrag_minimax import MiniMaxRefragClient  # type: ignore
             client = MiniMaxRefragClient()
-            # MiniMax M2: direct instruction - the model struggles with few-shot
-            extra_kwargs["system"] = "You rewrite search queries using synonyms. Output format: JSON array with exactly 2 strings. No other text."
-            prompt = f'Rewrite "{original_q}" as 2 different search queries using synonyms:'
+            extra_kwargs["system"] = f"You rewrite code search queries. Output a JSON array with exactly {cap} alternative queries. Use different terminology - do NOT repeat any words from the original."
+            prompt = f'Rewrite "{original_q}" using completely different technical terms:'
         elif runtime_kind == "glm":
             from scripts.refrag_glm import GLMRefragClient  # type: ignore
             client = GLMRefragClient()
-            extra_kwargs["disable_thinking"] = True  # GLM-4.6: skip deep thinking for expand
-            # GLM: simple instruction works well
-            prompt = f'Generate 2 alternative search queries for: "{original_q}"\nOutput as JSON array:'
+            # no_thinking=True: use configured GLM_MODEL but skip thinking for fast response
+            # All GLM models (4.5, 4.6, 4.7) support thinking: {type: "disabled"}
+            extra_kwargs["no_thinking"] = True
+            use_force_json = True  # GLM works best with response_format: json_object
+            # Focus on IMPLEMENTATIONS not concepts - gets more diverse results
+            prompt = (
+                f'For code search "{original_q}", suggest {cap} alternative queries focusing on:\n'
+                f'- Library/package names (e.g., "nltk wordnet", "gensim vectors")\n'
+                f'- Specific algorithms/techniques used internally\n'
+                f'- Data structures or patterns\n\n'
+                f'Output JSON array with {cap} implementation-focused queries:'
+            )
         else:
             from scripts.refrag_llamacpp import LlamaCppRefragClient  # type: ignore
             client = LlamaCppRefragClient()
-            # Local llama.cpp: original simple prompt
+            # llama.cpp / Granite: structured prompt with stop tokens
+            stop_tokens = ["\n\n", "```", "]"]  # Stop after first array closes
             prompt = (
-                f"Rewrite this code search query using different words: {original_q}\n"
-                'Give 2 short alternative phrasings as a JSON array. Example: ["alt1", "alt2"]'
+                f'Rewrite this code search query using different technical terms.\n'
+                f'Do NOT repeat words from the original. Use alternative concepts.\n'
+                f'Original: {original_q}\n\n'
+                f'Output {cap} alternatives as JSON array:\n['
             )
 
         out = client.generate_with_soft_embeddings(
             prompt=prompt,
-            max_tokens=int(os.environ.get("EXPAND_MAX_TOKENS", "128") or 128),
-            temperature=0.7 if runtime_kind == "llamacpp" else 1.0,
-            top_k=int(os.environ.get("EXPAND_TOP_K", "30") or 30),
+            max_tokens=int(os.environ.get("EXPAND_MAX_TOKENS", "256") or 256),
+            # Some creativity needed for diverse expansions
+            temperature=float(os.environ.get("EXPAND_TEMPERATURE", "0.7") or 0.7),
+            top_k=int(os.environ.get("EXPAND_TOP_K", "40") or 40),
             top_p=float(os.environ.get("EXPAND_TOP_P", "0.9") or 0.9),
-            stop=["\n\n"],
-            force_json=False,
+            stop=stop_tokens,
+            force_json=use_force_json,
             **extra_kwargs,
         )
         import json as _json
         import re as _re
 
-        # Debug: log raw output
-        logger.info(f"expand_query raw output: {repr(out)}")
+        if debug_expand:
+            logger.debug("expand_query raw output", extra={"runtime": runtime_kind, "out": repr(out)})
 
         alts: list[str] = []
+        seen = {q.strip() for q in qlist if isinstance(q, str)}
+        max_len = int(os.environ.get("EXPAND_MAX_CHARS", "240") or 240)
+
+        def _maybe_add(s: str) -> None:
+            ss = (s or "").strip()
+            if not ss:
+                return
+            # Trim extreme outputs and collapse whitespace
+            ss = _re.sub(r"\s+", " ", ss)
+            if max_len and len(ss) > max_len:
+                ss = ss[:max_len].rstrip()
+            if ss in seen:
+                return
+            seen.add(ss)
+            alts.append(ss)
+
+        # For llama.cpp, prompt ends with '[' so we need to prepend it and append ']'
+        if runtime_kind == "llamacpp" and out:
+            out = out.strip()
+            if not out.startswith("["):
+                out = "[" + out
+            if not out.endswith("]"):
+                out = out + "]"
+        # Strip markdown code blocks if present
+        out = _re.sub(r'^```(?:json)?\s*', '', out.strip())
+        out = _re.sub(r'\s*```$', '', out)
+
+        def _extract_strings_from_parsed(parsed: Any) -> None:
+            """Extract strings from parsed JSON - handles list or dict with common keys."""
+            nonlocal alts
+            # If it's a list, iterate directly
+            if isinstance(parsed, list):
+                for s in parsed:
+                    if isinstance(s, str):
+                        _maybe_add(s)
+                        if len(alts) >= cap:
+                            return
+            # If it's a dict, look for common keys that contain the array
+            elif isinstance(parsed, dict):
+                for key in ["answer", "alternatives", "queries", "results", "data"]:
+                    if key in parsed and isinstance(parsed[key], list):
+                        for s in parsed[key]:
+                            if isinstance(s, str):
+                                _maybe_add(s)
+                                if len(alts) >= cap:
+                                    return
+                        return  # Found and processed a key
+                # Last resort: try any list value in the dict
+                for v in parsed.values():
+                    if isinstance(v, list):
+                        for s in v:
+                            if isinstance(s, str):
+                                _maybe_add(s)
+                                if len(alts) >= cap:
+                                    return
+                        return  # Used first list found
+
         try:
             # First try direct JSON parse
             parsed = _json.loads(out)
-            if isinstance(parsed, list):
-                for s in parsed:
-                    if isinstance(s, str) and s and s not in qlist:
-                        alts.append(s)
-                        if len(alts) >= cap:
-                            break
+            _extract_strings_from_parsed(parsed)
         except Exception as parse_err:
             logger.debug(f"expand_query direct parse failed: {parse_err}")
             # Fallback: try Python literal eval for single-quoted lists
@@ -5619,8 +5688,8 @@ async def expand_query(query: Any = None, max_new: Any = None, session: Optional
                 parsed = ast.literal_eval(out)
                 if isinstance(parsed, list):
                     for s in parsed:
-                        if isinstance(s, str) and s and s not in qlist:
-                            alts.append(s)
+                        if isinstance(s, str):
+                            _maybe_add(s)
                             if len(alts) >= cap:
                                 break
             except Exception:
@@ -5641,8 +5710,8 @@ async def expand_query(query: Any = None, max_new: Any = None, session: Optional
                             parsed = ast.literal_eval(arr_text)
                         if isinstance(parsed, list):
                             for s in parsed:
-                                if isinstance(s, str) and s and s not in qlist:
-                                    alts.append(s)
+                                if isinstance(s, str):
+                                    _maybe_add(s)
                                     if len(alts) >= cap:
                                         break
                     else:
@@ -5653,19 +5722,19 @@ async def expand_query(query: Any = None, max_new: Any = None, session: Optional
                         if quoted_matches:
                             logger.debug(f"expand_query found quoted strings: {quoted_matches}")
                             for s in quoted_matches:
-                                s = s.strip()
-                                if s and s not in qlist:
-                                    alts.append(s)
-                                    if len(alts) >= cap:
-                                        break
+                                _maybe_add(s)
+                                if len(alts) >= cap:
+                                    break
                 except Exception as fallback_err:
                     logger.debug(f"expand_query fallback parse failed: {fallback_err}")
-        logger.info(f"expand_query returning alts: {alts}")
+        if debug_expand:
+            logger.debug("expand_query returning alts", extra={"alts": alts})
+        capped = alts[:cap]
         return {
             "ok": True,
             "original_query": qlist[0] if qlist else "",
-            "alternates": alts,
-            "total_queries": 1 + len(alts),
+            "alternates": capped,
+            "total_queries": 1 + len(capped),
             "decoder_used": runtime_kind,
         }
     except Exception as e:
@@ -5761,9 +5830,26 @@ def _cleanup_answer(text: str, max_chars: int | None = None) -> str:
 
 # Style and validation helpers for context_answer output
 def _answer_style_guidance() -> str:
-    """Compact instruction to keep answers direct and grounded."""
+    """Compact instruction to keep answers direct and grounded.
+    
+    GLM models get more generous guidance (4-8 sentences) since they handle
+    longer outputs better than Granite-4.0-Micro which needs strict 2-4 sentence limits.
+    """
+    try:
+        from scripts.refrag_glm import detect_glm_runtime
+        is_glm = detect_glm_runtime()
+    except ImportError:
+        is_glm = False
+    
+    if is_glm:
+        # GLM models can handle longer, more detailed answers
+        sentence_guidance = "Write a clear, comprehensive answer in 4-8 sentences."
+    else:
+        # Granite-4.0-Micro needs stricter limits for coherent output
+        sentence_guidance = "Write a direct answer in 2-4 sentences."
+    
     return (
-        "Write a direct answer in 2-4 sentences. No headings or labels. "
+        f"{sentence_guidance} No headings or labels. "
         "Ground non-trivial claims with bracketed citations like [n] using the numbered Sources. "
         "Never invent functions or parameters that do not appear in the snippets. "
         "Do not include URLs or Markdown links of any kind; cite only with [n]. "
@@ -7049,11 +7135,27 @@ def _ca_fallback_and_budget(
                 "yes",
                 "on",
             }:
+                # GLM models have much larger context windows - use higher budgets
+                try:
+                    from scripts.refrag_glm import detect_glm_runtime
+                    is_glm = detect_glm_runtime()
+                except ImportError:
+                    is_glm = False
+                
+                if is_glm:
+                    # GLM: 200K context allows much more code context
+                    _default_budget = "8192"  # 8x more than Granite
+                    _default_spans = "24"     # 3x more spans
+                else:
+                    # Granite/llamacpp: tighter limits
+                    _default_budget = "1024"
+                    _default_spans = "8"
+                
                 _pairs = {
                     "MICRO_BUDGET_TOKENS": os.environ.get(
-                        "MICRO_BUDGET_TOKENS", "1024"
+                        "MICRO_BUDGET_TOKENS", _default_budget
                     ),
-                    "MICRO_OUT_MAX_SPANS": os.environ.get("MICRO_OUT_MAX_SPANS", "8"),
+                    "MICRO_OUT_MAX_SPANS": os.environ.get("MICRO_OUT_MAX_SPANS", _default_spans),
                 }
         except Exception:
             _pairs = {"MICRO_BUDGET_TOKENS": "1024", "MICRO_OUT_MAX_SPANS": "8"}
@@ -7510,8 +7612,32 @@ def _ca_decoder_params(max_tokens: Any) -> tuple[int, float, int, float, list[st
         "\n\n\n",
     ]
     stops = default_stops + [s for s in (stop_env.split(",") if stop_env else []) if s]
+    
+    # Granite/llamacpp: use env var or 2000 default
+    # GLM: dynamically use model's max_output_tokens from config
+    try:
+        from scripts.refrag_glm import detect_glm_runtime, get_glm_model_name, get_model_config
+        is_glm = detect_glm_runtime()
+    except ImportError:
+        is_glm = False
+    
+    if is_glm:
+        # Pull dynamic limit from GLM model config (imports already succeeded above)
+        glm_model = get_glm_model_name()
+        model_config = get_model_config(glm_model)
+        # Respect env override if set, otherwise use model's max output
+        env_override = os.environ.get("DECODER_MAX_TOKENS", "").strip()
+        if env_override:
+            default_max_tokens = _to_int(env_override, model_config.get("max_output_tokens", 4000))
+        else:
+            # Use model's actual max output capability
+            default_max_tokens = model_config.get("max_output_tokens", 4000)
+    else:
+        # Granite/llamacpp
+        default_max_tokens = 2000
+    
     mtok = _to_int(
-        max_tokens, _to_int(os.environ.get("DECODER_MAX_TOKENS", "240"), 240)
+        max_tokens, _to_int(os.environ.get("DECODER_MAX_TOKENS", str(default_max_tokens)), default_max_tokens)
     )
     temp = 0.0
     top_k = _to_int(os.environ.get("DECODER_TOP_K", "20"), 20)
@@ -8109,30 +8235,72 @@ async def context_answer(
 
         if do_expand:
             try:
-                from scripts.refrag_llamacpp import (
-                    LlamaCppRefragClient,
-                    is_decoder_enabled,
-                )  # type: ignore
+                # Select runtime for expansion (defaults to local llama.cpp)
+                runtime_kind = str(os.environ.get("REFRAG_RUNTIME", "")).strip().lower() or "llamacpp"
 
-                if is_decoder_enabled():
-                    prompt = (
-                        "You expand code search queries. Given one or more short queries, "
-                        "propose up to 2 compact alternates. Return JSON array of strings only.\n"
-                        f"Queries: {queries}\n"
+                # Build prompt (ask for JSON array only)
+                prompt = (
+                    "You expand code search queries. Given one or more short queries, "
+                    "propose up to 2 compact alternates. Return JSON array of strings only.\n"
+                    f"Queries: {queries}\n"
+                )
+
+                extra_kwargs: dict[str, Any] = {}
+                if runtime_kind == "glm":
+                    from scripts.refrag_glm import GLMRefragClient  # type: ignore
+
+                    client = GLMRefragClient()
+                    extra_kwargs["disable_thinking"] = True
+                elif runtime_kind == "minimax":
+                    from scripts.refrag_minimax import MiniMaxRefragClient  # type: ignore
+
+                    client = MiniMaxRefragClient()
+                    extra_kwargs["system"] = (
+                        "You rewrite search queries using synonyms. "
+                        "Output format: JSON array with exactly 2 strings. No other text."
                     )
-                    client = LlamaCppRefragClient()
+                else:
+                    from scripts.refrag_llamacpp import (
+                        LlamaCppRefragClient,
+                        is_decoder_enabled,
+                    )  # type: ignore
+
+                    if not is_decoder_enabled():
+                        client = None
+                    else:
+                        client = LlamaCppRefragClient()
+
+                if client is not None:
                     # tight decoding for expansions
                     out = client.generate_with_soft_embeddings(
                         prompt=prompt,
                         max_tokens=int(os.environ.get("EXPAND_MAX_TOKENS", "64") or 64),
-                        temperature=0.0,  # Always 0 for deterministic expansion
+                        temperature=0.0 if runtime_kind in {"llamacpp", "glm"} else 1.0,
                         top_k=int(os.environ.get("EXPAND_TOP_K", "30") or 30),
                         top_p=float(os.environ.get("EXPAND_TOP_P", "0.9") or 0.9),
                         stop=["\n\n"],
+                        **extra_kwargs,
                     )
-                    import json as _json
 
-                    alts = []
+                    import json as _json
+                    import re as _re
+
+                    alts: list[str] = []
+                    seen = {q.strip() for q in queries if isinstance(q, str)}
+                    max_len = int(os.environ.get("EXPAND_MAX_CHARS", "240") or 240)
+
+                    def _maybe_add(s: str) -> None:
+                        ss = (s or "").strip()
+                        if not ss:
+                            return
+                        ss = _re.sub(r"\s+", " ", ss)
+                        if max_len and len(ss) > max_len:
+                            ss = ss[:max_len].rstrip()
+                        if ss in seen:
+                            return
+                        seen.add(ss)
+                        alts.append(ss)
+
                     try:
                         parsed = _json.loads(out)
                     except (_json.JSONDecodeError, TypeError, ValueError):
@@ -8149,21 +8317,20 @@ async def context_answer(
                             parsed = []
                     if isinstance(parsed, list):
                         for s in parsed:
-                            if isinstance(s, str) and s and s not in queries:
-                                alts.append(s)
-                                if len(alts) >= 2:
-                                    break
+                            if isinstance(s, str):
+                                _maybe_add(s)
+                            if len(alts) >= 2:
+                                break
                     if not alts and out and out.strip():
                         # Heuristic fallback: split lines, trim bullets, take up to 2
                         for cand in [
-                            t.strip().lstrip("-• ")
-                            for t in out.splitlines()
-                            if t.strip()
+                            t.strip().lstrip("-• ") for t in out.splitlines() if t.strip()
                         ][:2]:
-                            if cand and cand not in queries and len(alts) < 2:
-                                alts.append(cand)
+                            _maybe_add(cand)
+                            if len(alts) >= 2:
+                                break
                     if alts:
-                        queries.extend(alts)
+                        queries.extend(alts[:2])
                         did_local_expand = True  # Mark that we already expanded
             except (ImportError, AttributeError) as e:
                 logger.warning(
