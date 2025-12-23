@@ -70,11 +70,11 @@ class TestGLMModelConfig:
     def test_glm45_config_values(self):
         """Test GLM-4.5 has correct configuration values."""
         from scripts.refrag_glm import GLM_MODEL_CONFIGS
-        
+
         config = GLM_MODEL_CONFIGS["glm-4.5"]
         assert config["temperature"] == 1.0
         assert config["top_p"] == 0.95
-        assert config["supports_thinking"] is False
+        assert config["supports_thinking"] is True  # GLM-4.5 supports thinking control
         assert config["supports_tool_stream"] is False
 
 
@@ -222,11 +222,12 @@ class TestGLMThinkingSupport:
         
         client = GLMRefragClient()
         client.generate_with_soft_embeddings("test prompt", enable_thinking=True)
-        
+
         call_kwargs = mock_client.chat.completions.create.call_args[1]
-        # Thinking should not be set for 4.5
+        # GLM-4.5 now supports thinking control (can be enabled/disabled)
         extra_body = call_kwargs.get("extra_body", {})
-        assert "thinking" not in extra_body
+        assert "thinking" in extra_body
+        assert extra_body["thinking"]["type"] == "enabled"
 
 
 class TestGLMMaxTokensLimit:
