@@ -1049,6 +1049,8 @@ def _llm_expand_queries(
             from scripts.refrag_glm import detect_glm_runtime
             if detect_glm_runtime():
                 runtime_kind = "glm"
+            elif os.environ.get("MINIMAX_API_KEY", "").strip():
+                runtime_kind = "minimax"
             else:
                 runtime_kind = "llamacpp"
         except Exception:
@@ -1092,14 +1094,22 @@ def _llm_expand_queries(
         return alts
 
     try:
+        max_tokens = int(os.environ.get("EXPAND_MAX_TOKENS", "512"))
         if runtime_kind == "glm":
             from scripts.refrag_glm import GLMRefragClient
             client = GLMRefragClient()
             prompt = f'Rewrite "{original_q}" as {max_new} different code search queries using synonyms or related terms. Each query should be a complete phrase, not single words. Output as JSON array:'
-            glm_max_tokens = int(os.environ.get("EXPAND_MAX_TOKENS", "512"))
             txt = client.generate_with_soft_embeddings(
-                prompt, max_tokens=glm_max_tokens, temperature=1.0, top_p=0.9,
+                prompt, max_tokens=max_tokens, temperature=1.0, top_p=0.9,
                 disable_thinking=True, force_json=False
+            )
+        elif runtime_kind == "minimax":
+            from scripts.refrag_minimax import MiniMaxRefragClient
+            client = MiniMaxRefragClient()
+            prompt = f'Rewrite "{original_q}" as {max_new} different search queries using synonyms:'
+            txt = client.generate_with_soft_embeddings(
+                prompt, max_tokens=max_tokens, temperature=1.0,
+                system="You rewrite search queries using synonyms. Output format: JSON array of strings. No other text."
             )
         else:
             from scripts.refrag_llamacpp import LlamaCppRefragClient, is_decoder_enabled
@@ -1110,7 +1120,7 @@ def _llm_expand_queries(
                 f"Rewrite this code search query using different words: {original_q}\n"
                 f'Give {max_new} short alternative phrasings as a JSON array. Example: ["alt1", "alt2"]'
             )
-            txt = client.generate_with_soft_embeddings(prompt, max_tokens=512, temperature=0.7)
+            txt = client.generate_with_soft_embeddings(prompt, max_tokens=max_tokens, temperature=0.7)
         return _parse_alts(txt)
     except Exception:
         return []
