@@ -1,5 +1,4 @@
 """Tests for GLM model version configuration and backwards compatibility."""
-import pytest
 import os
 from unittest.mock import patch, MagicMock
 
