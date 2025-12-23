@@ -349,19 +349,38 @@ def copy_collection_qdrant(
                 raise RuntimeError(f"Failed to fetch source collection config for {src}: {exc}") from exc
 
             vectors_config = None
+            sparse_vectors_config = None
             try:
-                vectors_config = getattr(getattr(getattr(src_info, "config", None), "params", None), "vectors", None)
+                params = getattr(getattr(src_info, "config", None), "params", None)
+                if params is not None:
+                    vectors_config = getattr(params, "vectors", None)
+                    sparse_vectors_config = getattr(params, "sparse_vectors", None)
             except Exception:
                 vectors_config = None
+                sparse_vectors_config = None
 
             if vectors_config is None:
                 raise RuntimeError(f"Cannot determine vectors config for source collection {src}")
 
             try:
-                cli.create_collection(collection_name=dest, vectors_config=vectors_config)
-            except Exception:
-                # Collection may already exist; continue with upserts.
-                pass
+                cli.create_collection(
+                    collection_name=dest,
+                    vectors_config=vectors_config,
+                    sparse_vectors_config=sparse_vectors_config,
+                )
+            except Exception as exc:
+                # Allow clone to proceed if collection already exists.
+                if "already exists" not in str(exc).lower():
+                    raise RuntimeError(
+                        f"Failed to create destination collection {dest}: {exc}"
+                    ) from exc
+
+            try:
+                cli.get_collection(collection_name=dest)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Destination collection {dest} unavailable after creation: {exc}"
+                ) from exc
 
             offset = None
             batch_limit = int(os.environ.get("CTXCE_COPY_COLLECTION_BATCH", "512") or "512")
