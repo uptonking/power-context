@@ -127,7 +127,7 @@ def log_training_event(
             "query": query,
             "collection": collection,
             "candidates": candidate_info,
-            "teacher_scores": [_to_native(s) for s in teacher_scores] if teacher_scores else None,
+            "teacher_scores": [_to_native(s) for s in teacher_scores] if teacher_scores is not None and len(teacher_scores) > 0 else None,
             "metadata": metadata or {},
         }
 

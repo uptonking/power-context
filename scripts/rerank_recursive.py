@@ -2116,6 +2116,9 @@ class RecursiveReranker:
         Returns embeddings in the model's native dimension (e.g., 768 for BGE).
         Used by CollectionLearner to learn the projection matrix.
         """
+        from scripts.embedder import get_model_dimension
+        fallback_dim = get_model_dimension()
+
         embedder = self._get_embedder()
         if embedder is None:
             # Fallback to random embeddings
@@ -2125,7 +2128,7 @@ class RecursiveReranker:
                 text_hash = hashlib.sha256(text.encode("utf-8", errors="replace")).digest()
                 seed = int.from_bytes(text_hash[:4], "big")
                 rng = np.random.RandomState(seed)
-                vec = rng.randn(768).astype(np.float32)  # BGE base dim
+                vec = rng.randn(fallback_dim).astype(np.float32)
                 vec = vec / (np.linalg.norm(vec) + 1e-8)
                 result.append(vec)
             return np.array(result, dtype=np.float32)
@@ -2145,7 +2148,7 @@ class RecursiveReranker:
                 text_hash = hashlib.sha256(text.encode("utf-8", errors="replace")).digest()
                 seed = int.from_bytes(text_hash[:4], "big")
                 rng = np.random.RandomState(seed)
-                vec = rng.randn(768).astype(np.float32)
+                vec = rng.randn(fallback_dim).astype(np.float32)
                 vec = vec / (np.linalg.norm(vec) + 1e-8)
                 result.append(vec)
             return np.array(result, dtype=np.float32)
