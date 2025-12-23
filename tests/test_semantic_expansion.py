@@ -16,6 +16,9 @@ from scripts.semantic_expansion import (
     _cosine_similarity,
     _extract_code_tokens,
     _get_expansion_cache_key,
+    _coerce_embedding_vector,
+    _cache_expansion,
+    _get_cached_expansion,
     expand_queries_semantically,
     expand_queries_with_prf,
     get_expansion_stats,
@@ -98,6 +101,53 @@ class TestSemanticExpansion(unittest.TestCase):
         self.assertIn("calculate", key1)
         self.assertIn("sum", key1)
         self.assertIn("lang:python", key1)
+
+    def test_coerce_embedding_vector_handles_varied_shapes(self):
+        """_coerce_embedding_vector should flatten nested lists and tolist() outputs."""
+
+        class DummyVec:
+            def __init__(self, data):
+                self._data = data
+
+            def tolist(self):
+                return self._data
+
+        # Nested list
+        nested = [[0.1, 0.2, 0.3]]
+        self.assertEqual(_coerce_embedding_vector(nested), [0.1, 0.2, 0.3])
+
+        # Object with tolist()
+        obj = DummyVec((0.4, 0.5))
+        self.assertEqual(_coerce_embedding_vector(obj), [0.4, 0.5])
+
+    def test_coerce_embedding_vector_bad_input(self):
+        """_coerce_embedding_vector should return None on invalid input."""
+
+        class BadVec:
+            def tolist(self):
+                raise ValueError("nope")
+
+        self.assertIsNone(_coerce_embedding_vector(BadVec()))
+        self.assertIsNone(_coerce_embedding_vector(None))
+
+    def test_cache_stats_hit_and_miss(self):
+        """Cache stats should increment misses on set and hits on retrieval."""
+        clear_expansion_cache()
+        key = _get_expansion_cache_key(["foo"], "py")
+
+        stats = get_expansion_stats()
+        self.assertEqual(stats["cache_hits"], 0)
+        self.assertEqual(stats["cache_misses"], 0)
+
+        _cache_expansion(key, ["bar"])
+        stats = get_expansion_stats()
+        self.assertEqual(stats["cache_hits"], 0)
+        self.assertEqual(stats["cache_misses"], 1)
+
+        self.assertEqual(_get_cached_expansion(key), ["bar"])
+        stats = get_expansion_stats()
+        self.assertEqual(stats["cache_hits"], 1)
+        self.assertEqual(stats["cache_misses"], 1)
     
     @patch('scripts.semantic_expansion.FASTEMBED_AVAILABLE', False)
     def test_semantic_expansion_fallback(self):

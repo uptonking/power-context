@@ -1,6 +1,9 @@
 import importlib
 import builtins
+import json
 import types
+from pathlib import Path
+
 import pytest
 
 # Import targets
@@ -113,6 +116,19 @@ def test_dense_query_preserves_collection_on_filter_drop(monkeypatch):
     assert len(calls) == 2  # first fails, second succeeds after filter drop
     assert calls[1]["collection_name"] == "explicit-coll"
     assert calls[1].get("query_filter") is None or calls[1].get("filter") is None
+
+
+@pytest.mark.unit
+def test_collection_prefers_env_over_state(monkeypatch, tmp_path):
+    # State file should be ignored when COLLECTION_NAME env var is set
+    state_dir = tmp_path / ".codebase"
+    state_dir.mkdir()
+    (state_dir / "state.json").write_text(json.dumps({"qdrant_collection": "state-coll"}), encoding="utf-8")
+
+    monkeypatch.setenv("WORKSPACE_PATH", str(tmp_path))
+    monkeypatch.setenv("COLLECTION_NAME", "env-coll")
+
+    assert hyb._collection(None) == "env-coll"
 
 
 @pytest.mark.unit
