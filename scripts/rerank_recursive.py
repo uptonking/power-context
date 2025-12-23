@@ -2023,11 +2023,20 @@ class RecursiveReranker:
         self.refiner = LatentRefiner(dim=dim)
         # Note: ConfidenceEstimator created per-rerank call for thread safety
 
+        # Learned projection (uses same weights as training worker)
+        from scripts.embedder import get_model_dimension
+        embed_dim = get_model_dimension()
+        self._learned_projection = LearnedProjection(
+            input_dim=embed_dim,
+            output_dim=dim,
+            lr=0.0,  # No learning in serving path
+        )
+
         # Try to use ONNX embedder for document encoding
         self._embedder = None
         self._embedder_lock = threading.Lock()
 
-        # Cached projection matrices: input_dim -> projection_matrix
+        # Cached projection matrices: input_dim -> projection_matrix (fallback)
         self._proj_cache: Dict[int, np.ndarray] = {}
         self._proj_cache_lock = threading.Lock()
 
@@ -2154,13 +2163,23 @@ class RecursiveReranker:
             return np.array(result, dtype=np.float32)
 
     def _project_to_dim(self, embeddings: np.ndarray) -> np.ndarray:
-        """Project embeddings to target dimension if needed (cached for efficiency)."""
+        """Project embeddings to target dimension using learned projection.
+
+        Uses LearnedProjection when weights are available (trained by worker),
+        falls back to deterministic random projection otherwise.
+        """
         if embeddings.shape[-1] == self.dim:
             return embeddings
 
         input_dim = embeddings.shape[-1]
 
-        # Get or create cached projection matrix (deterministic, reused)
+        # Use learned projection if available and dimension matches
+        if (hasattr(self, '_learned_projection') and
+            self._learned_projection._weights_loaded and
+            self._learned_projection.input_dim == input_dim):
+            return self._learned_projection.forward(embeddings)
+
+        # Fallback: deterministic random projection (for cold start)
         with self._proj_cache_lock:
             if input_dim not in self._proj_cache:
                 # Use local RNG for deterministic, process-stable projection
@@ -2375,9 +2394,10 @@ def _get_learning_reranker(
     with _LEARNING_RERANKERS_LOCK:
         if collection not in _LEARNING_RERANKERS:
             reranker = RecursiveReranker(n_iterations=n_iterations, dim=dim)
-            # Set collection-specific weights path for scorer and refiner
+            # Set collection-specific weights path for scorer, refiner, and projection
             reranker.scorer.set_collection(collection)
             reranker.refiner.set_collection(collection)
+            reranker._learned_projection.set_collection(collection)
             _LEARNING_RERANKERS[collection] = reranker
         return _LEARNING_RERANKERS[collection]
 

@@ -289,8 +289,8 @@ class CollectionLearner:
         prompt_parts = [f"Rate code search relevance 0-10 for query: \"{query}\"\n"]
         for i in range(top_k):
             c = candidates[i]
-            doc = self._pack_doc(c, max_chars=300)
-            prompt_parts.append(f"[{i}] {doc[:400]}")
+            doc = self._pack_doc(c, max_chars=800)
+            prompt_parts.append(f"[{i}] {doc}")
 
         prompt_parts.append(
             "\nRespond with JSON: {\"scores\": [N, N, ...]} where each N is 0-10 relevance."
