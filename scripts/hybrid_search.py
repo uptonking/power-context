@@ -460,10 +460,33 @@ def _detect_implementation_intent(queries: List[str]) -> bool:
     return False
 
 # Micro-span compaction and budgeting (ReFRAG-lite output shaping)
-MICRO_OUT_MAX_SPANS = _safe_int(os.environ.get("MICRO_OUT_MAX_SPANS", "3"), 3)
-MICRO_MERGE_LINES = _safe_int(os.environ.get("MICRO_MERGE_LINES", "4"), 4)
-MICRO_BUDGET_TOKENS = _safe_int(os.environ.get("MICRO_BUDGET_TOKENS", "512"), 512)
-MICRO_TOKENS_PER_LINE = _safe_int(os.environ.get("MICRO_TOKENS_PER_LINE", "32"), 32)
+# Defaults vary by: (1) whether micro chunking is enabled, (2) runtime (GLM vs llamacpp)
+def _get_micro_defaults() -> tuple[int, int, int, int]:
+    """Return (max_spans, merge_lines, budget_tokens, tokens_per_line) based on runtime and micro chunk mode."""
+    # Check if micro chunking is enabled
+    micro_enabled = os.environ.get("INDEX_MICRO_CHUNKS", "1").strip().lower() in {"1", "true", "yes", "on"}
+    
+    # Detect runtime
+    runtime = os.environ.get("REFRAG_RUNTIME", "").strip().lower()
+    if not runtime and os.environ.get("GLM_API_KEY", "").strip():
+        runtime = "glm"
+    
+    if runtime == "glm":
+        if micro_enabled:
+            # GLM + micro chunks: high limits for 200K context
+            return (24, 6, 8192, 32)
+        else:
+            # GLM + semantic chunks: moderate limits
+            return (12, 4, 4096, 32)
+    else:
+        # Granite/llamacpp: tighter limits
+        return (3, 4, 512, 32)
+
+_MICRO_DEFAULTS = _get_micro_defaults()
+MICRO_OUT_MAX_SPANS = _safe_int(os.environ.get("MICRO_OUT_MAX_SPANS", str(_MICRO_DEFAULTS[0])), _MICRO_DEFAULTS[0])
+MICRO_MERGE_LINES = _safe_int(os.environ.get("MICRO_MERGE_LINES", str(_MICRO_DEFAULTS[1])), _MICRO_DEFAULTS[1])
+MICRO_BUDGET_TOKENS = _safe_int(os.environ.get("MICRO_BUDGET_TOKENS", str(_MICRO_DEFAULTS[2])), _MICRO_DEFAULTS[2])
+MICRO_TOKENS_PER_LINE = _safe_int(os.environ.get("MICRO_TOKENS_PER_LINE", str(_MICRO_DEFAULTS[3])), _MICRO_DEFAULTS[3])
 
 # === Large codebase scaling (default ON) ===
 # These parameters enable automatic scaling for collections with 10k+ points

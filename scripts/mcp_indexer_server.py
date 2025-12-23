@@ -7541,7 +7541,7 @@ def _ca_decoder_params(max_tokens: Any) -> tuple[int, float, int, float, list[st
     ]
     stops = default_stops + [s for s in (stop_env.split(",") if stop_env else []) if s]
     
-    # Granite: use env var or 240 default
+    # Granite/llamacpp: use env var or 2000 default
     # GLM: dynamically use model's max_output_tokens from config
     runtime = os.environ.get("REFRAG_RUNTIME", "").strip().lower()
     if not runtime and os.environ.get("GLM_API_KEY", "").strip():
@@ -7564,7 +7564,7 @@ def _ca_decoder_params(max_tokens: Any) -> tuple[int, float, int, float, list[st
             default_max_tokens = 4000  # Fallback
     else:
         # Granite/llamacpp
-        default_max_tokens = 1000
+        default_max_tokens = 2000
     
     mtok = _to_int(
         max_tokens, _to_int(os.environ.get("DECODER_MAX_TOKENS", str(default_max_tokens)), default_max_tokens)
