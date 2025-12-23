@@ -35,7 +35,7 @@ GLM_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
     "glm-4.6": {
         "temperature": 1.0,
         "top_p": 0.95,
-        "max_output_tokens": 56384,  # Not documented, conservative estimate
+        "max_output_tokens": 50000,  # No official limit documented; 50K conservative cap
         "max_context_tokens": 204800,  # 200K (expanded from 128K per docs)
         "supports_thinking": True,
         "supports_tool_stream": False,
@@ -83,9 +83,35 @@ def get_model_config(model: str) -> dict[str, Any]:
             return GLM_MODEL_CONFIGS["glm-4.7"]
         elif version == 6:
             return GLM_MODEL_CONFIGS["glm-4.6"]
-        else:
+        elif version == 5:
             return GLM_MODEL_CONFIGS["glm-4.5"]
+        else:
+            return GLM_DEFAULT_CONFIG
     return GLM_DEFAULT_CONFIG
+
+
+def detect_glm_runtime() -> bool:
+    """Detect if GLM runtime is active (shared helper to reduce duplication).
+    
+    Returns True if:
+    - REFRAG_RUNTIME is explicitly set to 'glm', OR
+    - REFRAG_RUNTIME is not set but GLM_API_KEY is present
+    """
+    runtime = os.environ.get("REFRAG_RUNTIME", "").strip().lower()
+    if runtime == "glm":
+        return True
+    if not runtime and os.environ.get("GLM_API_KEY", "").strip():
+        return True
+    return False
+
+
+def get_glm_model_name() -> str:
+    """Get the active GLM model name with consistent fallback.
+    
+    Returns GLM_MODEL env var if set and non-empty, otherwise 'glm-4.6'.
+    """
+    model = os.environ.get("GLM_MODEL", "").strip()
+    return model if model else "glm-4.6"
 
 
 class GLMRefragClient:
@@ -192,7 +218,7 @@ class GLMRefragClient:
             
             # Handle streaming response
             if stream:
-                return self._handle_streaming_response(response, model_config)
+                return self._handle_streaming_response(response)
             
             msg = response.choices[0].message
             # GLM models may use either content or reasoning_content
@@ -207,18 +233,18 @@ class GLMRefragClient:
     def _handle_streaming_response(
         self,
         response: Any,
-        model_config: dict[str, Any],
     ) -> str:
         """Handle streaming response, accumulating content and reasoning.
         
         Supports:
         - delta.content: Regular content tokens
         - delta.reasoning_content: Thinking/reasoning tokens (GLM-4.6+)
-        - delta.tool_calls: Streaming tool call arguments (GLM-4.7+)
+        
+        Note: Tool call streaming (GLM-4.7+) is parsed but not currently used
+        since context_answer returns text, not tool calls.
         """
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
-        tool_calls: dict[int, Any] = {}
         
         for chunk in response:
             if not chunk.choices:
@@ -232,18 +258,6 @@ class GLMRefragClient:
             # Accumulate regular content
             if hasattr(delta, 'content') and delta.content:
                 content_parts.append(delta.content)
-            
-            # Accumulate streaming tool calls (GLM-4.7+)
-            if hasattr(delta, 'tool_calls') and delta.tool_calls:
-                for tool_call in delta.tool_calls:
-                    idx = tool_call.index
-                    if idx not in tool_calls:
-                        tool_calls[idx] = tool_call
-                        if hasattr(tool_call.function, 'arguments'):
-                            tool_calls[idx].function.arguments = tool_call.function.arguments or ""
-                    else:
-                        if hasattr(tool_call.function, 'arguments') and tool_call.function.arguments:
-                            tool_calls[idx].function.arguments += tool_call.function.arguments
         
         # Return content, fallback to reasoning if content is empty
         content = "".join(content_parts).strip()

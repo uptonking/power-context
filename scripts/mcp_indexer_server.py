@@ -5766,12 +5766,13 @@ def _answer_style_guidance() -> str:
     GLM models get more generous guidance (4-8 sentences) since they handle
     longer outputs better than Granite-4.0-Micro which needs strict 2-4 sentence limits.
     """
-    runtime = os.environ.get("REFRAG_RUNTIME", "").strip().lower()
-    # Auto-detect GLM if runtime not explicit but GLM_API_KEY is set
-    if not runtime and os.environ.get("GLM_API_KEY", "").strip():
-        runtime = "glm"
+    try:
+        from scripts.refrag_glm import detect_glm_runtime
+        is_glm = detect_glm_runtime()
+    except ImportError:
+        is_glm = False
     
-    if runtime == "glm":
+    if is_glm:
         # GLM models can handle longer, more detailed answers
         sentence_guidance = "Write a clear, comprehensive answer in 4-8 sentences."
     else:
@@ -7066,11 +7067,13 @@ def _ca_fallback_and_budget(
                 "on",
             }:
                 # GLM models have much larger context windows - use higher budgets
-                _runtime = os.environ.get("REFRAG_RUNTIME", "").strip().lower()
-                if not _runtime and os.environ.get("GLM_API_KEY", "").strip():
-                    _runtime = "glm"
+                try:
+                    from scripts.refrag_glm import detect_glm_runtime
+                    _is_glm = detect_glm_runtime()
+                except ImportError:
+                    _is_glm = False
                 
-                if _runtime == "glm":
+                if _is_glm:
                     # GLM: 200K context allows much more code context
                     _default_budget = "8192"  # 8x more than Granite
                     _default_spans = "24"     # 3x more spans
@@ -7543,15 +7546,16 @@ def _ca_decoder_params(max_tokens: Any) -> tuple[int, float, int, float, list[st
     
     # Granite/llamacpp: use env var or 2000 default
     # GLM: dynamically use model's max_output_tokens from config
-    runtime = os.environ.get("REFRAG_RUNTIME", "").strip().lower()
-    if not runtime and os.environ.get("GLM_API_KEY", "").strip():
-        runtime = "glm"
+    try:
+        from scripts.refrag_glm import detect_glm_runtime, get_glm_model_name, get_model_config
+        is_glm = detect_glm_runtime()
+    except ImportError:
+        is_glm = False
     
-    if runtime == "glm":
+    if is_glm:
         # Pull dynamic limit from GLM model config
         try:
-            from scripts.refrag_glm import get_model_config
-            glm_model = os.environ.get("GLM_MODEL", "glm-4.6") or "glm-4.6"
+            glm_model = get_glm_model_name()
             model_config = get_model_config(glm_model)
             # Respect env override if set, otherwise use model's max output
             env_override = os.environ.get("DECODER_MAX_TOKENS", "").strip()

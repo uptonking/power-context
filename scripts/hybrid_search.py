@@ -466,12 +466,14 @@ def _get_micro_defaults() -> tuple[int, int, int, int]:
     # Check if micro chunking is enabled
     micro_enabled = os.environ.get("INDEX_MICRO_CHUNKS", "1").strip().lower() in {"1", "true", "yes", "on"}
     
-    # Detect runtime
-    runtime = os.environ.get("REFRAG_RUNTIME", "").strip().lower()
-    if not runtime and os.environ.get("GLM_API_KEY", "").strip():
-        runtime = "glm"
+    # Detect runtime using shared helper
+    try:
+        from scripts.refrag_glm import detect_glm_runtime
+        is_glm = detect_glm_runtime()
+    except ImportError:
+        is_glm = False
     
-    if runtime == "glm":
+    if is_glm:
         if micro_enabled:
             # GLM + micro chunks: high limits for 200K context
             return (24, 6, 8192, 32)
