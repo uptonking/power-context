@@ -287,10 +287,17 @@ export function handleOAuthAuthorize(_req, res, searchParams) {
   const redirectUri = searchParams.get("redirect_uri");
   const clientId = searchParams.get("client_id");
   const state = searchParams.get("state");
+  const responseType = searchParams.get("response_type");
   const codeChallenge = searchParams.get("code_challenge");
   const codeChallengeMethod = searchParams.get("code_challenge_method") || "S256";
-  // responseType is validated but not used further
-  searchParams.get("response_type");
+
+  // Validate response_type is "code" (authorization code flow)
+  if (responseType !== "code") {
+    res.statusCode = 400;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "unsupported_response_type", error_description: "Only response_type=code is supported" }));
+    return;
+  }
 
   // Validate client_id and redirect_uri against registered clients
   if (!validateClientAndRedirect(clientId, redirectUri)) {
@@ -371,24 +378,27 @@ export function handleOAuthStoreSession(req, res) {
       }
 
       // Additional CSRF protection: verify request came from a local browser origin
-      // Only allow requests from localhost origins (127.0.0.1 or localhost)
+      // Require Origin or Referer header to be present and from localhost
       const origin = req.headers["origin"] || req.headers["referer"];
-      if (origin) {
-        try {
-          const originUrl = new URL(origin);
-          const hostname = originUrl.hostname;
-          // Only allow localhost or 127.0.0.1 origins
-          if (hostname !== "localhost" && hostname !== "127.0.0.1") {
-            res.statusCode = 403;
-            res.end(JSON.stringify({ error: "forbidden", error_description: "Request must originate from localhost" }));
-            return;
-          }
-        } catch {
-          // If origin parsing fails, reject the request
+      if (!origin) {
+        res.statusCode = 403;
+        res.end(JSON.stringify({ error: "forbidden", error_description: "Origin or Referer header required" }));
+        return;
+      }
+      try {
+        const originUrl = new URL(origin);
+        const hostname = originUrl.hostname;
+        // Only allow localhost or 127.0.0.1 origins
+        if (hostname !== "localhost" && hostname !== "127.0.0.1") {
           res.statusCode = 403;
-          res.end(JSON.stringify({ error: "forbidden", error_description: "Invalid origin" }));
+          res.end(JSON.stringify({ error: "forbidden", error_description: "Request must originate from localhost" }));
           return;
         }
+      } catch {
+        // If origin parsing fails, reject the request
+        res.statusCode = 403;
+        res.end(JSON.stringify({ error: "forbidden", error_description: "Invalid origin" }));
+        return;
       }
 
       // Save the auth entry
