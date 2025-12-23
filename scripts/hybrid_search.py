@@ -1651,7 +1651,7 @@ def dense_query(
                 pass
         try:
             qp = client.query_points(
-                collection_name=_collection(),
+                collection_name=collection,
                 query=v,
                 using=vec_name,
                 query_filter=None,
