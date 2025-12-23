@@ -5511,7 +5511,7 @@ async def expand_query(query: Any = None, max_new: Any = None, session: Optional
 
     Parameters:
     - query: str or list[str]
-    - max_new: int in [0,2] (default 2)
+    - max_new: int in [0,5] (default 3)
 
     Returns:
     - {"alternates": list[str]} or {"alternates": [], "hint": "..."} if decoder disabled
