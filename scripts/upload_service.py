@@ -145,6 +145,13 @@ ADMIN_COLLECTION_DELETE_ENABLED = (
     str(os.environ.get("CTXCE_ADMIN_COLLECTION_DELETE_ENABLED", "0")).strip().lower()
     in {"1", "true", "yes", "on"}
 )
+try:
+    ADMIN_COLLECTION_REFRESH_MS = int(
+        str(os.environ.get("CTXCE_ADMIN_COLLECTION_REFRESH_MS", "5000")).strip()
+        or "5000"
+    )
+except Exception:
+    ADMIN_COLLECTION_REFRESH_MS = 5000
 _SLUGGED_REPO_RE = re.compile(r"^.+-[0-9a-f]{16}(?:_old)?$")
 CTXCE_MCP_ACL_ENFORCE = (
     str(os.environ.get("CTXCE_MCP_ACL_ENFORCE", "0")).strip().lower()
@@ -672,6 +679,7 @@ async def admin_acl_page(request: Request):
         grants=grants,
         deletion_enabled=ADMIN_COLLECTION_DELETE_ENABLED,
         work_dir=WORK_DIR,
+        refresh_ms=ADMIN_COLLECTION_REFRESH_MS,
     )
     candidate = _get_session_candidate_from_request(request)
     if candidate.get("source") and candidate.get("source") != "cookie":

@@ -47,7 +47,12 @@
       <p class="muted">Collection deletion is disabled by server configuration.</p>
     {% endif %}
 
-    <table id="collections-table" data-deletion-enabled="{{ '1' if deletion_enabled else '0' }}" data-work-dir="{{ work_dir }}">
+    <table
+      id="collections-table"
+      data-deletion-enabled="{{ '1' if deletion_enabled else '0' }}"
+      data-work-dir="{{ work_dir }}"
+      data-refresh-ms="{{ refresh_ms }}"
+    >
       <thead>
         <tr>
           <th>id</th>
@@ -198,9 +203,12 @@
   </div>
   <script>
     (function () {
-      const REFRESH_MS = 5000;
-      const bodyEl = document.getElementById("collections-body");
       const tableEl = document.getElementById("collections-table");
+      const REFRESH_MS = Math.max(
+        1000,
+        parseInt((tableEl && tableEl.dataset && tableEl.dataset.refreshMs) || "5000", 10)
+      );
+      const bodyEl = document.getElementById("collections-body");
       if (!bodyEl) {
         return;
       }
