@@ -31,6 +31,33 @@ class GLMRefragClient:
         from openai import OpenAI
         self.client = OpenAI(api_key=self.api_key, base_url=self.base_url)
 
+    def _parse_prompt_to_messages(self, prompt: str) -> list[dict[str, str]]:
+        """Parse Granite-style prompt into proper OpenAI messages array.
+
+        Handles prompts like:
+        <|start_of_role|>system<|end_of_role|>...<|end_of_text|>
+        <|start_of_role|>user<|end_of_role|>...<|end_of_text|>
+        <|start_of_role|>assistant<|end_of_role|>
+        """
+        import re
+        messages: list[dict[str, str]] = []
+
+        # Pattern to extract role blocks
+        pattern = r'<\|start_of_role\|>(\w+)<\|end_of_role\|>(.*?)(?:<\|end_of_text\|>|$)'
+        matches = re.findall(pattern, prompt, re.DOTALL)
+
+        if matches:
+            for role, content in matches:
+                content = content.strip()
+                if content:  # Skip empty content (like trailing assistant role)
+                    messages.append({"role": role, "content": content})
+
+        # Fallback: if no matches, treat entire prompt as user message
+        if not messages:
+            messages = [{"role": "user", "content": prompt}]
+
+        return messages
+
     def generate_with_soft_embeddings(
         self,
         prompt: str,
@@ -43,7 +70,7 @@ class GLMRefragClient:
         if disable_thinking:
             model = os.environ.get("GLM_MODEL_FAST", "glm-4.5")
         else:
-            model = os.environ.get("GLM_MODEL", "glm-4.6")
+            model = os.environ.get("GLM_MODEL", "glm-4.7")
         temperature = float(gen_kwargs.get("temperature", 0.2))
         top_p = float(gen_kwargs.get("top_p", 0.95))
         stop = gen_kwargs.get("stop")
@@ -56,9 +83,11 @@ class GLMRefragClient:
             timeout_val = None
 
         try:
+            # Parse Granite-style prompts into proper messages array
+            messages = self._parse_prompt_to_messages(prompt)
             create_kwargs: dict[str, Any] = {
                 "model": model,
-                "messages": [{"role": "user", "content": prompt}],
+                "messages": messages,
                 "max_tokens": int(gen_kwargs.get("max_tokens", max_tokens)),
                 "temperature": temperature,
                 "top_p": top_p,
