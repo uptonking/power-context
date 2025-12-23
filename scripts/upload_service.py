@@ -743,7 +743,14 @@ async def admin_reindex_collection(
         )
 
     try:
-        spawn_ingest_code(root=root, work_dir=WORK_DIR, collection=name, recreate=False, repo_name=repo_name)
+        spawn_ingest_code(
+            root=root,
+            work_dir=WORK_DIR,
+            collection=name,
+            recreate=False,
+            repo_name=repo_name,
+            clear_caches=True,
+        )
     except Exception as e:
         return render_admin_error(
             request,
@@ -823,7 +830,14 @@ async def admin_recreate_collection(
             api_key=os.environ.get("QDRANT_API_KEY") or None,
             collection=name,
         )
-        spawn_ingest_code(root=root, work_dir=WORK_DIR, collection=name, recreate=False, repo_name=repo_name)
+        spawn_ingest_code(
+            root=root,
+            work_dir=WORK_DIR,
+            collection=name,
+            recreate=False,
+            repo_name=repo_name,
+            clear_caches=True,
+        )
     except Exception as e:
         return render_admin_error(
             request,

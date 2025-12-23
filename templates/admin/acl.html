@@ -68,7 +68,13 @@
       <tbody id="collections-body">
       {% if collections and collections|length > 0 %}
         {% for c in collections %}
-          <tr {% if c.needs_reindex %}style="background:#fff3cd"{% endif %}>
+          <tr
+            {% if c.needs_recreate %}
+              style="background:#f8d7da"
+            {% elif c.needs_reindex_only %}
+              style="background:#fff3cd"
+            {% endif %}
+          >
             <td>{{ c.id }}</td>
             <td>
               <div>{{ c.qdrant_collection }}</div>
@@ -103,8 +109,42 @@
               {% else %}
                 <span class="error">missing</span>
               {% endif %}
-              {% if c.needs_reindex %}
-                <div class="error">maintenance needed</div>
+              {% if c.needs_recreate %}
+                <div class="error">
+                  maintenance needed — recreate
+                  {% if c.drift_recreate_keys %}
+                    <div class="small">
+                      {% for key in c.drift_recreate_keys %}
+                        <span class="badge">{{ key }}</span>
+                      {% endfor %}
+                    </div>
+                  {% endif %}
+                </div>
+              {% elif c.needs_snapshot_refresh %}
+                <div class="warning">
+                  config applied — refresh snapshot
+                  {% if c.snapshot_only_recreate_keys %}
+                    <div class="small">
+                      {% for key in c.snapshot_only_recreate_keys %}
+                        <span class="badge muted">{{ key }}</span>
+                      {% endfor %}
+                    </div>
+                  {% endif %}
+                  {% if c.snapshot_refresh_triggered %}
+                    <div class="muted small">env snapshot refreshed automatically</div>
+                  {% endif %}
+                </div>
+              {% elif c.needs_reindex_only %}
+                <div class="warning">
+                  config drift — reindex
+                  {% if c.drift_reindex_keys %}
+                    <div class="small">
+                      {% for key in c.drift_reindex_keys %}
+                        <span class="badge muted">{{ key }}</span>
+                      {% endfor %}
+                    </div>
+                  {% endif %}
+                </div>
               {% endif %}
             </td>
             <td><span class="muted">{{ c.applied_indexing_hash }}</span></td>
@@ -233,7 +273,14 @@
       }
 
       function renderRow(c) {
-        const highlight = c.needs_reindex ? ' style="background:#fff3cd"' : "";
+        let highlight = "";
+        if (c.needs_recreate) {
+          highlight = ' style="background:#f8d7da"';
+        } else if (c.needs_snapshot_refresh) {
+          highlight = ' style="background:#fbe8c6"';
+        } else if (c.needs_reindex_only) {
+          highlight = ' style="background:#fff3cd"';
+        }
         const containerInfo = c.container_path
           ? `<div class="muted">${escapeHtml(c.container_path)}</div>`
           : "";
@@ -241,7 +288,39 @@
         const mappingInfo = c.has_mapping
           ? `<span class="muted">ok (${c.mapping_count})</span>`
           : '<span class="error">missing</span>';
-        const maintenance = c.needs_reindex ? '<div class="error">maintenance needed</div>' : "";
+        let maintenance = "";
+        if (c.needs_recreate) {
+          const badges = (c.drift_recreate_keys || [])
+            .map((key) => `<span class="badge">${escapeHtml(key)}</span>`)
+            .join(" ");
+          maintenance = `
+            <div class="error">
+              maintenance needed — recreate
+              ${badges ? `<div class="small">${badges}</div>` : ""}
+            </div>`;
+        } else if (c.needs_snapshot_refresh) {
+          const badges = (c.snapshot_only_recreate_keys || [])
+            .map((key) => `<span class="badge muted">${escapeHtml(key)}</span>`)
+            .join(" ");
+          const refreshedNote = c.snapshot_refresh_triggered
+            ? '<div class="muted small">env snapshot refreshed automatically</div>'
+            : "";
+          maintenance = `
+            <div class="warning">
+              config applied — refresh snapshot
+              ${badges ? `<div class="small">${badges}</div>` : ""}
+              ${refreshedNote}
+            </div>`;
+        } else if (c.needs_reindex_only) {
+          const badges = (c.drift_reindex_keys || [])
+            .map((key) => `<span class="badge muted">${escapeHtml(key)}</span>`)
+            .join(" ");
+          maintenance = `
+            <div class="warning">
+              config drift — reindex
+              ${badges ? `<div class="small">${badges}</div>` : ""}
+            </div>`;
+        }
         const started = c.indexing_started_at
           ? `<div class="muted">started ${escapeHtml(c.indexing_started_at)}</div>`
           : "";

@@ -8,12 +8,17 @@ import traceback
 import json
 from pathlib import Path
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 try:
     from qdrant_client import QdrantClient
 except Exception:
     QdrantClient = None  # type: ignore
+
+try:
+    from scripts.embedder import get_model_dimension
+except Exception:
+    get_model_dimension = None  # type: ignore
 
 from scripts.collection_admin import copy_collection_qdrant
 
@@ -22,11 +27,15 @@ try:
         ensure_collection_and_indexes_once,
         ensure_payload_indexes,
         _sanitize_vector_name,
+        MINI_VECTOR_NAME as _MINI_VECTOR_NAME,
+        LEX_SPARSE_NAME as _LEX_SPARSE_NAME,
     )
 except Exception:
     ensure_collection_and_indexes_once = None  # type: ignore
     ensure_payload_indexes = None  # type: ignore
     _sanitize_vector_name = None  # type: ignore
+    _MINI_VECTOR_NAME = os.environ.get("MINI_VECTOR_NAME", "mini")
+    _LEX_SPARSE_NAME = os.environ.get("LEX_SPARSE_NAME", "lex_sparse")
 
 try:
     from scripts.workspace_state import (
@@ -41,6 +50,7 @@ try:
         update_staging_status,
         clear_staging_collection,
         activate_staging_collection,
+        promote_pending_indexing_config,
     )
 except Exception:
     get_collection_mappings = None  # type: ignore
@@ -54,39 +64,184 @@ except Exception:
     update_staging_status = None  # type: ignore
     clear_staging_collection = None  # type: ignore
     activate_staging_collection = None  # type: ignore
+    promote_pending_indexing_config = None  # type: ignore
 
 
 def _staging_enabled() -> bool:
     return bool(is_staging_enabled() if callable(is_staging_enabled) else False)
 
-try:
-    from scripts.embedder import get_model_dimension
-except Exception:
-    get_model_dimension = None  # type: ignore
+
+_COLLECTION_SCHEMA_CACHE: Dict[str, Dict[str, Any]] = {}
+_SNAPSHOT_REFRESHED: Set[str] = set()
 
 
-def _resolve_codebase_root(work_root: Path) -> Path:
-    env_root = (
-        os.environ.get("CTXCE_CODEBASE_ROOT")
-        or os.environ.get("CODEBASE_ROOT")
-        or ""
-    ).strip()
-    candidates: List[Path] = []
-    if env_root:
-        candidates.append(Path(env_root))
-    candidates.append(work_root)
-    candidates.append(work_root.parent)
-    for candidate in candidates:
+def _probe_collection_schema(collection: str) -> Optional[Dict[str, Any]]:
+    if not collection or QdrantClient is None:
+        return None
+    cached = _COLLECTION_SCHEMA_CACHE.get(collection)
+    if cached:
+        return cached
+
+    qdrant_url = os.environ.get("QDRANT_URL", "http://qdrant:6333")
+    api_key = os.environ.get("QDRANT_API_KEY") or None
+    try:
+        client = QdrantClient(url=qdrant_url, api_key=api_key)
+    except Exception:
+        return None
+
+    try:
+        info = client.get_collection(collection_name=collection)
+    except Exception:
         try:
-            base = candidate.resolve()
+            client.close()
         except Exception:
-            base = candidate
+            pass
+        return None
+
+    try:
+        vectors: Dict[str, Optional[int]] = {}
+        raw_vectors = getattr(getattr(info, "config", None), "params", None)
+        raw_vectors = getattr(raw_vectors, "vectors", None)
+        if raw_vectors:
+            items = None
+            if isinstance(raw_vectors, dict):
+                items = raw_vectors.items()
+            else:
+                try:
+                    items = raw_vectors.items()
+                except Exception:
+                    items = None
+            if items:
+                for name, params in items:
+                    try:
+                        size = getattr(params, "size", None)
+                    except Exception:
+                        size = None
+                    vectors[str(name)] = size
+
+        sparse_vectors: set[str] = set()
+        raw_sparse = getattr(getattr(info.config, "params", None), "sparse_vectors", None)
+        if raw_sparse:
+            keys_iter = None
+            if isinstance(raw_sparse, dict):
+                keys_iter = raw_sparse.keys()
+            else:
+                try:
+                    keys_iter = raw_sparse.keys()
+                except Exception:
+                    keys_iter = None
+            if keys_iter:
+                for name in keys_iter:
+                    sparse_vectors.add(str(name))
+
+        schema = {
+            "vectors": vectors,
+            "sparse_vectors": sparse_vectors,
+            "payload_indexes": getattr(getattr(info.config, "params", None), "payload_indexes", None),
+        }
+        _COLLECTION_SCHEMA_CACHE[collection] = schema
+        return schema
+    except Exception:
+        return None
+    finally:
         try:
-            if (base / ".codebase" / "repos").exists():
-                return base
+            client.close()
         except Exception:
-            continue
-    return work_root
+            pass
+
+
+def _filter_snapshot_only_recreate_keys(
+    collection: str,
+    drift_keys: List[str],
+    env_config: Dict[str, Any],
+) -> Tuple[List[str], List[str]]:
+    if not drift_keys or not collection or not env_config:
+        return drift_keys, []
+    schema = _probe_collection_schema(collection)
+    if not schema:
+        return drift_keys, []
+
+    vectors = schema.get("vectors") or {}
+    sparse_vectors = schema.get("sparse_vectors") or set()
+    mini_dim = vectors.get(_MINI_VECTOR_NAME)
+    has_sparse = _LEX_SPARSE_NAME in sparse_vectors
+
+    snapshot_only: List[str] = []
+    remaining: List[str] = []
+    for key in drift_keys:
+        suppress = False
+        if key == "embedding_model":
+            desired = env_config.get("embedding_model")
+            if desired and vectors.get(_sanitize_vector_name(desired) if _sanitize_vector_name else desired):
+                suppress = True
+        elif key == "embedding_provider":
+            suppress = False  # provider changes require rebuild
+        if key == "lex_sparse_mode":
+            desired_sparse = bool(env_config.get("lex_sparse_mode"))
+            if desired_sparse and has_sparse:
+                suppress = True
+        elif key == "mini_vec_dim":
+            desired_dim = env_config.get("mini_vec_dim")
+            refrag_on = bool(env_config.get("refrag_mode"))
+            if refrag_on and desired_dim and mini_dim == desired_dim:
+                suppress = True
+        if suppress:
+            snapshot_only.append(key)
+        else:
+            remaining.append(key)
+    return remaining, snapshot_only
+
+
+def _auto_refresh_snapshot_if_needed(
+    *,
+    collection: str,
+    workspace_path: Optional[str],
+    repo_name: Optional[str],
+    snapshot_only_keys: List[str],
+) -> bool:
+    if not snapshot_only_keys or not collection:
+        return False
+    if promote_pending_indexing_config is None:
+        return False
+    ws = (workspace_path or "").strip()
+    if not ws:
+        return False
+    cache_key = f"{ws}:{repo_name or ''}"
+    if cache_key in _SNAPSHOT_REFRESHED:
+        return False
+    try:
+        if get_workspace_state is not None:
+            st = get_workspace_state(ws, repo_name) or {}
+            if isinstance(st, dict):
+                has_pending = bool(st.get("indexing_config_pending") or st.get("indexing_env_pending"))
+            else:
+                has_pending = False
+        else:
+            has_pending = False
+    except Exception:
+        has_pending = False
+    if not has_pending:
+        return False
+    try:
+        promote_pending_indexing_config(workspace_path=ws, repo_name=repo_name)
+        _SNAPSHOT_REFRESHED.add(cache_key)
+        try:
+            print(
+                f"[snapshot_refresh] promoted pending indexing config for {collection} "
+                f"(workspace={ws}, repo={repo_name or 'default'}) after validating schema: "
+                f"{', '.join(snapshot_only_keys)}"
+            )
+        except Exception:
+            pass
+        return True
+    except Exception as exc:
+        try:
+            print(
+                f"[snapshot_refresh] Failed to promote indexing config for {collection}: {exc}"
+            )
+        except Exception:
+            pass
+        return False
 
 
 def _delete_path_tree(p: Path) -> bool:
@@ -123,6 +278,33 @@ def _delete_path_tree(p: Path) -> bool:
         return True
     except Exception:
         return False
+
+
+def _resolve_codebase_root(work_root: Path) -> Path:
+    env_root = (
+        os.environ.get("CTXCE_CODEBASE_ROOT")
+        or os.environ.get("CODEBASE_ROOT")
+        or ""
+    ).strip()
+
+    candidates: List[Path] = []
+    if env_root:
+        candidates.append(Path(env_root))
+    candidates.append(work_root)
+    candidates.append(work_root.parent)
+
+    for candidate in candidates:
+        try:
+            base = candidate.resolve()
+        except Exception:
+            base = candidate
+        try:
+            if (base / ".codebase" / "repos").exists():
+                return base
+        except Exception:
+            continue
+
+    return work_root
 
 
 def _cleanup_old_clone(
@@ -243,6 +425,27 @@ def _cleanup_old_clone(
         pass
 
 
+CONFIG_DRIFT_RULES: Dict[str, str] = {
+    # Schema / embedding changes
+    "embedding_model": "recreate",
+    "embedding_provider": "recreate",
+    "refrag_mode": "recreate",
+    "qwen3_embedding_enabled": "recreate",
+    "mini_vec_dim": "recreate",
+    "lex_sparse_mode": "recreate",
+    # Chunking / AST changes
+    "index_semantic_chunks": "reindex",
+    "index_chunk_lines": "reindex",
+    "index_chunk_overlap": "reindex",
+    "index_micro_chunks": "reindex",
+    "micro_chunk_tokens": "reindex",
+    "micro_chunk_stride": "reindex",
+    "max_micro_chunks_per_file": "reindex",
+    "use_tree_sitter": "reindex",
+    "index_use_enhanced_ast": "reindex",
+}
+
+
 def current_env_indexing_hash() -> str:
     try:
         if get_indexing_config_snapshot and compute_indexing_config_hash:
@@ -250,6 +453,47 @@ def current_env_indexing_hash() -> str:
     except Exception:
         return ""
     return ""
+
+
+def _current_env_indexing_config_and_hash() -> Tuple[Dict[str, Any], str]:
+    cfg: Dict[str, Any] = {}
+    cfg_hash = ""
+    if get_indexing_config_snapshot and compute_indexing_config_hash:
+        try:
+            snapshot = get_indexing_config_snapshot()
+            if isinstance(snapshot, dict):
+                cfg = snapshot
+            cfg_hash = compute_indexing_config_hash(snapshot or {})
+        except Exception:
+            cfg = {}
+            cfg_hash = ""
+    if not cfg_hash:
+        cfg_hash = current_env_indexing_hash()
+    return cfg, cfg_hash
+
+
+def _classify_indexing_drift(
+    applied_config: Dict[str, Any],
+    current_config: Dict[str, Any],
+) -> Tuple[List[str], List[str]]:
+    recreate_keys: List[str] = []
+    reindex_keys: List[str] = []
+    if not applied_config or not current_config:
+        return recreate_keys, reindex_keys
+    keys = set(applied_config.keys()) | set(current_config.keys())
+    for key in sorted(keys):
+        applied_val = applied_config.get(key)
+        current_val = current_config.get(key)
+        if applied_val == current_val:
+            continue
+        drift_class = CONFIG_DRIFT_RULES.get(key, "recreate")
+        if drift_class == "recreate":
+            recreate_keys.append(key)
+        elif drift_class == "reindex":
+            reindex_keys.append(key)
+        else:
+            recreate_keys.append(key)
+    return recreate_keys, reindex_keys
 
 
 def collection_mapping_index(*, work_dir: str) -> Dict[str, List[Dict[str, Any]]]:
@@ -321,7 +565,7 @@ def get_indexing_state(*, workspace_path: str, repo_name: Optional[str]) -> str:
 
 
 def build_admin_collections_view(*, collections: Any, work_dir: str) -> List[Dict[str, Any]]:
-    env_hash = current_env_indexing_hash()
+    env_config, env_hash = _current_env_indexing_config_and_hash()
     mapping_index = collection_mapping_index(work_dir=work_dir)
 
     enriched: List[Dict[str, Any]] = []
@@ -332,6 +576,7 @@ def build_admin_collections_view(*, collections: Any, work_dir: str) -> List[Dic
             coll_name = ""
 
         applied_hash = ""
+        applied_config: Dict[str, Any] = {}
         pending_hash = ""
         indexing_state = ""
         indexing_started_at = ""
@@ -356,6 +601,8 @@ def build_admin_collections_view(*, collections: Any, work_dir: str) -> List[Dic
             try:
                 st = get_workspace_state(str(container_path), repo_name) or {}
                 applied_hash = str(st.get("indexing_config_hash") or "")
+                cfg = st.get("indexing_config") or {}
+                applied_config = cfg if isinstance(cfg, dict) else {}
                 pending_hash = str(st.get("indexing_config_pending_hash") or "")
                 idx_status = st.get("indexing_status") or {}
                 if isinstance(idx_status, dict):
@@ -405,7 +652,39 @@ def build_admin_collections_view(*, collections: Any, work_dir: str) -> List[Dic
         # "maintenance needed" should reflect actual config drift requiring a maintenance reindex.
         # Pending hashes can exist during staging / queued rebuild flows; keep them visible in the UI
         # but do not treat them as drift.
-        needs_reindex = bool(env_hash and applied_hash and env_hash != applied_hash)
+        drift_detected = bool(env_hash and applied_hash and env_hash != applied_hash)
+        drift_recreate_keys: List[str] = []
+        drift_reindex_keys: List[str] = []
+        drift_unknown = False
+        snapshot_only_recreate_keys: List[str] = []
+        snapshot_refresh_triggered = False
+        if drift_detected:
+            if applied_config and env_config:
+                drift_recreate_keys, drift_reindex_keys = _classify_indexing_drift(applied_config, env_config)
+                if drift_recreate_keys:
+                    drift_recreate_keys, snapshot_only_recreate_keys = _filter_snapshot_only_recreate_keys(
+                        coll_name, drift_recreate_keys, env_config
+                    )
+            else:
+                drift_unknown = True
+
+        needs_recreate = bool(drift_recreate_keys)
+        if drift_unknown and not needs_recreate:
+            needs_recreate = True
+
+        needs_reindex_only = bool(not needs_recreate and drift_reindex_keys)
+        needs_snapshot_refresh = bool(
+            snapshot_only_recreate_keys and not needs_recreate and not needs_reindex_only
+        )
+        if needs_snapshot_refresh:
+            snapshot_refresh_triggered = _auto_refresh_snapshot_if_needed(
+                collection=coll_name,
+                workspace_path=container_path or work_dir,
+                repo_name=repo_name,
+                snapshot_only_keys=snapshot_only_recreate_keys,
+            )
+
+        needs_reindex = needs_recreate or needs_reindex_only
 
         try:
             cid = getattr(c, "id", None) if hasattr(c, "id") else c.get("id")  # type: ignore[union-attr]
@@ -428,6 +707,14 @@ def build_admin_collections_view(*, collections: Any, work_dir: str) -> List[Dic
                 "pending_indexing_hash": pending_hash,
                 "current_indexing_hash": env_hash,
                 "needs_reindex": needs_reindex,
+                "needs_recreate": needs_recreate,
+                "needs_reindex_only": needs_reindex_only,
+                "needs_snapshot_refresh": needs_snapshot_refresh,
+                "snapshot_refresh_triggered": snapshot_refresh_triggered,
+                "drift_recreate_keys": drift_recreate_keys,
+                "drift_reindex_keys": drift_reindex_keys,
+                "snapshot_only_recreate_keys": snapshot_only_recreate_keys,
+                "drift_unknown": drift_unknown,
                 "has_mapping": bool(container_path),
                 "staging_status": staging_status,
                 "staging_collection": staging_collection,
@@ -489,11 +776,14 @@ def spawn_ingest_code(
     recreate: bool,
     repo_name: Optional[str],
     env_overrides: Optional[Dict[str, Any]] = None,
+    clear_caches: bool = False,
 ) -> None:
     script_path = str((Path(__file__).resolve().parent / "ingest_code.py").resolve())
     cmd = [sys.executable or "python3", script_path, "--root", root, "--no-skip-unchanged"]
     if recreate:
         cmd.append("--recreate")
+    if clear_caches:
+        cmd.append("--clear-indexing-caches")
 
     env = os.environ.copy()
     # Apply per-run env overrides (e.g. pending env snapshots for staging rebuild).
@@ -718,35 +1008,67 @@ def start_staging_rebuild(*, collection: str, work_dir: str) -> str:
         print(f"[staging] ERROR verifying clone {old_collection}: {exc}")
         raise
 
-    _normalize_cloned_collection_schema(collection_name=old_collection, qdrant_url=qdrant_url)
+    # IMPORTANT: switch serving to *_old as soon as the clone is verified.
+    # Large repos can make the filesystem copy below slow; don't block the traffic cutover.
+    try:
+        print(f"[staging] Switching serving to clone {old_collection}")
+        update_workspace_state(
+            workspace_path=root,
+            repo_name=repo_name,
+            updates={
+                "serving_collection": old_collection,
+                "serving_repo_slug": f"{repo_name}_old" if repo_name else "",
+                "active_repo_slug": repo_name,
+                "qdrant_collection": collection,
+            },
+        )
+    except Exception as exc:
+        print(f"[staging] ERROR updating serving state to {old_collection}: {exc}")
+        raise
+
+    # Best-effort: ensure payload indexes on the clone. Failures here must not break cutover.
+    try:
+        _normalize_cloned_collection_schema(collection_name=old_collection, qdrant_url=qdrant_url)
+    except Exception as exc:
+        print(f"[staging] Warning: failed to normalize cloned collection {old_collection}: {exc}")
 
     # Duplicate workspace slug/state to <slug>_old so watcher/indexer can serve reads from the clone.
+    # This can be slow for large repos; treat as best-effort and do not block staging cutover.
     if repo_name:
         work_root = Path(os.environ.get("WORK_DIR") or os.environ.get("WORKDIR") or "/work")
         canonical_dir = work_root / repo_name
         old_dir = work_root / f"{repo_name}_old"
-        if canonical_dir.exists():
-            shutil.copytree(canonical_dir, old_dir, dirs_exist_ok=True)
-
-        old_state = state.copy()
-        # Preserve the env/config that was serving traffic; drop pending snapshots.
-        old_state["qdrant_collection"] = old_collection
-        old_state["serving_collection"] = old_collection
-        old_state["serving_repo_slug"] = f"{repo_name}_old"
-        old_state["active_repo_slug"] = old_state.get("active_repo_slug") or repo_name
         try:
-            old_state["indexing_status"] = {"state": "idle"}
-        except Exception:
-            pass
-        old_state.pop("indexing_config_pending", None)
-        old_state.pop("indexing_config_pending_hash", None)
-        old_state.pop("indexing_env_pending", None)
-        old_state.pop("staging", None)
-        update_workspace_state(
-            workspace_path=str(old_dir),
-            repo_name=f"{repo_name}_old",
-            updates=old_state,
-        )
+            if canonical_dir.exists():
+                t0 = time.time()
+                print(f"[staging] Copying workspace tree {canonical_dir} -> {old_dir}")
+                shutil.copytree(canonical_dir, old_dir, dirs_exist_ok=True)
+                print(f"[staging] Workspace copy completed in {time.time() - t0:.1f}s")
+        except Exception as exc:
+            print(f"[staging] Warning: failed to copy workspace tree for {repo_name}: {exc}")
+
+        try:
+            old_state = state.copy()
+            # Preserve the env/config that was serving traffic; drop pending snapshots.
+            old_state["qdrant_collection"] = old_collection
+            old_state["serving_collection"] = old_collection
+            old_state["serving_repo_slug"] = f"{repo_name}_old"
+            old_state["active_repo_slug"] = old_state.get("active_repo_slug") or repo_name
+            try:
+                old_state["indexing_status"] = {"state": "idle"}
+            except Exception:
+                pass
+            old_state.pop("indexing_config_pending", None)
+            old_state.pop("indexing_config_pending_hash", None)
+            old_state.pop("indexing_env_pending", None)
+            old_state.pop("staging", None)
+            update_workspace_state(
+                workspace_path=str(old_dir),
+                repo_name=f"{repo_name}_old",
+                updates=old_state,
+            )
+        except Exception as exc:
+            print(f"[staging] Warning: failed to write *_old state for {repo_name}: {exc}")
 
     # Prepare canonical slug for rebuild (pending env)
     pending_cfg = state.get("indexing_config_pending") or state.get("indexing_config")
@@ -773,17 +1095,6 @@ def start_staging_rebuild(*, collection: str, work_dir: str) -> str:
             "repo_name": repo_name,
         }
         set_staging_state(workspace_path=root, repo_name=repo_name, staging=staging_info)
-
-    update_workspace_state(
-        workspace_path=root,
-        repo_name=repo_name,
-        updates={
-            "serving_collection": old_collection,
-            "serving_repo_slug": f"{repo_name}_old",
-            "active_repo_slug": repo_name,
-            "qdrant_collection": collection,
-        },
-    )
 
     if update_staging_status:
         update_staging_status(

@@ -103,31 +103,87 @@ try:
         indexing_lock,
         file_indexing_lock,
         is_file_locked,
+        clear_symbol_cache,
     )
 except ImportError:
     # State integration is optional; continue if not available
-    log_activity = None  # type: ignore
-    get_cached_file_hash = None  # type: ignore
-    set_cached_file_hash = None  # type: ignore
-    remove_cached_file = None  # type: ignore
-    update_indexing_status = None  # type: ignore
-    update_workspace_state = None  # type: ignore
-    get_cached_symbols = None  # type: ignore
-    set_cached_symbols = None  # type: ignore
-    remove_cached_symbols = None  # type: ignore
-    get_cached_pseudo = None  # type: ignore
-    set_cached_pseudo = None  # type: ignore
-    update_symbols_with_pseudo = None  # type: ignore
-    compare_symbol_changes = None  # type: ignore
-    get_workspace_state = None  # type: ignore
-    get_cached_file_meta = None  # type: ignore
-    get_indexing_config_snapshot = None  # type: ignore
-    compute_indexing_config_hash = None  # type: ignore
-    persist_indexing_config = None  # type: ignore
-    promote_pending_indexing_config = None  # type: ignore
-    indexing_lock = None  # type: ignore
-    file_indexing_lock = None  # type: ignore
-    is_file_locked = None  # type: ignore
+    def _set_optional_ws_func(name: str) -> None:
+        globals()[name] = None  # type: ignore[attr-defined]
+
+    for _name in (
+        "log_activity",
+        "get_cached_file_hash",
+        "set_cached_file_hash",
+        "remove_cached_file",
+        "update_indexing_status",
+        "update_workspace_state",
+        "get_cached_symbols",
+        "set_cached_symbols",
+        "remove_cached_symbols",
+        "compare_symbol_changes",
+        "get_cached_pseudo",
+        "set_cached_pseudo",
+        "update_symbols_with_pseudo",
+        "get_workspace_state",
+        "get_cached_file_meta",
+        "get_indexing_config_snapshot",
+        "compute_indexing_config_hash",
+        "persist_indexing_config",
+        "promote_pending_indexing_config",
+        "indexing_lock",
+        "file_indexing_lock",
+        "is_file_locked",
+        "clear_symbol_cache",
+    ):
+        _set_optional_ws_func(_name)
+
+try:
+    from scripts.collection_health import clear_cache, clear_repo_cache
+except ImportError:
+    clear_cache = None  # type: ignore
+    clear_repo_cache = None  # type: ignore
+
+
+def _clear_indexing_caches_for_run(
+    workspace_path: str,
+    repo_name: Optional[str],
+) -> None:
+    """Best-effort removal of file-hash + symbol caches before a rebuild."""
+    actions: list[str] = []
+    if not workspace_path:
+        workspace_path = os.environ.get("WORKSPACE_PATH") or os.environ.get("WATCH_ROOT") or "/work"
+
+    multi_repo = False
+    try:
+        if is_multi_repo_mode:
+            multi_repo = bool(is_multi_repo_mode())
+    except Exception:
+        multi_repo = False
+
+    # Clear file-hash cache
+    try:
+        if multi_repo and repo_name and clear_repo_cache:
+            if clear_repo_cache(repo_name):
+                actions.append(f"file-hash cache (repo={repo_name})")
+        elif clear_cache:
+            if clear_cache(workspace_path):
+                actions.append("file-hash cache")
+    except Exception as e:
+        print(f"[clear_caches] Failed to clear file hash cache: {e}")
+
+    # Clear symbol cache
+    try:
+        if clear_symbol_cache:
+            cleared_dirs = clear_symbol_cache(workspace_path, repo_name)
+            if cleared_dirs:
+                actions.append(f"symbol cache ({cleared_dirs} dirs)")
+    except Exception as e:
+        print(f"[clear_caches] Failed to clear symbol cache: {e}")
+
+    if actions:
+        print(f"[clear_caches] Cleared {'; '.join(actions)}")
+    else:
+        print("[clear_caches] No caches were cleared (helpers unavailable or already empty)")
 
 
 # Helper: mark staging ready/idle after rebuild completes
@@ -3545,6 +3601,9 @@ def index_repo(
         ws_path = str(root)
         repo_tag = _detect_repo_name_from_path(root) if _detect_repo_name_from_path else None
 
+        if args.clear_indexing_caches:
+            _clear_indexing_caches_for_run(ws_path, repo_tag)
+
         force_collection = False
         try:
             force_collection = str(os.environ.get("CTXCE_FORCE_COLLECTION_NAME", "")).strip().lower() in {
@@ -4800,6 +4859,11 @@ def main():
         "--no-skip-unchanged",
         action="store_true",
         help="Do not skip files whose content hash matches existing index",
+    )
+    parser.add_argument(
+        "--clear-indexing-caches",
+        action="store_true",
+        help="Clear local file hash + symbol caches before indexing",
     )
     # Exclusion controls
     parser.add_argument(

@@ -1710,6 +1710,8 @@ def get_indexing_config_snapshot() -> Dict[str, Any]:
         "index_chunk_overlap": _env_int("INDEX_CHUNK_OVERLAP"),
         "use_tree_sitter": _env_truthy("USE_TREE_SITTER", False),
         "index_use_enhanced_ast": _env_truthy("INDEX_USE_ENHANCED_AST", False),
+        "mini_vec_dim": _env_int("MINI_VEC_DIM"),
+        "lex_sparse_mode": _env_truthy("LEX_SPARSE_MODE", False),
     }
 
 
@@ -2047,6 +2049,62 @@ def remove_cached_symbols(file_path: str) -> None:
             cache_path.unlink()
     except Exception:
         pass
+
+
+def clear_symbol_cache(
+    workspace_path: Optional[str] = None,
+    repo_name: Optional[str] = None,
+) -> int:
+    """
+    Clear symbol cache files for a workspace/repo.
+
+    Returns the number of symbol cache directories removed.
+    """
+    dirs_removed = 0
+    workspace_root = workspace_path or _resolve_workspace_root()
+
+    target_dirs: List[Path] = []
+    if is_multi_repo_mode() and repo_name:
+        target_dirs.append(_get_repo_state_dir(repo_name) / "symbols")
+    else:
+        try:
+            cache_parent = _get_cache_path(workspace_root).parent
+        except Exception:
+            cache_parent = Path(workspace_root) / ".codebase"
+        target_dirs.append(cache_parent / "symbols")
+
+    for symbols_dir in target_dirs:
+        if not symbols_dir.exists():
+            continue
+        for cache_file in symbols_dir.glob("*.json"):
+            file_path = ""
+            try:
+                with cache_file.open("r", encoding="utf-8-sig") as f:
+                    data = json.load(f)
+                file_path = str(data.get("file_path") or "")
+            except Exception:
+                file_path = ""
+            if file_path:
+                remove_cached_symbols(file_path)
+            else:
+                try:
+                    cache_file.unlink()
+                except Exception:
+                    pass
+
+        # Best-effort cleanup of empty symbols directory
+        try:
+            next(symbols_dir.iterdir())
+        except StopIteration:
+            try:
+                symbols_dir.rmdir()
+                dirs_removed += 1
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    return dirs_removed
 
 
 def compare_symbol_changes(old_symbols: dict, new_symbols: dict) -> tuple[list, list]:
