@@ -50,6 +50,9 @@ import scripts.ingest_code as idx
 from scripts.logger import get_logger
 
 
+_ENV_OVERLAY_LOCK = threading.RLock()
+
+
 try:
     logger = get_logger(__name__)
 except Exception:  # pragma: no cover - fallback for logger import issues
@@ -1080,13 +1083,23 @@ def _process_paths(paths, client, model, vector_name: str, model_dim: int, works
         if not env_snapshot:
             yield
             return
-        old_env = os.environ.copy()
-        try:
-            os.environ.update(env_snapshot)
-            yield
-        finally:
-            os.environ.clear()
-            os.environ.update(old_env)
+        # NOTE: This mutates process-wide environment variables, so it must be serialized.
+        # Avoid os.environ.clear() which can cause unrelated work to see a partially empty env.
+        with _ENV_OVERLAY_LOCK:
+            previous_values: Dict[str, Optional[str]] = {}
+            keys_to_restore = set(env_snapshot.keys())
+            try:
+                for k in keys_to_restore:
+                    previous_values[k] = os.environ.get(k)
+                os.environ.update(env_snapshot)
+                yield
+            finally:
+                for k in keys_to_restore:
+                    prev = previous_values.get(k)
+                    if prev is None:
+                        os.environ.pop(k, None)
+                    else:
+                        os.environ[k] = prev
 
     for p in unique_paths:
         repo_path = _detect_repo_for_file(p) or Path(workspace_path)
