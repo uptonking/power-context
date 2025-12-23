@@ -16,13 +16,13 @@
 
 ## Overview
 
-Context Engine is a production-ready MCP (Model Context Protocol) retrieval stack that unifies code indexing, hybrid search, and optional LLM decoding. It enables teams to ship context-aware AI agents by providing sophisticated semantic and lexical search capabilities with dual-transport compatibility.
+Production-ready MCP (Model Context Protocol) retrieval stack unifying code indexing, hybrid search, and optional LLM decoding. Enables teams to ship context-aware AI agents with semantic and lexical search capabilities and dual-transport compatibility.
 
 ## Core Principles
 
-- **Research-Grade Retrieval**: Implements ReFRAG-inspired micro-chunking and span budgeting
-- **Dual-Transport Support**: Supports both SSE (legacy) and HTTP RMCP (modern) protocols
-- **Performance-First**: Intelligent caching, connection pooling, and async I/O patterns
+- **Research-Grade Retrieval**: ReFRAG-inspired micro-chunking and span budgeting
+- **Dual-Transport Support**: SSE (legacy) and HTTP RMCP (modern) protocols
+- **Performance-First**: Intelligent caching, connection pooling, and async I/O
 - **Production-Ready**: Comprehensive health checks, monitoring, and operational tooling
 
 ## System Architecture

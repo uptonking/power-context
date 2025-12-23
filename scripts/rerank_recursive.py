@@ -1816,8 +1816,17 @@ class ONNXRecursiveReranker(RecursiveReranker):
             # Use tiny scorer with refined latent to get adjustment
             adjustment = self.scorer.forward(query_emb, doc_embs, state.z)
 
-            # Blend ONNX scores with adjustment
-            alpha = 0.2  # Small adjustment weight
+            # Blend ONNX scores with adjustment (adaptive alpha based on convergence)
+            try:
+                metrics = self.scorer.get_metrics()
+                if metrics.get("converged", False) and metrics.get("avg_loss", 1.0) < 0.3:
+                    alpha = 0.5  # Higher weight for well-trained scorer
+                elif metrics.get("update_count", 0) > 100:
+                    alpha = 0.35  # Moderate weight after some training
+                else:
+                    alpha = 0.2  # Conservative weight for untrained scorer
+            except Exception:
+                alpha = 0.2  # Fallback to conservative
             state.scores = (1 - alpha) * state.scores + alpha * adjustment
             state.score_history.append(state.scores.copy())
 

@@ -15,20 +15,20 @@
 
 ## Overview
 
-Context Engine supports first-class multi-repository operation through a unified collection architecture. This enables:
+Context Engine supports multi-repository operation through unified collection architecture:
 
 - **Single unified collection** (default: `codebase`) for seamless cross-repo search
 - **Per-repo metadata** for filtering and isolation when needed
 - **Remote deployment** on Kubernetes clusters with stronger hardware
-- **Minimal code changes** - existing single-repo workflows remain unchanged
+- **Minimal code changes** - existing single-repo workflows unchanged
 
 ## Architecture Principles
 
 ### 1. Unified Collection Model
 
-All repositories index into a **single shared collection** by default (`codebase`). This provides:
+All repositories index into **single shared collection** by default (`codebase`):
 
-- **Seamless cross-repo search**: Query across all your code at once
+- **Seamless cross-repo search**: Query across all code at once
 - **Simplified management**: One collection to monitor and maintain
 - **Efficient resource usage**: Shared HNSW index and vector storage
 

@@ -137,7 +137,7 @@ logger = logging.getLogger(__name__)
 
 # Configuration from environment
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
-DEFAULT_COLLECTION = os.environ.get("COLLECTION_NAME", "my-collection")
+DEFAULT_COLLECTION = os.environ.get("COLLECTION_NAME", "codebase")
 WORK_DIR = os.environ.get("WORK_DIR") or os.environ.get("WORKDIR") or "/work"
 MAX_BUNDLE_SIZE_MB = int(os.environ.get("MAX_BUNDLE_SIZE_MB", "100"))
 UPLOAD_TIMEOUT_SECS = int(os.environ.get("UPLOAD_TIMEOUT_SECS", "300"))

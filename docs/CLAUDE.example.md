@@ -1,27 +1,26 @@
-This file is intended for AI agents (Claude, etc.) using the Context‑Engine Qdrant‑Indexer and Memory MCP tools.
+AI agent rules for using Context‑Engine Qdrant‑Indexer and Memory MCP tools.
 
-These rules are NOT optional - you may existing tools for file reading, "grep" like searching tools and 'codebase search' tools - unrelated to qdrant-indexer mcp tools - you are to favour the qdrant-indexer tooling at all costs, as per these guidelines
+These rules are NOT optional - favor qdrant-indexer tooling at all costs over existing file reading, grep-like searching, and unrelated codebase search tools.
 
-Agentic AI Project Rules: When to Use MCP Qdrant-Indexer vs Grep
+## Agentic AI Project Rules: When to Use MCP Qdrant-Indexer vs Grep
 
   Core Decision Rules (for AI agents)
 
-  Workspace default: For this repo, MCP Qdrant-Indexer tools are the primary way to explore code and history. Always start with MCP for exploration, debugging, or "where/why" questions; use literal search/file-open only for narrow exact-literal lookups.
+  Workspace default: MCP Qdrant-Indexer tools are primary for exploring code and history. Start with MCP for exploration, debugging, or "where/why" questions; use literal search/file-open only for narrow exact-literal lookups.
 
-  - Use MCP Qdrant-Indexer when:
-    - You are exploring or don't know exact strings/symbols.
-    - You need semantic or cross-file understanding (relationships, patterns, architecture).
-    - You want ranked results with surrounding context, not just line hits.
+  Use MCP Qdrant-Indexer when:
+  - Exploring or don't know exact strings/symbols
+  - Need semantic or cross-file understanding (relationships, patterns, architecture)
+  - Want ranked results with surrounding context, not just line hits
 
-  - Use literal search/file-open when (and only when):
-    - You know the exact string/function/variable or error message, and you only need to confirm its existence or a file/line quickly (not to understand behavior or architecture).
+  Use literal search/file-open when (and only when):
+  - Know exact string/function/variable or error message, and only need to confirm existence or file/line quickly (not to understand behavior or architecture)
 
   Quick Heuristics:
-
-  - If the question is conceptual/architectural or about "where/why" behavior changed → start with MCP.
-  - If you need rich context/snippets around matches → MCP.
-  - If you only need to confirm existence/location of a specific literal (error message, env var, exact function name) → literal search/file-open.
-  - If in doubt → start with MCP.
+  - Conceptual/architectural or "where/why" behavior questions → start with MCP
+  - Need rich context/snippets around matches → MCP
+  - Only need to confirm existence/location of specific literal → literal search/file-open
+  - If in doubt → start with MCP
 
   Grep Anti-Patterns:
 
@@ -31,16 +30,18 @@ Agentic AI Project Rules: When to Use MCP Qdrant-Indexer vs Grep
   grep -r "error" .                   # → Use MCP: "error handling patterns"
   grep -r "database" .                # → Use MCP: "database operations"
 
-  # DO - Efficient for exact matches
+  ## DO - Efficient for exact matches
   grep -rn "UserAlreadyExists" .      # Specific error class
   grep -rn "def authenticate_user" .  # Exact function name
   grep -rn "REDIS_HOST" .            # Exact environment variable
 
   MCP Tool Patterns:
 
-  # DO - Use concept/keyword-style queries (short natural-language fragments).
-  # repo_search is semantic search, not grep, regex, or boolean syntax.
-  # Write queries as short descriptions, not as "foo OR bar" expressions.
+  - Use concept/keyword-style queries (short natural-language fragments).
+  
+  - repo_search is semantic search, not grep, regex, or boolean syntax.
+  
+  - Write queries as short descriptions, not as "foo OR bar" expressions.
   "input validation mechanisms"
   "database connection handling"
   "performance bottlenecks in request path"
