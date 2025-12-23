@@ -375,12 +375,22 @@ def copy_collection_qdrant(
                         f"Failed to create destination collection {dest}: {exc}"
                     ) from exc
 
-            try:
-                cli.get_collection(collection_name=dest)
-            except Exception as exc:
+            # Allow transient network hiccups when verifying the destination collection.
+            verify_attempts = max(1, int(os.environ.get("CTXCE_COPY_VERIFY_RETRIES", "3") or "3"))
+            verify_delay = float(os.environ.get("CTXCE_COPY_VERIFY_DELAY", "2") or "2")
+            last_err: Optional[Exception] = None
+            for _ in range(verify_attempts):
+                try:
+                    cli.get_collection(collection_name=dest)
+                    last_err = None
+                    break
+                except Exception as exc:
+                    last_err = exc
+                    time.sleep(max(0.1, verify_delay))
+            if last_err is not None:
                 raise RuntimeError(
-                    f"Destination collection {dest} unavailable after creation: {exc}"
-                ) from exc
+                    f"Destination collection {dest} unavailable after creation: {last_err}"
+                ) from last_err
 
             offset = None
             batch_limit = int(os.environ.get("CTXCE_COPY_COLLECTION_BATCH", "512") or "512")
