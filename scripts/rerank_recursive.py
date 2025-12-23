@@ -1685,10 +1685,13 @@ class LearnedHybridWeights:
         import fcntl
         os.makedirs(os.path.dirname(self._weights_path) or ".", exist_ok=True)
         lock_path = self._weights_path + ".lock"
-        tmp_path = self._weights_path + ".tmp"
+        # np.savez adds .npz extension, so use base path for tmp
+        base_path = self._weights_path.rsplit(".npz", 1)[0]
+        tmp_base = base_path + ".tmp"
+        tmp_path = tmp_base + ".npz"  # What np.savez actually writes
         with open(lock_path, "w") as lock_file:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-            np.savez(tmp_path, alpha=self.alpha, version=self._version)
+            np.savez(tmp_base, alpha=self.alpha, version=self._version)
             os.replace(tmp_path, self._weights_path)
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 

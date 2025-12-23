@@ -98,10 +98,12 @@ class CollectionLearner:
         self.refiner = LatentRefiner(dim=self.scorer.dim, lr=LEARNING_RATE)
         self.refiner.set_collection(collection)
 
-        # Learned projection: BGE (768) → working dim (256)
+        # Learned projection: raw embedding dim → working dim (256)
         # Lower LR than scorer/refiner - projection is more sensitive
+        from scripts.embedder import get_model_dimension
+        embed_dim = get_model_dimension()  # Respects EMBEDDING_MODEL env
         self.projection = LearnedProjection(
-            input_dim=768,  # BGE base output dim
+            input_dim=embed_dim,
             output_dim=self.scorer.dim,
             lr=LEARNING_RATE * 0.5,  # Half the learning rate
         )
