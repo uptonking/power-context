@@ -113,17 +113,17 @@
             <td><span class="muted">{{ c.current_indexing_hash }}</span></td>
             <td>
               {% if c.has_mapping %}
-                <form class="inline" method="post" action="/admin/collections/reindex" onsubmit="return confirm('Reindex collection ' + '{{ c.qdrant_collection }}' + '?');">
+                <form class="inline js-confirmable" data-confirm="Reindex collection {{ c.qdrant_collection }}?" method="post" action="/admin/collections/reindex">
                   <input type="hidden" name="collection" value="{{ c.qdrant_collection }}" />
                   <button type="submit">Reindex</button>
                 </form>
-                <form class="inline" method="post" action="/admin/collections/recreate" onsubmit="return confirm('Recreate collection ' + c.qdrant_collection + '? This will recreate Qdrant collection and reindex all files.');">
+                <form class="inline js-confirmable" data-confirm="Recreate collection {{ c.qdrant_collection }}? This will recreate Qdrant collection and reindex all files." method="post" action="/admin/collections/recreate">
                   <input type="hidden" name="collection" value="{{ c.qdrant_collection }}" />
                   <button type="submit">Recreate</button>
                 </form>
               {% endif %}
               {% if deletion_enabled %}
-                <form class="inline" method="post" action="/admin/collections/delete" onsubmit="return confirm('Delete collection ' + '{{ c.qdrant_collection }}' + '? This may delete server-side files under {{ work_dir }} if filesystem cleanup is selected.');">
+                <form class="inline js-confirmable" data-confirm="Delete collection {{ c.qdrant_collection }}? This may delete server-side files under {{ work_dir }} if filesystem cleanup is selected." method="post" action="/admin/collections/delete">
                   <input type="hidden" name="collection" value="{{ c.qdrant_collection }}" />
                   <label class="muted" style="display:block; margin-bottom:6px;">
                     <input type="checkbox" name="delete_fs" value="1" />
@@ -248,15 +248,15 @@
           : "";
         const actions = c.has_mapping
           ? `
-            <form class="inline" method="post" action="/admin/collections/reindex" onsubmit="return confirm('Reindex collection ${escapeHtml(
+            <form class="inline js-confirmable" data-confirm="Reindex collection ${escapeHtml(
               c.qdrant_collection
-            )}?');">
+            )}?" method="post" action="/admin/collections/reindex">
               <input type="hidden" name="collection" value="${escapeHtml(c.qdrant_collection)}" />
               <button type="submit">Reindex</button>
             </form>
-            <form class="inline" method="post" action="/admin/collections/recreate" onsubmit="return confirm('Recreate collection ${escapeHtml(
+            <form class="inline js-confirmable" data-confirm="Recreate collection ${escapeHtml(
               c.qdrant_collection
-            )}? This will recreate Qdrant collection and reindex all files.');">
+            )}? This will recreate Qdrant collection and reindex all files." method="post" action="/admin/collections/recreate">
               <input type="hidden" name="collection" value="${escapeHtml(c.qdrant_collection)}" />
               <button type="submit">Recreate</button>
             </form>
@@ -264,30 +264,30 @@
               <div style="margin: 6px 0;">
                 <div class="muted small">Staging: ${escapeHtml(c.staging_collection || "")}</div>
                 <div class="muted small">State: ${escapeHtml(c.staging_state || "unknown")}</div>
-                <form class="inline" method="post" action="/admin/staging/activate" onsubmit="return confirm('Activate staging for ${escapeHtml(
+                <form class="inline js-confirmable" data-confirm="Activate staging for ${escapeHtml(
                   c.qdrant_collection
-                )}? This will replace the active collection with the staging collection.');">
+                )}? This will replace the active collection with the staging collection." method="post" action="/admin/staging/activate">
                   <input type="hidden" name="collection" value="${escapeHtml(c.qdrant_collection)}" />
                   <button type="submit" style="background: #28a745; color: white;">Activate</button>
                 </form>
-                <form class="inline" method="post" action="/admin/staging/abort" onsubmit="return confirm('Abort staging for ${escapeHtml(
+                <form class="inline js-confirmable" data-confirm="Abort staging for ${escapeHtml(
                   c.qdrant_collection
-                )}? This will delete the staging collection.');">
+                )}? This will delete the staging collection." method="post" action="/admin/staging/abort">
                   <input type="hidden" name="collection" value="${escapeHtml(c.qdrant_collection)}" />
                   <button type="submit" style="background: #dc3545; color: white;">Abort</button>
                 </form>
               </div>
             ` : stagingEnabled && c.staging_status === 'none' ? `
-              <form class="inline" method="post" action="/admin/staging/start" onsubmit="return confirm('Start staging rebuild for ${escapeHtml(
+              <form class="inline js-confirmable" data-confirm="Start staging rebuild for ${escapeHtml(
                 c.qdrant_collection
-              )}? This will create a staging collection and reindex with current configuration.');">
+              )}? This will create a staging collection and reindex with current configuration." method="post" action="/admin/staging/start">
                 <input type="hidden" name="collection" value="${escapeHtml(c.qdrant_collection)}" />
                 <button type="submit" style="background: #007bff; color: white;">Start Staging</button>
               </form>
             ` : ''}
-            <form class="inline" method="post" action="/admin/staging/copy" onsubmit="return confirm('Copy collection ${escapeHtml(
+            <form class="inline js-confirmable" data-confirm="Copy collection ${escapeHtml(
               c.qdrant_collection
-            )}? This will create a full copy of the collection.');">
+            )}? This will create a full copy of the collection." method="post" action="/admin/staging/copy">
               <input type="hidden" name="collection" value="${escapeHtml(c.qdrant_collection)}" />
               <button type="submit">Copy</button>
             </form>
@@ -295,9 +295,9 @@
           : "";
         const deleteHtml = deletionEnabled
           ? `
-            <form class="inline" method="post" action="/admin/collections/delete" onsubmit="return confirm('Delete collection ${escapeHtml(
+            <form class="inline js-confirmable" data-confirm="Delete collection ${escapeHtml(
               c.qdrant_collection
-            )}? This may delete server-side files under ${escapeHtml(workDir)} if filesystem cleanup is selected.');">
+            )}? This may delete server-side files under ${escapeHtml(workDir)} if filesystem cleanup is selected." method="post" action="/admin/collections/delete">
               <input type="hidden" name="collection" value="${escapeHtml(c.qdrant_collection)}" />
               <label class="muted" style="display:block; margin-bottom:6px;">
                 <input type="checkbox" name="delete_fs" value="1" />

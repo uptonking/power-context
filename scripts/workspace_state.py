@@ -33,8 +33,11 @@ _cache_memo_last_check: Dict[str, float] = {}
 
 
 def is_staging_enabled() -> bool:
-    v = str(os.environ.get("CTXCE_STAGING_ENABLED", "0") or "0").strip().lower()
-    return v not in {"0", "false", "no", "off"}
+    raw = os.environ.get("CTXCE_STAGING_ENABLED", "")
+    v = (raw or "").strip().lower()
+    if not v:
+        return False
+    return v in {"1", "true", "yes", "on"}
 
 
 def _cache_memo_recheck_seconds() -> float:

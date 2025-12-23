@@ -321,12 +321,22 @@ def _bridge_state_authorized(request: Request) -> None:
                     return
             except Exception:
                 pass
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Unauthorized bridge request")
+        try:
+            _require_admin_session(request)
+            return
+        except HTTPException as exc:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail="Unauthorized bridge request"
+            ) from exc
 
-    try:
-        _require_admin_session(request)
-    except HTTPException as exc:
-        raise HTTPException(status_code=exc.status_code, detail="Unauthorized bridge request") from exc
+    else:
+        try:
+            _require_admin_session(request)
+            return
+        except HTTPException as exc:
+            raise HTTPException(
+                status_code=exc.status_code, detail="Unauthorized bridge request"
+            ) from exc
 
 
 def _infer_repo_from_workspace(workspace_path: str) -> Optional[str]:
