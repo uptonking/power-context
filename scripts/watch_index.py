@@ -1153,7 +1153,189 @@ def _process_paths(paths, client, model, vector_name: str, model_dim: int, works
                     pass
                 continue
 
-        if not p.exists():
+            if not p.exists():
+                if client is not None:
+                    try:
+                        idx.delete_points_by_path(client, collection, str(p))
+                        print(f"[deleted] {p} -> {collection}")
+                    except Exception:
+                        pass
+                try:
+                    remove_cached_file(str(p), repo_name)
+                except Exception:
+                    pass
+                _log_activity(repo_key, "deleted", p)
+                repo_progress[repo_key] = repo_progress.get(repo_key, 0) + 1
+                try:
+                    _update_progress(
+                        repo_key,
+                        started_at,
+                        repo_progress[repo_key],
+                        len(repo_files),
+                        p,
+                    )
+                except Exception:
+                    pass
+                continue
+
+            if client is not None and model is not None:
+                try:
+                    idx.ensure_collection_and_indexes_once(client, collection, model_dim, vector_name)
+                except Exception:
+                    pass
+
+                ok = False
+                try:
+                    # Prefer smart symbol-aware reindexing when enabled and cache is available
+                    try:
+                        if getattr(idx, "_smart_symbol_reindexing_enabled", None) and idx._smart_symbol_reindexing_enabled():
+                            text: str | None = None
+                            try:
+                                text = p.read_text(encoding="utf-8", errors="ignore")
+                            except Exception:
+                                text = None
+                            if text is not None:
+                                try:
+                                    language = idx.detect_language(p)
+                                except Exception:
+                                    language = ""
+                                try:
+                                    file_hash = hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest()
+                                except Exception:
+                                    file_hash = ""
+                                if file_hash:
+                                    # Fast path: skip if content hash matches cached hash (file unchanged)
+                                    # Safety: startup health check clears stale cache per-repo
+                                    try:
+                                        cached_hash = get_cached_file_hash(str(p), repo_name) if repo_name else None
+                                        if cached_hash and cached_hash == file_hash:
+                                            print(f"[skip_unchanged] {p} (hash match)")
+                                            ok = True
+                                            raise _SkipUnchanged()
+                                    except _SkipUnchanged:
+                                        raise
+                                    except Exception:
+                                        pass  # hash check failed, proceed with reindex
+
+                                    try:
+                                        use_smart, smart_reason = idx.should_use_smart_reindexing(str(p), file_hash)
+                                    except Exception:
+                                        use_smart, smart_reason = False, "smart_check_failed"
+
+                                    # Bootstrap: if we have no symbol cache yet, still run smart path once
+                                    bootstrap = smart_reason == "no_cached_symbols"
+                                    if use_smart or bootstrap:
+                                        msg_kind = "smart reindexing" if use_smart else "bootstrap (no_cached_symbols) for smart reindex"
+                                        try:
+                                            print(f"[SMART_REINDEX][watcher] Using {msg_kind} for {p} ({smart_reason})")
+                                        except Exception:
+                                            pass
+                                        try:
+                                            status = idx.process_file_with_smart_reindexing(
+                                                p,
+                                                text,
+                                                language,
+                                                client,
+                                                collection,
+                                                repo_name,
+                                                model,
+                                                vector_name,
+                                            )
+                                            ok = status in ("success", "skipped")
+                                        except Exception as se:
+                                            try:
+                                                print(f"[SMART_REINDEX][watcher] Smart reindexing failed for {p}: {se}")
+                                            except Exception:
+                                                pass
+                                            ok = False
+                                    else:
+                                        try:
+                                            print(f"[SMART_REINDEX][watcher] Using full reindexing for {p} ({smart_reason})")
+                                        except Exception:
+                                            pass
+                    except _SkipUnchanged:
+                        raise  # Propagate skip to outer handler
+                    except Exception as e_smart:
+                        try:
+                            print(
+                                f"[SMART_REINDEX][watcher] Smart reindexing disabled or preview failed for {p}: {e_smart}"
+                            )
+                        except Exception:
+                            pass
+
+                    # Fallback: full single-file reindex. Pseudo/tags are inlined by default;
+                    # when PSEUDO_BACKFILL_ENABLED=1 we run base-only and rely on backfill.
+                    if not ok:
+                        flag = (os.environ.get("PSEUDO_BACKFILL_ENABLED") or "").strip().lower()
+                        pseudo_mode = "off" if flag in {"1", "true", "yes", "on"} else "full"
+                        ok = idx.index_single_file(
+                            client,
+                            model,
+                            collection,
+                            vector_name,
+                            p,
+                            dedupe=True,
+                            skip_unchanged=False,
+                            pseudo_mode=pseudo_mode,
+                            repo_name_for_cache=repo_name,
+                        )
+                except _SkipUnchanged:
+                    # File unchanged - skip without error but still count towards progress
+                    status = "skipped"
+                    print(f"[{status}] {p} -> {collection}")
+                    _log_activity(repo_key, "skipped", p, {"reason": "hash_unchanged"})
+                    repo_progress[repo_key] = repo_progress.get(repo_key, 0) + 1
+                    try:
+                        _update_progress(
+                            repo_key,
+                            started_at,
+                            repo_progress[repo_key],
+                            len(repo_files),
+                            p,
+                        )
+                    except Exception:
+                        pass
+                    continue
+                except Exception as e:
+                    try:
+                        _update_progress(
+                            repo_key,
+                            started_at,
+                            repo_progress[repo_key],
+                            len(repo_files),
+                            p,
+                        )
+                    except Exception:
+                        pass
+                    continue
+
+                status = "indexed" if ok else "skipped"
+                print(f"[{status}] {p} -> {collection}")
+                if ok:
+                    try:
+                        size = int(p.stat().st_size)
+                    except Exception:
+                        size = None
+                    _log_activity(repo_key, "indexed", p, {"file_size": size})
+                else:
+                    _log_activity(
+                        repo_key, "skipped", p, {"reason": "no-change-or-error"}
+                    )
+            else:
+                print(f"Not processing locally: {p}")
+                _log_activity(repo_key, "skipped", p, {"reason": "remote-mode"})
+
+            repo_progress[repo_key] = repo_progress.get(repo_key, 0) + 1
+            try:
+                _update_progress(
+                    repo_key,
+                    started_at,
+                    repo_progress[repo_key],
+                    len(repo_files),
+                    p,
+                )
+            except Exception:
+                pass
             if client is not None:
                 try:
                     idx.delete_points_by_path(client, collection, str(p))
