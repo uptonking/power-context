@@ -1032,29 +1032,17 @@ def expand_queries_enhanced(
 def _llm_expand_queries(
     queries: List[str], language: str | None = None, max_new: int = 4
 ) -> List[str]:
-    """Best-effort LLM expansion using configured decoder (GLM or llama.cpp/Granite).
+    """Best-effort LLM expansion using configured decoder.
     
-    Uses the existing refrag infrastructure:
-      - GLM if detected via detect_glm_runtime()
-      - llama.cpp (Granite 4.0) otherwise
-    On any error or if decoder not configured, returns []."""
+    If REFRAG_RUNTIME is set, uses the configured client (glm, minimax, llamacpp).
+    If REFRAG_RUNTIME is unset, tries llamacpp (for users with just the container).
+    On any error, returns [] silently."""
     import json
     import re
     import ast
 
-    # Detect runtime kind (same logic as mcp_indexer_server.py expand_query)
-    runtime_kind = os.environ.get("REFRAG_RUNTIME", "").strip().lower()
-    if not runtime_kind:
-        try:
-            from scripts.refrag_glm import detect_glm_runtime
-            if detect_glm_runtime():
-                runtime_kind = "glm"
-            elif os.environ.get("MINIMAX_API_KEY", "").strip():
-                runtime_kind = "minimax"
-            else:
-                runtime_kind = "llamacpp"
-        except Exception:
-            runtime_kind = "llamacpp"
+    # If REFRAG_RUNTIME is explicitly set, use it; otherwise default to llamacpp
+    runtime_kind = os.environ.get("REFRAG_RUNTIME", "").strip().lower() or "llamacpp"
     
     original_q = " ".join(queries)
     
@@ -1112,9 +1100,7 @@ def _llm_expand_queries(
                 system="You rewrite search queries using synonyms. Output format: JSON array of strings. No other text."
             )
         else:
-            from scripts.refrag_llamacpp import LlamaCppRefragClient, is_decoder_enabled
-            if not is_decoder_enabled():
-                return []
+            from scripts.refrag_llamacpp import LlamaCppRefragClient
             client = LlamaCppRefragClient()
             prompt = (
                 f"Rewrite this code search query using different words: {original_q}\n"
