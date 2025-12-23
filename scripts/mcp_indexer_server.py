@@ -5550,16 +5550,25 @@ async def expand_query(query: Any = None, max_new: Any = None, session: Optional
             return {"alternates": []}
         original_q = qlist[0] if qlist else ""
         # Select decoder runtime: explicit REFRAG_RUNTIME takes priority,
-        # otherwise auto-detect based on which API keys are configured
+        # otherwise auto-detect based on which API keys are configured.
+        # Prefer GLM when available so expand_query stays aligned with GLM
+        # context_answer behavior and TOON-optimised paths.
         runtime_kind = str(os.environ.get("REFRAG_RUNTIME", "")).strip().lower()
         if not runtime_kind:
             # Auto-detect based on available API keys
-            if os.environ.get("MINIMAX_API_KEY", "").strip():
-                runtime_kind = "minimax"
-            elif os.environ.get("GLM_API_KEY", "").strip():
-                runtime_kind = "glm"
-            else:
-                runtime_kind = "llamacpp"
+            try:
+                from scripts.refrag_glm import detect_glm_runtime  # type: ignore
+                if detect_glm_runtime():
+                    runtime_kind = "glm"
+                elif os.environ.get("MINIMAX_API_KEY", "").strip():
+                    runtime_kind = "minimax"
+                else:
+                    runtime_kind = "llamacpp"
+            except Exception:
+                if os.environ.get("MINIMAX_API_KEY", "").strip():
+                    runtime_kind = "minimax"
+                else:
+                    runtime_kind = "llamacpp"
         print(f"[EXPAND] runtime_kind={runtime_kind}", flush=True)
 
         # Build prompt per runtime - each model needs different prompting style
@@ -5587,7 +5596,7 @@ async def expand_query(query: Any = None, max_new: Any = None, session: Optional
 
         out = client.generate_with_soft_embeddings(
             prompt=prompt,
-            max_tokens=int(os.environ.get("EXPAND_MAX_TOKENS", "128") or 128),
+            max_tokens=int(os.environ.get("EXPAND_MAX_TOKENS", "512") or 512),
             temperature=0.7 if runtime_kind == "llamacpp" else 1.0,
             top_k=int(os.environ.get("EXPAND_TOP_K", "30") or 30),
             top_p=float(os.environ.get("EXPAND_TOP_P", "0.9") or 0.9),
@@ -5761,9 +5770,26 @@ def _cleanup_answer(text: str, max_chars: int | None = None) -> str:
 
 # Style and validation helpers for context_answer output
 def _answer_style_guidance() -> str:
-    """Compact instruction to keep answers direct and grounded."""
+    """Compact instruction to keep answers direct and grounded.
+    
+    GLM models get more generous guidance (4-8 sentences) since they handle
+    longer outputs better than Granite-4.0-Micro which needs strict 2-4 sentence limits.
+    """
+    try:
+        from scripts.refrag_glm import detect_glm_runtime
+        is_glm = detect_glm_runtime()
+    except ImportError:
+        is_glm = False
+    
+    if is_glm:
+        # GLM models can handle longer, more detailed answers
+        sentence_guidance = "Write a clear, comprehensive answer in 4-8 sentences."
+    else:
+        # Granite-4.0-Micro needs stricter limits for coherent output
+        sentence_guidance = "Write a direct answer in 2-4 sentences."
+    
     return (
-        "Write a direct answer in 2-4 sentences. No headings or labels. "
+        f"{sentence_guidance} No headings or labels. "
         "Ground non-trivial claims with bracketed citations like [n] using the numbered Sources. "
         "Never invent functions or parameters that do not appear in the snippets. "
         "Do not include URLs or Markdown links of any kind; cite only with [n]. "
@@ -7049,11 +7075,27 @@ def _ca_fallback_and_budget(
                 "yes",
                 "on",
             }:
+                # GLM models have much larger context windows - use higher budgets
+                try:
+                    from scripts.refrag_glm import detect_glm_runtime
+                    is_glm = detect_glm_runtime()
+                except ImportError:
+                    is_glm = False
+                
+                if is_glm:
+                    # GLM: 200K context allows much more code context
+                    _default_budget = "8192"  # 8x more than Granite
+                    _default_spans = "24"     # 3x more spans
+                else:
+                    # Granite/llamacpp: tighter limits
+                    _default_budget = "1024"
+                    _default_spans = "8"
+                
                 _pairs = {
                     "MICRO_BUDGET_TOKENS": os.environ.get(
-                        "MICRO_BUDGET_TOKENS", "1024"
+                        "MICRO_BUDGET_TOKENS", _default_budget
                     ),
-                    "MICRO_OUT_MAX_SPANS": os.environ.get("MICRO_OUT_MAX_SPANS", "8"),
+                    "MICRO_OUT_MAX_SPANS": os.environ.get("MICRO_OUT_MAX_SPANS", _default_spans),
                 }
         except Exception:
             _pairs = {"MICRO_BUDGET_TOKENS": "1024", "MICRO_OUT_MAX_SPANS": "8"}
@@ -7510,8 +7552,32 @@ def _ca_decoder_params(max_tokens: Any) -> tuple[int, float, int, float, list[st
         "\n\n\n",
     ]
     stops = default_stops + [s for s in (stop_env.split(",") if stop_env else []) if s]
+    
+    # Granite/llamacpp: use env var or 2000 default
+    # GLM: dynamically use model's max_output_tokens from config
+    try:
+        from scripts.refrag_glm import detect_glm_runtime, get_glm_model_name, get_model_config
+        is_glm = detect_glm_runtime()
+    except ImportError:
+        is_glm = False
+    
+    if is_glm:
+        # Pull dynamic limit from GLM model config (imports already succeeded above)
+        glm_model = get_glm_model_name()
+        model_config = get_model_config(glm_model)
+        # Respect env override if set, otherwise use model's max output
+        env_override = os.environ.get("DECODER_MAX_TOKENS", "").strip()
+        if env_override:
+            default_max_tokens = _to_int(env_override, model_config.get("max_output_tokens", 4000))
+        else:
+            # Use model's actual max output capability
+            default_max_tokens = model_config.get("max_output_tokens", 4000)
+    else:
+        # Granite/llamacpp
+        default_max_tokens = 2000
+    
     mtok = _to_int(
-        max_tokens, _to_int(os.environ.get("DECODER_MAX_TOKENS", "240"), 240)
+        max_tokens, _to_int(os.environ.get("DECODER_MAX_TOKENS", str(default_max_tokens)), default_max_tokens)
     )
     temp = 0.0
     top_k = _to_int(os.environ.get("DECODER_TOP_K", "20"), 20)
