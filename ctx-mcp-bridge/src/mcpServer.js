@@ -666,8 +666,8 @@ export async function runHttpMcpServer(options) {
       // MCP Endpoint
       // ================================================================
 
-      // Check Bearer token for MCP endpoint
-      if (parsedUrl.pathname === "/mcp") {
+      // Check Bearer token for MCP endpoint (accept /mcp and /mcp/ for compatibility)
+      if (parsedUrl.pathname === "/mcp" || parsedUrl.pathname === "/mcp/") {
         const authHeader = req.headers["authorization"] || "";
         const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
 

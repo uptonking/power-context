@@ -306,6 +306,7 @@ export function handleOAuthAuthorize(_req, res, searchParams) {
     // Auto-generate code and redirect
     const code = generateCode();
     pendingCodes.set(code, {
+      clientId,
       sessionId: existingAuth.entry.sessionId,
       backendUrl: existingAuth.backendUrl,
       codeChallenge,
@@ -400,6 +401,7 @@ export function handleOAuthStoreSession(req, res) {
       // Generate auth code
       const code = generateCode();
       pendingCodes.set(code, {
+        clientId: client_id,
         sessionId: session_id,
         backendUrl: backend_url,
         codeChallenge: code_challenge,
@@ -434,6 +436,7 @@ export function handleOAuthToken(req, res) {
       const data = new URLSearchParams(body);
       const code = data.get("code");
       const redirectUri = data.get("redirect_uri");
+      const clientId = data.get("client_id");
       // PKCE code_verifier - extracted but not validated yet (local bridge, trusted)
       data.get("code_verifier");
       const grantType = data.get("grant_type");
@@ -458,6 +461,15 @@ export function handleOAuthToken(req, res) {
         pendingCodes.delete(code);
         res.statusCode = 400;
         res.end(JSON.stringify({ error: "invalid_grant", error_description: "Code expired" }));
+        return;
+      }
+
+      // Validate client_id matches the one used in authorize request
+      // This prevents code leakage from being used by a different client
+      if (pendingData.clientId !== clientId) {
+        pendingCodes.delete(code);
+        res.statusCode = 400;
+        res.end(JSON.stringify({ error: "invalid_client", error_description: "client_id mismatch" }));
         return;
       }
 
