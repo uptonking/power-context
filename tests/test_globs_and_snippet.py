@@ -85,6 +85,37 @@ def test_run_hybrid_search_list_globs(monkeypatch):
 
 
 @pytest.mark.unit
+def test_dense_query_preserves_collection_on_filter_drop(monkeypatch):
+    calls = []
+
+    class RecordingClient:
+        def __init__(self):
+            self._fail_once = True
+
+        def query_points(self, **kwargs):
+            calls.append(kwargs)
+            if self._fail_once:
+                self._fail_once = False
+                raise Exception("boom")
+            return types.SimpleNamespace(points=["ok"])
+
+    # Avoid pulling real qdrant models
+    monkeypatch.setattr(
+        hyb,
+        "models",
+        types.SimpleNamespace(SearchParams=lambda hnsw_ef: {"hnsw_ef": hnsw_ef}),
+    )
+
+    client = RecordingClient()
+    out = hyb.dense_query(client, "vec", [0.1], flt=None, per_query=1, collection_name="explicit-coll")
+
+    assert out == ["ok"]
+    assert len(calls) == 2  # first fails, second succeeds after filter drop
+    assert calls[1]["collection_name"] == "explicit-coll"
+    assert calls[1].get("query_filter") is None or calls[1].get("filter") is None
+
+
+@pytest.mark.unit
 def test_repo_search_snippet_strict_cap_after_highlight(monkeypatch):
     # Stub run_hybrid_search to emit a single result with a known path and range
     async def fake_run(**kwargs):

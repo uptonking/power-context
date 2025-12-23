@@ -1649,6 +1649,9 @@ def dense_query(
                 logger.debug("QP_FILTER_DROP", extra={"using": vec_name, "reason": str(e)[:200]})
             except Exception:
                 pass
+        # If no collection is available, avoid firing a request with an empty collection name.
+        if not collection:
+            return _legacy_vector_search(client, _collection(), vec_name, v, per_query, flt)
         try:
             qp = client.query_points(
                 collection_name=collection,
