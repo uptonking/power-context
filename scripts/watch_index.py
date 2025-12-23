@@ -1325,6 +1325,18 @@ def _process_paths(paths, client, model, vector_name: str, model_dim: int, works
                 print(f"Not processing locally: {p}")
                 _log_activity(repo_key, "skipped", p, {"reason": "remote-mode"})
 
+            repo_progress[repo_key] = repo_progress.get(repo_key, 0) + 1
+            try:
+                _update_progress(
+                    repo_key,
+                    started_at,
+                    repo_progress[repo_key],
+                    len(repo_files),
+                    p,
+                )
+            except Exception:
+                pass
+
     for repo_path in repo_groups.keys():
         try:
             repo_name = _extract_repo_name_from_path(repo_path)
