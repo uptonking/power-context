@@ -5550,25 +5550,12 @@ async def expand_query(query: Any = None, max_new: Any = None, session: Optional
             return {"alternates": []}
         original_q = qlist[0] if qlist else ""
         # Select decoder runtime: explicit REFRAG_RUNTIME takes priority,
-        # otherwise auto-detect based on which API keys are configured.
-        # Prefer GLM when available so expand_query stays aligned with GLM
-        # context_answer behavior and TOON-optimised paths.
+        # otherwise fall back to llamacpp (local).
+        # GLM requires explicit REFRAG_RUNTIME=glm to avoid accidental API calls.
         runtime_kind = str(os.environ.get("REFRAG_RUNTIME", "")).strip().lower()
         if not runtime_kind:
-            # Auto-detect based on available API keys
-            try:
-                from scripts.refrag_glm import detect_glm_runtime  # type: ignore
-                if detect_glm_runtime():
-                    runtime_kind = "glm"
-                elif os.environ.get("MINIMAX_API_KEY", "").strip():
-                    runtime_kind = "minimax"
-                else:
-                    runtime_kind = "llamacpp"
-            except Exception:
-                if os.environ.get("MINIMAX_API_KEY", "").strip():
-                    runtime_kind = "minimax"
-                else:
-                    runtime_kind = "llamacpp"
+            # Default to llamacpp when no runtime is specified
+            runtime_kind = "llamacpp"
         print(f"[EXPAND] runtime_kind={runtime_kind}", flush=True)
 
         # Build prompt per runtime - each model needs different prompting style

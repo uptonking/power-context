@@ -94,22 +94,20 @@ def get_model_config(model: str) -> dict[str, Any]:
 
 def detect_glm_runtime() -> bool:
     """Detect whether the GLM runtime should be considered active.
-    
+
     Shared helper to centralise the environment-variable logic used to decide
     if GLM-based behaviour should be enabled.
-    
+
     Returns:
-        True if GLM runtime is active under either condition:
-            - REFRAG_RUNTIME is explicitly set to 'glm' (case-insensitive), or
-            - REFRAG_RUNTIME is unset/empty and GLM_API_KEY is non-empty.
-        False otherwise (e.g., REFRAG_RUNTIME='openai', or both vars unset).
+        True only if REFRAG_RUNTIME is explicitly set to 'glm' (case-insensitive).
+        False otherwise (e.g., REFRAG_RUNTIME='llamacpp', 'minimax', or unset).
+
+    Note:
+        The presence of GLM_API_KEY alone does NOT auto-enable GLM.
+        You must explicitly set REFRAG_RUNTIME=glm to use the GLM runtime.
     """
     runtime = os.environ.get("REFRAG_RUNTIME", "").strip().lower()
-    if runtime == "glm":
-        return True
-    if not runtime and os.environ.get("GLM_API_KEY", "").strip():
-        return True
-    return False
+    return runtime == "glm"
 
 
 def get_glm_model_name() -> str:
