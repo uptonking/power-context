@@ -341,6 +341,7 @@ export function handleOAuthStoreSession(req, res) {
   let body = "";
   req.on("data", (chunk) => { body += chunk; });
   req.on("end", () => {
+    res.setHeader("Content-Type", "application/json");
     try {
       const data = JSON.parse(body);
       const { session_id, backend_url, redirect_uri, state, code_challenge, code_challenge_method, client_id } = data;
@@ -351,11 +352,19 @@ export function handleOAuthStoreSession(req, res) {
         return;
       }
 
+      // Validate backend_url is a valid URL string (prevent prototype pollution)
+      try {
+        new URL(backend_url);
+      } catch {
+        res.statusCode = 400;
+        res.end(JSON.stringify({ error: "Invalid backend_url" }));
+        return;
+      }
+
       // Validate client_id and redirect_uri against registered clients
       // Note: client_id is passed from the login page which gets it from the initial auth request
       if (!validateClientAndRedirect(client_id, redirect_uri)) {
         res.statusCode = 400;
-        res.setHeader("Content-Type", "application/json");
         res.end(JSON.stringify({ error: "invalid_client", error_description: "Unknown client_id or unauthorized redirect_uri" }));
         return;
       }
@@ -370,14 +379,12 @@ export function handleOAuthStoreSession(req, res) {
           // Only allow localhost or 127.0.0.1 origins
           if (hostname !== "localhost" && hostname !== "127.0.0.1") {
             res.statusCode = 403;
-            res.setHeader("Content-Type", "application/json");
             res.end(JSON.stringify({ error: "forbidden", error_description: "Request must originate from localhost" }));
             return;
           }
         } catch {
           // If origin parsing fails, reject the request
           res.statusCode = 403;
-          res.setHeader("Content-Type", "application/json");
           res.end(JSON.stringify({ error: "forbidden", error_description: "Invalid origin" }));
           return;
         }
@@ -426,13 +433,15 @@ export function handleOAuthToken(req, res) {
     try {
       const data = new URLSearchParams(body);
       const code = data.get("code");
+      const redirectUri = data.get("redirect_uri");
       // PKCE code_verifier - extracted but not validated yet (local bridge, trusted)
       data.get("code_verifier");
       const grantType = data.get("grant_type");
 
+      res.setHeader("Content-Type", "application/json");
+
       if (grantType !== "authorization_code") {
         res.statusCode = 400;
-        res.setHeader("Content-Type", "application/json");
         res.end(JSON.stringify({ error: "unsupported_grant_type" }));
         return;
       }
@@ -440,7 +449,6 @@ export function handleOAuthToken(req, res) {
       const pendingData = pendingCodes.get(code);
       if (!pendingData) {
         res.statusCode = 400;
-        res.setHeader("Content-Type", "application/json");
         res.end(JSON.stringify({ error: "invalid_grant", error_description: "Invalid or expired code" }));
         return;
       }
@@ -449,8 +457,16 @@ export function handleOAuthToken(req, res) {
       if (Date.now() - pendingData.createdAt > 600000) {
         pendingCodes.delete(code);
         res.statusCode = 400;
-        res.setHeader("Content-Type", "application/json");
         res.end(JSON.stringify({ error: "invalid_grant", error_description: "Code expired" }));
+        return;
+      }
+
+      // Validate redirect_uri matches the one used in authorize request
+      // This prevents code interception from being used on a different redirect URI
+      if (pendingData.redirectUri !== redirectUri) {
+        pendingCodes.delete(code);
+        res.statusCode = 400;
+        res.end(JSON.stringify({ error: "invalid_grant", error_description: "redirect_uri mismatch" }));
         return;
       }
 
