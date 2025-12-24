@@ -213,8 +213,8 @@ RERANK_EVENTS_ENABLED=0
 | REFRAG_MODE | Enable micro-chunking and span budgeting | 1 (enabled) |
 | REFRAG_GATE_FIRST | Enable mini-vector gating | 1 (enabled) |
 | REFRAG_CANDIDATES | Candidates for gate-first filtering | 200 |
-| MICRO_BUDGET_TOKENS | Token budget for context_answer | 512 |
-| MICRO_OUT_MAX_SPANS | Max spans returned per query | 3 |
+| MICRO_BUDGET_TOKENS | Token budget for context_answer | 5000 (GLM: 6000-8192) |
+| MICRO_OUT_MAX_SPANS | Max spans returned per query | 8 (GLM: 24) |
 | MICRO_CHUNK_TOKENS | Tokens per micro-chunk window | 16 |
 | MICRO_CHUNK_STRIDE | Stride between windows | 8 |
 | MICRO_MERGE_LINES | Lines to merge adjacent spans | 4 |
