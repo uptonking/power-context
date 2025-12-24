@@ -3616,6 +3616,10 @@ def index_repo(
     try:
         force_collection = False
         try:
+            # CTXCE_FORCE_COLLECTION_NAME forces ingest_code to honor the explicit COLLECTION_NAME
+            # env var even in multi-repo mode (disables per-repo collection routing). This is
+            # primarily used by admin-driven subprocess runs (e.g. staging rebuild) that supply
+            # per-repo indexing_env overrides.
             force_collection = str(os.environ.get("CTXCE_FORCE_COLLECTION_NAME", "")).strip().lower() in {
                 "1",
                 "true",

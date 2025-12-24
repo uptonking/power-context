@@ -3,7 +3,6 @@ import os
 import time
 import threading
 import subprocess
-import contextlib
 from pathlib import Path
 from typing import Optional, Set, Dict, List, Any
 
@@ -48,9 +47,6 @@ from datetime import datetime
 
 import scripts.ingest_code as idx
 from scripts.logger import get_logger
-
-
-_ENV_OVERLAY_LOCK = threading.RLock()
 
 
 try:
@@ -1027,6 +1023,7 @@ def _process_git_history_manifest(
     collection: str,
     vector_name: str,
     repo_name: Optional[str],
+    env_snapshot: Optional[Dict[str, str]] = None,
 ):
     try:
         import sys
@@ -1036,6 +1033,11 @@ def _process_git_history_manifest(
             return
         cmd = [sys.executable or "python3", str(script), "--manifest-json", str(p)]
         env = os.environ.copy()
+        try:
+            if env_snapshot:
+                env.update({str(k): str(v) for k, v in env_snapshot.items() if k})
+        except Exception:
+            pass
         if collection:
             env["COLLECTION_NAME"] = collection
         if QDRANT_URL:
@@ -1093,29 +1095,6 @@ def _process_paths(paths, client, model, vector_name: str, model_dim: int, works
 
     repo_progress: dict[str, int] = {key: 0 for key in repo_groups.keys()}
 
-    @contextlib.contextmanager
-    def _env_overlay(env_snapshot: Optional[Dict[str, str]]):
-        if not env_snapshot:
-            yield
-            return
-        # NOTE: This mutates process-wide environment variables, so it must be serialized.
-        # Avoid os.environ.clear() which can cause unrelated work to see a partially empty env.
-        with _ENV_OVERLAY_LOCK:
-            previous_values: Dict[str, Optional[str]] = {}
-            keys_to_restore = set(env_snapshot.keys())
-            try:
-                for k in keys_to_restore:
-                    previous_values[k] = os.environ.get(k)
-                os.environ.update(env_snapshot)
-                yield
-            finally:
-                for k in keys_to_restore:
-                    prev = previous_values.get(k)
-                    if prev is None:
-                        os.environ.pop(k, None)
-                    else:
-                        os.environ[k] = prev
-
     for p in unique_paths:
         repo_path = _detect_repo_for_file(p) or Path(workspace_path)
         repo_key = str(repo_path)
@@ -1131,137 +1110,209 @@ def _process_paths(paths, client, model, vector_name: str, model_dim: int, works
         except Exception:
             state_env = None
 
-        with _env_overlay(state_env):
-            if ".remote-git" in p.parts and p.suffix.lower() == ".json":
+        if ".remote-git" in p.parts and p.suffix.lower() == ".json":
+            try:
+                _process_git_history_manifest(
+                    p,
+                    client,
+                    model,
+                    collection,
+                    vector_name,
+                    repo_name,
+                    env_snapshot=(state_env if is_staging_enabled() else None),
+                )
+            except Exception as e:
                 try:
-                    _process_git_history_manifest(p, client, model, collection, vector_name, repo_name)
-                except Exception as e:
+                    print(f"[commit_ingest_error] {p}: {e}")
+                except Exception:
+                    pass
+            repo_progress[repo_key] = repo_progress.get(repo_key, 0) + 1
+            try:
+                _update_progress(
+                    repo_key,
+                    started_at,
+                    repo_progress[repo_key],
+                    len(repo_files),
+                    p,
+                )
+            except Exception:
+                pass
+            continue
+
+        if not p.exists():
+            if client is not None:
+                try:
+                    idx.delete_points_by_path(client, collection, str(p))
+                    print(f"[deleted] {p} -> {collection}")
+                except Exception:
+                    pass
+            try:
+                remove_cached_file(str(p), repo_name)
+            except Exception:
+                pass
+            _log_activity(repo_key, "deleted", p)
+            repo_progress[repo_key] = repo_progress.get(repo_key, 0) + 1
+            try:
+                _update_progress(
+                    repo_key,
+                    started_at,
+                    repo_progress[repo_key],
+                    len(repo_files),
+                    p,
+                )
+            except Exception:
+                pass
+            continue
+
+        # If a repo-specific indexing_env is present (staging), avoid mutating os.environ
+        # process-wide. Instead, run ingest_code in a subprocess with an explicit env dict.
+        if is_staging_enabled() and state_env and collection:
+            # Cheap pre-flight hash check so we can skip unchanged files without spawning a subprocess.
+            # TODO: Instead of launching one subprocess per file, queue changes and run a single ingest_code.py --root <repo> pass with --no-skip-unchanged. That reuses ingest’s own skip logic, but requires more plumbing (collect paths, pass via manifest/CLI, etc.).
+            skip_via_hash = False
+            try:
+                text = p.read_text(encoding="utf-8", errors="ignore")
+                try:
+                    file_hash = hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest()
+                except Exception:
+                    file_hash = ""
+                if file_hash:
                     try:
-                        print(f"[commit_ingest_error] {p}: {e}")
+                        cached_hash = get_cached_file_hash(str(p), repo_name) if repo_name else None
                     except Exception:
-                        pass
-                repo_progress[repo_key] = repo_progress.get(repo_key, 0) + 1
-                try:
-                    _update_progress(
-                        repo_key,
-                        started_at,
-                        repo_progress[repo_key],
-                        len(repo_files),
-                        p,
-                    )
-                except Exception:
-                    pass
-                continue
-
-            if not p.exists():
-                if client is not None:
-                    try:
-                        idx.delete_points_by_path(client, collection, str(p))
-                        print(f"[deleted] {p} -> {collection}")
-                    except Exception:
-                        pass
-                try:
-                    remove_cached_file(str(p), repo_name)
-                except Exception:
-                    pass
-                _log_activity(repo_key, "deleted", p)
-                repo_progress[repo_key] = repo_progress.get(repo_key, 0) + 1
-                try:
-                    _update_progress(
-                        repo_key,
-                        started_at,
-                        repo_progress[repo_key],
-                        len(repo_files),
-                        p,
-                    )
-                except Exception:
-                    pass
-                continue
-
-            if client is not None and model is not None:
-                try:
-                    idx.ensure_collection_and_indexes_once(client, collection, model_dim, vector_name)
-                except Exception:
-                    pass
-
-                ok = False
-                try:
-                    # Prefer smart symbol-aware reindexing when enabled and cache is available
-                    try:
-                        if getattr(idx, "_smart_symbol_reindexing_enabled", None) and idx._smart_symbol_reindexing_enabled():
-                            text: str | None = None
-                            try:
-                                text = p.read_text(encoding="utf-8", errors="ignore")
-                            except Exception:
-                                text = None
-                            if text is not None:
-                                try:
-                                    language = idx.detect_language(p)
-                                except Exception:
-                                    language = ""
-                                try:
-                                    file_hash = hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest()
-                                except Exception:
-                                    file_hash = ""
-                                if file_hash:
-                                    # Fast path: skip if content hash matches cached hash (file unchanged)
-                                    # Safety: startup health check clears stale cache per-repo
-                                    try:
-                                        cached_hash = get_cached_file_hash(str(p), repo_name) if repo_name else None
-                                        if cached_hash and cached_hash == file_hash:
-                                            print(f"[skip_unchanged] {p} (hash match)")
-                                            ok = True
-                                            raise _SkipUnchanged()
-                                    except _SkipUnchanged:
-                                        raise
-                                    except Exception:
-                                        pass  # hash check failed, proceed with reindex
-
-                                    try:
-                                        use_smart, smart_reason = idx.should_use_smart_reindexing(str(p), file_hash)
-                                    except Exception:
-                                        use_smart, smart_reason = False, "smart_check_failed"
-
-                                    # Bootstrap: if we have no symbol cache yet, still run smart path once
-                                    bootstrap = smart_reason == "no_cached_symbols"
-                                    if use_smart or bootstrap:
-                                        msg_kind = "smart reindexing" if use_smart else "bootstrap (no_cached_symbols) for smart reindex"
-                                        try:
-                                            print(f"[SMART_REINDEX][watcher] Using {msg_kind} for {p} ({smart_reason})")
-                                        except Exception:
-                                            pass
-                                        try:
-                                            status = idx.process_file_with_smart_reindexing(
-                                                p,
-                                                text,
-                                                language,
-                                                client,
-                                                collection,
-                                                repo_name,
-                                                model,
-                                                vector_name,
-                                            )
-                                            ok = status in ("success", "skipped")
-                                        except Exception as se:
-                                            try:
-                                                print(f"[SMART_REINDEX][watcher] Smart reindexing failed for {p}: {se}")
-                                            except Exception:
-                                                pass
-                                            ok = False
-                                    else:
-                                        try:
-                                            print(f"[SMART_REINDEX][watcher] Using full reindexing for {p} ({smart_reason})")
-                                        except Exception:
-                                            pass
-                    except _SkipUnchanged:
-                        raise  # Propagate skip to outer handler
-                    except Exception as e_smart:
+                        cached_hash = None
+                    if cached_hash and cached_hash == file_hash:
                         try:
-                            print(
-                                f"[SMART_REINDEX][watcher] Smart reindexing disabled or preview failed for {p}: {e_smart}"
+                            print(f"[skip_unchanged] {p} (hash match)")
+                        except Exception:
+                            pass
+                        _log_activity(repo_key, "skipped", p, {"reason": "hash_unchanged"})
+                        repo_progress[repo_key] = repo_progress.get(repo_key, 0) + 1
+                        try:
+                            _update_progress(
+                                repo_key,
+                                started_at,
+                                repo_progress[repo_key],
+                                len(repo_files),
+                                p,
                             )
                         except Exception:
                             pass
+                        skip_via_hash = True
+            except Exception:
+                pass
+            if skip_via_hash:
+                continue
+            try:
+                cmd = [
+                    sys.executable or "python3",
+                    str(ROOT_DIR / "scripts" / "ingest_code.py"),
+                    "--root",
+                    str(p),
+                    "--no-skip-unchanged",
+                ]
+                env = os.environ.copy()
+                try:
+                    env.update({str(k): str(v) for k, v in state_env.items() if k})
+                except Exception:
+                    pass
+                env["COLLECTION_NAME"] = collection
+                if QDRANT_URL:
+                    env["QDRANT_URL"] = QDRANT_URL
+                if repo_name:
+                    env["REPO_NAME"] = repo_name
+                subprocess.run(cmd, env=env, capture_output=True, text=True)
+                try:
+                    print(f"[indexed_subprocess] {p} -> {collection}")
+                except Exception:
+                    pass
+                repo_progress[repo_key] = repo_progress.get(repo_key, 0) + 1
+                try:
+                    _update_progress(
+                        repo_key,
+                        started_at,
+                        repo_progress[repo_key],
+                        len(repo_files),
+                        p,
+                    )
+                except Exception:
+                    pass
+                continue
+            except Exception:
+                pass
+        if client is not None and model is not None:
+            try:
+                try:
+                    idx.ensure_collection_and_indexes_once(
+                        client, collection, model_dim, vector_name
+                    )
+                except Exception:
+                    pass
+                ok = False
+                text: str | None = None
+                try:
+                    text = p.read_text(encoding="utf-8", errors="ignore")
+                except Exception:
+                    text = None
+                if text is not None:
+                    try:
+                        language = idx.detect_language(p)
+                    except Exception:
+                        language = ""
+                    try:
+                        file_hash = hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest()
+                    except Exception:
+                        file_hash = ""
+                    if file_hash:
+                        # Fast path: skip if content hash matches cached hash (file unchanged)
+                        # Safety: startup health check clears stale cache per-repo
+                        try:
+                            cached_hash = get_cached_file_hash(str(p), repo_name) if repo_name else None
+                            if cached_hash and cached_hash == file_hash:
+                                print(f"[skip_unchanged] {p} (hash match)")
+                                ok = True
+                                raise _SkipUnchanged()
+                        except _SkipUnchanged:
+                            raise
+                        except Exception:
+                            pass  # hash check failed, proceed with reindex
+
+                        try:
+                            use_smart, smart_reason = idx.should_use_smart_reindexing(str(p), file_hash)
+                        except Exception:
+                            use_smart, smart_reason = False, "smart_check_failed"
+
+                        # Bootstrap: if we have no symbol cache yet, still run smart path once
+                        bootstrap = smart_reason == "no_cached_symbols"
+                        if use_smart or bootstrap:
+                            msg_kind = "smart reindexing" if use_smart else "bootstrap (no_cached_symbols) for smart reindex"
+                            try:
+                                print(f"[SMART_REINDEX][watcher] Using {msg_kind} for {p} ({smart_reason})")
+                            except Exception:
+                                pass
+                            try:
+                                status = idx.process_file_with_smart_reindexing(
+                                    p,
+                                    text,
+                                    language,
+                                    client,
+                                    collection,
+                                    repo_name,
+                                    model,
+                                    vector_name,
+                                )
+                                ok = status in ("success", "skipped")
+                            except Exception as se:
+                                try:
+                                    print(f"[SMART_REINDEX][watcher] Smart reindexing failed for {p}: {se}")
+                                except Exception:
+                                    pass
+                                ok = False
+                        else:
+                            try:
+                                print(f"[SMART_REINDEX][watcher] Using full reindexing for {p} ({smart_reason})")
+                            except Exception:
+                                pass
 
                     # Fallback: full single-file reindex. Pseudo/tags are inlined by default;
                     # when PSEUDO_BACKFILL_ENABLED=1 we run base-only and rely on backfill.
@@ -1279,51 +1330,51 @@ def _process_paths(paths, client, model, vector_name: str, model_dim: int, works
                             pseudo_mode=pseudo_mode,
                             repo_name_for_cache=repo_name,
                         )
-                except _SkipUnchanged:
-                    # File unchanged - skip without error but still count towards progress
-                    status = "skipped"
-                    print(f"[{status}] {p} -> {collection}")
-                    _log_activity(repo_key, "skipped", p, {"reason": "hash_unchanged"})
-                    repo_progress[repo_key] = repo_progress.get(repo_key, 0) + 1
-                    try:
-                        _update_progress(
-                            repo_key,
-                            started_at,
-                            repo_progress[repo_key],
-                            len(repo_files),
-                            p,
-                        )
-                    except Exception:
-                        pass
-                    continue
-                except Exception as e:
-                    try:
-                        _update_progress(
-                            repo_key,
-                            started_at,
-                            repo_progress[repo_key],
-                            len(repo_files),
-                            p,
-                        )
-                    except Exception:
-                        pass
-                    continue
-
-                status = "indexed" if ok else "skipped"
+            except _SkipUnchanged:
+                # File unchanged - skip without error but still count towards progress
+                status = "skipped"
                 print(f"[{status}] {p} -> {collection}")
-                if ok:
-                    try:
-                        size = int(p.stat().st_size)
-                    except Exception:
-                        size = None
-                    _log_activity(repo_key, "indexed", p, {"file_size": size})
-                else:
-                    _log_activity(
-                        repo_key, "skipped", p, {"reason": "no-change-or-error"}
+                _log_activity(repo_key, "skipped", p, {"reason": "hash_unchanged"})
+                repo_progress[repo_key] = repo_progress.get(repo_key, 0) + 1
+                try:
+                    _update_progress(
+                        repo_key,
+                        started_at,
+                        repo_progress[repo_key],
+                        len(repo_files),
+                        p,
                     )
+                except Exception:
+                    pass
+                continue
+            except Exception as e:
+                try:
+                    _update_progress(
+                        repo_key,
+                        started_at,
+                        repo_progress[repo_key],
+                        len(repo_files),
+                        p,
+                    )
+                except Exception:
+                    pass
+                continue
+
+            status = "indexed" if ok else "skipped"
+            print(f"[{status}] {p} -> {collection}")
+            if ok:
+                try:
+                    size = int(p.stat().st_size)
+                except Exception:
+                    size = None
+                _log_activity(repo_key, "indexed", p, {"file_size": size})
             else:
-                print(f"Not processing locally: {p}")
-                _log_activity(repo_key, "skipped", p, {"reason": "remote-mode"})
+                _log_activity(
+                    repo_key, "skipped", p, {"reason": "no-change-or-error"}
+                )
+        else:
+            print(f"Not processing locally: {p}")
+            _log_activity(repo_key, "skipped", p, {"reason": "remote-mode"})
 
             repo_progress[repo_key] = repo_progress.get(repo_key, 0) + 1
             try:
