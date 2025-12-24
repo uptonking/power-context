@@ -200,5 +200,5 @@ def _collection(collection_name: str | None = None) -> str:
 # Cache configuration
 # ---------------------------------------------------------------------------
 
-MAX_EMBED_CACHE = int(os.environ.get("MAX_EMBED_CACHE", "8192") or 8192)
-MAX_RESULTS_CACHE = int(os.environ.get("HYBRID_RESULTS_CACHE", "32") or 32)
+MAX_EMBED_CACHE = _safe_int(os.environ.get("MAX_EMBED_CACHE"), 8192)
+MAX_RESULTS_CACHE = _safe_int(os.environ.get("HYBRID_RESULTS_CACHE"), 32)

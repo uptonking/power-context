@@ -62,7 +62,16 @@ except ImportError:
 # Legacy cache fallback structures
 _EMBED_QUERY_CACHE: OrderedDict[tuple[str, str], List[float]] = OrderedDict()
 _EMBED_LOCK = threading.Lock()
-MAX_EMBED_CACHE = int(os.environ.get("MAX_EMBED_CACHE", "8192") or 8192)
+def _safe_int(val, default: int) -> int:
+    """Safely parse an integer from a value, returning default on failure."""
+    try:
+        if val is None or (isinstance(val, str) and val.strip() == ""):
+            return default
+        return int(val)
+    except (ValueError, TypeError):
+        return default
+
+MAX_EMBED_CACHE = _safe_int(os.environ.get("MAX_EMBED_CACHE"), 8192)
 
 # Unified cache instance (lazy initialized)
 _EMBED_CACHE: Optional[Any] = None
@@ -131,8 +140,26 @@ def embed_queries_cached(
         queries: List of query strings to embed.
 
     Returns:
-        List of embedding vectors (one per query).
+        List of embedding vectors (one per query, guaranteed 1:1 correspondence).
+
+    Raises:
+        ValueError: If queries is empty or contains only invalid entries.
+        RuntimeError: If embedding fails for any query.
     """
+    if not queries:
+        raise ValueError("queries must be a non-empty list")
+
+    # Validate and sanitize queries - filter empty/whitespace but track positions
+    sanitized: List[str] = []
+    original_indices: List[int] = []
+    for i, q in enumerate(queries):
+        if q and isinstance(q, str) and q.strip():
+            sanitized.append(q.strip())
+            original_indices.append(i)
+
+    if not sanitized:
+        raise ValueError("queries contains no valid non-empty strings")
+
     try:
         # Best-effort model name extraction; fall back to env
         name = getattr(model, "model_name", None) or os.environ.get(
@@ -144,16 +171,33 @@ def embed_queries_cached(
     # Apply Qwen3 instruction prefix if enabled (queries only, not documents)
     try:
         from scripts.embedder import prefix_queries
-        queries = prefix_queries(queries, name)
+        sanitized = prefix_queries(sanitized, name)
     except ImportError:
         pass
 
     cache = _get_embed_cache()
 
     if UNIFIED_CACHE_AVAILABLE and cache is not None:
-        return _embed_with_unified_cache(model, queries, name, cache)
+        embeddings = _embed_with_unified_cache(model, sanitized, name, cache)
     else:
-        return _embed_with_legacy_cache(model, queries, name)
+        embeddings = _embed_with_legacy_cache(model, sanitized, name)
+
+    # Reconstruct full result list with None for invalid queries
+    # (callers should not pass empty queries, but if they do, fail clearly)
+    if len(embeddings) != len(sanitized):
+        raise RuntimeError(
+            f"Embedding count mismatch: got {len(embeddings)} for {len(sanitized)} queries"
+        )
+
+    # If all queries were valid, return directly
+    if len(sanitized) == len(queries):
+        return embeddings
+
+    # Otherwise, we had some empty queries - raise error (callers must sanitize)
+    raise ValueError(
+        f"queries contained {len(queries) - len(sanitized)} empty/invalid entries; "
+        "caller must filter empty queries before calling embed_queries_cached"
+    )
 
 
 def _embed_with_unified_cache(
@@ -185,19 +229,17 @@ def _embed_with_unified_cache(
             # Fallback to one-by-one if batch fails
             for q in missing_queries:
                 key = (str(model_name), str(q))
-                try:
-                    vec = next(model.embed([q])).tolist()
-                    cache.set(key, vec)
-                except Exception:
-                    pass
+                vec = next(model.embed([q])).tolist()
+                cache.set(key, vec)
 
     # Return embeddings in original order from cache
     out: List[List[float]] = []
     for q in queries:
         key = (str(model_name), str(q))
         v = cache.get(key)
-        if v is not None:
-            out.append(v)
+        if v is None:
+            raise RuntimeError(f"Failed to embed query: {q!r}")
+        out.append(v)
     return out
 
 
@@ -235,16 +277,13 @@ def _embed_with_legacy_cache(
             # Fallback to one-by-one if batch fails
             for q in missing_queries:
                 key = (str(model_name), str(q))
-                try:
-                    vec = next(model.embed([q])).tolist()
-                    with _EMBED_LOCK:
-                        if key not in _EMBED_QUERY_CACHE:
-                            _EMBED_QUERY_CACHE[key] = vec
-                            # Evict oldest entries if cache exceeds limit
-                            while len(_EMBED_QUERY_CACHE) > MAX_EMBED_CACHE:
-                                _EMBED_QUERY_CACHE.popitem(last=False)
-                except Exception:
-                    pass
+                vec = next(model.embed([q])).tolist()
+                with _EMBED_LOCK:
+                    if key not in _EMBED_QUERY_CACHE:
+                        _EMBED_QUERY_CACHE[key] = vec
+                        # Evict oldest entries if cache exceeds limit
+                        while len(_EMBED_QUERY_CACHE) > MAX_EMBED_CACHE:
+                            _EMBED_QUERY_CACHE.popitem(last=False)
 
     # Return embeddings in original order from cache (thread-safe read)
     out: List[List[float]] = []
@@ -252,8 +291,9 @@ def _embed_with_legacy_cache(
         for q in queries:
             key = (str(model_name), str(q))
             v = _EMBED_QUERY_CACHE.get(key)
-            if v is not None:
-                out.append(v)
+            if v is None:
+                raise RuntimeError(f"Failed to embed query: {q!r}")
+            out.append(v)
     return out
 
 
