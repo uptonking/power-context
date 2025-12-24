@@ -180,7 +180,8 @@ def parse_query_dsl(queries: List[str]) -> Tuple[List[str], Dict[str, str]]:
         remaining = " ".join([p for p in parts if p])
         if remaining:
             clean.append(remaining)
-    # Keep at least an empty query if everything was tokens
+    # Keep at least an empty query if everything was tokens (filter-only mode)
+    # Callers should filter empty strings before embedding
     if not clean and queries:
         clean = [""]
     return clean, extracted

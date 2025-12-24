@@ -656,6 +656,28 @@ def run_hybrid_search(
 
     # Build query list (LLM-assisted first, then synonym expansion)
     qlist = list(clean_queries)
+
+    # Filter-only mode: derive implicit queries from DSL tokens
+    # e.g., "lang:python" -> add "python" as a query term for ranking
+    if not qlist or (len(qlist) == 1 and not qlist[0].strip()):
+        qlist = []  # Start fresh
+        if eff_language:
+            qlist.append(eff_language)
+        if eff_symbol:
+            qlist.append(eff_symbol)
+        if eff_kind:
+            qlist.append(eff_kind)
+        if eff_ext:
+            # Add extension without dot as query term
+            ext_term = eff_ext.lstrip(".")
+            if ext_term:
+                qlist.append(ext_term)
+        if eff_under:
+            # Add path segments as query terms
+            parts = [p for p in str(eff_under).replace("\\", "/").split("/") if p]
+            for p in parts[-2:]:  # Last 2 path segments
+                if p and p not in qlist:
+                    qlist.append(p)
     if llm_max > 0:
         _llm_more = _llm_expand_queries(qlist, eff_language, max_new=llm_max)
         for s in _llm_more:
@@ -811,8 +833,9 @@ def run_hybrid_search(
         score_map[pid]["lx"] += lxs
         score_map[pid]["s"] += lxs
 
-    # Dense queries
-    embedded = _embed_queries_cached(_model, qlist)
+    # Dense queries - filter out empty strings for filter-only mode (e.g., "lang:python")
+    qlist_for_embed = [q for q in qlist if q and q.strip()]
+    embedded = _embed_queries_cached(_model, qlist_for_embed) if qlist_for_embed else []
     # Ensure collection schema is compatible with current search settings (named vectors)
     try:
         if embedded:
