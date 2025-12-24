@@ -977,19 +977,8 @@ def spawn_ingest_code(
 
     env = os.environ.copy()
     # Apply per-run env overrides (e.g. pending env snapshots for staging rebuild).
+    # Merge overrides on top of current env, removing keys for None values.
     if isinstance(env_overrides, dict):
-        for k, v in env_overrides.items():
-            try:
-                key = str(k)
-            except Exception:
-                continue
-            if not key:
-                continue
-            try:
-                env[key] = "" if v is None else str(v)
-            except Exception:
-                continue
-        # Merge overrides on top of current env
         for k, v in env_overrides.items():
             if v is None:
                 env.pop(k, None)
