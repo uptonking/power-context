@@ -1024,6 +1024,20 @@ async def admin_start_staging(
                 logger.info(f"[admin] Started staging rebuild for {name} -> {staging_collection}")
             except Exception as e:
                 logger.error(f"[admin] Background staging start failed for {name}: {e}")
+                # Ensure we don't leave the workspace stuck in a queued staging state.
+                try:
+                    if clear_staging_collection:
+                        clear_staging_collection(workspace_path=root, repo_name=repo_name)
+                    elif update_workspace_state:
+                        update_workspace_state(
+                            workspace_path=root,
+                            repo_name=repo_name,
+                            updates={"staging": None},
+                        )
+                except Exception as clear_err:
+                    logger.warning(
+                        f"[admin] Failed to clear staging state after start failure for {name}: {clear_err}"
+                    )
 
         asyncio.create_task(_bg_start())
     except Exception as e:
@@ -1113,19 +1127,14 @@ async def admin_abort_staging(
 
     try:
         if abort_staging_rebuild is not None:
-            async def _bg_abort() -> None:
-                try:
-                    await asyncio.to_thread(
-                        abort_staging_rebuild,
-                        collection=name,
-                        work_dir=WORK_DIR,
-                        delete_collection=True,
-                    )
-                    logger.info(f"[admin] Aborted staging rebuild for {name}")
-                except Exception as e:
-                    logger.error(f"[admin] Background staging abort failed for {name}: {e}")
-
-            asyncio.create_task(_bg_abort())
+            # Run abort to completion so we always clear staging metadata before returning.
+            await asyncio.to_thread(
+                abort_staging_rebuild,
+                collection=name,
+                work_dir=WORK_DIR,
+                delete_collection=True,
+            )
+            logger.info(f"[admin] Aborted staging rebuild for {name}")
         elif clear_staging_collection:
             # Fallback for older deployments: clear staging metadata only.
             clear_staging_collection(workspace_path=root, repo_name=repo_name)

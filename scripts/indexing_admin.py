@@ -1097,7 +1097,13 @@ def start_staging_rebuild(*, collection: str, work_dir: str) -> str:
 
     state = _get_workspace_state_safe(root, repo_name)
     current_staging = state.get("staging") or {}
-    if isinstance(current_staging, dict) and current_staging.get("collection"):
+    staging_status_state = ""
+    try:
+        staging_status_state = str(((current_staging.get("status") or {}).get("state") or "")).strip().lower()
+    except Exception:
+        staging_status_state = ""
+    queued_marker = staging_status_state in {"", "queued"}
+    if isinstance(current_staging, dict) and current_staging.get("collection") and not queued_marker:
         raise RuntimeError("A staging collection is already running for this workspace")
 
     # Copy current collection to <collection>_old
