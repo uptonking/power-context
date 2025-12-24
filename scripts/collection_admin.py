@@ -317,7 +317,6 @@ def copy_collection_qdrant(
         try:
             raw = (
                 os.environ.get("CTXCE_COPY_COLLECTION_TIMEOUT")
-                or os.environ.get("QDRANT_COPY_TIMEOUT")
                 or os.environ.get("QDRANT_TIMEOUT")
                 or ""
             )
