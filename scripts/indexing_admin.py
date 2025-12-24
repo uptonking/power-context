@@ -51,6 +51,7 @@ try:
         clear_staging_collection,
         activate_staging_collection,
         promote_pending_indexing_config,
+        persist_indexing_config,
     )
 except Exception:
     get_collection_mappings = None  # type: ignore
@@ -65,6 +66,7 @@ except Exception:
     clear_staging_collection = None  # type: ignore
     activate_staging_collection = None  # type: ignore
     promote_pending_indexing_config = None  # type: ignore
+    persist_indexing_config = None  # type: ignore
 
 
 def _staging_enabled() -> bool:
@@ -73,6 +75,7 @@ def _staging_enabled() -> bool:
 
 _COLLECTION_SCHEMA_CACHE: Dict[str, Dict[str, Any]] = {}
 _SNAPSHOT_REFRESHED: Set[str] = set()
+_MAPPING_INDEX_CACHE: Dict[str, Any] = {"ts": 0.0, "work_dir": "", "value": {}}
 
 
 def _probe_collection_schema(collection: str) -> Optional[Dict[str, Any]]:
@@ -198,10 +201,14 @@ def _auto_refresh_snapshot_if_needed(
     workspace_path: Optional[str],
     repo_name: Optional[str],
     snapshot_only_keys: List[str],
+    staging_status: str = "none",
+    indexing_state: str = "",
 ) -> bool:
     if not snapshot_only_keys or not collection:
         return False
     if promote_pending_indexing_config is None:
+        return False
+    if persist_indexing_config is None:
         return False
     ws = (workspace_path or "").strip()
     if not ws:
@@ -209,20 +216,79 @@ def _auto_refresh_snapshot_if_needed(
     cache_key = f"{ws}:{repo_name or ''}"
     if cache_key in _SNAPSHOT_REFRESHED:
         return False
+
+    # Safety: Do not auto-refresh during active staging rebuild.
+    # The old collection depends on the saved .env being accurate.
+    if staging_status == "active":
+        return False
+
+    # Skip when indexing is currently running; wait for a quiescent window.
+    try:
+        normalized_index_state = (indexing_state or "").strip().lower()
+    except Exception:
+        normalized_index_state = ""
+    if normalized_index_state in {"initializing", "indexing", "running"}:
+        return False
+
     try:
         if get_workspace_state is not None:
             st = get_workspace_state(ws, repo_name) or {}
             if isinstance(st, dict):
                 has_pending = bool(st.get("indexing_config_pending") or st.get("indexing_env_pending"))
+                applied_hash = str(st.get("indexing_config_hash") or "")
+                pending_hash = str(st.get("indexing_config_pending_hash") or "")
             else:
                 has_pending = False
+                applied_hash = ""
+                pending_hash = ""
         else:
             has_pending = False
+            applied_hash = ""
+            pending_hash = ""
     except Exception:
         has_pending = False
-    if not has_pending:
+        applied_hash = ""
+        pending_hash = ""
+
+    # If the pending hash already matches applied, there's nothing to refresh.
+    if applied_hash and pending_hash and applied_hash == pending_hash:
         return False
+
+    # Auto-capture current config as pending when safe:
+    # - No active staging rebuild (checked above)
+    # - No pending config exists (avoid clobbering existing pending)
+    # - Schema already validated (snapshot_only_keys non-empty)
+    if not has_pending:
+        try:
+            persist_indexing_config(
+                workspace_path=ws,
+                repo_name=repo_name,
+                pending=True,
+            )
+        except Exception as exc:
+            try:
+                print(
+                    f"[snapshot_refresh] Failed to capture pending config for {collection}: {exc}"
+                )
+            except Exception:
+                pass
+            return False
+
+    dry_run = str(os.environ.get("CTXCE_SNAPSHOT_REFRESH_DRY_RUN", "0")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
     try:
+        if dry_run:
+            print(
+                f"[snapshot_refresh] DRY RUN: would promote pending config for {collection} "
+                f"(workspace={ws}, repo={repo_name or 'default'}) after validating schema: "
+                f"{', '.join(snapshot_only_keys)}"
+            )
+            return True
         promote_pending_indexing_config(workspace_path=ws, repo_name=repo_name)
         _SNAPSHOT_REFRESHED.add(cache_key)
         try:
@@ -446,6 +512,24 @@ CONFIG_DRIFT_RULES: Dict[str, str] = {
 }
 
 
+_INDEXING_CONFIG_DEFAULTS: Dict[str, Any] = {
+    # Keep in sync with scripts.workspace_state.get_indexing_config_snapshot defaults.
+    "refrag_mode": False,
+    "qwen3_embedding_enabled": False,
+    "index_semantic_chunks": True,
+    "index_micro_chunks": False,
+    "micro_chunk_tokens": None,
+    "micro_chunk_stride": None,
+    "max_micro_chunks_per_file": None,
+    "index_chunk_lines": None,
+    "index_chunk_overlap": None,
+    "use_tree_sitter": False,
+    "index_use_enhanced_ast": False,
+    "mini_vec_dim": None,
+    "lex_sparse_mode": False,
+}
+
+
 def current_env_indexing_hash() -> str:
     try:
         if get_indexing_config_snapshot and compute_indexing_config_hash:
@@ -482,8 +566,18 @@ def _classify_indexing_drift(
         return recreate_keys, reindex_keys
     keys = set(applied_config.keys()) | set(current_config.keys())
     for key in sorted(keys):
+        applied_has = key in applied_config
+        current_has = key in current_config
         applied_val = applied_config.get(key)
         current_val = current_config.get(key)
+
+        # Back-compat: older state snapshots may not include newly added keys.
+        # Treat missing keys as their default values to avoid false drift.
+        if not applied_has and key in _INDEXING_CONFIG_DEFAULTS:
+            applied_val = _INDEXING_CONFIG_DEFAULTS.get(key)
+        if not current_has and key in _INDEXING_CONFIG_DEFAULTS:
+            current_val = _INDEXING_CONFIG_DEFAULTS.get(key)
+
         if applied_val == current_val:
             continue
         drift_class = CONFIG_DRIFT_RULES.get(key, "recreate")
@@ -500,6 +594,25 @@ def collection_mapping_index(*, work_dir: str) -> Dict[str, List[Dict[str, Any]]
     if not get_collection_mappings:
         return {}
     try:
+        ttl = float(os.environ.get("CTXCE_COLLECTION_MAPPING_INDEX_TTL_SECS", "5") or 5)
+    except Exception:
+        ttl = 5.0
+    try:
+        now = time.time()
+    except Exception:
+        now = 0.0
+    try:
+        if (
+            ttl > 0
+            and _MAPPING_INDEX_CACHE.get("work_dir") == work_dir
+            and (now - float(_MAPPING_INDEX_CACHE.get("ts") or 0.0)) < ttl
+        ):
+            cached = _MAPPING_INDEX_CACHE.get("value")
+            if isinstance(cached, dict):
+                return cached
+    except Exception:
+        pass
+    try:
         mappings = get_collection_mappings(search_root=work_dir) or []
     except Exception:
         mappings = []
@@ -512,6 +625,12 @@ def collection_mapping_index(*, work_dir: str) -> Dict[str, List[Dict[str, Any]]
         if not name:
             continue
         out.setdefault(name, []).append(m)
+    try:
+        _MAPPING_INDEX_CACHE["ts"] = now
+        _MAPPING_INDEX_CACHE["work_dir"] = work_dir
+        _MAPPING_INDEX_CACHE["value"] = out
+    except Exception:
+        pass
     return out
 
 
@@ -597,9 +716,15 @@ def build_admin_collections_view(*, collections: Any, work_dir: str) -> List[Dic
         except Exception:
             mapping_count = 0
 
+        st: Dict[str, Any] = {}
         if container_path and get_workspace_state:
             try:
-                st = get_workspace_state(str(container_path), repo_name) or {}
+                st_raw = get_workspace_state(str(container_path), repo_name) or {}
+                st = st_raw if isinstance(st_raw, dict) else {}
+            except Exception:
+                st = {}
+        if st:
+            try:
                 applied_hash = str(st.get("indexing_config_hash") or "")
                 cfg = st.get("indexing_config") or {}
                 applied_config = cfg if isinstance(cfg, dict) else {}
@@ -624,6 +749,8 @@ def build_admin_collections_view(*, collections: Any, work_dir: str) -> List[Dic
                             progress_current_file = ""
             except Exception:
                 applied_hash = ""
+                applied_config = {}
+                pending_hash = ""
                 indexing_state = ""
                 indexing_started_at = ""
                 progress_files_processed = None
@@ -634,9 +761,8 @@ def build_admin_collections_view(*, collections: Any, work_dir: str) -> List[Dic
         staging_status = "none"
         staging_collection = ""
         staging_state = ""
-        if container_path and get_workspace_state:
+        if st:
             try:
-                st = get_workspace_state(str(container_path), repo_name) or {}
                 staging_info = st.get("staging") or {}
                 if isinstance(staging_info, dict) and staging_info.get("collection"):
                     staging_status = "active"
@@ -682,6 +808,7 @@ def build_admin_collections_view(*, collections: Any, work_dir: str) -> List[Dic
                 workspace_path=container_path or work_dir,
                 repo_name=repo_name,
                 snapshot_only_keys=snapshot_only_recreate_keys,
+                staging_status=staging_status,
             )
 
         needs_reindex = needs_recreate or needs_reindex_only

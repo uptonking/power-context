@@ -243,6 +243,19 @@
   </div>
   <script>
     (function () {
+      document.addEventListener("submit", function (event) {
+        const form = event.target && event.target.closest
+          ? event.target.closest(".js-confirmable")
+          : null;
+        if (!form) {
+          return;
+        }
+        const message = form.getAttribute("data-confirm") || "Are you sure?";
+        if (!window.confirm(message)) {
+          event.preventDefault();
+        }
+      });
+
       const tableEl = document.getElementById("collections-table");
       const REFRESH_MS = Math.max(
         1000,

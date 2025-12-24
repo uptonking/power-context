@@ -109,6 +109,8 @@ try:
         get_collection_mappings,
         find_collection_for_logical_repo,
         update_workspace_state,
+        set_staging_state,
+        update_staging_status,
         logical_repo_reuse_enabled,
         get_collection_state_snapshot,
     )
@@ -123,7 +125,8 @@ except ImportError:
     get_collection_mappings = None
     find_collection_for_logical_repo = None
     update_workspace_state = None
-
+    set_staging_state = None
+    update_staging_status = None
     def logical_repo_reuse_enabled() -> bool:  # type: ignore[no-redef]
         return False
 
@@ -177,6 +180,20 @@ app.add_middleware(
 
 # In-memory sequence tracking (in production, use persistent storage)
 _sequence_tracker: Dict[str, int] = {}
+
+
+def _int_env(name: str, default: int) -> int:
+    """Read integer env vars safely; blank/invalid values fall back to default."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        trimmed = str(raw).strip()
+        if not trimmed:
+            return default
+        return int(trimmed)
+    except (TypeError, ValueError):
+        return default
 
 class UploadResponse(BaseModel):
     success: bool
@@ -714,7 +731,9 @@ async def admin_collections_status(request: Request):
     except Exception:
         raise HTTPException(status_code=500, detail="Failed to load collections")
 
-    enriched = build_admin_collections_view(collections=collections, work_dir=WORK_DIR)
+    enriched = await asyncio.to_thread(
+        lambda: build_admin_collections_view(collections=collections, work_dir=WORK_DIR)
+    )
     return JSONResponse({"collections": enriched})
 
 
@@ -942,9 +961,73 @@ async def admin_start_staging(
             back_href="/admin/acl",
         )
 
+    root: Optional[str] = None
+    repo_name: Optional[str] = None
     try:
-        staging_collection = start_staging_rebuild(collection=name, work_dir=WORK_DIR)
-        logger.info(f"[admin] Started staging rebuild for {name} -> {staging_collection}")
+        root, repo_name = resolve_collection_root(collection=name, work_dir=WORK_DIR)
+    except Exception:
+        root, repo_name = None, None
+    if not root:
+        return render_admin_error(
+            request,
+            title="Start Staging Failed",
+            message="No workspace mapping found for collection",
+            back_href="/admin/acl",
+        )
+
+    staged_clone_name = f"{name}_old"
+    request_id = secrets.token_hex(8)
+    now = datetime.utcnow().isoformat()
+    staging_payload = {
+        "collection": staged_clone_name,
+        "started_at": now,
+        "updated_at": now,
+        "env_hash": None,
+        "workspace_path": root,
+        "repo_name": repo_name,
+        "status": {
+            "state": "queued",
+            "queued_at": now,
+            "request_id": request_id,
+        },
+    }
+
+    if set_staging_state:
+        try:
+            set_staging_state(workspace_path=root, repo_name=repo_name, staging=staging_payload)
+        except Exception as set_err:
+            logger.warning(f"[admin] Failed to persist queued staging state for {name}: {set_err}")
+    elif update_workspace_state:
+        try:
+            update_workspace_state(
+                workspace_path=root,
+                repo_name=repo_name,
+                updates={"staging": staging_payload},
+            )
+        except Exception as set_err:
+            logger.warning(f"[admin] Failed to update workspace state for queued staging {name}: {set_err}")
+
+    if update_staging_status:
+        try:
+            update_staging_status(
+                workspace_path=root,
+                repo_name=repo_name,
+                status={"state": "queued", "queued_at": now, "request_id": request_id},
+            )
+        except Exception as status_err:
+            logger.debug(f"[admin] Failed to mark staging status queued for {name}: {status_err}")
+
+    try:
+        async def _bg_start() -> None:
+            try:
+                staging_collection = await asyncio.to_thread(
+                    start_staging_rebuild, collection=name, work_dir=WORK_DIR
+                )
+                logger.info(f"[admin] Started staging rebuild for {name} -> {staging_collection}")
+            except Exception as e:
+                logger.error(f"[admin] Background staging start failed for {name}: {e}")
+
+        asyncio.create_task(_bg_start())
     except Exception as e:
         return render_admin_error(
             request,
@@ -987,8 +1070,14 @@ async def admin_activate_staging(
         )
 
     try:
-        activate_staging_rebuild(collection=name, work_dir=WORK_DIR)
-        logger.info(f"[admin] Activated staging for {name}")
+        async def _bg_activate() -> None:
+            try:
+                await asyncio.to_thread(activate_staging_rebuild, collection=name, work_dir=WORK_DIR)
+                logger.info(f"[admin] Activated staging for {name}")
+            except Exception as e:
+                logger.error(f"[admin] Background staging activate failed for {name}: {e}")
+
+        asyncio.create_task(_bg_activate())
     except Exception as e:
         return render_admin_error(
             request,
@@ -1026,8 +1115,19 @@ async def admin_abort_staging(
 
     try:
         if abort_staging_rebuild is not None:
-            abort_staging_rebuild(collection=name, work_dir=WORK_DIR, delete_collection=True)
-            logger.info(f"[admin] Aborted staging rebuild for {name}")
+            async def _bg_abort() -> None:
+                try:
+                    await asyncio.to_thread(
+                        abort_staging_rebuild,
+                        collection=name,
+                        work_dir=WORK_DIR,
+                        delete_collection=True,
+                    )
+                    logger.info(f"[admin] Aborted staging rebuild for {name}")
+                except Exception as e:
+                    logger.error(f"[admin] Background staging abort failed for {name}: {e}")
+
+            asyncio.create_task(_bg_abort())
         elif clear_staging_collection:
             # Fallback for older deployments: clear staging metadata only.
             clear_staging_collection(workspace_path=root, repo_name=repo_name)
@@ -1539,7 +1639,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 def main():
     """Main entry point for the upload service."""
     host = os.environ.get("UPLOAD_SERVICE_HOST", "0.0.0.0")
-    port = int(os.environ.get("UPLOAD_SERVICE_PORT", "8002"))
+    port = _int_env("UPLOAD_SERVICE_PORT", 8002)
 
     logger.info(f"Starting upload service on {host}:{port}")
     logger.info(f"Qdrant URL: {QDRANT_URL}")
