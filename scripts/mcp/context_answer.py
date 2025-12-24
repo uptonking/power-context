@@ -2494,6 +2494,7 @@ async def _context_answer_impl(
     get_embedding_model_fn=None,
     expand_query_fn=None,
     env_lock=None,  # Threading lock for env var manipulation
+    prepare_filters_and_retrieve_fn=None,  # For testability
 ) -> Dict[str, Any]:
     """Natural-language Q&A over the repo using retrieval + local LLM (llama.cpp).
 
@@ -2526,6 +2527,9 @@ async def _context_answer_impl(
 
     # Use injected lock or fall back to module-level lock
     _lock = env_lock if env_lock is not None else _CA_ENV_LOCK
+
+    # Use injected retrieval function or fall back to module function
+    _retrieve_fn = prepare_filters_and_retrieve_fn if prepare_filters_and_retrieve_fn is not None else _ca_prepare_filters_and_retrieve
 
     # Normalize inputs and compute effective limits/flags
     _cfg = _ca_unwrap_and_normalize(
@@ -2693,7 +2697,7 @@ async def _context_answer_impl(
 
         try:
             # Refactored retrieval pipeline (filters + hybrid search)
-            _retr = _ca_prepare_filters_and_retrieve(
+            _retr = _retrieve_fn(
                 queries=queries,
                 lim=lim,
                 ppath=ppath,
