@@ -1963,7 +1963,9 @@ def main():
                     default=_env_truthy(os.environ.get("HYBRID_EXPAND"), False))
     ap.add_argument("--no-expand", dest="expand", action="store_false")
     ap.add_argument("--per-path", type=int, default=int(os.environ.get("HYBRID_PER_PATH", "1") or 1))
-    ap.add_argument("--per-query", type=int, default=None,
+    _per_query_env = os.environ.get("HYBRID_PER_QUERY")
+    _per_query_default = int(_per_query_env) if _per_query_env and _per_query_env.strip().isdigit() else None
+    ap.add_argument("--per-query", type=int, default=_per_query_default,
                     help="Candidate retrieval per query (default: adaptive based on limit/collection size). "
                          "Also settable via HYBRID_PER_QUERY env var.")
     ap.add_argument("--limit", type=int, default=10)
