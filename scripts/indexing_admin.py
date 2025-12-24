@@ -812,6 +812,7 @@ def build_admin_collections_view(*, collections: Any, work_dir: str) -> List[Dic
                 repo_name=repo_name,
                 snapshot_only_keys=snapshot_only_recreate_keys,
                 staging_status=staging_status,
+                indexing_state=indexing_state,
             )
 
         needs_reindex = needs_recreate or needs_reindex_only
