@@ -1221,11 +1221,32 @@ def _process_paths(paths, client, model, vector_name: str, model_dim: int, works
                     env["QDRANT_URL"] = QDRANT_URL
                 if repo_name:
                     env["REPO_NAME"] = repo_name
-                subprocess.run(cmd, env=env, capture_output=True, text=True)
-                try:
-                    print(f"[indexed_subprocess] {p} -> {collection}")
-                except Exception:
-                    pass
+                result = subprocess.run(cmd, env=env, capture_output=True, text=True)
+                if result.returncode != 0:
+                    try:
+                        logger.error(
+                            "watch_index::subprocess_index_failed",
+                            extra={
+                                "repo_key": repo_key,
+                                "collection": collection,
+                                "file": str(p),
+                                "returncode": result.returncode,
+                                "stdout": (result.stdout or "").strip(),
+                                "stderr": (result.stderr or "").strip(),
+                            },
+                        )
+                    except Exception:
+                        try:
+                            print(
+                                f"[indexed_subprocess_error] {p} -> {collection} returncode={result.returncode}"
+                            )
+                        except Exception:
+                            pass
+                else:
+                    try:
+                        print(f"[indexed_subprocess] {p} -> {collection}")
+                    except Exception:
+                        pass
                 repo_progress[repo_key] = repo_progress.get(repo_key, 0) + 1
                 try:
                     _update_progress(
