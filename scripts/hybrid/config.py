@@ -132,22 +132,26 @@ SPARSE_RRF_MIN = 1.0 / (RRF_K + 50)  # Worst rank we care about (50)
 # ---------------------------------------------------------------------------
 
 def _get_micro_defaults() -> tuple[int, int, int, int]:
-    """Return (max_spans, merge_lines, budget_tokens, tokens_per_line) based on runtime and micro chunk mode."""
+    """Return (max_spans, merge_lines, budget_tokens, tokens_per_line) based on runtime and micro chunk mode.
+
+    Budget tokens floor is 5000 to ensure context_answer has enough context for quality answers.
+    """
     micro_enabled = os.environ.get("INDEX_MICRO_CHUNKS", "1").strip().lower() in {"1", "true", "yes", "on"}
-    
+
     try:
         from scripts.refrag_glm import detect_glm_runtime
         is_glm = detect_glm_runtime()
     except ImportError:
         is_glm = False
-    
+
     if is_glm:
         if micro_enabled:
             return (24, 6, 8192, 32)
         else:
-            return (12, 4, 4096, 32)
+            return (12, 4, 6000, 32)
     else:
-        return (3, 4, 512, 32)
+        # Non-GLM: still need reasonable budget for quality context_answer
+        return (8, 4, 5000, 32)
 
 
 _MICRO_DEFAULTS = _get_micro_defaults()

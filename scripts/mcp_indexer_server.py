@@ -7158,7 +7158,7 @@ def _ca_fallback_and_budget(
                     "MICRO_OUT_MAX_SPANS": os.environ.get("MICRO_OUT_MAX_SPANS", _default_spans),
                 }
         except Exception:
-            _pairs = {"MICRO_BUDGET_TOKENS": "1024", "MICRO_OUT_MAX_SPANS": "8"}
+            _pairs = {"MICRO_BUDGET_TOKENS": "5000", "MICRO_OUT_MAX_SPANS": "8"}
         with _env_overrides(_pairs):
             budgeted = _merge_and_budget_spans(items)
         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
@@ -8222,7 +8222,7 @@ async def context_answer(
                     pass
             else:
                 try:
-                    _base = int(float(os.environ.get("MICRO_BUDGET_TOKENS", "1024")))
+                    _base = int(float(os.environ.get("MICRO_BUDGET_TOKENS", "5000")))
                     budget_tokens = int(max(128, int(_base * _factor)))
                 except Exception:
                     pass
