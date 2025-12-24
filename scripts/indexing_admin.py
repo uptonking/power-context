@@ -944,13 +944,13 @@ def recreate_collection_qdrant(*, qdrant_url: str, api_key: Optional[str], colle
         return
     try:
         cli = QdrantClient(url=qdrant_url, api_key=api_key or None)
-    except Exception:
-        return
+    except Exception as connect_error:
+        raise RuntimeError(f"Failed to connect to Qdrant for collection '{name}': {connect_error}") from connect_error
     try:
         try:
             cli.delete_collection(collection_name=name)
-        except Exception:
-            pass
+        except Exception as delete_error:
+            raise RuntimeError(f"Failed to delete existing collection '{name}' in Qdrant: {delete_error}") from delete_error
     finally:
         try:
             cli.close()
