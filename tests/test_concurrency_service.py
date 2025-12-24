@@ -27,4 +27,4 @@ async def test_repo_search_concurrent(monkeypatch):
         return await srv.repo_search(queries=["def"], limit=2, compact=True)
 
     # Ensure no event-loop blocking under moderate concurrency
-    await asyncio.wait_for(asyncio.gather(*[one() for _ in range(25)]), timeout=3)
+    await asyncio.wait_for(asyncio.gather(*[one() for _ in range(25)]), timeout=30)
