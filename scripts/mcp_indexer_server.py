@@ -865,11 +865,17 @@ def _to_str_list_relaxed(x: _Any) -> list[str]:
                     current = maybe.strip()
                     continue
 
+                # Only split on commas if it looks like a simple list of identifiers,
+                # NOT natural language prose. Heuristic: if any part has internal spaces
+                # (multi-word), it's likely prose - don't split.
                 if ',' in current:
-                    tokens: list[str] = []
-                    for part in current.split(','):
-                        tokens.extend(_normalize_tokens(part, depth + 1))
-                    return tokens
+                    parts = [p.strip() for p in current.split(',')]
+                    has_prose = any(' ' in p for p in parts if p)
+                    if not has_prose:
+                        tokens: list[str] = []
+                        for part in parts:
+                            tokens.extend(_normalize_tokens(part, depth + 1))
+                        return tokens
 
                 return [current]
 
@@ -8256,6 +8262,9 @@ async def context_answer(
             os.environ["MICRO_BUDGET_TOKENS"] = str(budget_tokens)
         # Optionally expand queries via local decoder (tight cap) when requested
         queries = list(queries)
+        # Track original queries - expansion adds alternates for retrieval only,
+        # but we answer the original question(s) the user asked
+        original_queries = list(queries)
         # For LLM answering, default to include snippets so the model sees actual code
         if include_snippet in (None, ""):
             include_snippet = True
@@ -8274,113 +8283,22 @@ async def context_answer(
 
         if do_expand:
             try:
-                # Select runtime for expansion (defaults to local llama.cpp)
-                runtime_kind = str(os.environ.get("REFRAG_RUNTIME", "")).strip().lower() or "llamacpp"
-
-                # Build prompt (ask for JSON array only)
-                prompt = (
-                    "You expand code search queries. Given one or more short queries, "
-                    "propose up to 2 compact alternates. Return JSON array of strings only.\n"
-                    f"Queries: {queries}\n"
-                )
-
-                extra_kwargs: dict[str, Any] = {}
-                if runtime_kind == "glm":
-                    from scripts.refrag_glm import GLMRefragClient  # type: ignore
-
-                    client = GLMRefragClient()
-                    extra_kwargs["disable_thinking"] = True
-                elif runtime_kind == "minimax":
-                    from scripts.refrag_minimax import MiniMaxRefragClient  # type: ignore
-
-                    client = MiniMaxRefragClient()
-                    extra_kwargs["system"] = (
-                        "You rewrite search queries using synonyms. "
-                        "Output format: JSON array with exactly 2 strings. No other text."
-                    )
-                else:
-                    from scripts.refrag_llamacpp import (
-                        LlamaCppRefragClient,
-                        is_decoder_enabled,
-                    )  # type: ignore
-
-                    if not is_decoder_enabled():
-                        client = None
-                    else:
-                        client = LlamaCppRefragClient()
-
-                if client is not None:
-                    # tight decoding for expansions
-                    out = client.generate_with_soft_embeddings(
-                        prompt=prompt,
-                        max_tokens=int(os.environ.get("EXPAND_MAX_TOKENS", "64") or 64),
-                        temperature=0.0 if runtime_kind in {"llamacpp", "glm"} else 1.0,
-                        top_k=int(os.environ.get("EXPAND_TOP_K", "30") or 30),
-                        top_p=float(os.environ.get("EXPAND_TOP_P", "0.9") or 0.9),
-                        stop=["\n\n"],
-                        **extra_kwargs,
-                    )
-
-                    import json as _json
-                    import re as _re
-
-                    alts: list[str] = []
-                    seen = {q.strip() for q in queries if isinstance(q, str)}
-                    max_len = int(os.environ.get("EXPAND_MAX_CHARS", "240") or 240)
-
-                    def _maybe_add(s: str) -> None:
-                        ss = (s or "").strip()
-                        if not ss:
-                            return
-                        ss = _re.sub(r"\s+", " ", ss)
-                        if max_len and len(ss) > max_len:
-                            ss = ss[:max_len].rstrip()
-                        if ss in seen:
-                            return
-                        seen.add(ss)
-                        alts.append(ss)
-
-                    try:
-                        parsed = _json.loads(out)
-                    except (_json.JSONDecodeError, TypeError, ValueError):
-                        # Salvage: try to extract a JSON array substring
-                        try:
-                            start = out.find("[")
-                            end = out.rfind("]")
-                            if start != -1 and end != -1 and end > start:
-                                parsed = _json.loads(out[start : end + 1])
-                            else:
-                                parsed = []
-                        except Exception as e2:
-                            logger.debug("Expand parse salvage failed", exc_info=e2)
-                            parsed = []
-                    if isinstance(parsed, list):
-                        for s in parsed:
-                            if isinstance(s, str):
-                                _maybe_add(s)
-                            if len(alts) >= 2:
-                                break
-                    if not alts and out and out.strip():
-                        # Heuristic fallback: split lines, trim bullets, take up to 2
-                        for cand in [
-                            t.strip().lstrip("-• ") for t in out.splitlines() if t.strip()
-                        ][:2]:
-                            _maybe_add(cand)
-                            if len(alts) >= 2:
-                                break
+                # Delegate to expand_query for consistent, high-quality expansion
+                # Uses the same runtime-specific prompts and parsing logic
+                expand_result = await expand_query(query=queries, max_new=2)
+                if expand_result.get("ok") and expand_result.get("alternates"):
+                    alts = expand_result["alternates"][:2]
                     if alts:
-                        queries.extend(alts[:2])
-                        did_local_expand = True  # Mark that we already expanded
-            except (ImportError, AttributeError) as e:
-                logger.warning(
-                    "Query expansion failed (decoder unavailable)", exc_info=e
-                )
-            except (TimeoutError, ConnectionError) as e:
-                logger.warning(
-                    "Query expansion failed (decoder timeout/connection)", exc_info=e
-                )
+                        queries.extend(alts)
+                        did_local_expand = True
+                        if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                            logger.debug(
+                                "Query expansion via expand_query",
+                                extra={"original": original_queries, "expanded": queries},
+                            )
             except Exception as e:
-                logger.error("Unexpected error during query expansion", exc_info=e)
+                # Expansion is optional - log and continue without it
+                logger.debug("Query expansion failed", exc_info=e)
 
         try:
             # Refactored retrieval pipeline (filters + hybrid search)
@@ -8472,7 +8390,7 @@ async def context_answer(
         return {
             "error": f"hybrid search failed: {err}",
             "citations": [],
-            "query": queries,
+            "query": original_queries,
         }
 
     # Ensure final retrieval call reflects Tier-2 relaxed filters for tests/introspection
@@ -8532,7 +8450,7 @@ async def context_answer(
         return {
             "answer": "insufficient context",
             "citations": [],
-            "query": queries,
+            "query": original_queries,
             "used": {"gate_first": True, "refrag": True, "no_citations": True},
         }
 
@@ -8699,7 +8617,7 @@ async def context_answer(
                 "error": "decoder disabled: set REFRAG_DECODER=1 and start llamacpp",
                 "answer": _fallback_txt.strip(),
                 "citations": citations,
-                "query": queries,
+                "query": original_queries,
                 "used": {"decoder": False, "extractive_fallback": True},
             }
 
@@ -8719,7 +8637,9 @@ async def context_answer(
             extra_hint = ""
 
         # Build prompt and decode (deadline-aware)
-        prompt = _ca_build_prompt(context_blocks, citations, queries)
+        # Use original_queries for the prompt - we answer what the user asked,
+        # not the expanded alternates (those were only for broader retrieval)
+        prompt = _ca_build_prompt(context_blocks, citations, original_queries)
         if os.environ.get("DEBUG_CONTEXT_ANSWER"):
             logger.debug("LLM_PROMPT", extra={"length": len(prompt)})
         _elapsed = time.time() - _ca_start_ts
@@ -8738,7 +8658,7 @@ async def context_answer(
             return {
                 "answer": _fallback_txt.strip(),
                 "citations": citations,
-                "query": queries,
+                "query": original_queries,
                 "used": {"gate_first": True, "refrag": True, "deadline_fallback": True},
             }
         # Tighten max_tokens and decoder HTTP timeout to fit remaining time
@@ -8785,7 +8705,7 @@ async def context_answer(
         return {
             "error": f"decoder call failed: {e}",
             "citations": citations,
-            "query": queries,
+            "query": original_queries,
         }
 
     # Final introspection call to ensure last search reflects relaxed filters
@@ -8801,9 +8721,10 @@ async def context_answer(
         pass
 
     # Optional: provide per-query answers/citations for pack mode by reusing the combined retrieval
+    # Use original_queries for answering - expanded alternates were only for retrieval
     answers_by_query = None
     try:
-        if len(queries) > 1 and str(_cfg.get("mode") or "").strip().lower() == "pack":
+        if len(original_queries) > 1 and str(_cfg.get("mode") or "").strip().lower() == "pack":
             import re as _re
 
             def _tok2(s: str) -> list[str]:
@@ -8825,7 +8746,7 @@ async def context_answer(
             id_to_block = {idx + 1: blk for idx, blk in enumerate(context_blocks or [])}
 
             answers_by_query = []
-            for q in queries:
+            for q in original_queries:
                 try:
                     toks = set(_tok2(q))
                     picked_ids: list[int] = []
@@ -8908,7 +8829,7 @@ async def context_answer(
     out = {
         "answer": answer.strip(),
         "citations": citations,
-        "query": queries,
+        "query": original_queries,
         "used": {"gate_first": True, "refrag": True},
     }
     if answers_by_query:
