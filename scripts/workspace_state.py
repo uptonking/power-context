@@ -552,6 +552,40 @@ def indexing_lock():
     """
     yield
 
+def _git_remote_repo_name(repo_path: Path) -> Optional[str]:
+    """Return canonical repo name from git remote origin URL or toplevel."""
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(repo_path), "config", "--get", "remote.origin.url"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            url = r.stdout.strip()
+            name = url.rstrip("/").rsplit("/", 1)[-1]
+            if name.endswith(".git"):
+                name = name[:-4]
+            if name:
+                return name
+    except Exception:
+        pass
+
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(repo_path), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        top = (r.stdout or "").strip()
+        if r.returncode == 0 and top:
+            return Path(top).name
+    except Exception:
+        pass
+    return None
+
+
 def _detect_repo_name_from_path(path: Path) -> str:
     """Detect repository name from path using git remote origin URL.
 
@@ -591,29 +625,9 @@ def _detect_repo_name_from_path(path: Path) -> str:
 
     try:
         base = path if path.is_dir() else path.parent
-        # First try: get repo name from git remote origin URL (canonical name)
-        try:
-            r = subprocess.run(
-                ["git", "-C", str(base), "config", "--get", "remote.origin.url"],
-                capture_output=True, text=True, timeout=5
-            )
-            if r.returncode == 0 and r.stdout.strip():
-                url = r.stdout.strip()
-                # Extract repo name from URL (e.g., git@github.com:user/repo.git -> repo)
-                name = url.rstrip("/").rsplit("/", 1)[-1]
-                if name.endswith(".git"):
-                    name = name[:-4]
-                if name:
-                    return name
-        except Exception:
-            pass
-
-        # Second try: get git toplevel directory name
-        r = subprocess.run(["git", "-C", str(base), "rev-parse", "--show-toplevel"],
-                           capture_output=True, text=True, timeout=5)
-        top = (r.stdout or "").strip()
-        if r.returncode == 0 and top:
-            return Path(top).name
+        git_name = _git_remote_repo_name(base)
+        if git_name:
+            return git_name
     except Exception:
         pass
     try:
@@ -961,9 +975,7 @@ def get_staging_targets(
 
     if canonical_slug:
         result["canonical_slug"] = canonical_slug
-        result["old_slug"] = (
-            canonical_slug if canonical_slug.endswith("_old") else f"{canonical_slug}_old"
-        )
+        result["old_slug"] = f"{canonical_slug}_old"
 
     return result
 

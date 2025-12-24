@@ -296,12 +296,14 @@
         } else if (c.needs_reindex_only) {
           highlight = ' style="background:#fff3cd"';
         }
+        const mappingCountRaw = Number(c.mapping_count);
+        const mappingCount = Number.isFinite(mappingCountRaw) ? mappingCountRaw.toString() : "0";
         const containerInfo = c.container_path
           ? `<div class="muted">${escapeHtml(c.container_path)}</div>`
           : "";
         const repoInfo = c.repo_name ? `<div class="muted">repo: ${escapeHtml(c.repo_name)}</div>` : "";
         const mappingInfo = c.has_mapping
-          ? `<span class="muted">ok (${c.mapping_count})</span>`
+          ? `<span class="muted">ok (${escapeHtml(mappingCount)})</span>`
           : '<span class="error">missing</span>';
         let maintenance = "";
         if (c.needs_recreate) {

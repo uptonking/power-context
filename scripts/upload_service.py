@@ -87,15 +87,11 @@ try:
         start_staging_rebuild,
         activate_staging_rebuild,
         abort_staging_rebuild,
-        clear_staging_collection,
-        resolve_collection_root,
     )
 except ImportError:
     start_staging_rebuild = None  # type: ignore
     activate_staging_rebuild = None  # type: ignore
     abort_staging_rebuild = None  # type: ignore
-    clear_staging_collection = None  # type: ignore
-    resolve_collection_root = None  # type: ignore
 
 # Import existing workspace state and indexing functions
 try:
@@ -111,6 +107,7 @@ try:
         update_workspace_state,
         set_staging_state,
         update_staging_status,
+        clear_staging_collection,
         logical_repo_reuse_enabled,
         get_collection_state_snapshot,
     )
@@ -127,6 +124,7 @@ except ImportError:
     update_workspace_state = None
     set_staging_state = None
     update_staging_status = None
+    clear_staging_collection = None
     def logical_repo_reuse_enabled() -> bool:  # type: ignore[no-redef]
         return False
 

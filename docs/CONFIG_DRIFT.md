@@ -28,6 +28,6 @@ This document tracks which environment/configuration knobs impact the indexing p
 * Env-hash-aware cache invalidation so smart reindex won’t reuse stale symbol snapshots when drift occurs.
 * Automated “bulk reindex” job for reindex-only drift classes, so the warning clears once the sweep completes.
 * Optional suppression of warnings for knobs proven to be safe hot applies once supporting automation exists.
-* Reindex can clean up
-* Smart/file reindex only runs when a file changes, so untouched files retain the old chunking. There’s no env-hash-triggered sweep or cache invalidation yet, so the only way to keep consistency is to recreate or manually reindex the entire collection.
+* Reindex can clean up old symbol caches to free disk space and remove stale chunks.
+* File-level reindex only runs when a file changes, so untouched files retain the previous chunking; without env-hash-triggered sweeping or cache invalidation, consistency currently requires a full recreate or manual reindex of every file.
 

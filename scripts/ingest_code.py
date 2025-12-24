@@ -3502,6 +3502,7 @@ def index_repo(
     dedupe: bool = True,
     skip_unchanged: bool = True,
     pseudo_mode: str = "full",
+    clear_caches: bool = False,
 ):
     """Index a repository into Qdrant.
 
@@ -3601,7 +3602,7 @@ def index_repo(
         ws_path = str(root)
         repo_tag = _detect_repo_name_from_path(root) if _detect_repo_name_from_path else None
 
-        if args.clear_indexing_caches:
+        if clear_caches:
             _clear_indexing_caches_for_run(ws_path, repo_tag)
 
         force_collection = False
@@ -5049,6 +5050,7 @@ def main():
         dedupe=(not args.no_dedupe),
         skip_unchanged=(not args.no_skip_unchanged),
         pseudo_mode=pseudo_mode,
+        clear_caches=args.clear_indexing_caches,
     )
 
 
