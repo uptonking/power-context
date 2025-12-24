@@ -32,6 +32,8 @@ __all__ = [
     "_ca_decode",
     "_ca_postprocess_answer",
     "_synthesize_from_citations",
+    # Main implementation
+    "_context_answer_impl",
 ]
 
 import os
@@ -2456,3 +2458,665 @@ def _synthesize_from_citations(
             lines.append("Summary: No code context available.")
 
     return "\n".join([ln for ln in lines if ln]).strip()
+
+
+# ---------------------------------------------------------------------------
+# _context_answer_impl - Main orchestration (extracted from mcp_indexer_server.py)
+# ---------------------------------------------------------------------------
+async def _context_answer_impl(
+    query: Any = None,
+    limit: Any = None,
+    per_path: Any = None,
+    budget_tokens: Any = None,
+    include_snippet: Any = None,
+    collection: Any = None,
+    max_tokens: Any = None,
+    temperature: Any = None,
+    mode: Any = None,
+    expand: Any = None,
+    language: Any = None,
+    under: Any = None,
+    kind: Any = None,
+    symbol: Any = None,
+    ext: Any = None,
+    path_regex: Any = None,
+    path_glob: Any = None,
+    not_glob: Any = None,
+    case: Any = None,
+    not_: Any = None,
+    repo: Any = None,
+    kwargs: Any = None,
+    # Dependency injection
+    get_embedding_model_fn=None,
+    expand_query_fn=None,
+) -> Dict[str, Any]:
+    """Natural-language Q&A over the repo using retrieval + local LLM (llama.cpp).
+
+    Implementation extracted from mcp_indexer_server.py for testability.
+    The @mcp.tool() decorated wrapper in mcp_indexer_server.py calls this.
+    """
+    import time
+    import asyncio
+
+    # Import logger utilities
+    try:
+        from scripts.logger import safe_bool, safe_float
+    except ImportError:
+        def safe_bool(val, default=False, **kw):
+            if val is None:
+                return default
+            if isinstance(val, bool):
+                return val
+            return str(val).strip().lower() in {"1", "true", "yes", "on"}
+        def safe_float(val, default=0.0, **kw):
+            try:
+                return float(val) if val is not None else default
+            except:
+                return default
+
+    # Get embedding model function
+    if get_embedding_model_fn is None:
+        from scripts.mcp.admin_tools import _get_embedding_model
+        get_embedding_model_fn = _get_embedding_model
+
+    # Environment lock for concurrent access
+    _ENV_LOCK = threading.Lock()
+
+    # Normalize inputs and compute effective limits/flags
+    _cfg = _ca_unwrap_and_normalize(
+        query,
+        limit,
+        per_path,
+        budget_tokens,
+        include_snippet,
+        collection,
+        max_tokens,
+        temperature,
+        mode,
+        expand,
+        language,
+        under,
+        kind,
+        symbol,
+        ext,
+        path_regex,
+        path_glob,
+        not_glob,
+        case,
+        not_,
+        kwargs,
+    )
+    queries = _cfg["queries"]
+    lim = _cfg["limit"]
+    ppath = _cfg["per_path"]
+    include_snippet = _cfg["include_snippet"]
+    collection = _cfg["collection"]
+    budget_tokens = _cfg["budget_tokens"]
+    max_tokens = _cfg["max_tokens"]
+    temperature = _cfg["temperature"]
+    mode = _cfg["mode"]
+    expand = _cfg["expand"]
+    _flt = _cfg["filters"]
+    req_language = _flt.get("language")
+    under = _flt.get("under")
+    kind = _flt.get("kind")
+    symbol = _flt.get("symbol")
+    ext = _flt.get("ext")
+    path_regex = _flt.get("path_regex")
+    path_glob = _flt.get("path_glob")
+    not_glob = _flt.get("not_glob")
+    case = _flt.get("case")
+    not_ = _flt.get("not_")
+
+    # Enforce sane minimums to avoid empty span selection
+    try:
+        lim = int(lim)
+    except Exception:
+        lim = 15
+    if lim <= 0:
+        lim = 1
+    try:
+        ppath = int(ppath)
+    except Exception:
+        ppath = 5
+    if ppath <= 0:
+        ppath = 1
+
+    # Soft per-call deadline to avoid client-side 60s timeouts
+    _ca_start_ts = time.time()
+
+    if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+        logger.debug(
+            "ARG_SHAPE",
+            extra={"normalized_queries": queries, "limit": lim, "per_path": ppath},
+        )
+
+    # Broad-query budget bump (gated)
+    try:
+        _qtext = " ".join([q for q in (queries or []) if isinstance(q, str)]).lower()
+        _broad_tokens = (
+            "how", "explain", "overview", "architecture", "design",
+            "work", "works", "guide", "readme",
+        )
+        _broad = any(t in _qtext for t in _broad_tokens)
+    except Exception:
+        _broad = False
+    if _broad:
+        try:
+            _factor = float(os.environ.get("CTX_BROAD_BUDGET_FACTOR", "1.4"))
+        except Exception:
+            _factor = 1.0
+        if _factor > 1.0:
+            if budget_tokens is not None and str(budget_tokens).strip() != "":
+                try:
+                    budget_tokens = int(max(128, int(float(budget_tokens) * _factor)))
+                except Exception:
+                    pass
+            else:
+                try:
+                    _base = int(float(os.environ.get("MICRO_BUDGET_TOKENS", "5000")))
+                    budget_tokens = int(max(128, int(_base * _factor)))
+                except Exception:
+                    pass
+
+    # Collection + model setup (reuse indexer defaults)
+    coll = (collection or _default_collection()) or ""
+    model_name = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
+    model = get_embedding_model_fn(model_name)
+
+    # Prepare environment toggles for ReFRAG gate-first and budgeting
+    if not _ENV_LOCK.acquire(timeout=30.0):
+        logger.warning("ENV_LOCK timeout, potential deadlock detected")
+    prev = {
+        "REFRAG_MODE": os.environ.get("REFRAG_MODE"),
+        "REFRAG_GATE_FIRST": os.environ.get("REFRAG_GATE_FIRST"),
+        "REFRAG_CANDIDATES": os.environ.get("REFRAG_CANDIDATES"),
+        "COLLECTION_NAME": os.environ.get("COLLECTION_NAME"),
+        "MICRO_BUDGET_TOKENS": os.environ.get("MICRO_BUDGET_TOKENS"),
+    }
+    err: Optional[str] = None
+    items = []
+    eff_language = None
+    eff_path_glob = None
+    eff_not_glob = None
+    override_under = None
+    sym_arg = None
+    cwd_root = None
+    spans = []
+    did_local_expand = False
+    original_queries = list(queries)
+
+    try:
+        # Enable ReFRAG gate-first for context compression
+        os.environ["REFRAG_MODE"] = "1"
+        os.environ["REFRAG_GATE_FIRST"] = os.environ.get("REFRAG_GATE_FIRST", "1") or "1"
+        os.environ["COLLECTION_NAME"] = coll
+        if budget_tokens is not None and str(budget_tokens).strip() != "":
+            os.environ["MICRO_BUDGET_TOKENS"] = str(budget_tokens)
+
+        # Track original queries - expansion adds alternates for retrieval only
+        queries = list(queries)
+
+        # For LLM answering, default to include snippets
+        if include_snippet in (None, ""):
+            include_snippet = True
+
+        do_expand = safe_bool(
+            expand, default=False, logger=logger, context="expand"
+        ) or safe_bool(
+            os.environ.get("HYBRID_EXPAND", "0"),
+            default=False,
+            logger=logger,
+            context="HYBRID_EXPAND",
+        )
+
+        if do_expand and expand_query_fn is not None:
+            try:
+                expand_result = await expand_query_fn(query=queries, max_new=2)
+                if expand_result.get("ok") and expand_result.get("alternates"):
+                    alts = expand_result["alternates"][:2]
+                    if alts:
+                        queries.extend(alts)
+                        did_local_expand = True
+                        if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                            logger.debug(
+                                "Query expansion via expand_query",
+                                extra={"original": original_queries, "expanded": queries},
+                            )
+            except Exception as e:
+                logger.debug("Query expansion failed", exc_info=e)
+
+        try:
+            # Refactored retrieval pipeline (filters + hybrid search)
+            _retr = _ca_prepare_filters_and_retrieve(
+                queries=queries,
+                lim=lim,
+                ppath=ppath,
+                filters=_cfg["filters"],
+                model=model,
+                did_local_expand=did_local_expand,
+                kwargs={
+                    "language": _cfg["filters"].get("language"),
+                    "under": _cfg["filters"].get("under"),
+                    "path_glob": _cfg["filters"].get("path_glob"),
+                    "not_glob": _cfg["filters"].get("not_glob"),
+                    "path_regex": _cfg["filters"].get("path_regex"),
+                    "ext": _cfg["filters"].get("ext"),
+                    "kind": _cfg["filters"].get("kind"),
+                    "case": _cfg["filters"].get("case"),
+                    "symbol": _cfg["filters"].get("symbol"),
+                },
+                repo=repo,
+            )
+            items = _retr["items"]
+            eff_language = _retr["eff_language"]
+            eff_path_glob = _retr["eff_path_glob"]
+            eff_not_glob = _retr["eff_not_glob"]
+            override_under = _retr["override_under"]
+            sym_arg = _retr["sym_arg"]
+            cwd_root = _retr["cwd_root"]
+            path_regex = _retr["path_regex"]
+            ext = _retr["ext"]
+            kind = _retr["kind"]
+            case = _retr["case"]
+            req_language = eff_language
+
+            fallback_kwargs = dict(kwargs or {})
+            for key in ("path_glob", "language", "under"):
+                fallback_kwargs.pop(key, None)
+
+            spans = _ca_fallback_and_budget(
+                items=items,
+                queries=queries,
+                lim=lim,
+                ppath=ppath,
+                eff_language=eff_language,
+                eff_path_glob=eff_path_glob,
+                eff_not_glob=eff_not_glob,
+                path_regex=path_regex,
+                sym_arg=sym_arg,
+                ext=ext,
+                kind=kind,
+                override_under=override_under,
+                did_local_expand=did_local_expand,
+                model=model,
+                req_language=req_language,
+                not_=not_,
+                case=case,
+                cwd_root=cwd_root,
+                include_snippet=bool(include_snippet),
+                kwargs=fallback_kwargs,
+                repo=repo,
+            )
+        except Exception as e:
+            err = str(e)
+            spans = []
+            if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+                logger.debug("EXCEPTION", exc_info=e, extra={"error": err})
+    finally:
+        for k, v in prev.items():
+            if v is None:
+                try:
+                    del os.environ[k]
+                except Exception as e:
+                    logger.error(f"Failed to restore env var {k}: {e}")
+            else:
+                os.environ[k] = v
+        _ENV_LOCK.release()
+
+    if err is not None:
+        return {
+            "error": f"hybrid search failed: {err}",
+            "citations": [],
+            "query": original_queries,
+        }
+
+    # Ensure final retrieval call reflects Tier-2 relaxed filters
+    try:
+        from scripts.hybrid_search import run_hybrid_search as _rh
+        _ = _rh(
+            queries=queries,
+            limit=int(max(lim, 1)),
+            per_path=int(max(ppath, 1)),
+        )
+    except Exception:
+        pass
+
+    # Build citations and context payload for the decoder
+    (
+        citations,
+        context_blocks,
+        snippets_by_id,
+        asked_ident,
+        _def_line_exact,
+        _def_id,
+        _usage_id,
+    ) = _ca_build_citations_and_context(
+        spans=spans,
+        include_snippet=bool(include_snippet),
+        queries=queries,
+    )
+
+    # Salvage: if citations are empty but we have items, rebuild from raw items
+    if not citations:
+        try:
+            (
+                citations2,
+                context_blocks2,
+                snippets_by_id2,
+                asked_ident2,
+                _def_line_exact2,
+                _def_id2,
+                _usage_id2,
+            ) = _ca_build_citations_and_context(
+                spans=(items or []),
+                include_snippet=bool(include_snippet),
+                queries=queries,
+            )
+            if citations2:
+                citations = citations2
+                context_blocks = context_blocks2
+                snippets_by_id = snippets_by_id2
+                asked_ident = asked_ident2
+                _def_line_exact = _def_line_exact2
+                _def_id = _def_id2
+                _usage_id = _usage_id2
+        except Exception:
+            pass
+
+    # If still no citations, return an explicit insufficient-context answer
+    if not citations:
+        return {
+            "answer": "insufficient context",
+            "citations": [],
+            "query": original_queries,
+            "used": {"gate_first": True, "refrag": True, "no_citations": True},
+        }
+
+    # FS supplement for identifier definitions
+    if asked_ident and not _def_line_exact:
+        cand_paths: list[str] = []
+        for it in items or []:
+            p = it.get("path") or it.get("host_path") or it.get("container_path")
+            if p and str(p) not in cand_paths:
+                cand_paths.append(str(p))
+        try:
+            qj3 = " ".join(queries)
+            import re as _re
+            m = _re.search(r"in\s+([\w./-]+\.py)\b", qj3)
+            if m:
+                fp = m.group(1)
+                if fp not in cand_paths:
+                    cand_paths.append(fp)
+        except Exception:
+            pass
+        supplements = []
+        if str(os.environ.get("CTX_TIER3_FS", "0")).strip().lower() in {"1", "true", "yes", "on"}:
+            supplements = _ca_ident_supplement(
+                cand_paths,
+                asked_ident,
+                include_snippet=bool(include_snippet),
+                max_hits=3,
+            )
+        if supplements:
+            def _k(s: Dict[str, Any]):
+                return (
+                    str(s.get("path") or ""),
+                    int(s.get("start_line") or 0),
+                    int(s.get("end_line") or 0),
+                )
+            seen_keys = {_k(s) for s in spans}
+            new_spans = []
+            for s in supplements:
+                k = _k(s)
+                if k not in seen_keys:
+                    new_spans.append(s)
+                    seen_keys.add(k)
+            if new_spans:
+                spans = new_spans + spans
+                (
+                    citations,
+                    context_blocks,
+                    snippets_by_id,
+                    asked_ident,
+                    _def_line_exact,
+                    _def_id,
+                    _usage_id,
+                ) = _ca_build_citations_and_context(
+                    spans=spans,
+                    include_snippet=bool(include_snippet),
+                    queries=queries,
+                )
+
+    # Debug: log span details
+    if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+        logger.debug(
+            "CONTEXT_BLOCKS",
+            extra={
+                "spans": len(spans),
+                "context_blocks": len(context_blocks),
+                "previews": [block[:300] for block in context_blocks[:3]],
+            },
+        )
+
+    # Decoder params and stops
+    mtok, temp, top_k, top_p, stops = _ca_decoder_params(max_tokens)
+
+    # Deadline-aware decode budgeting
+    _client_deadline_sec = safe_float(
+        os.environ.get("CTX_CLIENT_DEADLINE_SEC", "178"),
+        default=178.0, logger=logger, context="CTX_CLIENT_DEADLINE_SEC",
+    )
+    _tokens_per_sec = safe_float(
+        os.environ.get("DECODER_TOKENS_PER_SEC", ""),
+        default=10.0, logger=logger, context="DECODER_TOKENS_PER_SEC",
+    )
+    _decoder_timeout_cap = safe_float(
+        os.environ.get("CTX_DECODER_TIMEOUT_CAP", "170"),
+        default=170.0, logger=logger, context="CTX_DECODER_TIMEOUT_CAP",
+    )
+    _deadline_margin = safe_float(
+        os.environ.get("CTX_DEADLINE_MARGIN_SEC", "6"),
+        default=6.0, logger=logger, context="CTX_DEADLINE_MARGIN_SEC",
+    )
+
+    # Call llama.cpp decoder (requires REFRAG_DECODER=1)
+    try:
+        from scripts.refrag_llamacpp import is_decoder_enabled
+
+        if not is_decoder_enabled():
+            logger.info("Decoder disabled; returning extractive fallback with citations")
+            _fallback_txt = _ca_postprocess_answer(
+                "",
+                citations,
+                asked_ident=asked_ident,
+                def_line_exact=_def_line_exact,
+                def_id=_def_id,
+                usage_id=_usage_id,
+                snippets_by_id=snippets_by_id,
+            )
+            return {
+                "error": "decoder disabled: set REFRAG_DECODER=1 and start llamacpp",
+                "answer": _fallback_txt.strip(),
+                "citations": citations,
+                "query": original_queries,
+                "used": {"decoder": False, "extractive_fallback": True},
+            }
+
+        # Build prompt and decode (deadline-aware)
+        prompt = _ca_build_prompt(context_blocks, citations, original_queries)
+        if os.environ.get("DEBUG_CONTEXT_ANSWER"):
+            logger.debug("LLM_PROMPT", extra={"length": len(prompt)})
+
+        _elapsed = time.time() - _ca_start_ts
+        _remain = float(_client_deadline_sec) - _elapsed
+        if _remain <= float(_deadline_margin):
+            _fallback_txt = _ca_postprocess_answer(
+                "",
+                citations,
+                asked_ident=asked_ident,
+                def_line_exact=_def_line_exact,
+                def_id=_def_id,
+                usage_id=_usage_id,
+                snippets_by_id=snippets_by_id,
+            )
+            return {
+                "answer": _fallback_txt.strip(),
+                "citations": citations,
+                "query": original_queries,
+                "used": {"gate_first": True, "refrag": True, "deadline_fallback": True},
+            }
+
+        # Tighten max_tokens and decoder HTTP timeout to fit remaining time
+        try:
+            _allow_tokens = int(
+                max(
+                    16.0,
+                    min(
+                        float(mtok),
+                        max(0.0, _remain - max(0.0, float(_deadline_margin) - 2.0))
+                        * float(_tokens_per_sec),
+                    ),
+                )
+            )
+        except Exception:
+            _allow_tokens = int(max(16, int(mtok)))
+        mtok = int(_allow_tokens)
+        _llama_timeout = int(max(5.0, min(_decoder_timeout_cap, max(1.0, _remain - 1.0))))
+
+        with _env_overrides({"LLAMACPP_TIMEOUT_SEC": str(_llama_timeout)}):
+            answer = _ca_decode(
+                prompt,
+                mtok=mtok,
+                temp=temp,
+                top_k=top_k,
+                top_p=top_p,
+                stops=stops,
+                timeout=_llama_timeout,
+            )
+
+        # Post-process and validate
+        answer = _ca_postprocess_answer(
+            answer,
+            citations,
+            asked_ident=asked_ident,
+            def_line_exact=_def_line_exact,
+            def_id=_def_id,
+            usage_id=_usage_id,
+            snippets_by_id=snippets_by_id,
+        )
+
+    except Exception as e:
+        return {
+            "error": f"decoder call failed: {e}",
+            "citations": citations,
+            "query": original_queries,
+        }
+
+    # Final introspection call
+    try:
+        from scripts.hybrid_search import run_hybrid_search as _rh2
+        _ = _rh2(
+            queries=queries,
+            limit=int(max(lim, 1)),
+            per_path=int(max(ppath, 1)),
+        )
+    except Exception:
+        pass
+
+    # Optional: provide per-query answers/citations for pack mode
+    answers_by_query = None
+    try:
+        if len(original_queries) > 1 and str(_cfg.get("mode") or "").strip().lower() == "pack":
+            import re as _re
+
+            def _tok2(s: str) -> list[str]:
+                try:
+                    return [
+                        w.lower()
+                        for w in _re.split(r"[^A-Za-z0-9_]+", str(s or ""))
+                        if len(w) >= 3
+                    ]
+                except Exception:
+                    return []
+
+            id_to_cit = {
+                int(c.get("id") or 0): c
+                for c in (citations or [])
+                if int(c.get("id") or 0) > 0
+            }
+            id_to_block = {idx + 1: blk for idx, blk in enumerate(context_blocks or [])}
+
+            answers_by_query = []
+            for q in original_queries:
+                try:
+                    toks = set(_tok2(q))
+                    picked_ids: list[int] = []
+                    if toks:
+                        for cid, c in id_to_cit.items():
+                            path_l = str(c.get("path") or "").lower()
+                            sn = (snippets_by_id.get(cid) or "").lower()
+                            if any(t in sn or t in path_l for t in toks):
+                                picked_ids.append(cid)
+                                if len(picked_ids) >= 6:
+                                    break
+                    if not picked_ids:
+                        picked_ids = [c.get("id") for c in (citations or [])[:2] if c.get("id")]
+
+                    cits_i = [id_to_cit[cid] for cid in picked_ids if cid in id_to_cit]
+                    ctx_blocks_i = [id_to_block[cid] for cid in picked_ids if cid in id_to_block]
+
+                    if not cits_i:
+                        answers_by_query.append({
+                            "query": q,
+                            "answer": "insufficient context",
+                            "citations": [],
+                        })
+                        continue
+
+                    prompt_i = _ca_build_prompt(ctx_blocks_i, cits_i, [q])
+                    ans_raw_i = _ca_decode(
+                        prompt_i,
+                        mtok=mtok,
+                        temp=temp,
+                        top_k=top_k,
+                        top_p=top_p,
+                        stops=stops,
+                        timeout=_llama_timeout,
+                    )
+
+                    asked_ident_i = _primary_identifier_from_queries([q])
+                    ans_i = _ca_postprocess_answer(
+                        ans_raw_i,
+                        cits_i,
+                        asked_ident=asked_ident_i,
+                        def_line_exact=None,
+                        def_id=None,
+                        usage_id=None,
+                        snippets_by_id={cid: snippets_by_id.get(cid, "") for cid in picked_ids},
+                    )
+
+                    answers_by_query.append({
+                        "query": q,
+                        "answer": ans_i,
+                        "citations": cits_i,
+                    })
+                except Exception as _e:
+                    answers_by_query.append({
+                        "query": q,
+                        "answer": "",
+                        "citations": [],
+                        "error": str(_e),
+                    })
+    except Exception:
+        answers_by_query = None
+
+    out = {
+        "answer": answer.strip(),
+        "citations": citations,
+        "query": original_queries,
+        "used": {"gate_first": True, "refrag": True},
+    }
+    if answers_by_query:
+        out["answers_by_query"] = answers_by_query
+    return out
