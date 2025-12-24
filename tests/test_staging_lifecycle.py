@@ -1,10 +1,9 @@
 import json
 import os
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import pytest
-from fastapi import Response
 from fastapi.testclient import TestClient
 
 
@@ -233,16 +232,16 @@ def test_staging_start_promote_activate_and_abort_are_consistent(
     indexing_admin.abort_staging_rebuild(collection=collection, work_dir=str(root), delete_collection=True)
 
 
-def test_update_workspace_state_allows_repo_state_updates_without_workspace_dir(tmp_path: Path):
+def test_update_workspace_state_allows_repo_state_updates_without_workspace_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     from scripts import workspace_state
 
-    os.environ.pop("WORKSPACE_PATH", None)
-    os.environ.pop("WATCH_ROOT", None)
-    os.environ.pop("WORK_DIR", None)
-    os.environ.pop("WORKDIR", None)
-    os.environ["MULTI_REPO_MODE"] = "1"
-    os.environ["WORKSPACE_PATH"] = str(tmp_path)
-    os.environ["WATCH_ROOT"] = str(tmp_path)
+    monkeypatch.delenv("WORKSPACE_PATH", raising=False)
+    monkeypatch.delenv("WATCH_ROOT", raising=False)
+    monkeypatch.delenv("WORK_DIR", raising=False)
+    monkeypatch.delenv("WORKDIR", raising=False)
+    monkeypatch.setenv("MULTI_REPO_MODE", "1")
+    monkeypatch.setenv("WORKSPACE_PATH", str(tmp_path))
+    monkeypatch.setenv("WATCH_ROOT", str(tmp_path))
 
     repo_name = "missing_ws_repo"
     repo_state_dir = tmp_path / ".codebase" / "repos" / repo_name

@@ -71,6 +71,8 @@
           <tr
             {% if c.needs_recreate %}
               style="background:#f8d7da"
+            {% elif c.needs_snapshot_refresh %}
+              style="background:#fbe8c6"
             {% elif c.needs_reindex_only %}
               style="background:#fff3cd"
             {% endif %}

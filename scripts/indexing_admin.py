@@ -7,7 +7,7 @@ import shutil
 import traceback
 import json
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 try:
@@ -20,7 +20,10 @@ try:
 except Exception:
     get_model_dimension = None  # type: ignore
 
-from scripts.collection_admin import copy_collection_qdrant
+try:
+    from scripts.collection_admin import copy_collection_qdrant
+except Exception:
+    copy_collection_qdrant = None  # type: ignore
 
 try:
     from scripts.ingest_code import (
@@ -941,14 +944,21 @@ def spawn_ingest_code(
                 repo_name=repo_name,
                 status={
                     "state": "initializing",
-                    "started_at": datetime.now().isoformat(),
+                    "started_at": datetime.now(timezone.utc).isoformat(),
                     "progress": {"files_processed": 0, "total_files": None, "current_file": None},
                 },
             )
     except Exception:
         pass
 
-    subprocess.Popen(cmd, env=env)
+    # Spawn the ingest process and validate it started successfully
+    try:
+        proc = subprocess.Popen(cmd, env=env)
+        # Validate the process started (has PID and hasn't already exited)
+        if proc.pid is None or proc.poll() is not None:
+            raise RuntimeError(f"Failed to start ingest process: {cmd}")
+    except Exception as exc:
+        raise RuntimeError(f"Failed to spawn ingest_code for {root}: {exc}") from exc
 
 
 def _determine_embedding_dim(model_name: str) -> int:
@@ -1091,23 +1101,27 @@ def start_staging_rebuild(*, collection: str, work_dir: str) -> str:
     qdrant_url = os.environ.get("QDRANT_URL", "http://qdrant:6333")
     source_point_count = _get_collection_point_count(collection_name=collection, qdrant_url=qdrant_url)
 
-    global copy_collection_qdrant
-    if copy_collection_qdrant is None:
-        from scripts.collection_admin import copy_collection_qdrant as _ccq  # re-import for container
-        copy_collection_qdrant = _ccq  # type: ignore
+    # Use local import for thread-safety and determinism
+    _copy_fn: Any = None
+    if copy_collection_qdrant is not None:
+        _copy_fn = copy_collection_qdrant
+    else:
+        # Re-import for container environments where module-level import may have failed
+        from scripts.collection_admin import copy_collection_qdrant as _ccq
+        _copy_fn = _ccq
 
-    if not callable(copy_collection_qdrant):
+    if not callable(_copy_fn):
         raise RuntimeError("copy_collection_qdrant unavailable (import failed)")
 
     try:
         print(f"[staging] Copying collection {collection} -> {old_collection} (overwrite=True)")
         try:
             print(
-                f"[staging] copy_collection_qdrant callable={callable(copy_collection_qdrant)} type={type(copy_collection_qdrant)} module={getattr(copy_collection_qdrant, '__module__', '?')}"
+                f"[staging] copy_collection_qdrant callable={callable(_copy_fn)} type={type(_copy_fn)} module={getattr(_copy_fn, '__module__', '?')}"
             )
         except Exception:
             pass
-        copy_collection_qdrant(
+        _copy_fn(
             source=collection,
             target=old_collection,
             qdrant_url=qdrant_url,
@@ -1211,8 +1225,8 @@ def start_staging_rebuild(*, collection: str, work_dir: str) -> str:
     if set_staging_state:
         staging_info = {
             "collection": old_collection,
-            "started_at": datetime.utcnow().isoformat(),
-            "updated_at": datetime.utcnow().isoformat(),
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
             "env_hash": pending_hash or env_hash,
             "indexing_config": pending_cfg,
             "indexing_config_hash": pending_hash,
@@ -1229,7 +1243,7 @@ def start_staging_rebuild(*, collection: str, work_dir: str) -> str:
             repo_name=repo_name,
             status={
                 "state": "initializing",
-                "started_at": datetime.utcnow().isoformat(),
+                "started_at": datetime.now(timezone.utc).isoformat(),
                 "progress": {"files_processed": 0, "total_files": None, "current_file": None},
             },
         )
