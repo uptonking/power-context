@@ -955,8 +955,11 @@ def spawn_ingest_code(
     # Spawn the ingest process and validate it started successfully
     try:
         proc = subprocess.Popen(cmd, env=env)
-        # Validate the process started (has PID and hasn't already exited)
-        if proc.pid is None or proc.poll() is not None:
+        try:
+            poller = proc.poll  # type: ignore[attr-defined]
+        except AttributeError:
+            poller = None
+        if callable(poller) and poller() is not None:
             raise RuntimeError(f"Failed to start ingest process: {cmd}")
     except Exception as exc:
         raise RuntimeError(f"Failed to spawn ingest_code for {root}: {exc}") from exc
