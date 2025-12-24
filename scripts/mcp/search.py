@@ -95,6 +95,7 @@ async def _repo_search_impl(
     get_embedding_model_fn: Any = None,  # callable for _get_embedding_model
     require_auth_session_fn: Any = None,  # callable for _require_auth_session
     do_highlight_snippet_fn: Any = None,  # callable for _do_highlight_snippet
+    run_async_fn: Any = None,  # callable for _run_async (subprocess runner)
 ) -> Dict[str, Any]:
     """Zero-config code search over repositories (hybrid: vector + lexical RRF, rerank ON by default).
 
@@ -128,6 +129,9 @@ async def _repo_search_impl(
     - symbol="context_answer", under="scripts"
     """
     sess = require_auth_session_fn(session) if require_auth_session_fn else session
+
+    # Use injected run_async or fall back to module import
+    _run_async_fn = run_async_fn if run_async_fn is not None else _run_async
 
     # Handle queries alias (explicit parameter)
     if queries is not None and (query is None or (isinstance(query, str) and str(query).strip() == "")):
@@ -627,7 +631,7 @@ async def _repo_search_impl(
         if collection:
             cmd += ["--collection", str(collection)]
 
-        res = await _run_async(cmd, env=env)
+        res = await _run_async_fn(cmd, env=env)
         for line in (res.get("stdout") or "").splitlines():
             line = line.strip()
             if not line:
@@ -948,7 +952,7 @@ async def _repo_search_impl(
                         _req_ms = _floor_ms
                     _eff_ms = max(_floor_ms, _req_ms)
                     _t_sec = max(0.1, _eff_ms / 1000.0)
-                    rres = await _run_async(rcmd, env=env, timeout=_t_sec)
+                    rres = await _run_async_fn(rcmd, env=env, timeout=_t_sec)
                     if os.environ.get("MCP_DEBUG_RERANK", "").strip():
                         logger.debug(
                             "RERANK_RET",

@@ -1132,6 +1132,7 @@ async def repo_search(
         get_embedding_model_fn=_get_embedding_model,
         require_auth_session_fn=_require_auth_session,
         do_highlight_snippet_fn=_do_highlight_snippet,
+        run_async_fn=_run_async,
     )
 
 
