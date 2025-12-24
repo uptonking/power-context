@@ -3509,6 +3509,21 @@ def index_repo(
     Note: Caller is responsible for acquiring indexing_lock() if coordination
     with watcher is required. See workspace_state.indexing_lock() for details.
     """
+    ws_path = str(root)
+    repo_tag: Optional[str] = None
+    try:
+        repo_tag = _detect_repo_name_from_path(root) if _detect_repo_name_from_path else None
+    except Exception:
+        repo_tag = None
+
+    if clear_caches:
+        try:
+            _clear_indexing_caches_for_run(ws_path, repo_tag)
+        except Exception as e:
+            import traceback
+
+            print(f"[ERROR] Failed to clear caches before indexing: {e}")
+            print(f"[ERROR] Traceback: {traceback.format_exc()}")
     # Optional fast no-change precheck: when INDEX_FS_FASTPATH is enabled, use
     # fs metadata + cache.json to exit early before model/Qdrant setup when all
     # files are unchanged.
@@ -3599,12 +3614,6 @@ def index_repo(
 
     # Workspace state: derive collection and persist metadata
     try:
-        ws_path = str(root)
-        repo_tag = _detect_repo_name_from_path(root) if _detect_repo_name_from_path else None
-
-        if clear_caches:
-            _clear_indexing_caches_for_run(ws_path, repo_tag)
-
         force_collection = False
         try:
             force_collection = str(os.environ.get("CTXCE_FORCE_COLLECTION_NAME", "")).strip().lower() in {

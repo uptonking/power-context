@@ -685,7 +685,9 @@ async def admin_acl_page(request: Request):
         logger.error(f"[upload_service] Failed to load admin UI data: {e}")
         raise HTTPException(status_code=500, detail="Failed to load admin data")
 
-    enriched = build_admin_collections_view(collections=collections, work_dir=WORK_DIR)
+    enriched = await asyncio.to_thread(
+        build_admin_collections_view, collections=collections, work_dir=WORK_DIR
+    )
 
     resp = render_admin_acl(
         request,
