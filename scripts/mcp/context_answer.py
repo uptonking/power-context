@@ -54,6 +54,10 @@ from scripts.logger import safe_int, ValidationError
 
 logger = logging.getLogger(__name__)
 
+# Module-level lock for environment variable manipulation in context_answer
+# Prevents concurrent requests from clobbering each other's env changes
+_CA_ENV_LOCK = threading.Lock()
+
 
 # ---------------------------------------------------------------------------
 # Answer cleanup
@@ -2519,9 +2523,6 @@ async def _context_answer_impl(
         from scripts.mcp.admin_tools import _get_embedding_model
         get_embedding_model_fn = _get_embedding_model
 
-    # Environment lock for concurrent access
-    _ENV_LOCK = threading.Lock()
-
     # Normalize inputs and compute effective limits/flags
     _cfg = _ca_unwrap_and_normalize(
         query,
@@ -2625,8 +2626,8 @@ async def _context_answer_impl(
     model = get_embedding_model_fn(model_name)
 
     # Prepare environment toggles for ReFRAG gate-first and budgeting
-    if not _ENV_LOCK.acquire(timeout=30.0):
-        logger.warning("ENV_LOCK timeout, potential deadlock detected")
+    if not _CA_ENV_LOCK.acquire(timeout=30.0):
+        logger.warning("_CA_ENV_LOCK timeout, potential deadlock detected")
     prev = {
         "REFRAG_MODE": os.environ.get("REFRAG_MODE"),
         "REFRAG_GATE_FIRST": os.environ.get("REFRAG_GATE_FIRST"),
@@ -2758,11 +2759,13 @@ async def _context_answer_impl(
             if v is None:
                 try:
                     del os.environ[k]
+                except KeyError:
+                    pass  # Already unset, fine
                 except Exception as e:
                     logger.error(f"Failed to restore env var {k}: {e}")
             else:
                 os.environ[k] = v
-        _ENV_LOCK.release()
+        _CA_ENV_LOCK.release()
 
     if err is not None:
         return {
