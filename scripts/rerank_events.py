@@ -99,15 +99,22 @@ def log_training_event(
         return False
 
     try:
+        # Helper to convert numpy types to native Python for JSON
+        def _to_native(v):
+            if hasattr(v, "item"):  # numpy scalar
+                return v.item()
+            return v
+
         # Extract minimal candidate info (don't store full code)
         candidate_info = []
         for i, c in enumerate(candidates):
+            score = initial_scores[i] if i < len(initial_scores) else 0
             info = {
                 "path": c.get("path", ""),
                 "symbol": c.get("symbol", ""),
                 "start_line": c.get("start_line", 0),
                 "end_line": c.get("end_line", 0),
-                "initial_score": initial_scores[i] if i < len(initial_scores) else 0,
+                "initial_score": _to_native(score),
             }
             # Include small snippet for learning (truncated)
             snippet = c.get("code") or c.get("snippet") or ""
@@ -120,7 +127,7 @@ def log_training_event(
             "query": query,
             "collection": collection,
             "candidates": candidate_info,
-            "teacher_scores": teacher_scores,
+            "teacher_scores": [_to_native(s) for s in teacher_scores] if teacher_scores is not None and len(teacher_scores) > 0 else None,
             "metadata": metadata or {},
         }
 

@@ -40,9 +40,13 @@ except ImportError:
 
 # Import local utilities
 try:
-    from scripts.utils import lex_hash_vector_queries as _lex_hash_vector_queries
+    from scripts.utils import (
+        lex_hash_vector_queries as _lex_hash_vector_queries,
+        sanitize_vector_name as _sanitize_vector_name,
+    )
 except ImportError:
     _lex_hash_vector_queries = None
+    _sanitize_vector_name = None
 
 # Configuration defaults
 SEMANTIC_EXPANSION_ENABLED = os.environ.get("SEMANTIC_EXPANSION_ENABLED", "1").lower() in {"1", "true", "yes", "on"}
@@ -86,6 +90,21 @@ def _cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
         return dot_product / (norm1 * norm2)
     except Exception:
         return 0.0
+
+
+def _coerce_embedding_vector(raw: Any) -> Optional[List[float]]:
+    """Best-effort conversion of embedding output into a flat float list."""
+    try:
+        if raw is None:
+            return None
+        vec = raw.tolist() if hasattr(raw, "tolist") else raw
+        if isinstance(vec, (list, tuple)):
+            if vec and isinstance(vec[0], (list, tuple)):
+                vec = vec[0]
+            return [float(x) for x in vec]
+        return [float(x) for x in list(vec)]
+    except Exception:
+        return None
 
 
 def _get_expansion_cache_key(queries: List[str], language: Optional[str] = None) -> str:
@@ -254,6 +273,18 @@ def expand_queries_semantically(
                 model = _get_embedding_model(model_name)
             else:
                 model = TextEmbedding(model_name=model_name)
+        else:
+            # When caller injects a model, prefer its name for vector selection if available
+            model_name = getattr(model, "model_name", os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5"))
+        
+        # Qdrant collections with multiple vectors require the vector name
+        vector_name = None
+        try:
+            vector_name = _sanitize_vector_name(model_name) if _sanitize_vector_name else None
+        except Exception:
+            vector_name = None
+        if not vector_name and model_name:
+            vector_name = str(model_name).replace("/", "-").replace("_", "-")[:64]
         
         if collection is None:
             collection = os.environ.get("COLLECTION_NAME", "codebase")
@@ -274,21 +305,24 @@ def expand_queries_semantically(
 
         # Accept either vector objects with tolist() or plain (nested) lists
         try:
-            qv_raw = query_embeddings[0]
-            if hasattr(qv_raw, "tolist"):
-                query_vector = qv_raw.tolist()
-            elif isinstance(qv_raw, (list, tuple)) and qv_raw and isinstance(qv_raw[0], (list, tuple)):
-                query_vector = list(qv_raw[0])
-            else:
-                query_vector = list(qv_raw)
+            query_vector = _coerce_embedding_vector(query_embeddings[0])
         except Exception:
+            query_vector = None
+        if not query_vector:
             return []
 
         # Search for similar documents
         try:
+            search_vector = query_vector
+            if vector_name:
+                try:
+                    search_vector = models.NamedVector(name=vector_name, vector=query_vector)
+                except Exception:
+                    search_vector = query_vector
+
             search_results = client.search(
                 collection_name=collection,
-                query_vector=query_vector,
+                query_vector=search_vector,
                 limit=SEMANTIC_EXPANSION_TOP_K,
                 with_payload=True,
                 with_vectors=False  # We don't need vectors for term extraction
@@ -314,14 +348,10 @@ def expand_queries_semantically(
         for i, term in enumerate(candidate_terms):
             if i < len(candidate_embeddings):
                 try:
-                    cv_raw = candidate_embeddings[i]
-                    if hasattr(cv_raw, "tolist"):
-                        candidate_vector = cv_raw.tolist()
-                    elif isinstance(cv_raw, (list, tuple)) and cv_raw and isinstance(cv_raw[0], (list, tuple)):
-                        candidate_vector = list(cv_raw[0])
-                    else:
-                        candidate_vector = list(cv_raw)
+                    candidate_vector = _coerce_embedding_vector(candidate_embeddings[i])
                 except Exception:
+                    continue
+                if not candidate_vector:
                     continue
                 similarity = _cosine_similarity(query_vector, candidate_vector)
 
@@ -380,8 +410,10 @@ def expand_queries_with_prf(
             
             if not query_embeddings:
                 return _expand_with_lexical_similarity(queries, candidate_terms)
-            
-            query_vector = query_embeddings[0].tolist()
+
+            query_vector = _coerce_embedding_vector(query_embeddings[0])
+            if not query_vector:
+                return _expand_with_lexical_similarity(queries, candidate_terms)
             
             # Get embeddings for candidates
             candidate_embeddings = list(model.embed(candidate_terms))
@@ -393,7 +425,9 @@ def expand_queries_with_prf(
             similar_terms = []
             for i, term in enumerate(candidate_terms):
                 if i < len(candidate_embeddings):
-                    candidate_vector = candidate_embeddings[i].tolist()
+                    candidate_vector = _coerce_embedding_vector(candidate_embeddings[i])
+                    if not candidate_vector:
+                        continue
                     similarity = _cosine_similarity(query_vector, candidate_vector)
                     
                     if similarity >= SEMANTIC_EXPANSION_SIMILARITY_THRESHOLD:

@@ -42,6 +42,7 @@ jobs:
         pip install mcp fastmcp
         pip install fastapi uvicorn[standard] python-multipart jinja2
         pip install python-toon
+        pip install openai>=1.0
         
     - name: Wait for Qdrant to be ready
       run: |

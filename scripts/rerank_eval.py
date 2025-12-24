@@ -78,7 +78,8 @@ def get_candidates(query: str, limit: int = 30) -> List[Dict[str, Any]]:
         from scripts.hybrid_search import run_hybrid_search
         from scripts.embedder import get_embedding_model
 
-        model_name = os.environ.get("EMBEDDING_MODEL", "Alibaba-NLP/gte-base-en-v1.5")
+        # Use BAAI/bge-base-en-v1.5 which is supported by fastembed
+        model_name = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
         model = get_embedding_model(model_name)
 
         results = run_hybrid_search(
@@ -107,8 +108,20 @@ def get_candidates(query: str, limit: int = 30) -> List[Dict[str, Any]]:
 def get_onnx_scores(query: str, candidates: List[Dict[str, Any]]) -> Optional[List[float]]:
     """Get ONNX reranker scores (ground truth)."""
     try:
-        from scripts.rerank_query import score_candidates
-        return score_candidates(query, candidates)
+        from scripts.rerank_local import rerank_local
+        pairs = []
+        for c in candidates:
+            doc_parts = []
+            if c.get("symbol"):
+                doc_parts.append(str(c["symbol"]))
+            if c.get("path"):
+                doc_parts.append(str(c["path"]))
+            code = c.get("code") or c.get("snippet") or ""
+            if code:
+                doc_parts.append(code[:500])
+            doc = " ".join(doc_parts) if doc_parts else "empty"
+            pairs.append((query, doc))
+        return rerank_local(pairs)
     except Exception:
         return None
 
@@ -268,6 +281,15 @@ def run_eval(
     """Run evaluation across all queries and modes."""
     summaries: Dict[str, EvalSummary] = {}
 
+    # Warmup: pre-cache embeddings for all queries (cold start is not representative)
+    print("Warming up embedding cache...")
+    for query in queries:
+        candidates = get_candidates(query)
+        if candidates and "learning" in modes:
+            # Run once to cache embeddings
+            rerank_learning(query, copy.deepcopy(candidates))
+    print("Warmup complete.")
+
     for mode in modes:
         results = []
         latencies = []
@@ -315,6 +337,13 @@ def print_summary(summaries: Dict[str, EvalSummary]):
     print(f"{'Mode':<12} {'MRR':<8} {'R@5':<8} {'R@10':<8} {'p50ms':<8} {'p95ms':<8} {'p99ms':<8}")
     print("-" * 80)
 
+    # Track for comparison
+    baseline_mrr = summaries.get("baseline", EvalSummary("baseline", 0, 0, 0, 0, 0, 0, 0)).mrr_mean
+    onnx_mrr = summaries.get("onnx", EvalSummary("onnx", 0, 0, 0, 0, 0, 0, 0)).mrr_mean
+    onnx_p50 = summaries.get("onnx", EvalSummary("onnx", 0, 0, 0, 0, 0, 0, 0)).latency_p50_ms
+    learning_mrr = summaries.get("learning", EvalSummary("learning", 0, 0, 0, 0, 0, 0, 0)).mrr_mean
+    learning_p50 = summaries.get("learning", EvalSummary("learning", 0, 0, 0, 0, 0, 0, 0)).latency_p50_ms
+
     for mode, summary in summaries.items():
         print(
             f"{mode:<12} "
@@ -326,6 +355,24 @@ def print_summary(summaries: Dict[str, EvalSummary]):
             f"{summary.latency_p99_ms:<8.1f}"
         )
     print("=" * 80)
+
+    # Self-improving search analysis
+    print("\nSELF-IMPROVING SEARCH ANALYSIS:")
+    print("-" * 50)
+
+    if baseline_mrr > 0:
+        learning_vs_baseline = ((learning_mrr - baseline_mrr) / baseline_mrr) * 100
+        print(f"Learning vs Baseline: {learning_vs_baseline:+.1f}% MRR improvement")
+
+    if onnx_p50 > 0 and learning_p50 > 0:
+        speedup = onnx_p50 / learning_p50
+        print(f"Learning vs ONNX:     {speedup:.1f}x faster ({learning_p50:.1f}ms vs {onnx_p50:.1f}ms)")
+
+    if onnx_mrr > 0:
+        distill_quality = (learning_mrr / onnx_mrr) * 100
+        print(f"Distillation quality: {distill_quality:.1f}% of ONNX MRR")
+
+    print("-" * 50)
 
 
 def main():

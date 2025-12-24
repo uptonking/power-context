@@ -56,3 +56,32 @@ def test_merge_and_budget_respects_per_path_cap(monkeypatch):
     paths = [(m.get("pt").payload["metadata"]["path"]) for m in merged]
     c = Counter(paths)
     assert c.get("x.py", 0) <= 1
+
+
+def test_merge_and_budget_spans_works_without_explicit_budget(monkeypatch):
+    """Ensure budgeting works when no MICRO_BUDGET_TOKENS is provided.
+
+    This simulates the default case where callers don't set an explicit budget
+    and rely on the library's internal default value.
+    """
+
+    # Do not set MICRO_BUDGET_TOKENS at all; rely on default inside the helper
+    monkeypatch.delenv("MICRO_BUDGET_TOKENS", raising=False)
+
+    # Keep other knobs small so we still trigger budgeting logic deterministically
+    monkeypatch.setenv("MICRO_TOKENS_PER_LINE", "10")
+    monkeypatch.setenv("MICRO_MERGE_LINES", "2")
+    monkeypatch.setenv("MICRO_OUT_MAX_SPANS", "3")
+
+    items = [
+        _mk_item("a.py", 1, 3, 1.0),
+        _mk_item("a.py", 4, 6, 0.9),
+        _mk_item("b.py", 10, 12, 0.8),
+    ]
+
+    merged = _merge_and_budget_spans(items)
+
+    # We should still get at least one merged span with budgeting metadata
+    assert len(merged) >= 1
+    assert merged[0]["_merged_start"] <= merged[0]["_merged_end"]
+    assert isinstance(merged[0]["_budget_tokens"], int)

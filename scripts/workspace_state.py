@@ -1190,7 +1190,29 @@ def _collection_name_for_repo_slug(normalized_repo: str, *, is_old_slug: bool) -
 
 
 def get_collection_name(repo_name: Optional[str] = None) -> str:
-    """Get collection name for repository or workspace."""
+    """Get collection name for repository or workspace.
+
+    Priority:
+    1. Explicit COLLECTION_NAME env var - master override when set to a real value
+       (if repo_name is an *_old clone, append _old to the override unless already present)
+    2. Derive from repo slug (including *_old suffix handling)
+    3. Fallback: "global-collection"
+
+    This ensures COLLECTION_NAME works as a master override in both local dev
+    and container environments, while still allowing deterministic derivation
+    from repo slugs (including staging clone slugs).
+    """
+
+    # COLLECTION_NAME always wins when explicitly set to a real value.
+    env_coll = os.environ.get("COLLECTION_NAME", "").strip()
+    if env_coll and env_coll not in PLACEHOLDER_COLLECTION_NAMES:
+        try:
+            if isinstance(repo_name, str) and repo_name.endswith("_old") and not env_coll.endswith("_old"):
+                return f"{env_coll}_old"
+        except Exception:
+            pass
+        return env_coll
+
     normalized = _normalize_repo_name_for_collection(repo_name) if repo_name else None
     is_old_slug = False
     try:
@@ -1204,15 +1226,6 @@ def get_collection_name(repo_name: Optional[str] = None) -> str:
         derived = _collection_name_for_repo_slug(normalized, is_old_slug=is_old_slug)
     if derived:
         return derived
-
-    # Check environment for single-repo mode or fallback
-    env_coll = os.environ.get("COLLECTION_NAME", "").strip()
-    if env_coll and env_coll not in PLACEHOLDER_COLLECTION_NAMES:
-        return env_coll
-
-    # Use repo name if provided (for single-repo mode with repo name)
-    if normalized:
-        return _generate_collection_name_from_repo(normalized)
 
     # Default fallback
     return "global-collection"
