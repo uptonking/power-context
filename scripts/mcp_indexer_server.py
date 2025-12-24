@@ -1546,6 +1546,7 @@ async def context_answer(
         kwargs=kwargs,
         get_embedding_model_fn=_get_embedding_model,
         expand_query_fn=expand_query,
+        env_lock=_ENV_LOCK,
     )
  
 @mcp.tool()

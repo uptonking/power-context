@@ -2493,6 +2493,7 @@ async def _context_answer_impl(
     # Dependency injection
     get_embedding_model_fn=None,
     expand_query_fn=None,
+    env_lock=None,  # Threading lock for env var manipulation
 ) -> Dict[str, Any]:
     """Natural-language Q&A over the repo using retrieval + local LLM (llama.cpp).
 
@@ -2522,6 +2523,9 @@ async def _context_answer_impl(
     if get_embedding_model_fn is None:
         from scripts.mcp.admin_tools import _get_embedding_model
         get_embedding_model_fn = _get_embedding_model
+
+    # Use injected lock or fall back to module-level lock
+    _lock = env_lock if env_lock is not None else _CA_ENV_LOCK
 
     # Normalize inputs and compute effective limits/flags
     _cfg = _ca_unwrap_and_normalize(
@@ -2626,8 +2630,8 @@ async def _context_answer_impl(
     model = get_embedding_model_fn(model_name)
 
     # Prepare environment toggles for ReFRAG gate-first and budgeting
-    if not _CA_ENV_LOCK.acquire(timeout=30.0):
-        logger.warning("_CA_ENV_LOCK timeout, potential deadlock detected")
+    if not _lock.acquire(timeout=30.0):
+        logger.warning("env_lock timeout, potential deadlock detected")
     prev = {
         "REFRAG_MODE": os.environ.get("REFRAG_MODE"),
         "REFRAG_GATE_FIRST": os.environ.get("REFRAG_GATE_FIRST"),
@@ -2765,7 +2769,7 @@ async def _context_answer_impl(
                     logger.error(f"Failed to restore env var {k}: {e}")
             else:
                 os.environ[k] = v
-        _CA_ENV_LOCK.release()
+        _lock.release()
 
     if err is not None:
         return {
