@@ -1348,6 +1348,19 @@ def _process_paths(paths, client, model, vector_name: str, model_dim: int, works
                     pass
                 continue
             except Exception as e:
+                repo_progress[repo_key] = repo_progress.get(repo_key, 0) + 1
+                try:
+                    logger.error(
+                        "watch_index::_process_paths error",
+                        extra={
+                            "repo_key": repo_key,
+                            "collection": collection,
+                            "file": str(p),
+                        },
+                        exc_info=True,
+                    )
+                except Exception:
+                    pass
                 try:
                     _update_progress(
                         repo_key,
@@ -1372,6 +1385,17 @@ def _process_paths(paths, client, model, vector_name: str, model_dim: int, works
                 _log_activity(
                     repo_key, "skipped", p, {"reason": "no-change-or-error"}
                 )
+            repo_progress[repo_key] = repo_progress.get(repo_key, 0) + 1
+            try:
+                _update_progress(
+                    repo_key,
+                    started_at,
+                    repo_progress[repo_key],
+                    len(repo_files),
+                    p,
+                )
+            except Exception:
+                pass
         else:
             print(f"Not processing locally: {p}")
             _log_activity(repo_key, "skipped", p, {"reason": "remote-mode"})
