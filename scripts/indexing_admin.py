@@ -1276,10 +1276,10 @@ def start_staging_rebuild(*, collection: str, work_dir: str) -> str:
                 old_state["indexing_status"] = {"state": "idle"}
             except Exception:
                 pass
-            old_state.pop("indexing_config_pending", None)
-            old_state.pop("indexing_config_pending_hash", None)
-            old_state.pop("indexing_env_pending", None)
-            old_state.pop("staging", None)
+            old_state["indexing_config_pending"] = None
+            old_state["indexing_config_pending_hash"] = None
+            old_state["indexing_env_pending"] = None
+            old_state["staging"] = None
             update_workspace_state(
                 workspace_path=str(old_dir),
                 repo_name=f"{repo_name}_old",

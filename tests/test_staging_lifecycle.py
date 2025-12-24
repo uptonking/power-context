@@ -91,6 +91,20 @@ def test_staging_start_promote_activate_and_abort_are_consistent(
         pending_env={"CTXCE_ENV_ROLE": "pending", "CTXCE_E2E_MARKER": "pending"},
     )
     pending_env = envs["pending"]
+    # Seed cache.json so staging clone should copy + retarget paths.
+    src_cache_dir = root / ".codebase" / "repos" / repo_name
+    src_cache_dir.mkdir(parents=True, exist_ok=True)
+    original_path = (repo_ws / "hello.txt").resolve().as_posix()
+    (src_cache_dir / "cache.json").write_text(
+        json.dumps(
+            {
+                "file_hashes": {
+                    original_path: {"hash": "abc123", "size": 5, "mtime": 123456},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
 
     # Patch boundaries (no real Qdrant, no subprocess indexing).
     calls = {
@@ -180,6 +194,13 @@ def test_staging_start_promote_activate_and_abort_are_consistent(
     assert old_state.get("serving_collection") == old_collection
     assert old_state.get("indexing_env_pending") in (None, {})
     assert (old_state.get("indexing_env") or {}) == envs["active"]
+    # Cached file hashes should be copied and retargeted to the cloned workspace.
+    clone_cache_path = root / ".codebase" / "repos" / f"{repo_name}_old" / "cache.json"
+    assert clone_cache_path.exists(), "expected cloned cache.json"
+    clone_cache = json.loads(clone_cache_path.read_text(encoding="utf-8"))
+    clone_path = (root / f"{repo_name}_old" / "hello.txt").resolve().as_posix()
+    assert clone_path in clone_cache.get("file_hashes", {}), "clone cache missing retargeted path"
+    assert original_path not in clone_cache.get("file_hashes", {}), "original path leaked into clone cache"
 
     # === PROMOTE pending env ===
     workspace_state.promote_pending_indexing_config(workspace_path=str(repo_ws), repo_name=repo_name)
