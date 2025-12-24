@@ -350,6 +350,7 @@ def run_hybrid_search(
     collection: str | None = None,
     mode: str | None = None,
     repo: str | list[str] | None = None,  # Filter by repo name(s); "*" to disable auto-filter
+    per_query: int | None = None,  # Base candidate retrieval per query (default: adaptive)
 ) -> List[Dict[str, Any]]:
     client = QdrantClient(url=os.environ.get("QDRANT_URL", QDRANT_URL), api_key=API_KEY)
     model_name = os.environ.get("EMBEDDING_MODEL", MODEL_NAME)
@@ -730,7 +731,9 @@ def run_hybrid_search(
     _scaled_rrf_k = _scale_rrf_k(RRF_K, _coll_size)
 
     # Adaptive per_query: retrieve more candidates from larger collections
-    _scaled_per_query = _adaptive_per_query(max(24, limit), _coll_size, _has_filters)
+    # Use explicit per_query if provided, otherwise compute adaptively
+    _base_per_query = per_query if per_query is not None else max(24, limit)
+    _scaled_per_query = _adaptive_per_query(_base_per_query, _coll_size, _has_filters)
 
     if os.environ.get("DEBUG_HYBRID_SEARCH") and _coll_size >= LARGE_COLLECTION_THRESHOLD:
         logger.debug(f"Large collection scaling: size={_coll_size}, rrf_k={_scaled_rrf_k}, per_query={_scaled_per_query}")
@@ -1937,6 +1940,9 @@ def main():
                     default=_env_truthy(os.environ.get("HYBRID_EXPAND"), False))
     ap.add_argument("--no-expand", dest="expand", action="store_false")
     ap.add_argument("--per-path", type=int, default=int(os.environ.get("HYBRID_PER_PATH", "1") or 1))
+    ap.add_argument("--per-query", type=int, default=None,
+                    help="Candidate retrieval per query (default: adaptive based on limit/collection size). "
+                         "Also settable via HYBRID_PER_QUERY env var.")
     ap.add_argument("--limit", type=int, default=10)
     ap.add_argument("--json", dest="json_out", action="store_true")
     ap.add_argument("--quiet", dest="quiet", action="store_true")
@@ -1969,6 +1975,7 @@ def main():
         expand=args.expand,
         collection=args.collection,
         repo=args.repo,
+        per_query=args.per_query,
     )
 
     # Handle empty results

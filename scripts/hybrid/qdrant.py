@@ -86,6 +86,10 @@ except ImportError:
 
     def get_qdrant_client(url=None, api_key=None, force_new=False, use_pool=True):
         """Fallback client creation when pooling is unavailable."""
+        if QdrantClient is None:
+            raise ImportError(
+                "qdrant_client is not installed. Install with: pip install qdrant-client"
+            )
         return QdrantClient(
             url=url or os.environ.get("QDRANT_URL", "http://localhost:6333"),
             api_key=api_key or os.environ.get("QDRANT_API_KEY")
