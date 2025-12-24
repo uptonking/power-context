@@ -251,6 +251,111 @@ function isTransientToolError(error) {
 // Acts as a low-level proxy for tools, forwarding tools/list and tools/call
 // to the remote qdrant-indexer MCP server while adding a local `ping` tool.
 
+const ADMIN_SESSION_COOKIE_NAME = "ctxce_session";
+const SLUGGED_REPO_RE = /.+-[0-9a-f]{16}(?:_old)?$/i;
+const BRIDGE_STATE_TOKEN = (process.env.CTXCE_BRIDGE_STATE_TOKEN || "").trim();
+
+function normalizeBackendUrl(candidate) {
+  const trimmed = (candidate || "").trim();
+  if (!trimmed) {
+    return "";
+  }
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol && parsed.host) {
+      return `${parsed.protocol}//${parsed.host}`;
+    }
+  } catch {
+    // ignore parse failures
+  }
+  return trimmed.replace(/\/+$/, "");
+}
+
+function resolveAuthBackendContext() {
+  const envBackend = normalizeBackendUrl(process.env.CTXCE_AUTH_BACKEND_URL || "");
+  if (envBackend) {
+    return { backendUrl: envBackend, source: "CTXCE_AUTH_BACKEND_URL" };
+  }
+  try {
+    const any = loadAnyAuthEntry();
+    const stored = normalizeBackendUrl(any?.backendUrl || "");
+    if (stored) {
+      return { backendUrl: stored, source: "auth_entry" };
+    }
+  } catch {
+    // ignore auth config read failures
+  }
+  return { backendUrl: "", source: "" };
+}
+
+const {
+  backendUrl: AUTH_BACKEND_URL,
+  source: AUTH_BACKEND_SOURCE,
+} = resolveAuthBackendContext();
+const UPLOAD_SERVICE_URL = AUTH_BACKEND_URL;
+const UPLOAD_AUTH_BACKEND = AUTH_BACKEND_URL;
+
+if (UPLOAD_SERVICE_URL) {
+  debugLog(`[ctxce] Upload/auth backend resolved from ${AUTH_BACKEND_SOURCE}: ${UPLOAD_SERVICE_URL}`);
+} else {
+  debugLog("[ctxce] No auth backend detected; bridge/state overrides disabled.");
+}
+
+async function fetchBridgeCollectionState({
+  workspace,
+  collection,
+  sessionId,
+  repoName,
+  bridgeStateToken,
+}) {
+  try {
+    if (!UPLOAD_SERVICE_URL) {
+      debugLog("[ctxce] Skipping bridge/state fetch: no upload endpoint configured.");
+      return null;
+    }
+    const url = new URL("/bridge/state", UPLOAD_SERVICE_URL);
+    if (collection && collection.trim()) {
+      url.searchParams.set("collection", collection.trim());
+    } else if (workspace && workspace.trim()) {
+      url.searchParams.set("workspace", workspace.trim());
+    }
+    if (repoName && repoName.trim()) {
+      url.searchParams.set("repo_name", repoName.trim());
+    }
+
+    const headers = {
+      Accept: "application/json",
+    };
+    if (bridgeStateToken && bridgeStateToken.trim()) {
+      headers["X-Bridge-State-Token"] = bridgeStateToken.trim();
+    }
+    if (sessionId) {
+      headers.Cookie = `${ADMIN_SESSION_COOKIE_NAME}=${sessionId}`;
+    }
+
+    debugLog(`[ctxce] Fetching bridge/state from ${url.toString()} (repo=${repoName || "<none>"}).`);
+    const resp = await fetch(url, {
+      method: "GET",
+      headers,
+    });
+    if (!resp.ok) {
+      if (resp.status === 401 || resp.status === 403) {
+        debugLog(
+          `[ctxce] /bridge/state responded ${resp.status}; missing or invalid token/session, falling back to ctx_config defaults.`,
+        );
+        return null;
+      }
+      throw new Error(`bridge/state responded ${resp.status}`);
+    }
+    debugLog(`[ctxce] bridge/state responded ${resp.status}`);
+    const data = await resp.json();
+    return data && typeof data === "object" ? data : null;
+  } catch (err) {
+    debugLog("[ctxce] Failed to fetch /bridge/state: " + String(err));
+    return null;
+  }
+}
+
 async function createBridgeServer(options) {
   const workspace = options.workspace || process.cwd();
   const indexerUrl = options.indexerUrl;
@@ -285,51 +390,63 @@ async function createBridgeServer(options) {
   // keep it deterministic per workspace to help the indexer reuse
   // session-scoped defaults.
   const explicitSession = process.env.CTXCE_SESSION_ID || "";
-  const authBackendUrl = process.env.CTXCE_AUTH_BACKEND_URL || "";
+  const authBackendEnv = (process.env.CTXCE_AUTH_BACKEND_URL || "").trim();
+  let backendHint = authBackendEnv || UPLOAD_AUTH_BACKEND || "";
   let sessionId = explicitSession;
 
+  function sessionFromEntry(entry) {
+    if (!entry || typeof entry.sessionId !== "string" || !entry.sessionId) {
+      return "";
+    }
+    const expiresAt = entry.expiresAt;
+    if (
+      typeof expiresAt === "number" &&
+      Number.isFinite(expiresAt) &&
+      expiresAt > 0 &&
+      expiresAt < Math.floor(Date.now() / 1000)
+    ) {
+      debugLog("[ctxce] Stored auth session appears expired; please run `ctxce auth login` again.");
+      return "";
+    }
+    return entry.sessionId;
+  }
+
+  function findSavedSession(backends) {
+    for (const backend of backends) {
+      const trimmed = (backend || "").trim();
+      if (!trimmed) {
+        continue;
+      }
+      try {
+        const entry = loadAuthEntry(trimmed);
+        const session = sessionFromEntry(entry);
+        if (session) {
+          backendHint = trimmed;
+          return session;
+        }
+      } catch {
+        // ignore lookup failures
+      }
+    }
+    try {
+      const any = loadAnyAuthEntry();
+      const session = any ? sessionFromEntry(any.entry) : "";
+      if (session && any?.backendUrl) {
+        backendHint = any.backendUrl;
+        return session;
+      }
+    } catch {
+      // ignore lookup failures
+    }
+    return "";
+  }
+
   function resolveSessionId() {
-    const explicit = process.env.CTXCE_SESSION_ID || "";
+    const explicit = (process.env.CTXCE_SESSION_ID || "").trim();
     if (explicit) {
       return explicit;
     }
-    let backendToUse = authBackendUrl;
-    let entry = null;
-    if (backendToUse) {
-      try {
-        entry = loadAuthEntry(backendToUse);
-      } catch {
-        entry = null;
-      }
-    }
-    if (!entry) {
-      try {
-        const any = loadAnyAuthEntry();
-        if (any && any.entry) {
-          backendToUse = any.backendUrl;
-          entry = any.entry;
-        }
-      } catch {
-        entry = null;
-      }
-    }
-    if (entry) {
-      let expired = false;
-      const rawExpires = entry.expiresAt;
-      if (typeof rawExpires === "number" && Number.isFinite(rawExpires) && rawExpires > 0) {
-        const nowSecs = Math.floor(Date.now() / 1000);
-        if (rawExpires < nowSecs) {
-          expired = true;
-        }
-      }
-      if (!expired && typeof entry.sessionId === "string" && entry.sessionId) {
-        return entry.sessionId;
-      }
-      if (expired) {
-        debugLog("[ctxce] Stored auth session appears expired; please run `ctxce auth login` again.");
-      }
-    }
-    return "";
+    return findSavedSession([backendHint, UPLOAD_AUTH_BACKEND, authBackendEnv]);
   }
 
   if (!sessionId) {
@@ -346,6 +463,32 @@ async function createBridgeServer(options) {
   if (defaultCollection) {
     defaultsPayload.collection = defaultCollection;
   }
+
+  const repoName = detectRepoName(workspace, config);
+
+  try {
+    const state = await fetchBridgeCollectionState({
+      workspace,
+      collection: defaultCollection,
+      sessionId,
+      repoName,
+      bridgeStateToken: BRIDGE_STATE_TOKEN,
+    });
+    if (state) {
+      const serving = state.serving_collection || state.active_collection;
+      if (serving) {
+        defaultsPayload.collection = serving;
+        if (!defaultCollection || defaultCollection !== serving) {
+          debugLog(
+            `[ctxce] Using serving collection from /bridge/state: ${serving}`,
+          );
+        }
+      }
+    }
+  } catch (err) {
+    debugLog("[ctxce] bridge/state lookup failed: " + String(err));
+  }
+
   if (defaultMode) {
     defaultsPayload.mode = defaultMode;
   }
@@ -803,5 +946,26 @@ function detectGitBranch(workspace) {
   } catch {
     return null;
   }
+}
+
+function detectRepoName(workspace, config) {
+  const envRepo =
+    (process.env.CURRENT_REPO && process.env.CURRENT_REPO.trim()) ||
+    (process.env.REPO_NAME && process.env.REPO_NAME.trim());
+  if (envRepo) {
+    return envRepo;
+  }
+
+  if (config) {
+    const cfgRepo =
+      (typeof config.repo_name === "string" && config.repo_name.trim()) ||
+      (typeof config.default_repo === "string" && config.default_repo.trim());
+    if (cfgRepo) {
+      return cfgRepo;
+    }
+  }
+
+  const leaf = workspace ? path.basename(workspace) : "";
+  return leaf && SLUGGED_REPO_RE.test(leaf) ? leaf : null;
 }
 

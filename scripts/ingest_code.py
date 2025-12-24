@@ -96,30 +96,124 @@ try:
         update_symbols_with_pseudo,
         get_workspace_state,
         get_cached_file_meta,
+        get_indexing_config_snapshot,
+        compute_indexing_config_hash,
+        persist_indexing_config,
+        promote_pending_indexing_config,
         indexing_lock,
         file_indexing_lock,
         is_file_locked,
+        clear_symbol_cache,
     )
 except ImportError:
     # State integration is optional; continue if not available
-    log_activity = None  # type: ignore
-    get_cached_file_hash = None  # type: ignore
-    set_cached_file_hash = None  # type: ignore
-    remove_cached_file = None  # type: ignore
-    update_indexing_status = None  # type: ignore
-    update_workspace_state = None  # type: ignore
-    get_cached_symbols = None  # type: ignore
-    set_cached_symbols = None  # type: ignore
-    remove_cached_symbols = None  # type: ignore
-    get_cached_pseudo = None  # type: ignore
-    set_cached_pseudo = None  # type: ignore
-    update_symbols_with_pseudo = None  # type: ignore
-    compare_symbol_changes = None  # type: ignore
-    get_workspace_state = None  # type: ignore
-    get_cached_file_meta = None  # type: ignore
-    indexing_lock = None  # type: ignore
-    file_indexing_lock = None  # type: ignore
-    is_file_locked = None  # type: ignore
+    def _set_optional_ws_func(name: str) -> None:
+        globals()[name] = None  # type: ignore[attr-defined]
+
+    for _name in (
+        "log_activity",
+        "get_cached_file_hash",
+        "set_cached_file_hash",
+        "remove_cached_file",
+        "update_indexing_status",
+        "update_workspace_state",
+        "get_cached_symbols",
+        "set_cached_symbols",
+        "remove_cached_symbols",
+        "compare_symbol_changes",
+        "get_cached_pseudo",
+        "set_cached_pseudo",
+        "update_symbols_with_pseudo",
+        "get_workspace_state",
+        "get_cached_file_meta",
+        "get_indexing_config_snapshot",
+        "compute_indexing_config_hash",
+        "persist_indexing_config",
+        "promote_pending_indexing_config",
+        "indexing_lock",
+        "file_indexing_lock",
+        "is_file_locked",
+        "clear_symbol_cache",
+    ):
+        _set_optional_ws_func(_name)
+
+try:
+    from scripts.collection_health import clear_cache, clear_repo_cache
+except ImportError:
+    clear_cache = None  # type: ignore
+    clear_repo_cache = None  # type: ignore
+
+
+def _clear_indexing_caches_for_run(
+    workspace_path: str,
+    repo_name: Optional[str],
+) -> None:
+    """Best-effort removal of file-hash + symbol caches before a rebuild."""
+    actions: list[str] = []
+    if not workspace_path:
+        workspace_path = os.environ.get("WORKSPACE_PATH") or os.environ.get("WATCH_ROOT") or "/work"
+
+    multi_repo = False
+    try:
+        if is_multi_repo_mode:
+            multi_repo = bool(is_multi_repo_mode())
+    except Exception:
+        multi_repo = False
+
+    # Clear file-hash cache
+    try:
+        if multi_repo and repo_name and clear_repo_cache:
+            if clear_repo_cache(repo_name):
+                actions.append(f"file-hash cache (repo={repo_name})")
+        elif clear_cache:
+            if clear_cache(workspace_path):
+                actions.append("file-hash cache")
+    except Exception as e:
+        print(f"[clear_caches] Failed to clear file hash cache: {e}")
+
+    # Clear symbol cache
+    try:
+        if clear_symbol_cache:
+            cleared_dirs = clear_symbol_cache(workspace_path, repo_name)
+            if cleared_dirs:
+                actions.append(f"symbol cache ({cleared_dirs} dirs)")
+    except Exception as e:
+        print(f"[clear_caches] Failed to clear symbol cache: {e}")
+
+    if actions:
+        print(f"[clear_caches] Cleared {'; '.join(actions)}")
+    else:
+        print("[clear_caches] No caches were cleared (helpers unavailable or already empty)")
+
+
+# Helper: mark staging ready/idle after rebuild completes
+def _mark_staging_idle(target_ws: str, repo_name: str, files_indexed: int) -> None:
+    if not (get_workspace_state and update_workspace_state):
+        return
+    try:
+        st = get_workspace_state(target_ws, repo_name) or {}
+        staging = st.get("staging") or {}
+        if not (isinstance(staging, dict) and staging.get("collection")):
+            return
+        status = staging.get("status") or {}
+        if not isinstance(status, dict):
+            status = {}
+        status.setdefault("started_at", status.get("started_at") or datetime.now().isoformat())
+        status["state"] = "idle"
+        status["progress"] = {
+            "files_processed": files_indexed,
+            "total_files": None,
+            "current_file": None,
+        }
+        staging["status"] = status
+        staging["updated_at"] = datetime.now().isoformat()
+        update_workspace_state(
+            workspace_path=target_ws,
+            repo_name=repo_name,
+            updates={"staging": staging},
+        )
+    except Exception:
+        pass
 
 # Optional Tree-sitter import (graceful fallback) - tree-sitter 0.25+ API
 _TS_LANGUAGES: Dict[str, Any] = {}
@@ -3400,20 +3494,36 @@ def _index_single_file_inner(
 def index_repo(
     root: Path,
     qdrant_url: str,
-    api_key: str,
-    collection: str,
+    api_key: Optional[str],
+    collection: Optional[str],
     model_name: str,
     recreate: bool,
     *,
     dedupe: bool = True,
     skip_unchanged: bool = True,
     pseudo_mode: str = "full",
+    clear_caches: bool = False,
 ):
     """Index a repository into Qdrant.
 
     Note: Caller is responsible for acquiring indexing_lock() if coordination
     with watcher is required. See workspace_state.indexing_lock() for details.
     """
+    ws_path = str(root)
+    repo_tag: Optional[str] = None
+    try:
+        repo_tag = _detect_repo_name_from_path(root) if _detect_repo_name_from_path else None
+    except Exception:
+        repo_tag = None
+
+    if clear_caches:
+        try:
+            _clear_indexing_caches_for_run(ws_path, repo_tag)
+        except Exception as e:
+            import traceback
+
+            print(f"[ERROR] Failed to clear caches before indexing: {e}")
+            print(f"[ERROR] Traceback: {traceback.format_exc()}")
     # Optional fast no-change precheck: when INDEX_FS_FASTPATH is enabled, use
     # fs metadata + cache.json to exit early before model/Qdrant setup when all
     # files are unchanged.
@@ -3504,11 +3614,25 @@ def index_repo(
 
     # Workspace state: derive collection and persist metadata
     try:
-        ws_path = str(root)
-        repo_tag = _detect_repo_name_from_path(root) if _detect_repo_name_from_path else None
+        force_collection = False
+        try:
+            # CTXCE_FORCE_COLLECTION_NAME forces ingest_code to honor the explicit COLLECTION_NAME
+            # env var even in multi-repo mode (disables per-repo collection routing). This is
+            # primarily used by admin-driven subprocess runs (e.g. staging rebuild) that supply
+            # per-repo indexing_env overrides.
+            force_collection = str(os.environ.get("CTXCE_FORCE_COLLECTION_NAME", "")).strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+        except Exception:
+            force_collection = False
 
         is_multi_repo = bool(is_multi_repo_mode and is_multi_repo_mode())
         use_per_repo_collections = bool(is_multi_repo and _get_collection_for_file)
+        if force_collection and collection:
+            use_per_repo_collections = False
 
         if use_per_repo_collections:
             collection = None  # Determined per file later
@@ -3516,7 +3640,8 @@ def index_repo(
         else:
             if 'get_collection_name' in globals() and get_collection_name:
                 try:
-                    resolved = get_collection_name(ws_path)
+                    # get_collection_name expects a repo identifier/slug, not a filesystem path.
+                    resolved = get_collection_name(repo_tag or ws_path)
                     placeholders = {"", "default-collection", "my-collection", "codebase"}
                     if resolved and collection in placeholders:
                         collection = resolved
@@ -3524,9 +3649,17 @@ def index_repo(
                     pass
 
         if update_workspace_state and not use_per_repo_collections:
+            updates = {"qdrant_collection": collection}
+            try:
+                if get_indexing_config_snapshot and compute_indexing_config_hash:
+                    cfg = get_indexing_config_snapshot()
+                    updates["indexing_config"] = cfg
+                    updates["indexing_config_hash"] = compute_indexing_config_hash(cfg)
+            except Exception:
+                pass
             update_workspace_state(
                 workspace_path=ws_path,
-                updates={"qdrant_collection": collection},
+                updates=updates,
                 repo_name=repo_tag,
             )
         if update_indexing_status and repo_tag:
@@ -4219,6 +4352,13 @@ def index_repo(
             for repo_name in touched_repos or ({repo_tag} if repo_tag else set()):
                 try:
                     target_ws = repo_roots.get(repo_name) or ws_path
+                    try:
+                        if promote_pending_indexing_config:
+                            promote_pending_indexing_config(workspace_path=target_ws, repo_name=repo_name)
+                        elif persist_indexing_config:
+                            persist_indexing_config(workspace_path=target_ws, repo_name=repo_name)
+                    except Exception:
+                        pass
                     update_indexing_status(
                         workspace_path=target_ws,
                         status={
@@ -4227,6 +4367,9 @@ def index_repo(
                         },
                         repo_name=repo_name,
                     )
+
+                    # If staging is active, advance staging status out of "initializing".
+                    _mark_staging_idle(target_ws, repo_name, files_indexed)
                 except Exception:
                     continue
     except Exception as e:
@@ -4731,6 +4874,11 @@ def main():
         action="store_true",
         help="Do not skip files whose content hash matches existing index",
     )
+    parser.add_argument(
+        "--clear-indexing-caches",
+        action="store_true",
+        help="Clear local file hash + symbol caches before indexing",
+    )
     # Exclusion controls
     parser.add_argument(
         "--ignore-file",
@@ -4864,9 +5012,20 @@ def main():
     collection = os.environ.get("COLLECTION_NAME") or os.environ.get("DEFAULT_COLLECTION") or "codebase"
     model_name = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
 
+    force_collection = False
+    try:
+        force_collection = str(os.environ.get("CTXCE_FORCE_COLLECTION_NAME", "")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+    except Exception:
+        force_collection = False
+
     # Resolve collection name based on multi-repo mode
     multi_repo = bool(is_multi_repo_mode and is_multi_repo_mode())
-    if multi_repo:
+    if multi_repo and not force_collection:
         # Multi-repo mode: pass collection=None to trigger per-repo collection resolution
         collection = None
         print("[multi_repo] Multi-repo mode enabled - will create separate collections per repository")
@@ -4874,7 +5033,13 @@ def main():
         # Single-repo mode: use environment variable
         if 'get_collection_name' in globals() and get_collection_name:
             try:
-                resolved = get_collection_name(str(Path(args.root).resolve()))
+                # get_collection_name expects a repo identifier/slug, not a filesystem path.
+                root_repo = None
+                try:
+                    root_repo = _detect_repo_name_from_path(Path(args.root).resolve())
+                except Exception:
+                    root_repo = None
+                resolved = get_collection_name(root_repo or str(Path(args.root).resolve()))
                 placeholders = {"", "default-collection", "my-collection", "codebase"}
                 if resolved and collection in placeholders:
                     collection = resolved
@@ -4898,6 +5063,7 @@ def main():
         dedupe=(not args.no_dedupe),
         skip_unchanged=(not args.no_skip_unchanged),
         pseudo_mode=pseudo_mode,
+        clear_caches=args.clear_indexing_caches,
     )
 
 
