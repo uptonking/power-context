@@ -11,6 +11,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { loadAnyAuthEntry, loadAuthEntry } from "./authConfig.js";
 import { maybeRemapToolArgs, maybeRemapToolResult } from "./resultPathMapping.js";
+import * as oauthHandler from "./oauthHandler.js";
 
 function debugLog(message) {
   try {
@@ -616,73 +617,128 @@ export async function runHttpMcpServer(options) {
 
   await server.connect(transport);
 
+  // Build issuer URL for OAuth
+  // Note: Local-only bridge uses 127.0.0.1. For remote access, this would need to be configurable.
+  const issuerUrl = `http://127.0.0.1:${port}`;
+
   const httpServer = createServer((req, res) => {
     try {
-      if (!req.url || !req.url.startsWith("/mcp")) {
-        res.statusCode = 404;
-        res.setHeader("Content-Type", "application/json");
-        res.end(
-          JSON.stringify({
-            jsonrpc: "2.0",
-            error: { code: -32000, message: "Not found" },
-            id: null,
-          }),
-        );
+      const url = req.url || "/";
+
+      // Parse URL for query params
+      const parsedUrl = new URL(url, `http://${req.headers.host || 'localhost'}`);
+
+      // ================================================================
+      // OAuth 2.0 Endpoints (RFC9728 Protected Resource Metadata + RFC7591)
+      // ================================================================
+
+      // OAuth metadata endpoint (RFC9728)
+      if (parsedUrl.pathname === "/.well-known/oauth-authorization-server") {
+        oauthHandler.handleOAuthMetadata(req, res, issuerUrl);
         return;
       }
 
-      if (req.method !== "POST") {
-        res.statusCode = 405;
-        res.setHeader("Content-Type", "application/json");
-        res.end(
-          JSON.stringify({
-            jsonrpc: "2.0",
-            error: { code: -32000, message: "Method not allowed" },
-            id: null,
-          }),
-        );
+      // OAuth Dynamic Client Registration endpoint (RFC7591)
+      if (parsedUrl.pathname === "/oauth/register" && req.method === "POST") {
+        oauthHandler.handleOAuthRegister(req, res);
         return;
       }
 
-      let body = "";
-      req.on("data", (chunk) => {
-        body += chunk;
-      });
-      req.on("end", async () => {
-        let parsed;
-        try {
-          parsed = body ? JSON.parse(body) : {};
-        } catch (err) {
-          debugLog("[ctxce] Failed to parse HTTP MCP request body: " + String(err));
-          res.statusCode = 400;
+      // OAuth authorize endpoint
+      if (parsedUrl.pathname === "/oauth/authorize") {
+        oauthHandler.handleOAuthAuthorize(req, res, parsedUrl.searchParams);
+        return;
+      }
+
+      // Store session endpoint (helper for login page)
+      if (parsedUrl.pathname === "/oauth/store-session" && req.method === "POST") {
+        oauthHandler.handleOAuthStoreSession(req, res);
+        return;
+      }
+
+      // OAuth token endpoint
+      if (parsedUrl.pathname === "/oauth/token" && req.method === "POST") {
+        oauthHandler.handleOAuthToken(req, res);
+        return;
+      }
+
+      // ================================================================
+      // MCP Endpoint
+      // ================================================================
+
+      // Check Bearer token for MCP endpoint (accept /mcp and /mcp/ for compatibility)
+      if (parsedUrl.pathname === "/mcp" || parsedUrl.pathname === "/mcp/") {
+        const authHeader = req.headers["authorization"] || "";
+        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+
+        // TODO: Validate token and inject session
+        // For now, allow unauthenticated (backward compatible)
+
+        if (req.method !== "POST") {
+          res.statusCode = 405;
           res.setHeader("Content-Type", "application/json");
           res.end(
             JSON.stringify({
               jsonrpc: "2.0",
-              error: { code: -32700, message: "Invalid JSON" },
+              error: { code: -32000, message: "Method not allowed" },
               id: null,
             }),
           );
           return;
         }
 
-        try {
-          await transport.handleRequest(req, res, parsed);
-        } catch (err) {
-          debugLog("[ctxce] Error handling HTTP MCP request: " + String(err));
-          if (!res.headersSent) {
-            res.statusCode = 500;
+        let body = "";
+        req.on("data", (chunk) => {
+          body += chunk;
+        });
+        req.on("end", async () => {
+          let parsed;
+          try {
+            parsed = body ? JSON.parse(body) : {};
+          } catch (err) {
+            debugLog("[ctxce] Failed to parse HTTP MCP request body: " + String(err));
+            res.statusCode = 400;
             res.setHeader("Content-Type", "application/json");
             res.end(
               JSON.stringify({
                 jsonrpc: "2.0",
-                error: { code: -32603, message: "Internal server error" },
+                error: { code: -32700, message: "Invalid JSON" },
                 id: null,
               }),
             );
+            return;
           }
-        }
-      });
+
+          try {
+            await transport.handleRequest(req, res, parsed);
+          } catch (err) {
+            debugLog("[ctxce] Error handling HTTP MCP request: " + String(err));
+            if (!res.headersSent) {
+              res.statusCode = 500;
+              res.setHeader("Content-Type", "application/json");
+              res.end(
+                JSON.stringify({
+                  jsonrpc: "2.0",
+                  error: { code: -32603, message: "Internal server error" },
+                  id: null,
+                }),
+              );
+            }
+          }
+        });
+        return;
+      }
+
+      // 404 for everything else
+      res.statusCode = 404;
+      res.setHeader("Content-Type", "application/json");
+      res.end(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          error: { code: -32000, message: "Not found" },
+          id: null,
+        }),
+      );
     } catch (err) {
       debugLog("[ctxce] Unexpected error in HTTP MCP server: " + String(err));
       if (!res.headersSent) {
@@ -699,8 +755,9 @@ export async function runHttpMcpServer(options) {
     }
   });
 
-  httpServer.listen(port, () => {
-    debugLog(`[ctxce] HTTP MCP bridge listening on port ${port}`);
+  // Bind to 127.0.0.1 only (localhost) for local-only OAuth security
+  httpServer.listen(port, '127.0.0.1', () => {
+    debugLog(`[ctxce] HTTP MCP bridge listening on 127.0.0.1:${port}`);
   });
 }
 
