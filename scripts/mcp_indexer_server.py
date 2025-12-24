@@ -7191,26 +7191,47 @@ def _ca_fallback_and_budget(
         try:
             path = str(span.get("path") or "")
             container_path = str(span.get("container_path") or "")
+            host_path = str(span.get("host_path") or "")
             sline = int(span.get("start_line") or 0)
             eline = int(span.get("end_line") or 0)
-            if not (path or container_path) or sline <= 0:
+            if not (path or container_path or host_path) or sline <= 0:
                 span["_ident_snippet"] = ""
                 return ""
+
+            # Build list of candidate paths to try:
+            # 1. Container path (/work/...) - works in Docker/k8s
+            # 2. Host path from metadata - works locally
+            # 3. Relative path from cwd - fallback for local dev
+            candidates: list[str] = []
             raw_path = container_path or path
             fp = raw_path
             if not os.path.isabs(fp):
                 fp = os.path.join("/work", fp)
             realp = os.path.realpath(fp)
-            if not realp.startswith("/work/"):
-                span["_ident_snippet"] = ""
-                return ""
-            with open(realp, "r", encoding="utf-8", errors="ignore") as f:
-                lines = f.readlines()
-            si = max(1, sline - 1)
-            ei = min(len(lines), max(sline, eline) + 1)
-            snippet = "".join(lines[si - 1 : ei])
-            span["_ident_snippet"] = snippet
-            return snippet
+            if realp.startswith("/work/"):
+                candidates.append(realp)
+            # Try host_path if available (populated by indexer for local runs)
+            if host_path and os.path.isabs(host_path):
+                candidates.append(host_path)
+            # Also try workspace-relative for local dev when /work doesn't exist
+            if not os.path.exists("/work") and path and not os.path.isabs(path):
+                local_rel = os.path.join(os.getcwd(), path)
+                if os.path.exists(local_rel):
+                    candidates.append(local_rel)
+
+            # Try each candidate until we find one that exists
+            for cand in candidates:
+                if os.path.isfile(cand):
+                    with open(cand, "r", encoding="utf-8", errors="ignore") as f:
+                        lines = f.readlines()
+                    si = max(1, sline - 1)
+                    ei = min(len(lines), max(sline, eline) + 1)
+                    snippet = "".join(lines[si - 1 : ei])
+                    span["_ident_snippet"] = snippet
+                    return snippet
+
+            span["_ident_snippet"] = ""
+            return ""
         except Exception:
             span["_ident_snippet"] = ""
             return ""
@@ -7431,25 +7452,43 @@ def _ca_build_citations_and_context(
             snippet = str(it.get("_ident_snippet")).strip()
         if not snippet and path and sline and include_snippet:
             try:
-                fp = path
                 import os as _os
 
+                # Build list of candidate paths to try:
+                # 1. Container path (/work/...) - works in Docker/k8s
+                # 2. Host path from metadata - works locally
+                # 3. Relative path from cwd - fallback for local dev
+                candidates: list[str] = []
+                fp = path
                 if not _os.path.isabs(fp):
                     fp = _os.path.join("/work", fp)
                 realp = _os.path.realpath(fp)
-                if not realp.startswith("/work/"):
-                    snippet = ""
-                else:
-                    with open(realp, "r", encoding="utf-8", errors="ignore") as f:
-                        lines = f.readlines()
-                    try:
-                        margin = int(_os.environ.get("CTX_READ_MARGIN", "1") or 1)
-                    except (ValueError, TypeError):
-                        margin = 1
-                    si = max(1, sline - margin)
-                    ei = min(len(lines), max(sline, eline) + margin)
-                    snippet = "".join(lines[si - 1 : ei])
-                    it["_ident_snippet"] = snippet
+                if realp.startswith("/work/"):
+                    candidates.append(realp)
+                # Try host_path if available (populated by indexer for local runs)
+                if _hostp and _os.path.isabs(str(_hostp)):
+                    candidates.append(str(_hostp))
+                # Also try workspace-relative for local dev when /work doesn't exist
+                if not _os.path.exists("/work") and not _os.path.isabs(path):
+                    # Try from cwd (assuming cwd is workspace root)
+                    local_rel = _os.path.join(_os.getcwd(), path)
+                    if _os.path.exists(local_rel):
+                        candidates.append(local_rel)
+
+                # Try each candidate until we find one that exists
+                for cand in candidates:
+                    if _os.path.isfile(cand):
+                        with open(cand, "r", encoding="utf-8", errors="ignore") as f:
+                            lines = f.readlines()
+                        try:
+                            margin = int(_os.environ.get("CTX_READ_MARGIN", "1") or 1)
+                        except (ValueError, TypeError):
+                            margin = 1
+                        si = max(1, sline - margin)
+                        ei = min(len(lines), max(sline, eline) + margin)
+                        snippet = "".join(lines[si - 1 : ei])
+                        it["_ident_snippet"] = snippet
+                        break
             except Exception:
                 snippet = ""
         if not snippet:

@@ -917,17 +917,28 @@ def _normalize_repo_name_for_collection(repo_name: str) -> str:
 
 
 def get_collection_name(repo_name: Optional[str] = None) -> str:
-    """Get collection name for repository or workspace."""
-    normalized = _normalize_repo_name_for_collection(repo_name) if repo_name else None
+    """Get collection name for repository or workspace.
 
-    # In multi-repo mode, prioritize repo-specific collection names
-    if is_multi_repo_mode() and normalized:
-        return _generate_collection_name_from_repo(normalized)
+    Priority:
+    1. Explicit COLLECTION_NAME env var - always wins when set to a real value
+    2. Multi-repo mode: generate from repo name
+    3. Single-repo mode with repo name: generate from repo name
+    4. Fallback: "global-collection"
 
-    # Check environment for single-repo mode or fallback
+    This ensures COLLECTION_NAME works as a master override in both local dev
+    and container environments, while still allowing auto-generation when
+    COLLECTION_NAME is not set or is a placeholder.
+    """
+    # COLLECTION_NAME always wins when explicitly set to a real value
     env_coll = os.environ.get("COLLECTION_NAME", "").strip()
     if env_coll and env_coll not in PLACEHOLDER_COLLECTION_NAMES:
         return env_coll
+
+    normalized = _normalize_repo_name_for_collection(repo_name) if repo_name else None
+
+    # In multi-repo mode, generate repo-specific collection names
+    if is_multi_repo_mode() and normalized:
+        return _generate_collection_name_from_repo(normalized)
 
     # Use repo name if provided (for single-repo mode with repo name)
     if normalized:
