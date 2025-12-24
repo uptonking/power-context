@@ -76,6 +76,65 @@ def _staging_enabled() -> bool:
     return bool(is_staging_enabled() if callable(is_staging_enabled) else False)
 
 
+def _workspace_base_dir() -> Path:
+    return Path(os.environ.get("WORKSPACE_PATH") or os.environ.get("WATCH_ROOT") or "/work")
+
+
+def _repo_state_dir(repo_name: str) -> Path:
+    return _workspace_base_dir() / ".codebase" / "repos" / repo_name
+
+
+def _copy_repo_state_for_clone(
+    *,
+    repo_name: str,
+    clone_repo_name: str,
+    src_workspace: str,
+    clone_workspace: str,
+) -> None:
+    src_dir = _repo_state_dir(repo_name)
+    if not src_dir.exists():
+        return
+    dst_dir = _repo_state_dir(clone_repo_name)
+    shutil.copytree(src_dir, dst_dir, dirs_exist_ok=True)
+
+    cache_path = dst_dir / "cache.json"
+    if not cache_path.exists():
+        return
+
+    try:
+        with cache_path.open("r", encoding="utf-8") as fh:
+            cache = json.load(fh)
+        file_hashes = cache.get("file_hashes")
+        if not isinstance(file_hashes, dict):
+            return
+
+        src_root = str(Path(src_workspace).resolve())
+        clone_root = str(Path(clone_workspace).resolve())
+        updated = False
+        new_hashes: Dict[str, Any] = {}
+        for key, value in file_hashes.items():
+            new_key = key
+            if isinstance(key, str):
+                if key.startswith(src_root):
+                    new_key = clone_root + key[len(src_root) :]
+                else:
+                    token = f"/{repo_name}"
+                    repl = f"/{clone_repo_name}"
+                    if token in key:
+                        new_key = key.replace(token, repl, 1)
+                if new_key != key:
+                    updated = True
+            new_hashes[new_key] = value
+
+        if updated:
+            cache["file_hashes"] = new_hashes
+            cache["updated_at"] = datetime.now(timezone.utc).isoformat()
+            with cache_path.open("w", encoding="utf-8") as fh:
+                json.dump(cache, fh, ensure_ascii=False, indent=2, sort_keys=True)
+    except Exception as exc:
+        print(f"[staging] Warning: failed to retarget cache.json for {clone_repo_name}: {exc}")
+
+
 _COLLECTION_SCHEMA_CACHE: Dict[str, Dict[str, Any]] = {}
 _SNAPSHOT_REFRESHED: Set[str] = set()
 _MAPPING_INDEX_CACHE: Dict[str, Any] = {"ts": 0.0, "work_dir": "", "value": {}}
@@ -1112,10 +1171,8 @@ def start_staging_rebuild(*, collection: str, work_dir: str) -> str:
     source_point_count = _get_collection_point_count(collection_name=collection, qdrant_url=qdrant_url)
 
     # Use local import for thread-safety and determinism
-    _copy_fn: Any = None
-    if copy_collection_qdrant is not None:
-        _copy_fn = copy_collection_qdrant
-    else:
+    _copy_fn: Any = copy_collection_qdrant
+    if _copy_fn is None:
         # Re-import for container environments where module-level import may have failed
         from scripts.collection_admin import copy_collection_qdrant as _ccq
         _copy_fn = _ccq
@@ -1197,6 +1254,16 @@ def start_staging_rebuild(*, collection: str, work_dir: str) -> str:
                 print(f"[staging] Workspace copy completed in {time.time() - t0:.1f}s")
         except Exception as exc:
             print(f"[staging] Warning: failed to copy workspace tree for {repo_name}: {exc}")
+
+        try:
+            _copy_repo_state_for_clone(
+                repo_name=repo_name,
+                clone_repo_name=f"{repo_name}_old",
+                src_workspace=str(canonical_dir),
+                clone_workspace=str(old_dir),
+            )
+        except Exception as exc:
+            print(f"[staging] Warning: failed to copy repo state for {repo_name}: {exc}")
 
         try:
             old_state = state.copy()
