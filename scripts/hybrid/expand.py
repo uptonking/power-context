@@ -20,17 +20,11 @@ __all__ = [
 
 import os
 import re
-import sys
 import ast
 import json
 import logging
 from typing import List, Dict, Any, TYPE_CHECKING
 from pathlib import Path
-
-# Ensure project root is on sys.path for scripts imports
-_ROOT_DIR = Path(__file__).resolve().parent.parent
-if str(_ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(_ROOT_DIR))
 
 logger = logging.getLogger("hybrid_expand")
 

@@ -22,18 +22,12 @@ __all__ = [
 ]
 
 import os
-import sys
 import logging
 import threading
 import re
 from typing import List, Dict, Any, Tuple
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
-
-# Ensure /work or repo root is in sys.path for scripts imports
-_ROOT_DIR = Path(__file__).resolve().parent.parent
-if str(_ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(_ROOT_DIR))
 
 # Core Qdrant imports
 try:

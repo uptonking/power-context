@@ -20,16 +20,10 @@ __all__ = [
 ]
 
 import os
-import sys
 import threading
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any, List, Optional, TYPE_CHECKING
-
-# Ensure project root is on sys.path for imports
-_ROOT_DIR = Path(__file__).resolve().parent.parent
-if str(_ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(_ROOT_DIR))
 
 # ---------------------------------------------------------------------------
 # Embedder factory setup
