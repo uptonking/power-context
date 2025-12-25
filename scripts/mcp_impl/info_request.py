@@ -24,7 +24,7 @@ from typing import Any, Dict, List
 logger = logging.getLogger(__name__)
 
 # Import _split_ident for tokenization
-from scripts.mcp.utils import _split_ident
+from scripts.mcp_impl.utils import _split_ident
 
 
 def _extract_symbols_from_query(query: str) -> list[str]:

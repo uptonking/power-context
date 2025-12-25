@@ -188,7 +188,7 @@ async def _collection_map_impl(
 
     Implementation extracted from mcp_indexer_server.py for modularity.
     """
-    from scripts.mcp.utils import _coerce_bool
+    from scripts.mcp_impl.utils import _coerce_bool
 
     _coerce = coerce_bool_fn or _coerce_bool
 

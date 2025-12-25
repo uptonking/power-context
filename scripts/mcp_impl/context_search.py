@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Imports from sibling modules
 # ---------------------------------------------------------------------------
-from scripts.mcp.utils import (
+from scripts.mcp_impl.utils import (
     _coerce_bool,
     _coerce_int,
     _to_str_list_relaxed,
@@ -35,8 +35,8 @@ from scripts.mcp.utils import (
     _maybe_parse_jsonish,
     _extract_kwargs_payload,
 )
-from scripts.mcp.workspace import _default_collection, _MEM_COLL_CACHE
-from scripts.mcp.toon import _should_use_toon, _format_context_results_as_toon
+from scripts.mcp_impl.workspace import _default_collection, _MEM_COLL_CACHE
+from scripts.mcp_impl.toon import _should_use_toon, _format_context_results_as_toon
 
 # Environment
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")

@@ -60,7 +60,7 @@ async def _memory_store_impl(
     if default_collection_fn:
         coll = (collection or default_collection_fn()) or ""
     else:
-        from scripts.mcp.workspace import _default_collection
+        from scripts.mcp_impl.workspace import _default_collection
         coll = (collection or _default_collection()) or ""
 
     model_name = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
@@ -106,7 +106,7 @@ async def _memory_store_impl(
     if get_embedding_model_fn:
         model = get_embedding_model_fn(model_name)
     else:
-        from scripts.mcp.admin_tools import _get_embedding_model
+        from scripts.mcp_impl.admin_tools import _get_embedding_model
         model = _get_embedding_model(model_name)
 
     dense = next(model.embed([str(information)])).tolist()

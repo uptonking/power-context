@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Imports from sibling modules
 # ---------------------------------------------------------------------------
-from scripts.mcp.utils import _extract_kwargs_payload
+from scripts.mcp_impl.utils import _extract_kwargs_payload
 
 
 # Test file globs
@@ -118,7 +118,7 @@ async def _search_tests_for_impl(
             globs.append(str(extra_glob))
     
     if repo_search_fn is None:
-        from scripts.mcp.search import _repo_search_impl
+        from scripts.mcp_impl.search import _repo_search_impl
         repo_search_fn = _repo_search_impl
     
     return await repo_search_fn(
@@ -167,7 +167,7 @@ async def _search_config_for_impl(
             globs.append(str(extra_glob))
     
     if repo_search_fn is None:
-        from scripts.mcp.search import _repo_search_impl
+        from scripts.mcp_impl.search import _repo_search_impl
         repo_search_fn = _repo_search_impl
     
     return await repo_search_fn(
@@ -203,7 +203,7 @@ async def _search_callers_for_impl(
     - Returns repo_search result shape
     """
     if repo_search_fn is None:
-        from scripts.mcp.search import _repo_search_impl
+        from scripts.mcp_impl.search import _repo_search_impl
         repo_search_fn = _repo_search_impl
 
     return await repo_search_fn(
@@ -244,7 +244,7 @@ async def _search_importers_for_impl(
             globs.append(str(extra_glob))
 
     if repo_search_fn is None:
-        from scripts.mcp.search import _repo_search_impl
+        from scripts.mcp_impl.search import _repo_search_impl
         repo_search_fn = _repo_search_impl
 
     # Forward to repo_search with preset path_glob; caller can still pass other filters

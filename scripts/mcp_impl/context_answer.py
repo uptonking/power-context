@@ -44,12 +44,12 @@ from typing import Any, Dict, Optional, Tuple
 from pathlib import Path
 
 # Import utilities from sibling modules
-from scripts.mcp.utils import (
+from scripts.mcp_impl.utils import (
     _to_str_list_relaxed,
     _env_overrides,
     _primary_identifier_from_queries,
 )
-from scripts.mcp.workspace import _default_collection
+from scripts.mcp_impl.workspace import _default_collection
 from scripts.logger import safe_int, ValidationError
 
 logger = logging.getLogger(__name__)
@@ -2522,7 +2522,7 @@ async def _context_answer_impl(
 
     # Get embedding model function
     if get_embedding_model_fn is None:
-        from scripts.mcp.admin_tools import _get_embedding_model
+        from scripts.mcp_impl.admin_tools import _get_embedding_model
         get_embedding_model_fn = _get_embedding_model
 
     # Use injected lock or fall back to module-level lock

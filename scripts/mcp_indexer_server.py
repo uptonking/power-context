@@ -105,7 +105,7 @@ except ImportError:
     logging.basicConfig(level=logging.INFO)
 
     # Import safe conversion functions from utils (single source of truth)
-    from scripts.mcp.utils import safe_int, safe_float, safe_bool
+    from scripts.mcp_impl.utils import safe_int, safe_float, safe_bool
 
 
 from scripts.mcp_auth import (
@@ -141,25 +141,25 @@ from scripts.mcp_toon import (
 )
 
 # Import implementations from extracted modules
-from scripts.mcp.context_search import _context_search_impl
-from scripts.mcp.query_expand import _expand_query_impl
-from scripts.mcp.search import _repo_search_impl
-from scripts.mcp.info_request import (
+from scripts.mcp_impl.context_search import _context_search_impl
+from scripts.mcp_impl.query_expand import _expand_query_impl
+from scripts.mcp_impl.search import _repo_search_impl
+from scripts.mcp_impl.info_request import (
     _extract_symbols_from_query,
     _extract_related_concepts,
     _format_information_field,
     _extract_relationships,
     _calculate_confidence,
 )
-from scripts.mcp.admin_tools import _collection_map_impl
-from scripts.mcp.memory import _memory_store_impl
-from scripts.mcp.search_specialized import (
+from scripts.mcp_impl.admin_tools import _collection_map_impl
+from scripts.mcp_impl.memory import _memory_store_impl
+from scripts.mcp_impl.search_specialized import (
     _search_tests_for_impl,
     _search_config_for_impl,
     _search_callers_for_impl,
     _search_importers_for_impl,
 )
-from scripts.mcp.search_history import (
+from scripts.mcp_impl.search_history import (
     _search_commits_for_impl,
     _change_history_for_path_impl,
 )
@@ -205,7 +205,7 @@ PORT = safe_int(
     context="FASTMCP_INDEXER_PORT",
 )
 
-# Note: _env_overrides and _primary_identifier_from_queries are now imported from scripts.mcp.utils
+# Note: _env_overrides and _primary_identifier_from_queries are now imported from scripts.mcp_impl.utils
 
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
 DEFAULT_COLLECTION = (
@@ -1614,7 +1614,7 @@ async def code_search(
 
 # ---------------------------------------------------------------------------
 # info_request: Simplified codebase retrieval with explanation mode
-# (helpers imported from scripts.mcp.info_request)
+# (helpers imported from scripts.mcp_impl.info_request)
 # ---------------------------------------------------------------------------
 @mcp.tool()
 async def info_request(

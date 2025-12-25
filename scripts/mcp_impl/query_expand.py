@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Imports from sibling modules
 # ---------------------------------------------------------------------------
-from scripts.mcp.utils import _coerce_int, _to_str_list_relaxed
+from scripts.mcp_impl.utils import _coerce_int, _to_str_list_relaxed
 
 async def _expand_query_impl(query: Any = None, max_new: Any = None, session: Optional[str] = None) -> Dict[str, Any]:
     """LLM-assisted query expansion (local llama.cpp, if enabled).

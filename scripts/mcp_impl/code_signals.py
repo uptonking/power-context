@@ -78,7 +78,7 @@ def _init_code_intent_centroids():
     global _CODE_INTENT_CACHE
     
     # Import here to avoid circular dependency
-    from scripts.mcp.admin_tools import _get_embedding_model
+    from scripts.mcp_impl.admin_tools import _get_embedding_model
     import numpy as np
     
     with _CODE_INTENT_LOCK:
@@ -119,7 +119,7 @@ def _detect_code_intent_embedding(query: str) -> float:
         float: 0.0-1.0 indicating code-likeness (1.0 = very code-like)
     """
     # Import here to avoid circular dependency
-    from scripts.mcp.admin_tools import _get_embedding_model
+    from scripts.mcp_impl.admin_tools import _get_embedding_model
     import numpy as np
     
     if not _CODE_INTENT_CACHE.get("initialized"):

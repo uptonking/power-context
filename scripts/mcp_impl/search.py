@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Imports from sibling modules
 # ---------------------------------------------------------------------------
-from scripts.mcp.utils import (
+from scripts.mcp_impl.utils import (
     _coerce_bool,
     _coerce_int,
     _coerce_str,
@@ -39,8 +39,8 @@ from scripts.mcp.utils import (
     _tokens_from_queries,
     safe_int,
 )
-from scripts.mcp.workspace import _default_collection, _work_script
-from scripts.mcp.admin_tools import _detect_current_repo, _run_async
+from scripts.mcp_impl.workspace import _default_collection, _work_script
+from scripts.mcp_impl.admin_tools import _detect_current_repo, _run_async
 from scripts.mcp_toon import _should_use_toon, _format_results_as_toon
 from scripts.mcp_auth import require_collection_access as _require_collection_access
 

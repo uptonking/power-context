@@ -57,7 +57,7 @@ async def _search_commits_for_impl(
     """
     # Get default collection function
     if default_collection_fn is None:
-        from scripts.mcp.workspace import _default_collection
+        from scripts.mcp_impl.workspace import _default_collection
         default_collection_fn = _default_collection
 
     # Normalize inputs
@@ -134,7 +134,7 @@ async def _search_commits_for_impl(
 
                 if vec_name:
                     if get_embedding_model_fn is None:
-                        from scripts.mcp.admin_tools import _get_embedding_model
+                        from scripts.mcp_impl.admin_tools import _get_embedding_model
                         get_embedding_model_fn = _get_embedding_model
                     
                     embed_model = get_embedding_model_fn(model_name)
@@ -326,7 +326,7 @@ async def _change_history_for_path_impl(
     """
     # Get default collection function
     if default_collection_fn is None:
-        from scripts.mcp.workspace import _default_collection
+        from scripts.mcp_impl.workspace import _default_collection
         default_collection_fn = _default_collection
 
     p = str(path or "").strip()
