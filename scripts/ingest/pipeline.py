@@ -1,25 +1,9 @@
 #!/usr/bin/env python3
 """
-ingest_code.py - Façade module for code indexing.
+ingest/pipeline.py - Core indexing pipeline.
 
-This is the stable public entrypoint for the code indexing subsystem.
-All internal logic has been refactored into smaller, focused modules in scripts/ingest/:
-- config.py: Environment-based configuration and constants
-- tree_sitter.py: Tree-sitter setup and language loading
-- vectors.py: Vector generation utilities (lex hash, mini projection)
-- exclusions.py: File and directory exclusion logic
-- chunking.py: Code chunking utilities (line, semantic, token-based)
-- symbols.py: Symbol extraction for code analysis
-- pseudo.py: ReFRAG pseudo-description and tag generation
-- metadata.py: Metadata extraction (git, imports, calls)
-- qdrant.py: Qdrant schema and I/O operations
-- pipeline.py: Helper functions for indexing
-- cli.py: Command-line interface
-
-This façade:
-1. Re-exports all public APIs for backwards compatibility
-2. Implements main orchestration functions (index_single_file, index_repo, process_file_with_smart_reindexing)
-3. Provides the CLI entrypoint (main)
+This module provides the main indexing functions: index_single_file, index_repo,
+process_file_with_smart_reindexing, and related orchestration logic.
 """
 from __future__ import annotations
 
@@ -28,168 +12,60 @@ import sys
 import hashlib
 import time
 from pathlib import Path
-from datetime import datetime
 from typing import List, Dict, Any, Optional, TYPE_CHECKING
-
-# Ensure project root is on sys.path when run as a script
-ROOT_DIR = Path(__file__).resolve().parent.parent
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
 
 from qdrant_client import QdrantClient, models
 
-# ---------------------------------------------------------------------------
-# Re-exports from ingest/config.py
-# ---------------------------------------------------------------------------
 from scripts.ingest.config import (
     ROOT_DIR,
-    _safe_int_env,
-    _env_truthy,
-    LEX_VECTOR_NAME,
-    LEX_VECTOR_DIM,
-    MINI_VECTOR_NAME,
-    MINI_VEC_DIM,
-    LEX_SPARSE_NAME,
-    LEX_SPARSE_MODE,
-    _STOP,
     CODE_EXTS,
     EXTENSIONLESS_FILES,
-    _DEFAULT_EXCLUDE_DIRS,
-    _DEFAULT_EXCLUDE_DIR_GLOBS,
-    _DEFAULT_EXCLUDE_FILES,
-    _ANY_DEPTH_EXCLUDE_DIR_NAMES,
+    LEX_VECTOR_NAME,
+    LEX_VECTOR_DIM,
+    LEX_SPARSE_NAME,
+    LEX_SPARSE_MODE,
+    MINI_VECTOR_NAME,
+    MINI_VEC_DIM,
+    _env_truthy,
     is_multi_repo_mode,
     get_collection_name,
     logical_repo_reuse_enabled,
-    log_activity,
     get_cached_file_hash,
     set_cached_file_hash,
-    remove_cached_file,
-    update_indexing_status,
-    update_workspace_state,
     get_cached_symbols,
     set_cached_symbols,
-    remove_cached_symbols,
-    compare_symbol_changes,
     get_cached_pseudo,
     set_cached_pseudo,
-    update_symbols_with_pseudo,
-    get_workspace_state,
     get_cached_file_meta,
-    indexing_lock,
+    get_workspace_state,
+    compare_symbol_changes,
     file_indexing_lock,
-    is_file_locked,
-    _detect_repo_for_file,
-    _get_collection_for_file,
 )
-
-# ---------------------------------------------------------------------------
-# Re-exports from ingest/tree_sitter.py
-# ---------------------------------------------------------------------------
-from scripts.ingest.tree_sitter import (
-    _TS_LANGUAGES,
-    _TS_AVAILABLE,
-    _use_tree_sitter,
-    _ts_parser,
-    _load_ts_language,
-)
-
-try:
-    from tree_sitter import Parser, Language
-except ImportError:
-    Parser = None  # type: ignore
-    Language = None  # type: ignore
-
-# ---------------------------------------------------------------------------
-# Re-exports from ingest/vectors.py
-# ---------------------------------------------------------------------------
-from scripts.ingest.vectors import (
-    _MINI_PROJ_CACHE,
-    _get_mini_proj,
-    project_mini,
-    _split_ident_lex,
-    _lex_hash_vector,
-)
-
-# ---------------------------------------------------------------------------
-# Re-exports from ingest/exclusions.py
-# ---------------------------------------------------------------------------
 from scripts.ingest.exclusions import (
-    _Excluder,
-    is_indexable_file,
-    _is_indexable_file,
-    _should_skip_explicit_file_by_excluder,
     iter_files,
+    _should_skip_explicit_file_by_excluder,
 )
-
-# ---------------------------------------------------------------------------
-# Re-exports from ingest/chunking.py
-# ---------------------------------------------------------------------------
-from scripts.ingest.chunking import (
-    chunk_lines,
-    chunk_semantic,
-    chunk_by_tokens,
-)
-
-# ---------------------------------------------------------------------------
-# Re-exports from ingest/symbols.py
-# ---------------------------------------------------------------------------
+from scripts.ingest.chunking import chunk_lines, chunk_semantic, chunk_by_tokens
 from scripts.ingest.symbols import (
-    _Sym,
-    _extract_symbols_python,
-    _extract_symbols_js_like,
-    _extract_symbols_go,
-    _extract_symbols_java,
-    _extract_symbols_csharp,
-    _extract_symbols_php,
-    _extract_symbols_shell,
-    _extract_symbols_yaml,
-    _extract_symbols_powershell,
-    _extract_symbols_rust,
-    _extract_symbols_terraform,
-    _ts_extract_symbols_python,
-    _ts_extract_symbols_js,
-    _ts_extract_symbols_yaml,
-    _ts_extract_symbols,
     _extract_symbols,
     _choose_symbol_for_chunk,
     extract_symbols_with_tree_sitter,
 )
-
-# ---------------------------------------------------------------------------
-# Re-exports from ingest/pseudo.py
-# ---------------------------------------------------------------------------
 from scripts.ingest.pseudo import (
-    _pseudo_describe_enabled,
-    _smart_symbol_reindexing_enabled,
     generate_pseudo_tags,
     should_process_pseudo_for_chunk,
-    should_use_smart_reindexing,
 )
-
-# ---------------------------------------------------------------------------
-# Re-exports from ingest/metadata.py
-# ---------------------------------------------------------------------------
 from scripts.ingest.metadata import (
     _git_metadata,
-    _extract_imports,
-    _extract_calls,
     _get_imports_calls,
-    _get_host_path_from_origin,
     _compute_host_and_container_paths,
 )
-
-# ---------------------------------------------------------------------------
-# Re-exports from ingest/qdrant.py
-# ---------------------------------------------------------------------------
+from scripts.ingest.vectors import project_mini
 from scripts.ingest.qdrant import (
-    ENSURED_COLLECTIONS,
-    ENSURED_COLLECTIONS_LAST_CHECK,
-    CollectionNeedsRecreateError,
     ensure_collection,
-    recreate_collection,
-    ensure_payload_indexes,
     ensure_collection_and_indexes_once,
+    ensure_payload_indexes,
+    recreate_collection,
     get_indexed_file_hash,
     delete_points_by_path,
     upsert_points,
@@ -197,64 +73,50 @@ from scripts.ingest.qdrant import (
     embed_batch,
 )
 
-# ---------------------------------------------------------------------------
-# Re-exports from ingest/pipeline.py (helpers only)
-# ---------------------------------------------------------------------------
-from scripts.ingest.pipeline import (
-    _detect_repo_name_from_path,
-    detect_language,
-    build_information,
-    pseudo_backfill_tick,
-)
-
-# ---------------------------------------------------------------------------
-# Re-exports from ingest/cli.py
-# ---------------------------------------------------------------------------
-from scripts.ingest.cli import (
-    parse_args,
-)
-
-# ---------------------------------------------------------------------------
-# Additional imports for backward compatibility
-# ---------------------------------------------------------------------------
-try:
-    from scripts.embedder import get_embedding_model as _get_embedding_model
-    _EMBEDDER_FACTORY = True
-except ImportError:
-    _EMBEDDER_FACTORY = False
-
-if TYPE_CHECKING:
-    from fastembed import TextEmbedding
-
-try:
-    from fastembed import TextEmbedding
-except ImportError:
-    TextEmbedding = None  # type: ignore
-
+# Import utility functions
 from scripts.utils import sanitize_vector_name as _sanitize_vector_name
 from scripts.utils import lex_hash_vector_text as _lex_hash_vector_text
 from scripts.utils import lex_sparse_vector_text as _lex_sparse_vector_text
 
-try:
-    from scripts.ast_analyzer import get_ast_analyzer, chunk_code_semantically
-    _AST_ANALYZER_AVAILABLE = True
-except ImportError:
-    _AST_ANALYZER_AVAILABLE = False
-
-try:
-    from tqdm import tqdm
-except ImportError:
-    tqdm = None  # type: ignore
-
-_TS_WARNED = False
+if TYPE_CHECKING:
+    from fastembed import TextEmbedding
 
 
-# ---------------------------------------------------------------------------
-# Main orchestration functions (kept in façade for test monkeypatching)
-# ---------------------------------------------------------------------------
+def _detect_repo_name_from_path(path: Path) -> str:
+    """Wrapper function to use workspace_state repository detection."""
+    try:
+        from scripts.workspace_state import _extract_repo_name_from_path as _ws_detect
+        return _ws_detect(str(path))
+    except ImportError:
+        return path.name if path.is_dir() else path.parent.name
+
+
+def detect_language(path: Path) -> str:
+    """Detect language from file extension or name pattern."""
+    ext_lang = CODE_EXTS.get(path.suffix.lower())
+    if ext_lang:
+        return ext_lang
+    fname_lower = path.name.lower()
+    if fname_lower in EXTENSIONLESS_FILES:
+        return EXTENSIONLESS_FILES[fname_lower]
+    if fname_lower.startswith("dockerfile"):
+        return "dockerfile"
+    return "unknown"
+
+
+def build_information(
+    language: str, path: Path, start: int, end: int, first_line: str
+) -> str:
+    """Build the information/document string for a chunk."""
+    first_line = (first_line or "").strip()
+    if len(first_line) > 160:
+        first_line = first_line[:160] + "…"
+    return f"{language} code from {path} lines {start}-{end}. {first_line}"
+
+
 def index_single_file(
     client: QdrantClient,
-    model,
+    model: "TextEmbedding",
     collection: str,
     vector_name: str,
     file_path: Path,
@@ -304,7 +166,7 @@ def index_single_file(
 
 def _index_single_file_inner(
     client: QdrantClient,
-    model,
+    model: "TextEmbedding",
     collection: str,
     vector_name: str,
     file_path: Path,
@@ -391,6 +253,7 @@ def _index_single_file_inner(
                     changed_symbols.add(symbol_id)
 
     if skip_unchanged:
+        ws_path = os.environ.get("WATCH_ROOT") or os.environ.get("WORKSPACE_PATH") or "/work"
         try:
             if get_cached_file_hash:
                 prev_local = get_cached_file_hash(str(file_path), repo_tag)
@@ -443,6 +306,13 @@ def _index_single_file_inner(
                 _new_tokens = max(_base_tokens, int(_base_tokens * _scale))
                 _new_stride = max(_base_stride, int(_base_stride * _scale))
                 chunks = chunk_by_tokens(text, k_tokens=_new_tokens, stride_tokens=_new_stride)
+                try:
+                    print(
+                        f"[ingest] micro-chunks resized path={file_path} count={_before}->{len(chunks)} "
+                        f"tokens={_base_tokens}->{_new_tokens} stride={_base_stride}->{_new_stride}"
+                    )
+                except Exception:
+                    pass
         except Exception:
             chunks = chunk_by_tokens(text)
     elif use_semantic:
@@ -453,7 +323,7 @@ def _index_single_file_inner(
     batch_texts: List[str] = []
     batch_meta: List[Dict] = []
     batch_ids: List[int] = []
-    batch_lex: List[list] = []
+    batch_lex: List[list[float]] = []
     batch_lex_text: List[str] = []
 
     def make_point(pid, dense_vec, lex_vec, payload, lex_text: str = ""):
@@ -475,7 +345,7 @@ def _index_single_file_inner(
     pseudo_batch_concurrency = int(os.environ.get("PSEUDO_BATCH_CONCURRENCY", "1") or 1)
     use_batch_pseudo = pseudo_batch_concurrency > 1 and pseudo_mode == "full"
 
-    chunk_data: list = []
+    chunk_data: list[dict] = []
     for ch in chunks:
         info = build_information(
             language, file_path, ch["start"], ch["end"],
@@ -612,8 +482,10 @@ def _index_single_file_inner(
         ]
         upsert_points(client, collection, points)
         try:
+            ws = os.environ.get("WATCH_ROOT") or os.environ.get("WORKSPACE_PATH") or "/work"
             if set_cached_file_hash:
-                set_cached_file_hash(str(file_path), file_hash, repo_tag)
+                file_repo_tag = repo_tag
+                set_cached_file_hash(str(file_path), file_hash, file_repo_tag)
         except Exception:
             pass
         return True
@@ -664,7 +536,10 @@ def index_repo(
                     all_unchanged = False
                     break
             if all_unchanged:
-                print("[fast_index] No changes detected via fs metadata; skipping model and Qdrant setup")
+                try:
+                    print("[fast_index] No changes detected via fs metadata; skipping model and Qdrant setup")
+                except Exception:
+                    pass
                 return
         except Exception:
             pass
@@ -674,6 +549,7 @@ def index_repo(
         model = get_embedding_model(model_name)
         dim = get_model_dimension(model_name)
     except ImportError:
+        from fastembed import TextEmbedding
         model = TextEmbedding(model_name=model_name)
         dim = len(next(model.embed(["dimension probe"])))
 
@@ -723,9 +599,10 @@ def index_repo(
     )
 
     try:
+        from tqdm import tqdm
         files = list(iter_files(root))
-        iterator = tqdm(files, desc="Indexing files") if tqdm else files
-    except Exception:
+        iterator = tqdm(files, desc="Indexing files")
+    except ImportError:
         files = list(iter_files(root))
         iterator = files
 
@@ -798,8 +675,8 @@ def process_file_with_smart_reindexing(
         return "failed"
 
     cached_symbols = get_cached_symbols(fp) if get_cached_symbols else {}
-    unchanged_symbols: list = []
-    changed_symbols: list = []
+    unchanged_symbols: list[str] = []
+    changed_symbols: list[str] = []
     if cached_symbols and compare_symbol_changes:
         try:
             unchanged_symbols, changed_symbols = compare_symbol_changes(
@@ -844,7 +721,7 @@ def process_file_with_smart_reindexing(
         print(f"[SMART_REINDEX] Failed to load existing points for {file_path}: {e}")
         existing_points = []
 
-    points_by_code: dict = {}
+    points_by_code: dict[tuple[str, str, str], list] = {}
     try:
         for rec in existing_points:
             payload = rec.payload or {}
@@ -878,12 +755,12 @@ def process_file_with_smart_reindexing(
     
     symbol_spans = _extract_symbols(language, text)
 
-    reused_points: list = []
-    embed_texts: list = []
-    embed_payloads: list = []
-    embed_ids: list = []
-    embed_lex: list = []
-    embed_lex_text: list = []
+    reused_points: list[models.PointStruct] = []
+    embed_texts: list[str] = []
+    embed_payloads: list[dict] = []
+    embed_ids: list[int] = []
+    embed_lex: list[list[float]] = []
+    embed_lex_text: list[str] = []
 
     imports, calls = _get_imports_calls(language, text)
     last_mod, churn_count, author_count = _git_metadata(file_path)
@@ -891,7 +768,7 @@ def process_file_with_smart_reindexing(
     pseudo_batch_concurrency = int(os.environ.get("PSEUDO_BATCH_CONCURRENCY", "1") or 1)
     use_batch_pseudo = pseudo_batch_concurrency > 1
 
-    chunk_data_sr: list = []
+    chunk_data_sr: list[dict] = []
     for ch in chunks:
         info = build_information(
             language, file_path, ch["start"], ch["end"],
@@ -1084,7 +961,7 @@ def process_file_with_smart_reindexing(
         embed_lex.append(_lex_hash_vector_text(aug_lex_text))
         embed_lex_text.append(aug_lex_text)
 
-    new_points: list = []
+    new_points: list[models.PointStruct] = []
     if embed_texts:
         vectors = embed_batch(model, embed_texts)
         for pid, v, lx, pl, lt in zip(embed_ids, vectors, embed_lex, embed_payloads, embed_lex_text):
@@ -1130,93 +1007,177 @@ def process_file_with_smart_reindexing(
     return "success"
 
 
-# ---------------------------------------------------------------------------
-# CLI entrypoint
-# ---------------------------------------------------------------------------
-def main():
-    """Main entry point for the CLI."""
-    from scripts.ingest.cli import main as _cli_main
-    _cli_main()
+# Import pseudo_backfill_tick for backward compatibility
+def pseudo_backfill_tick(
+    client: QdrantClient,
+    collection: str,
+    repo_name: str | None = None,
+    *,
+    max_points: int = 256,
+    dim: int | None = None,
+    vector_name: str | None = None,
+) -> int:
+    """Best-effort pseudo/tag backfill for a collection."""
+    from scripts.ingest.qdrant import ensure_collection_and_indexes_once
+    
+    if not collection or max_points <= 0:
+        return 0
 
+    try:
+        from qdrant_client import models as _models
+    except Exception:
+        return 0
 
-# ---------------------------------------------------------------------------
-# Public API (__all__)
-# ---------------------------------------------------------------------------
-__all__ = [
-    # Config
-    "ROOT_DIR",
-    "LEX_VECTOR_NAME",
-    "LEX_VECTOR_DIM",
-    "MINI_VECTOR_NAME",
-    "MINI_VEC_DIM",
-    "LEX_SPARSE_NAME",
-    "LEX_SPARSE_MODE",
-    "CODE_EXTS",
-    "EXTENSIONLESS_FILES",
-    # Workspace state
-    "is_multi_repo_mode",
-    "get_collection_name",
-    "logical_repo_reuse_enabled",
-    "get_cached_symbols",
-    "set_cached_symbols",
-    "compare_symbol_changes",
-    "get_cached_pseudo",
-    "set_cached_pseudo",
-    "get_cached_file_hash",
-    "set_cached_file_hash",
-    # Tree-sitter
-    "_TS_AVAILABLE",
-    "_TS_LANGUAGES",
-    "_use_tree_sitter",
-    # Vectors
-    "project_mini",
-    "_lex_hash_vector",
-    # Exclusions
-    "iter_files",
-    "is_indexable_file",
-    "_Excluder",
-    # Chunking
-    "chunk_lines",
-    "chunk_semantic",
-    "chunk_by_tokens",
-    # Symbols
-    "_extract_symbols",
-    "extract_symbols_with_tree_sitter",
-    "_choose_symbol_for_chunk",
-    # Pseudo
-    "_pseudo_describe_enabled",
-    "_smart_symbol_reindexing_enabled",
-    "generate_pseudo_tags",
-    "should_process_pseudo_for_chunk",
-    "should_use_smart_reindexing",
-    # Metadata
-    "_git_metadata",
-    "_get_imports_calls",
-    # Qdrant
-    "ensure_collection",
-    "recreate_collection",
-    "ensure_payload_indexes",
-    "ensure_collection_and_indexes_once",
-    "get_indexed_file_hash",
-    "delete_points_by_path",
-    "upsert_points",
-    "hash_id",
-    "embed_batch",
-    # Pipeline
-    "_detect_repo_name_from_path",
-    "detect_language",
-    "build_information",
-    "index_single_file",
-    "index_repo",
-    "process_file_with_smart_reindexing",
-    "pseudo_backfill_tick",
-    # CLI
-    "main",
-    # Backward compat
-    "TextEmbedding",
-    "_EMBEDDER_FACTORY",
-]
+    must_conditions: list[Any] = []
+    if repo_name:
+        try:
+            must_conditions.append(
+                _models.FieldCondition(
+                    key="metadata.repo",
+                    match=_models.MatchValue(value=repo_name),
+                )
+            )
+        except Exception:
+            pass
 
+    flt = None
+    try:
+        null_cond = getattr(_models, "IsNullCondition", None)
+        empty_cond = getattr(_models, "IsEmptyCondition", None)
+        if null_cond is not None:
+            should_conditions = []
+            try:
+                should_conditions.append(null_cond(is_null="pseudo"))
+            except Exception:
+                pass
+            try:
+                should_conditions.append(null_cond(is_null="tags"))
+            except Exception:
+                pass
+            if empty_cond is not None:
+                try:
+                    should_conditions.append(empty_cond(is_empty="tags"))
+                except Exception:
+                    pass
+            flt = _models.Filter(
+                must=must_conditions or None,
+                should=should_conditions or None,
+            )
+        else:
+            flt = _models.Filter(must=must_conditions or None)
+    except Exception:
+        flt = None
 
-if __name__ == "__main__":
-    main()
+    processed = 0
+    debug_enabled = (os.environ.get("PSEUDO_BACKFILL_DEBUG") or "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+    next_offset = None
+
+    def _maybe_ensure_collection() -> bool:
+        if not dim or not vector_name:
+            return False
+        try:
+            ensure_collection_and_indexes_once(client, collection, int(dim), vector_name)
+            return True
+        except Exception:
+            return False
+
+    while processed < max_points:
+        batch_limit = max(1, min(64, max_points - processed))
+        try:
+            points, next_offset = client.scroll(
+                collection_name=collection,
+                scroll_filter=flt,
+                limit=batch_limit,
+                with_payload=True,
+                with_vectors=True,
+                offset=next_offset,
+            )
+        except Exception:
+            if _maybe_ensure_collection():
+                try:
+                    points, next_offset = client.scroll(
+                        collection_name=collection,
+                        scroll_filter=flt,
+                        limit=batch_limit,
+                        with_payload=True,
+                        with_vectors=True,
+                        offset=next_offset,
+                    )
+                except Exception:
+                    break
+            else:
+                break
+
+        if not points:
+            break
+
+        new_points: list[Any] = []
+        for rec in points:
+            try:
+                payload = rec.payload or {}
+                md = payload.get("metadata") or {}
+                code = md.get("code") or ""
+                if not code:
+                    continue
+
+                pseudo = payload.get("pseudo") or ""
+                tags_val = payload.get("tags") or []
+                tags: list[str] = list(tags_val) if isinstance(tags_val, list) else []
+
+                if not pseudo and not tags:
+                    try:
+                        pseudo, tags = generate_pseudo_tags(code)
+                    except Exception:
+                        pseudo, tags = "", []
+
+                if not pseudo and not tags:
+                    continue
+
+                payload["pseudo"] = pseudo
+                payload["tags"] = tags
+
+                aug_text = f"{code} {pseudo} {' '.join(tags)}".strip()
+                lex_vec = _lex_hash_vector_text(aug_text)
+
+                vec = rec.vector
+                if isinstance(vec, dict):
+                    vecs = dict(vec)
+                    vecs[LEX_VECTOR_NAME] = lex_vec
+                    new_vec = vecs
+                else:
+                    new_vec = vec
+
+                if LEX_SPARSE_MODE and aug_text and isinstance(new_vec, dict):
+                    sparse_vec = _lex_sparse_vector_text(aug_text)
+                    if sparse_vec.get("indices"):
+                        new_vec[LEX_SPARSE_NAME] = models.SparseVector(**sparse_vec)
+
+                new_points.append(
+                    models.PointStruct(
+                        id=rec.id,
+                        vector=new_vec,
+                        payload=payload,
+                    )
+                )
+                processed += 1
+            except Exception:
+                continue
+
+        if new_points:
+            try:
+                upsert_points(client, collection, new_points)
+            except Exception:
+                if _maybe_ensure_collection():
+                    try:
+                        upsert_points(client, collection, new_points)
+                    except Exception:
+                        break
+                else:
+                    break
+
+        if next_offset is None:
+            break
+
+    return processed
