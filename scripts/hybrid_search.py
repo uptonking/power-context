@@ -101,6 +101,8 @@ from scripts.hybrid_config import (
     # Cache config
     MAX_EMBED_CACHE,
     MAX_RESULTS_CACHE,
+    # Output config
+    INCLUDE_WHY,
 )
 
 # ---------------------------------------------------------------------------
@@ -777,7 +779,7 @@ def run_hybrid_search(
                 lex_vec = lex_hash_vector(qlist)
                 lex_results = lex_query(client, lex_vec, flt, _scaled_per_query, collection)
                 if lex_results:
-                    print(f"[hybrid_search] LEX_SPARSE_MODE enabled but sparse query returned empty; fell back to dense lex")
+                    logger.debug("LEX_SPARSE_MODE enabled but sparse query returned empty; fell back to dense lex")
             else:
                 _used_sparse_lex = True  # Actually used sparse vectors
         else:
@@ -789,7 +791,7 @@ def run_hybrid_search(
             try:
                 lex_vec = lex_hash_vector(qlist)
                 lex_results = lex_query(client, lex_vec, flt, _scaled_per_query, collection)
-                print(f"[hybrid_search] LEX_SPARSE_MODE sparse query failed ({e}); fell back to dense lex")
+                logger.warning("LEX_SPARSE_MODE sparse query failed (%s); fell back to dense lex", e)
             except Exception:
                 lex_results = []
         else:
@@ -1742,19 +1744,22 @@ def run_hybrid_search(
         # Add reranker info to components if present
         if rerank_score is not None:
             comp["rerank"] = round(float(rerank_score), 4)
-        why = []
-        if comp["dense_rrf"]:
-            why.append(f"dense_rrf:{comp['dense_rrf']}")
-        for k in ("lexical", "symbol_substr", "symbol_exact", "core_boost", "lang_boost", "impl_boost"):
-            if comp[k]:
-                why.append(f"{k}:{comp[k]}")
-        if comp["vendor_penalty"]:
-            why.append(f"vendor_penalty:{comp['vendor_penalty']}")
-        for k in ("test_penalty", "config_penalty", "doc_penalty"):
-            if comp.get(k):
-                why.append(f"{k}:{comp[k]}")
-        if comp["recency"]:
-            why.append(f"recency:{comp['recency']}")
+        # Build "why" explanation only if enabled (reduces tokens by default)
+        why = None
+        if INCLUDE_WHY:
+            why = []
+            if comp["dense_rrf"]:
+                why.append(f"dense_rrf:{comp['dense_rrf']}")
+            for k in ("lexical", "symbol_substr", "symbol_exact", "core_boost", "lang_boost", "impl_boost"):
+                if comp[k]:
+                    why.append(f"{k}:{comp[k]}")
+            if comp["vendor_penalty"]:
+                why.append(f"vendor_penalty:{comp['vendor_penalty']}")
+            for k in ("test_penalty", "config_penalty", "doc_penalty"):
+                if comp.get(k):
+                    why.append(f"{k}:{comp[k]}")
+            if comp["recency"]:
+                why.append(f"recency:{comp['recency']}")
         # Related hints
         _imports = md.get("imports") or []
         _calls = md.get("calls") or []
@@ -1901,29 +1906,29 @@ def run_hybrid_search(
         except Exception:
             pass
 
-        items.append(
-            {
-                "score": round(float(m["s"]), 4),
-                "raw_score": float(m["s"]),  # expose raw fused score for downstream budgeter
-                "fusion_score": round(fusion_score, 4),  # Always store fusion score
-                "rerank_score": round(float(rerank_score), 4) if rerank_score is not None else None,  # Store rerank separately
-                "path": _emit_path,
-                "host_path": _host,
-                "container_path": _cont,
-                "symbol": _symp,
-                "start_line": start_line,
-                "end_line": end_line,
-                "components": comp,
-                "why": why,
-                "relations": {"imports": _imports, "calls": _calls, "symbol_path": _symp},
-                "related_paths": _related_out,
-                "span_budgeted": bool(m.get("_merged_start") is not None),
-                "budget_tokens_used": m.get("_budget_tokens"),
-                "text": _text,
-                "pseudo": _pseudo,
-                "tags": _tags,
-            }
-        )
+        item = {
+            "score": round(float(m["s"]), 4),
+            "raw_score": float(m["s"]),  # expose raw fused score for downstream budgeter
+            "fusion_score": round(fusion_score, 4),  # Always store fusion score
+            "rerank_score": round(float(rerank_score), 4) if rerank_score is not None else None,  # Store rerank separately
+            "path": _emit_path,
+            "host_path": _host,
+            "container_path": _cont,
+            "symbol": _symp,
+            "start_line": start_line,
+            "end_line": end_line,
+            "components": comp,
+            "relations": {"imports": _imports, "calls": _calls, "symbol_path": _symp},
+            "related_paths": _related_out,
+            "span_budgeted": bool(m.get("_merged_start") is not None),
+            "budget_tokens_used": m.get("_budget_tokens"),
+            "text": _text,
+            "pseudo": _pseudo,
+            "tags": _tags,
+        }
+        if why is not None:
+            item["why"] = why
+        items.append(item)
     if _USE_CACHE and cache_key is not None:
         if UNIFIED_CACHE_AVAILABLE:
             _RESULTS_CACHE.set(cache_key, items)
