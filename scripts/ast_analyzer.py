@@ -187,11 +187,12 @@ class ASTAnalyzer:
             "python": {"ast": True, "tree_sitter": True},
             "javascript": {"ast": False, "tree_sitter": True},
             "typescript": {"ast": False, "tree_sitter": True},
-            "java": {"ast": False, "tree_sitter": False},
-            "go": {"ast": False, "tree_sitter": False},
-            "rust": {"ast": False, "tree_sitter": False},
-            "c": {"ast": False, "tree_sitter": False},
-            "cpp": {"ast": False, "tree_sitter": False},
+            "java": {"ast": False, "tree_sitter": True},
+            "go": {"ast": False, "tree_sitter": True},
+            "rust": {"ast": False, "tree_sitter": True},
+            "c": {"ast": False, "tree_sitter": True},
+            "cpp": {"ast": False, "tree_sitter": True},
+            "ruby": {"ast": False, "tree_sitter": True},
         }
         
         logger.info(f"ASTAnalyzer initialized: tree_sitter={self.use_tree_sitter}")
@@ -222,6 +223,16 @@ class ASTAnalyzer:
             return self._analyze_python(content, file_path)
         elif language in ("javascript", "typescript") and self.use_tree_sitter:
             return self._analyze_js_ts(content, file_path, language)
+        elif language == "go" and self.use_tree_sitter:
+            return self._analyze_go(content, file_path)
+        elif language == "rust" and self.use_tree_sitter:
+            return self._analyze_rust(content, file_path)
+        elif language == "java" and self.use_tree_sitter:
+            return self._analyze_java(content, file_path)
+        elif language in ("c", "cpp") and self.use_tree_sitter:
+            return self._analyze_c_cpp(content, file_path, language)
+        elif language == "ruby" and self.use_tree_sitter:
+            return self._analyze_ruby(content, file_path)
         else:
             # Fallback to regex-based analysis
             return self._analyze_generic(content, file_path, language)
@@ -627,6 +638,589 @@ class ASTAnalyzer:
             "imports": imports,
             "calls": calls,
             "language": language
+        }
+    
+    # ---- Go analysis (using tree-sitter) ----
+    
+    def _analyze_go(self, content: str, file_path: str) -> Dict[str, Any]:
+        """Analyze Go using tree-sitter."""
+        parser = self._get_ts_parser("go")
+        if not parser:
+            return self._analyze_generic(content, file_path, "go")
+        
+        try:
+            tree = parser.parse(content.encode("utf-8"))
+            root = tree.root_node
+        except Exception as e:
+            logger.warning(f"Tree-sitter parse error in {file_path}: {e}")
+            return self._analyze_generic(content, file_path, "go")
+        
+        symbols = []
+        imports = []
+        calls = []
+        
+        def node_text(n):
+            return content.encode("utf-8")[n.start_byte:n.end_byte].decode("utf-8", errors="ignore")
+        
+        def walk(node, parent_type=None):
+            node_type = node.type
+            
+            # Functions
+            if node_type == "function_declaration":
+                name_node = node.child_by_field_name("name")
+                func_name = node_text(name_node) if name_node else ""
+                symbols.append(CodeSymbol(
+                    name=func_name,
+                    kind="function",
+                    start_line=node.start_point[0] + 1,
+                    end_line=node.end_point[0] + 1
+                ))
+            
+            # Methods
+            elif node_type == "method_declaration":
+                name_node = node.child_by_field_name("name")
+                method_name = node_text(name_node) if name_node else ""
+                receiver = node.child_by_field_name("receiver")
+                receiver_type = ""
+                if receiver:
+                    for child in receiver.children:
+                        if child.type == "type_identifier":
+                            receiver_type = node_text(child)
+                            break
+                symbols.append(CodeSymbol(
+                    name=method_name,
+                    kind="method",
+                    start_line=node.start_point[0] + 1,
+                    end_line=node.end_point[0] + 1,
+                    parent=receiver_type,
+                    path=f"{receiver_type}.{method_name}" if receiver_type else method_name
+                ))
+            
+            # Types (struct, interface)
+            elif node_type == "type_declaration":
+                for child in node.children:
+                    if child.type == "type_spec":
+                        name_node = child.child_by_field_name("name")
+                        type_name = node_text(name_node) if name_node else ""
+                        type_node = child.child_by_field_name("type")
+                        kind = "struct"
+                        if type_node and type_node.type == "interface_type":
+                            kind = "interface"
+                        symbols.append(CodeSymbol(
+                            name=type_name,
+                            kind=kind,
+                            start_line=child.start_point[0] + 1,
+                            end_line=child.end_point[0] + 1
+                        ))
+            
+            # Imports
+            elif node_type == "import_declaration":
+                for child in node.children:
+                    if child.type == "import_spec":
+                        path_node = child.child_by_field_name("path")
+                        if path_node:
+                            module = node_text(path_node).strip('"')
+                            imports.append(ImportReference(
+                                module=module,
+                                names=[],
+                                line=child.start_point[0] + 1,
+                                is_from=True
+                            ))
+                    elif child.type == "import_spec_list":
+                        for spec in child.children:
+                            if spec.type == "import_spec":
+                                path_node = spec.child_by_field_name("path")
+                                if path_node:
+                                    module = node_text(path_node).strip('"')
+                                    imports.append(ImportReference(
+                                        module=module,
+                                        names=[],
+                                        line=spec.start_point[0] + 1,
+                                        is_from=True
+                                    ))
+            
+            # Calls
+            elif node_type == "call_expression":
+                func = node.child_by_field_name("function")
+                if func:
+                    name = node_text(func)
+                    base = name.split(".")[-1] if "." in name else name
+                    if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", base):
+                        calls.append(CallReference(
+                            caller="",
+                            callee=base,
+                            line=node.start_point[0] + 1,
+                            context="call"
+                        ))
+            
+            for child in node.children:
+                walk(child, node_type)
+        
+        walk(root)
+        
+        return {
+            "symbols": symbols,
+            "imports": imports,
+            "calls": calls,
+            "language": "go"
+        }
+    
+    # ---- Rust analysis (using tree-sitter) ----
+    
+    def _analyze_rust(self, content: str, file_path: str) -> Dict[str, Any]:
+        """Analyze Rust using tree-sitter."""
+        parser = self._get_ts_parser("rust")
+        if not parser:
+            return self._analyze_generic(content, file_path, "rust")
+        
+        try:
+            tree = parser.parse(content.encode("utf-8"))
+            root = tree.root_node
+        except Exception as e:
+            logger.warning(f"Tree-sitter parse error in {file_path}: {e}")
+            return self._analyze_generic(content, file_path, "rust")
+        
+        symbols = []
+        imports = []
+        calls = []
+        
+        def node_text(n):
+            return content.encode("utf-8")[n.start_byte:n.end_byte].decode("utf-8", errors="ignore")
+        
+        def walk(node, parent_struct=None):
+            node_type = node.type
+            
+            # Functions
+            if node_type == "function_item":
+                name_node = node.child_by_field_name("name")
+                func_name = node_text(name_node) if name_node else ""
+                symbols.append(CodeSymbol(
+                    name=func_name,
+                    kind="function",
+                    start_line=node.start_point[0] + 1,
+                    end_line=node.end_point[0] + 1,
+                    parent=parent_struct
+                ))
+            
+            # Structs
+            elif node_type == "struct_item":
+                name_node = node.child_by_field_name("name")
+                struct_name = node_text(name_node) if name_node else ""
+                symbols.append(CodeSymbol(
+                    name=struct_name,
+                    kind="struct",
+                    start_line=node.start_point[0] + 1,
+                    end_line=node.end_point[0] + 1
+                ))
+            
+            # Enums
+            elif node_type == "enum_item":
+                name_node = node.child_by_field_name("name")
+                enum_name = node_text(name_node) if name_node else ""
+                symbols.append(CodeSymbol(
+                    name=enum_name,
+                    kind="enum",
+                    start_line=node.start_point[0] + 1,
+                    end_line=node.end_point[0] + 1
+                ))
+            
+            # Traits
+            elif node_type == "trait_item":
+                name_node = node.child_by_field_name("name")
+                trait_name = node_text(name_node) if name_node else ""
+                symbols.append(CodeSymbol(
+                    name=trait_name,
+                    kind="trait",
+                    start_line=node.start_point[0] + 1,
+                    end_line=node.end_point[0] + 1
+                ))
+            
+            # Impl blocks
+            elif node_type == "impl_item":
+                type_node = node.child_by_field_name("type")
+                impl_type = node_text(type_node).split("<")[0].strip() if type_node else ""
+                for child in node.children:
+                    walk(child, impl_type)
+                return
+            
+            # Use statements
+            elif node_type == "use_declaration":
+                arg = node.child_by_field_name("argument")
+                if arg:
+                    imports.append(ImportReference(
+                        module=node_text(arg).strip(),
+                        names=[],
+                        line=node.start_point[0] + 1,
+                        is_from=True
+                    ))
+            
+            # Calls and macros
+            elif node_type in ("call_expression", "macro_invocation"):
+                func = node.child_by_field_name("function") or node.child_by_field_name("macro")
+                if func:
+                    name = node_text(func)
+                    base = name.split("::")[-1].rstrip("!") if "::" in name else name.rstrip("!")
+                    if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", base):
+                        calls.append(CallReference(
+                            caller="",
+                            callee=base,
+                            line=node.start_point[0] + 1,
+                            context="call"
+                        ))
+            
+            for child in node.children:
+                walk(child, parent_struct)
+        
+        walk(root)
+        
+        return {
+            "symbols": symbols,
+            "imports": imports,
+            "calls": calls,
+            "language": "rust"
+        }
+    
+    # ---- Java analysis (using tree-sitter) ----
+    
+    def _analyze_java(self, content: str, file_path: str) -> Dict[str, Any]:
+        """Analyze Java using tree-sitter."""
+        parser = self._get_ts_parser("java")
+        if not parser:
+            return self._analyze_generic(content, file_path, "java")
+        
+        try:
+            tree = parser.parse(content.encode("utf-8"))
+            root = tree.root_node
+        except Exception as e:
+            logger.warning(f"Tree-sitter parse error in {file_path}: {e}")
+            return self._analyze_generic(content, file_path, "java")
+        
+        symbols = []
+        imports = []
+        calls = []
+        
+        def node_text(n):
+            return content.encode("utf-8")[n.start_byte:n.end_byte].decode("utf-8", errors="ignore")
+        
+        def walk(node, parent_class=None):
+            node_type = node.type
+            
+            # Classes
+            if node_type == "class_declaration":
+                name_node = node.child_by_field_name("name")
+                class_name = node_text(name_node) if name_node else ""
+                symbols.append(CodeSymbol(
+                    name=class_name,
+                    kind="class",
+                    start_line=node.start_point[0] + 1,
+                    end_line=node.end_point[0] + 1
+                ))
+                for child in node.children:
+                    walk(child, class_name)
+                return
+            
+            # Interfaces
+            elif node_type == "interface_declaration":
+                name_node = node.child_by_field_name("name")
+                iface_name = node_text(name_node) if name_node else ""
+                symbols.append(CodeSymbol(
+                    name=iface_name,
+                    kind="interface",
+                    start_line=node.start_point[0] + 1,
+                    end_line=node.end_point[0] + 1
+                ))
+                for child in node.children:
+                    walk(child, iface_name)
+                return
+            
+            # Methods
+            elif node_type == "method_declaration":
+                name_node = node.child_by_field_name("name")
+                method_name = node_text(name_node) if name_node else ""
+                symbols.append(CodeSymbol(
+                    name=method_name,
+                    kind="method",
+                    start_line=node.start_point[0] + 1,
+                    end_line=node.end_point[0] + 1,
+                    parent=parent_class,
+                    path=f"{parent_class}.{method_name}" if parent_class else method_name
+                ))
+            
+            # Constructors
+            elif node_type == "constructor_declaration":
+                name_node = node.child_by_field_name("name")
+                ctor_name = node_text(name_node) if name_node else ""
+                symbols.append(CodeSymbol(
+                    name=ctor_name,
+                    kind="constructor",
+                    start_line=node.start_point[0] + 1,
+                    end_line=node.end_point[0] + 1,
+                    parent=parent_class
+                ))
+            
+            # Imports
+            elif node_type == "import_declaration":
+                for child in node.children:
+                    if child.type == "scoped_identifier" or child.type == "identifier":
+                        imports.append(ImportReference(
+                            module=node_text(child),
+                            names=[],
+                            line=node.start_point[0] + 1,
+                            is_from=True
+                        ))
+                        break
+            
+            # Method calls
+            elif node_type == "method_invocation":
+                name_node = node.child_by_field_name("name")
+                if name_node:
+                    calls.append(CallReference(
+                        caller="",
+                        callee=node_text(name_node),
+                        line=node.start_point[0] + 1,
+                        context="call"
+                    ))
+            
+            for child in node.children:
+                walk(child, parent_class)
+        
+        walk(root)
+        
+        return {
+            "symbols": symbols,
+            "imports": imports,
+            "calls": calls,
+            "language": "java"
+        }
+    
+    # ---- C/C++ analysis (using tree-sitter) ----
+    
+    def _analyze_c_cpp(self, content: str, file_path: str, language: str) -> Dict[str, Any]:
+        """Analyze C/C++ using tree-sitter."""
+        parser = self._get_ts_parser(language)
+        if not parser:
+            return self._analyze_generic(content, file_path, language)
+        
+        try:
+            tree = parser.parse(content.encode("utf-8"))
+            root = tree.root_node
+        except Exception as e:
+            logger.warning(f"Tree-sitter parse error in {file_path}: {e}")
+            return self._analyze_generic(content, file_path, language)
+        
+        symbols = []
+        imports = []
+        calls = []
+        
+        def node_text(n):
+            return content.encode("utf-8")[n.start_byte:n.end_byte].decode("utf-8", errors="ignore")
+        
+        def walk(node, parent_class=None):
+            node_type = node.type
+            
+            # Functions
+            if node_type == "function_definition":
+                decl = node.child_by_field_name("declarator")
+                func_name = ""
+                if decl:
+                    for child in decl.children:
+                        if child.type == "identifier":
+                            func_name = node_text(child)
+                            break
+                        elif child.type == "function_declarator":
+                            for subchild in child.children:
+                                if subchild.type == "identifier":
+                                    func_name = node_text(subchild)
+                                    break
+                if func_name:
+                    symbols.append(CodeSymbol(
+                        name=func_name,
+                        kind="function",
+                        start_line=node.start_point[0] + 1,
+                        end_line=node.end_point[0] + 1,
+                        parent=parent_class
+                    ))
+            
+            # Classes (C++)
+            elif node_type == "class_specifier":
+                name_node = node.child_by_field_name("name")
+                class_name = node_text(name_node) if name_node else ""
+                if class_name:
+                    symbols.append(CodeSymbol(
+                        name=class_name,
+                        kind="class",
+                        start_line=node.start_point[0] + 1,
+                        end_line=node.end_point[0] + 1
+                    ))
+                    for child in node.children:
+                        walk(child, class_name)
+                    return
+            
+            # Structs
+            elif node_type == "struct_specifier":
+                name_node = node.child_by_field_name("name")
+                struct_name = node_text(name_node) if name_node else ""
+                if struct_name:
+                    symbols.append(CodeSymbol(
+                        name=struct_name,
+                        kind="struct",
+                        start_line=node.start_point[0] + 1,
+                        end_line=node.end_point[0] + 1
+                    ))
+            
+            # Includes
+            elif node_type == "preproc_include":
+                path_node = node.child_by_field_name("path")
+                if path_node:
+                    path = node_text(path_node).strip('<">').strip()
+                    imports.append(ImportReference(
+                        module=path,
+                        names=[],
+                        line=node.start_point[0] + 1,
+                        is_from=False
+                    ))
+            
+            # Calls
+            elif node_type == "call_expression":
+                func = node.child_by_field_name("function")
+                if func:
+                    name = node_text(func)
+                    # Handle namespaced calls like std::cout
+                    base = name.split("::")[-1] if "::" in name else name
+                    if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", base):
+                        calls.append(CallReference(
+                            caller="",
+                            callee=base,
+                            line=node.start_point[0] + 1,
+                            context="call"
+                        ))
+            
+            for child in node.children:
+                walk(child, parent_class)
+        
+        walk(root)
+        
+        return {
+            "symbols": symbols,
+            "imports": imports,
+            "calls": calls,
+            "language": language
+        }
+    
+    # ---- Ruby analysis (using tree-sitter) ----
+    
+    def _analyze_ruby(self, content: str, file_path: str) -> Dict[str, Any]:
+        """Analyze Ruby using tree-sitter."""
+        parser = self._get_ts_parser("ruby")
+        if not parser:
+            return self._analyze_generic(content, file_path, "ruby")
+        
+        try:
+            tree = parser.parse(content.encode("utf-8"))
+            root = tree.root_node
+        except Exception as e:
+            logger.warning(f"Tree-sitter parse error in {file_path}: {e}")
+            return self._analyze_generic(content, file_path, "ruby")
+        
+        symbols = []
+        imports = []
+        calls = []
+        
+        def node_text(n):
+            return content.encode("utf-8")[n.start_byte:n.end_byte].decode("utf-8", errors="ignore")
+        
+        def walk(node, parent_class=None):
+            node_type = node.type
+            
+            # Classes
+            if node_type == "class":
+                name_node = node.child_by_field_name("name")
+                class_name = node_text(name_node) if name_node else ""
+                symbols.append(CodeSymbol(
+                    name=class_name,
+                    kind="class",
+                    start_line=node.start_point[0] + 1,
+                    end_line=node.end_point[0] + 1
+                ))
+                for child in node.children:
+                    walk(child, class_name)
+                return
+            
+            # Modules
+            elif node_type == "module":
+                name_node = node.child_by_field_name("name")
+                module_name = node_text(name_node) if name_node else ""
+                symbols.append(CodeSymbol(
+                    name=module_name,
+                    kind="module",
+                    start_line=node.start_point[0] + 1,
+                    end_line=node.end_point[0] + 1
+                ))
+                for child in node.children:
+                    walk(child, module_name)
+                return
+            
+            # Methods
+            elif node_type == "method":
+                name_node = node.child_by_field_name("name")
+                method_name = node_text(name_node) if name_node else ""
+                symbols.append(CodeSymbol(
+                    name=method_name,
+                    kind="method",
+                    start_line=node.start_point[0] + 1,
+                    end_line=node.end_point[0] + 1,
+                    parent=parent_class,
+                    path=f"{parent_class}.{method_name}" if parent_class else method_name
+                ))
+            
+            # Require statements
+            elif node_type == "call":
+                method = node.child_by_field_name("method")
+                if method:
+                    method_name = node_text(method)
+                    if method_name in ("require", "require_relative", "load"):
+                        args = node.child_by_field_name("arguments")
+                        if args:
+                            for arg in args.children:
+                                if arg.type == "string":
+                                    path = node_text(arg).strip("'\"")
+                                    imports.append(ImportReference(
+                                        module=path,
+                                        names=[],
+                                        line=node.start_point[0] + 1,
+                                        is_from=True
+                                    ))
+                                    break
+                    else:
+                        # Regular method call
+                        calls.append(CallReference(
+                            caller="",
+                            callee=method_name,
+                            line=node.start_point[0] + 1,
+                            context="call"
+                        ))
+            
+            # Method calls (method_call node type)
+            elif node_type == "method_call":
+                method = node.child_by_field_name("method")
+                if method:
+                    calls.append(CallReference(
+                        caller="",
+                        callee=node_text(method),
+                        line=node.start_point[0] + 1,
+                        context="call"
+                    ))
+            
+            for child in node.children:
+                walk(child, parent_class)
+        
+        walk(root)
+        
+        return {
+            "symbols": symbols,
+            "imports": imports,
+            "calls": calls,
+            "language": "ruby"
         }
     
     def _get_ts_parser(self, language: str):
