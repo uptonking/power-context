@@ -417,13 +417,13 @@ class AsyncSubprocessManager:
 
 # Global async subprocess manager instance
 _async_manager: Optional[AsyncSubprocessManager] = None
-_manager_lock = asyncio.Lock()
+_manager_lock = threading.Lock()
 
 
-def get_async_subprocess_manager(timeout: float = 30.0, max_workers: int = 10) -> AsyncSubprocessManager:
+async def get_async_subprocess_manager(timeout: float = 30.0, max_workers: int = 10) -> AsyncSubprocessManager:
     """Get or create the global async subprocess manager."""
     global _async_manager
-    
+
     def _create_manager():
         global _async_manager
         if _async_manager is None:
@@ -433,9 +433,8 @@ def get_async_subprocess_manager(timeout: float = 30.0, max_workers: int = 10) -
             )
             logger.debug("Created global async subprocess manager")
         return _async_manager
-    
-    # Use regular lock since this function is not async
-    import threading
+
+    # Use regular lock (threading.Lock supports context manager)
     with _manager_lock:
         return _create_manager()
 

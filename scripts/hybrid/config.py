@@ -19,6 +19,7 @@ __all__ = [
     "MICRO_OUT_MAX_SPANS", "MICRO_MERGE_LINES", "MICRO_BUDGET_TOKENS", "MICRO_TOKENS_PER_LINE",
     "LARGE_COLLECTION_THRESHOLD", "MAX_RRF_K_SCALE", "SCORE_NORMALIZE_ENABLED",
     "MAX_EMBED_CACHE", "MAX_RESULTS_CACHE",
+    "INCLUDE_WHY",
 ]
 import os
 from pathlib import Path
@@ -206,3 +207,11 @@ def _collection(collection_name: str | None = None) -> str:
 
 MAX_EMBED_CACHE = _safe_int(os.environ.get("MAX_EMBED_CACHE"), 8192)
 MAX_RESULTS_CACHE = _safe_int(os.environ.get("HYBRID_RESULTS_CACHE"), 32)
+
+
+# ---------------------------------------------------------------------------
+# Output configuration
+# ---------------------------------------------------------------------------
+
+# Include "why" explanations in search results (disabled by default to reduce tokens)
+INCLUDE_WHY = os.environ.get("INCLUDE_WHY", "0").lower() in {"1", "true", "yes", "on"}
