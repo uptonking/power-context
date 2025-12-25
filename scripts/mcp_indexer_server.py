@@ -216,8 +216,7 @@ try:
     from scripts.workspace_state import get_collection_name as _ws_get_collection_name  # type: ignore
 
     if DEFAULT_COLLECTION in {"", "default-collection", "my-collection", "codebase"}:
-        workspace_path = os.environ.get("WATCH_ROOT", "/work")
-        resolved = _ws_get_collection_name(workspace_path)
+        resolved = _ws_get_collection_name(None)
         if resolved:
             DEFAULT_COLLECTION = resolved
 except Exception:

@@ -13,8 +13,9 @@ import tempfile
 import asyncio
 import logging
 import re
+import secrets
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 from datetime import datetime
 
 import uvicorn
@@ -23,6 +24,19 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from scripts.upload_delta_bundle import get_workspace_key, process_delta_bundle
+
+from scripts.indexing_admin import (
+    build_admin_collections_view,
+    resolve_collection_root,
+    spawn_ingest_code,
+    recreate_collection_qdrant,
+)
+
+try:
+    from scripts.workspace_state import is_staging_enabled
+except Exception:
+    is_staging_enabled = None  # type: ignore
+
 
 from pydantic import BaseModel, Field
 from scripts.auth_backend import (
@@ -46,9 +60,10 @@ from scripts.auth_backend import (
 )
 
 try:
-    from scripts.collection_admin import delete_collection_everywhere
+    from scripts.collection_admin import delete_collection_everywhere, copy_collection_qdrant
 except Exception:
     delete_collection_everywhere = None
+    copy_collection_qdrant = None
 try:
     from scripts.admin_ui import (
         render_admin_acl,
@@ -66,6 +81,18 @@ except Exception:
     render_admin_error = _admin_ui_unavailable
     render_admin_login = _admin_ui_unavailable
 
+# Import staging/indexing admin helpers
+try:
+    from scripts.indexing_admin import (
+        start_staging_rebuild,
+        activate_staging_rebuild,
+        abort_staging_rebuild,
+    )
+except ImportError:
+    start_staging_rebuild = None  # type: ignore
+    activate_staging_rebuild = None  # type: ignore
+    abort_staging_rebuild = None  # type: ignore
+
 # Import existing workspace state and indexing functions
 try:
     from scripts.workspace_state import (
@@ -78,7 +105,11 @@ try:
         get_collection_mappings,
         find_collection_for_logical_repo,
         update_workspace_state,
+        set_staging_state,
+        update_staging_status,
+        clear_staging_collection,
         logical_repo_reuse_enabled,
+        get_collection_state_snapshot,
     )
 except ImportError:
     # Fallback for testing without full environment
@@ -91,7 +122,9 @@ except ImportError:
     get_collection_mappings = None
     find_collection_for_logical_repo = None
     update_workspace_state = None
-
+    set_staging_state = None
+    update_staging_status = None
+    clear_staging_collection = None
     def logical_repo_reuse_enabled() -> bool:  # type: ignore[no-redef]
         return False
 
@@ -113,11 +146,19 @@ ADMIN_COLLECTION_DELETE_ENABLED = (
     str(os.environ.get("CTXCE_ADMIN_COLLECTION_DELETE_ENABLED", "0")).strip().lower()
     in {"1", "true", "yes", "on"}
 )
-_SLUGGED_REPO_RE = re.compile(r"^.+-[0-9a-f]{16}$")
+try:
+    ADMIN_COLLECTION_REFRESH_MS = int(
+        str(os.environ.get("CTXCE_ADMIN_COLLECTION_REFRESH_MS", "5000")).strip()
+        or "5000"
+    )
+except Exception:
+    ADMIN_COLLECTION_REFRESH_MS = 5000
+_SLUGGED_REPO_RE = re.compile(r"^.+-[0-9a-f]{16}(?:_old)?$")
 CTXCE_MCP_ACL_ENFORCE = (
     str(os.environ.get("CTXCE_MCP_ACL_ENFORCE", "0")).strip().lower()
     in {"1", "true", "yes", "on"}
 )
+BRIDGE_STATE_TOKEN = (os.environ.get("CTXCE_BRIDGE_STATE_TOKEN") or "").strip()
 
 # FastAPI app
 app = FastAPI(
@@ -137,6 +178,20 @@ app.add_middleware(
 
 # In-memory sequence tracking (in production, use persistent storage)
 _sequence_tracker: Dict[str, int] = {}
+
+
+def _int_env(name: str, default: int) -> int:
+    """Read integer env vars safely; blank/invalid values fall back to default."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        trimmed = str(raw).strip()
+        if not trimmed:
+            return default
+        return int(trimmed)
+    except (TypeError, ValueError):
+        return default
 
 class UploadResponse(BaseModel):
     success: bool
@@ -162,6 +217,18 @@ class HealthResponse(BaseModel):
     version: str
     qdrant_url: str
     work_dir: str
+
+
+class BridgeCollectionStateResponse(BaseModel):
+    workspace_path: str
+    repo_name: Optional[str]
+    active_collection: Optional[str]
+    serving_collection: Optional[str]
+    previous_collection: Optional[str]
+    active_repo_slug: Optional[str]
+    serving_repo_slug: Optional[str]
+    indexing_status: Optional[Dict[str, Any]]
+    staging: Optional[Dict[str, Any]]
 
 
 class AuthLoginRequest(BaseModel):
@@ -266,6 +333,71 @@ def _require_admin_session(request: Request) -> Dict[str, Any]:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin required")
     return record
 
+
+def _bridge_state_authorized(request: Request) -> None:
+    header_token = (request.headers.get("X-Bridge-State-Token") or "").strip()
+    if BRIDGE_STATE_TOKEN:
+        if header_token:
+            try:
+                if secrets.compare_digest(header_token, BRIDGE_STATE_TOKEN):
+                    return
+            except Exception:
+                pass
+        try:
+            _require_admin_session(request)
+            return
+        except HTTPException as exc:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail="Unauthorized bridge request"
+            ) from exc
+
+    else:
+        try:
+            _require_admin_session(request)
+            return
+        except HTTPException as exc:
+            raise HTTPException(
+                status_code=exc.status_code, detail="Unauthorized bridge request"
+            ) from exc
+
+
+def _infer_repo_from_workspace(workspace_path: str) -> Optional[str]:
+    try:
+        candidate = Path(workspace_path).name
+        if candidate and _SLUGGED_REPO_RE.match(candidate):
+            return candidate
+    except Exception:
+        return None
+    return None
+
+
+def _resolve_bridge_state_target(
+    *,
+    collection: Optional[str],
+    workspace: Optional[str],
+    repo_name: Optional[str],
+) -> Tuple[str, Optional[str]]:
+    """Resolve workspace path + repo_name for bridge state lookups."""
+    workspace_path = (workspace or "").strip()
+    if not workspace_path:
+        workspace_path = WORK_DIR
+
+    repo = (repo_name or "").strip() or None
+
+    if collection:
+        if resolve_collection_root is None:
+            raise HTTPException(status_code=400, detail="collection mapping unavailable")
+        root, resolved_repo = resolve_collection_root(collection=collection, work_dir=WORK_DIR)
+        if not root:
+            raise HTTPException(status_code=404, detail="collection mapping not found")
+        workspace_path = root
+        repo = resolved_repo
+    elif not repo:
+        repo = _infer_repo_from_workspace(workspace_path)
+
+    return workspace_path, repo
+
+
 def get_next_sequence(workspace_path: str) -> int:
     """Get next sequence number for workspace."""
     key = get_workspace_key(workspace_path)
@@ -366,11 +498,7 @@ async def _process_bundle_background(
 async def auth_status():
     try:
         if not AUTH_ENABLED:
-            return AuthStatusResponse(
-                enabled=False,
-                has_users=None,
-                session_ttl_seconds=AUTH_SESSION_TTL_SECONDS,
-            )
+            return AuthStatusResponse(enabled=False, has_users=None, session_ttl_seconds=0)
         try:
             users_exist = has_any_users()
         except AuthDisabledError:
@@ -557,13 +685,18 @@ async def admin_acl_page(request: Request):
         logger.error(f"[upload_service] Failed to load admin UI data: {e}")
         raise HTTPException(status_code=500, detail="Failed to load admin data")
 
+    enriched = await asyncio.to_thread(
+        build_admin_collections_view, collections=collections, work_dir=WORK_DIR
+    )
+
     resp = render_admin_acl(
         request,
         users=users,
-        collections=collections,
+        collections=enriched,
         grants=grants,
         deletion_enabled=ADMIN_COLLECTION_DELETE_ENABLED,
         work_dir=WORK_DIR,
+        refresh_ms=ADMIN_COLLECTION_REFRESH_MS,
     )
     candidate = _get_session_candidate_from_request(request)
     if candidate.get("source") and candidate.get("source") != "cookie":
@@ -585,6 +718,153 @@ async def admin_acl_grant(
         raise HTTPException(status_code=404, detail="Auth disabled")
     except Exception as e:
         return render_admin_error(request, title="Grant Failed", message=str(e), back_href="/admin/acl")
+    return RedirectResponse(url="/admin/acl", status_code=302)
+
+
+@app.get("/admin/collections/status")
+async def admin_collections_status(request: Request):
+    _require_admin_session(request)
+    try:
+        collections = list_collections(include_deleted=False)
+    except AuthDisabledError:
+        raise HTTPException(status_code=404, detail="Auth disabled")
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to load collections")
+
+    enriched = await asyncio.to_thread(
+        lambda: build_admin_collections_view(collections=collections, work_dir=WORK_DIR)
+    )
+    return JSONResponse({"collections": enriched})
+
+
+@app.post("/admin/collections/reindex")
+async def admin_reindex_collection(
+    request: Request,
+    collection: str = Form(...),
+):
+    _require_admin_session(request)
+    name = (collection or "").strip()
+    if not name:
+        return render_admin_error(
+            request,
+            title="Reindex Failed",
+            message="collection is required",
+            back_href="/admin/acl",
+        )
+
+    root, repo_name = resolve_collection_root(collection=name, work_dir=WORK_DIR)
+    if not root:
+        return render_admin_error(
+            request,
+            title="Reindex Failed",
+            message="No workspace mapping found for collection (no state.json mapping)",
+            back_href="/admin/acl",
+        )
+
+    try:
+        spawn_ingest_code(
+            root=root,
+            work_dir=WORK_DIR,
+            collection=name,
+            recreate=False,
+            repo_name=repo_name,
+            clear_caches=True,
+        )
+    except Exception as e:
+        return render_admin_error(
+            request,
+            title="Reindex Failed",
+            message=str(e),
+            back_href="/admin/acl",
+        )
+
+    return RedirectResponse(url="/admin/acl", status_code=302)
+
+
+@app.get("/bridge/state")
+async def bridge_collection_state(
+    request: Request,
+    collection: Optional[str] = None,
+    workspace: Optional[str] = None,
+    repo_name: Optional[str] = None,
+):
+    if get_collection_state_snapshot is None:
+        raise HTTPException(status_code=503, detail="workspace_state helper unavailable")
+
+    _bridge_state_authorized(request)
+
+    workspace_path, repo = _resolve_bridge_state_target(collection=collection, workspace=workspace, repo_name=repo_name)
+
+    snapshot = get_collection_state_snapshot(workspace_path=workspace_path, repo_name=repo)
+    if not snapshot:
+        raise HTTPException(status_code=404, detail="Workspace state not found")
+
+    if not (is_staging_enabled() if callable(is_staging_enabled) else False):
+        # Classic mode: ignore any serving_* overrides from staging/migration.
+        snapshot = dict(snapshot)
+        snapshot.pop("serving_collection", None)
+        snapshot.pop("serving_repo_slug", None)
+
+    return BridgeCollectionStateResponse(
+        workspace_path=str(snapshot.get("workspace_path") or workspace_path),
+        repo_name=snapshot.get("repo_name") or repo,
+        active_collection=snapshot.get("active_collection"),
+        serving_collection=snapshot.get("serving_collection") or snapshot.get("active_collection"),
+        previous_collection=snapshot.get("previous_collection"),
+        active_repo_slug=snapshot.get("active_repo_slug") or repo,
+        serving_repo_slug=snapshot.get("serving_repo_slug") or snapshot.get("active_repo_slug"),
+        indexing_status=snapshot.get("indexing_status"),
+        staging=snapshot.get("staging"),
+    )
+
+
+# Recreate previous admin endpoint that was displaced by /bridge/state
+@app.post("/admin/collections/recreate")
+async def admin_recreate_collection(
+    request: Request,
+    collection: str = Form(...),
+):
+    _require_admin_session(request)
+    name = (collection or "").strip()
+    if not name:
+        return render_admin_error(
+            request,
+            title="Recreate Failed",
+            message="collection is required",
+            back_href="/admin/acl",
+        )
+
+    root, repo_name = resolve_collection_root(collection=name, work_dir=WORK_DIR)
+    if not root:
+        return render_admin_error(
+            request,
+            title="Recreate Failed",
+            message="No workspace mapping found for collection (no state.json mapping)",
+            back_href="/admin/acl",
+        )
+
+    try:
+        recreate_collection_qdrant(
+            qdrant_url=QDRANT_URL,
+            api_key=os.environ.get("QDRANT_API_KEY") or None,
+            collection=name,
+        )
+        spawn_ingest_code(
+            root=root,
+            work_dir=WORK_DIR,
+            collection=name,
+            recreate=False,
+            repo_name=repo_name,
+            clear_caches=True,
+        )
+    except Exception as e:
+        return render_admin_error(
+            request,
+            title="Recreate Failed",
+            message=str(e),
+            back_href="/admin/acl",
+        )
+
     return RedirectResponse(url="/admin/acl", status_code=302)
 
 
@@ -643,6 +923,279 @@ async def admin_delete_collection(
         return render_admin_error(
             request,
             title="Delete Collection Failed",
+            message=str(e),
+            back_href="/admin/acl",
+        )
+
+    return RedirectResponse(url="/admin/acl", status_code=302)
+
+
+@app.post("/admin/staging/start")
+async def admin_start_staging(
+    request: Request,
+    collection: str = Form(...),
+):
+    _require_admin_session(request)
+    if not (is_staging_enabled() if callable(is_staging_enabled) else False):
+        return render_admin_error(
+            request,
+            title="Start Staging Failed",
+            message="Staging is disabled (set CTXCE_STAGING_ENABLED=1 to enable)",
+            back_href="/admin/acl",
+        )
+
+    name = (collection or "").strip()
+    if not name:
+        return render_admin_error(
+            request,
+            title="Start Staging Failed",
+            message="collection is required",
+            back_href="/admin/acl",
+        )
+
+    if start_staging_rebuild is None:
+        return render_admin_error(
+            request,
+            title="Start Staging Failed",
+            message="Staging helper unavailable",
+            back_href="/admin/acl",
+        )
+
+    root: Optional[str] = None
+    repo_name: Optional[str] = None
+    try:
+        root, repo_name = resolve_collection_root(collection=name, work_dir=WORK_DIR)
+    except Exception:
+        root, repo_name = None, None
+    if not root:
+        return render_admin_error(
+            request,
+            title="Start Staging Failed",
+            message="No workspace mapping found for collection",
+            back_href="/admin/acl",
+        )
+
+    staged_clone_name = f"{name}_old"
+    request_id = secrets.token_hex(8)
+    now = datetime.utcnow().isoformat()
+    staging_payload = {
+        "collection": staged_clone_name,
+        "started_at": now,
+        "updated_at": now,
+        "env_hash": None,
+        "workspace_path": root,
+        "repo_name": repo_name,
+        "status": {
+            "state": "queued",
+            "queued_at": now,
+            "request_id": request_id,
+        },
+    }
+
+    if set_staging_state:
+        try:
+            set_staging_state(workspace_path=root, repo_name=repo_name, staging=staging_payload)
+        except Exception as set_err:
+            logger.warning(f"[admin] Failed to persist queued staging state for {name}: {set_err}")
+    elif update_workspace_state:
+        try:
+            update_workspace_state(
+                workspace_path=root,
+                repo_name=repo_name,
+                updates={"staging": staging_payload},
+            )
+        except Exception as set_err:
+            logger.warning(f"[admin] Failed to update workspace state for queued staging {name}: {set_err}")
+
+    if update_staging_status:
+        try:
+            update_staging_status(
+                workspace_path=root,
+                repo_name=repo_name,
+                status={"state": "queued", "queued_at": now, "request_id": request_id},
+            )
+        except Exception as status_err:
+            logger.debug(f"[admin] Failed to mark staging status queued for {name}: {status_err}")
+
+    try:
+        async def _bg_start() -> None:
+            try:
+                staging_collection = await asyncio.to_thread(
+                    start_staging_rebuild, collection=name, work_dir=WORK_DIR
+                )
+                logger.info(f"[admin] Started staging rebuild for {name} -> {staging_collection}")
+            except Exception as e:
+                logger.error(f"[admin] Background staging start failed for {name}: {e}")
+                # Ensure we don't leave the workspace stuck in a queued staging state.
+                try:
+                    if clear_staging_collection:
+                        clear_staging_collection(workspace_path=root, repo_name=repo_name)
+                    elif update_workspace_state:
+                        update_workspace_state(
+                            workspace_path=root,
+                            repo_name=repo_name,
+                            updates={"staging": None},
+                        )
+                except Exception as clear_err:
+                    logger.warning(
+                        f"[admin] Failed to clear staging state after start failure for {name}: {clear_err}"
+                    )
+
+        asyncio.create_task(_bg_start())
+    except Exception as e:
+        return render_admin_error(
+            request,
+            title="Start Staging Failed",
+            message=str(e),
+            back_href="/admin/acl",
+        )
+
+    return RedirectResponse(url="/admin/acl", status_code=302)
+
+
+@app.post("/admin/staging/activate")
+async def admin_activate_staging(
+    request: Request,
+    collection: str = Form(...),
+):
+    _require_admin_session(request)
+    if not (is_staging_enabled() if callable(is_staging_enabled) else False):
+        return render_admin_error(
+            request,
+            title="Activate Staging Failed",
+            message="Staging is disabled (set CTXCE_STAGING_ENABLED=1 to enable)",
+            back_href="/admin/acl",
+        )
+    name = (collection or "").strip()
+    if not name:
+        return render_admin_error(
+            request,
+            title="Activate Staging Failed",
+            message="collection is required",
+            back_href="/admin/acl",
+        )
+
+    if activate_staging_rebuild is None:
+        return render_admin_error(
+            request,
+            title="Activate Staging Failed",
+            message="Staging helper unavailable",
+            back_href="/admin/acl",
+        )
+
+    try:
+        async def _bg_activate() -> None:
+            try:
+                await asyncio.to_thread(activate_staging_rebuild, collection=name, work_dir=WORK_DIR)
+                logger.info(f"[admin] Activated staging for {name}")
+            except Exception as e:
+                logger.error(f"[admin] Background staging activate failed for {name}: {e}")
+
+        asyncio.create_task(_bg_activate())
+    except Exception as e:
+        return render_admin_error(
+            request,
+            title="Activate Staging Failed",
+            message=str(e),
+            back_href="/admin/acl",
+        )
+
+    return RedirectResponse(url="/admin/acl", status_code=302)
+
+
+@app.post("/admin/staging/abort")
+async def admin_abort_staging(
+    request: Request,
+    collection: str = Form(...),
+):
+    _require_admin_session(request)
+    name = (collection or "").strip()
+    if not name:
+        return render_admin_error(
+            request,
+            title="Abort Staging Failed",
+            message="collection is required",
+            back_href="/admin/acl",
+        )
+
+    root, repo_name = resolve_collection_root(collection=name, work_dir=WORK_DIR)
+    if not root:
+        return render_admin_error(
+            request,
+            title="Abort Staging Failed",
+            message="No workspace mapping found for collection",
+            back_href="/admin/acl",
+        )
+
+    try:
+        if abort_staging_rebuild is not None:
+            # Run abort to completion so we always clear staging metadata before returning.
+            await asyncio.to_thread(
+                abort_staging_rebuild,
+                collection=name,
+                work_dir=WORK_DIR,
+                delete_collection=True,
+            )
+            logger.info(f"[admin] Aborted staging rebuild for {name}")
+        elif clear_staging_collection:
+            # Fallback for older deployments: clear staging metadata only.
+            clear_staging_collection(workspace_path=root, repo_name=repo_name)
+            logger.info(f"[admin] Aborted staging for {name} (metadata only)")
+        else:
+            raise RuntimeError("staging abort helpers unavailable")
+    except Exception as e:
+        return render_admin_error(
+            request,
+            title="Abort Staging Failed",
+            message=str(e),
+            back_href="/admin/acl",
+        )
+
+    return RedirectResponse(url="/admin/acl", status_code=302)
+
+
+@app.post("/admin/staging/copy")
+async def admin_copy_collection(
+    request: Request,
+    collection: str = Form(...),
+    target: Optional[str] = Form(None),
+    overwrite: Optional[str] = Form(""),
+):
+    _require_admin_session(request)
+    name = (collection or "").strip()
+    if not name:
+        return render_admin_error(
+            request,
+            title="Copy Collection Failed",
+            message="collection is required",
+            back_href="/admin/acl",
+        )
+
+    if copy_collection_qdrant is None:
+        return render_admin_error(
+            request,
+            title="Copy Collection Failed",
+            message="copy helper unavailable",
+            back_href="/admin/acl",
+        )
+
+    try:
+        allow_overwrite = str(overwrite or "").strip().lower() in {"1", "true", "yes", "on"}
+    except Exception:
+        allow_overwrite = False
+
+    try:
+        new_name = copy_collection_qdrant(
+            source=name,
+            target=(target or None),
+            qdrant_url=QDRANT_URL,
+            overwrite=allow_overwrite,
+        )
+        logger.info(f"[admin] Copied collection {name} -> {new_name}")
+    except Exception as e:
+        return render_admin_error(
+            request,
+            title="Copy Collection Failed",
             message=str(e),
             back_href="/admin/acl",
         )
@@ -1095,7 +1648,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 def main():
     """Main entry point for the upload service."""
     host = os.environ.get("UPLOAD_SERVICE_HOST", "0.0.0.0")
-    port = int(os.environ.get("UPLOAD_SERVICE_PORT", "8002"))
+    port = _int_env("UPLOAD_SERVICE_PORT", 8002)
 
     logger.info(f"Starting upload service on {host}:{port}")
     logger.info(f"Qdrant URL: {QDRANT_URL}")

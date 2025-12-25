@@ -27,23 +27,20 @@ spec:
         image: context-engine-upload-service
         imagePullPolicy: IfNotPresent
         command:
-        - python
-        - scripts/upload_service.py
+        - uvicorn
+        args:
+        - scripts.upload_service:app
+        - --host
+        - 0.0.0.0
+        - --port
+        - '8002'
+        - --workers
+        - '2'
         ports:
         - name: http
           containerPort: 8002
           protocol: TCP
         env:
-        - name: QDRANT_URL
-          valueFrom:
-            configMapKeyRef:
-              name: context-engine-config
-              key: QDRANT_URL
-        - name: COLLECTION_NAME
-          valueFrom:
-            configMapKeyRef:
-              name: context-engine-config
-              key: COLLECTION_NAME
         - name: UPLOAD_SERVICE_HOST
           value: 0.0.0.0
         - name: UPLOAD_SERVICE_PORT
@@ -54,26 +51,6 @@ spec:
           value: '100'
         - name: UPLOAD_TIMEOUT_SECS
           value: '300'
-        - name: EMBEDDING_MODEL
-          valueFrom:
-            configMapKeyRef:
-              name: context-engine-config
-              key: EMBEDDING_MODEL
-        - name: USE_TREE_SITTER
-          valueFrom:
-            configMapKeyRef:
-              name: context-engine-config
-              key: USE_TREE_SITTER
-        - name: INDEX_SEMANTIC_CHUNKS
-          valueFrom:
-            configMapKeyRef:
-              name: context-engine-config
-              key: INDEX_SEMANTIC_CHUNKS
-        - name: INDEX_MICRO_CHUNKS
-          valueFrom:
-            configMapKeyRef:
-              name: context-engine-config
-              key: INDEX_MICRO_CHUNKS
         resources:
           requests:
             memory: 512Mi
@@ -86,18 +63,20 @@ spec:
           mountPath: /work
         - name: codebase-volume
           mountPath: /work/.codebase
-        livenessProbe:
-          httpGet:
-            path: /health
-            port: http
-          initialDelaySeconds: 30
-          periodSeconds: 10
+        # livenessProbe:
+        #   httpGet:
+        #     path: /health
+        #     port: http
+        #   initialDelaySeconds: 30
+        #   periodSeconds: 10
         readinessProbe:
           httpGet:
             path: /health
             port: http
           initialDelaySeconds: 10
-          periodSeconds: 5
+          timeoutSeconds: 15
+          periodSeconds: 10
+          failureThreshold: 10
         envFrom:
         - configMapRef:
             name: context-engine-config

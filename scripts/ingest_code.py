@@ -623,14 +623,15 @@ def _index_single_file_inner(
 def index_repo(
     root: Path,
     qdrant_url: str,
-    api_key: str,
-    collection: str,
+    api_key: Optional[str],
+    collection: Optional[str],
     model_name: str,
     recreate: bool,
     *,
     dedupe: bool = True,
     skip_unchanged: bool = True,
     pseudo_mode: str = "full",
+    clear_caches: bool = False,
 ):
     """Index a repository into Qdrant."""
     fast_fs = _env_truthy(os.environ.get("INDEX_FS_FASTPATH"), False)

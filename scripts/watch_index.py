@@ -2,10 +2,11 @@
 import os
 import time
 import threading
-import json
 import subprocess
 from pathlib import Path
 from typing import Optional, Set, Dict, List, Any
+
+import sys
 
 from qdrant_client import QdrantClient, models
 
@@ -14,8 +15,6 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
 # Ensure project root is on sys.path when run as a script (so 'scripts' can be imported)
-import sys
-
 ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
@@ -25,6 +24,7 @@ from scripts.workspace_state import (
     get_collection_name,
     _get_global_state_dir,
     is_multi_repo_mode,
+    is_staging_enabled,
     get_cached_file_hash,
     set_cached_file_hash,
     remove_cached_file,
@@ -37,6 +37,10 @@ from scripts.workspace_state import (
     _get_repo_state_dir,
     _cross_process_lock,
     get_collection_mappings,
+    get_indexing_config_snapshot,
+    compute_indexing_config_hash,
+    persist_indexing_config,
+    promote_pending_indexing_config,
 )
 import hashlib
 from datetime import datetime
@@ -94,8 +98,10 @@ def _get_collection_for_repo(repo_path: Path) -> str:
     except Exception:
         repo_name = None
 
-    # Multi-repo: try to reuse a canonical collection based on logical_repo_id
-    if repo_name and is_multi_repo_mode() and logical_repo_reuse_enabled():
+    # Multi-repo: always honor explicit serving/qdrant collection from state when present.
+    # This is required for staging/migration workflows (e.g. *_old repos) even when
+    # logical-repo reuse is disabled.
+    if repo_name and is_multi_repo_mode():
         workspace_root = os.environ.get("WORKSPACE_PATH") or os.environ.get("WATCH_ROOT") or "/work"
         try:
             ws_root_path = Path(workspace_root).resolve()
@@ -110,10 +116,17 @@ def _get_collection_for_repo(repo_path: Path) -> str:
             state = {}
 
         if isinstance(state, dict):
+            serving_coll = state.get("serving_collection") or state.get("qdrant_collection")
+            if isinstance(serving_coll, str) and serving_coll:
+                return serving_coll
+
+        # Multi-repo: try to reuse a canonical collection based on logical_repo_id
+        if logical_repo_reuse_enabled():
             try:
                 state = ensure_logical_repo_id(state, ws_path)
             except Exception:
                 pass
+
             lrid = state.get("logical_repo_id")
             if isinstance(lrid, str) and lrid:
                 coll: Optional[str]
@@ -131,11 +144,6 @@ def _get_collection_for_repo(repo_path: Path) -> str:
                     except Exception:
                         pass
                     return coll
-
-            # Fallback to any explicit collection stored in state for this repo
-            coll2 = state.get("qdrant_collection")
-            if isinstance(coll2, str) and coll2:
-                return coll2
 
         # Legacy behaviour: derive per-repo collection name
         try:
@@ -807,7 +815,7 @@ def _start_pseudo_backfill_worker(
 def main():
     # Resolve collection name from workspace state before any client/state ops
     try:
-        from scripts.workspace_state import get_collection_name as _get_coll
+        from scripts.workspace_state import get_collection_name_with_staging as _get_coll
     except Exception:
         _get_coll = None
 
@@ -920,6 +928,15 @@ def main():
             root_repo_name = _extract_repo_name_from_path(str(ROOT))
             if root_repo_name:
                 root_collection = get_collection_name(root_repo_name)
+                try:
+                    if persist_indexing_config:
+                        persist_indexing_config(
+                            workspace_path=str(ROOT),
+                            repo_name=root_repo_name,
+                            pending=True,
+                        )
+                except Exception:
+                    pass
                 update_indexing_status(
                     repo_name=root_repo_name,
                     status={"state": "watching"},
@@ -932,10 +949,24 @@ def main():
                     "[workspace_state] Multi-repo: root path is not a repo; skipping state initialization"
                 )
         else:
-            update_workspace_state(
-                workspace_path=str(ROOT),
-                updates={"qdrant_collection": default_collection},
-            )
+            updates = {"qdrant_collection": default_collection}
+            try:
+                if get_indexing_config_snapshot and compute_indexing_config_hash:
+                    cfg = get_indexing_config_snapshot()
+                    updates["indexing_config"] = cfg
+                    updates["indexing_config_hash"] = compute_indexing_config_hash(cfg)
+            except Exception:
+                pass
+            update_workspace_state(workspace_path=str(ROOT), updates=updates)
+            try:
+                if persist_indexing_config:
+                    persist_indexing_config(
+                        workspace_path=str(ROOT),
+                        repo_name=None,
+                        pending=True,
+                    )
+            except Exception:
+                pass
             update_indexing_status(status={"state": "watching"})
     except Exception as e:
         print(f"[workspace_state] Error initializing workspace state: {e}")
@@ -992,6 +1023,7 @@ def _process_git_history_manifest(
     collection: str,
     vector_name: str,
     repo_name: Optional[str],
+    env_snapshot: Optional[Dict[str, str]] = None,
 ):
     try:
         import sys
@@ -1001,6 +1033,11 @@ def _process_git_history_manifest(
             return
         cmd = [sys.executable or "python3", str(script), "--manifest-json", str(p)]
         env = os.environ.copy()
+        try:
+            if env_snapshot:
+                env.update({str(k): str(v) for k, v in env_snapshot.items() if k})
+        except Exception:
+            pass
         if collection:
             env["COLLECTION_NAME"] = collection
         if QDRANT_URL:
@@ -1033,6 +1070,15 @@ def _process_paths(paths, client, model, vector_name: str, model_dim: int, works
     for repo_path, repo_files in repo_groups.items():
         try:
             repo_name = _extract_repo_name_from_path(repo_path)
+            try:
+                if persist_indexing_config:
+                    persist_indexing_config(
+                        workspace_path=repo_path,
+                        repo_name=repo_name,
+                        pending=True,
+                    )
+            except Exception:
+                pass
             update_indexing_status(
                 repo_name=repo_name,
                 status={
@@ -1055,10 +1101,26 @@ def _process_paths(paths, client, model, vector_name: str, model_dim: int, works
         repo_files = repo_groups.get(repo_key, [])
         repo_name = _extract_repo_name_from_path(repo_key)
         collection = _get_collection_for_file(p)
+        state_env: Optional[Dict[str, str]] = None
+        try:
+            st = get_workspace_state(repo_key, repo_name) if get_workspace_state else None
+            if isinstance(st, dict):
+                if is_staging_enabled():
+                    state_env = st.get("indexing_env")
+        except Exception:
+            state_env = None
 
         if ".remote-git" in p.parts and p.suffix.lower() == ".json":
             try:
-                _process_git_history_manifest(p, client, model, collection, vector_name, repo_name)
+                _process_git_history_manifest(
+                    p,
+                    client,
+                    model,
+                    collection,
+                    vector_name,
+                    repo_name,
+                    env_snapshot=(state_env if is_staging_enabled() else None),
+                )
             except Exception as e:
                 try:
                     print(f"[commit_ingest_error] {p}: {e}")
@@ -1102,105 +1164,193 @@ def _process_paths(paths, client, model, vector_name: str, model_dim: int, works
                 pass
             continue
 
-        if client is not None and model is not None:
+        # If a repo-specific indexing_env is present (staging), avoid mutating os.environ
+        # process-wide. Instead, run ingest_code in a subprocess with an explicit env dict.
+        if is_staging_enabled() and state_env and collection:
+            # Cheap pre-flight hash check so we can skip unchanged files without spawning a subprocess.
+            # TODO: Instead of launching one subprocess per file, queue changes and run a single ingest_code.py --root <repo> pass with --no-skip-unchanged. That reuses ingest’s own skip logic, but requires more plumbing (collect paths, pass via manifest/CLI, etc.).
+            skip_via_hash = False
             try:
-                idx.ensure_collection_and_indexes_once(client, collection, model_dim, vector_name)
+                text = p.read_text(encoding="utf-8", errors="ignore")
+                try:
+                    file_hash = hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest()
+                except Exception:
+                    file_hash = ""
+                if file_hash:
+                    try:
+                        cached_hash = get_cached_file_hash(str(p), repo_name) if repo_name else None
+                    except Exception:
+                        cached_hash = None
+                    if cached_hash and cached_hash == file_hash:
+                        try:
+                            print(f"[skip_unchanged] {p} (hash match)")
+                        except Exception:
+                            pass
+                        _log_activity(repo_key, "skipped", p, {"reason": "hash_unchanged"})
+                        repo_progress[repo_key] = repo_progress.get(repo_key, 0) + 1
+                        try:
+                            _update_progress(
+                                repo_key,
+                                started_at,
+                                repo_progress[repo_key],
+                                len(repo_files),
+                                p,
+                            )
+                        except Exception:
+                            pass
+                        skip_via_hash = True
             except Exception:
                 pass
-
-            ok = False
+            if skip_via_hash:
+                continue
             try:
-                # Prefer smart symbol-aware reindexing when enabled and cache is available
+                cmd = [
+                    sys.executable or "python3",
+                    str(ROOT_DIR / "scripts" / "ingest_code.py"),
+                    "--root",
+                    str(p),
+                    "--no-skip-unchanged",
+                ]
+                env = os.environ.copy()
                 try:
-                    if getattr(idx, "_smart_symbol_reindexing_enabled", None) and idx._smart_symbol_reindexing_enabled():
-                        text: str | None = None
-                        try:
-                            text = p.read_text(encoding="utf-8", errors="ignore")
-                        except Exception:
-                            text = None
-                        if text is not None:
-                            try:
-                                language = idx.detect_language(p)
-                            except Exception:
-                                language = ""
-                            try:
-                                file_hash = hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest()
-                            except Exception:
-                                file_hash = ""
-                            if file_hash:
-                                # Fast path: skip if content hash matches cached hash (file unchanged)
-                                # Safety: startup health check clears stale cache per-repo
-                                try:
-                                    cached_hash = get_cached_file_hash(str(p), repo_name) if repo_name else None
-                                    if cached_hash and cached_hash == file_hash:
-                                        print(f"[skip_unchanged] {p} (hash match)")
-                                        ok = True
-                                        raise _SkipUnchanged()
-                                except _SkipUnchanged:
-                                    raise
-                                except Exception:
-                                    pass  # hash check failed, proceed with reindex
-
-                                try:
-                                    use_smart, smart_reason = idx.should_use_smart_reindexing(str(p), file_hash)
-                                except Exception:
-                                    use_smart, smart_reason = False, "smart_check_failed"
-
-                                # Bootstrap: if we have no symbol cache yet, still run smart path once
-                                bootstrap = smart_reason == "no_cached_symbols"
-                                if use_smart or bootstrap:
-                                    msg_kind = "smart reindexing" if use_smart else "bootstrap (no_cached_symbols) for smart reindex"
-                                    try:
-                                        print(f"[SMART_REINDEX][watcher] Using {msg_kind} for {p} ({smart_reason})")
-                                    except Exception:
-                                        pass
-                                    try:
-                                        status = idx.process_file_with_smart_reindexing(
-                                            p,
-                                            text,
-                                            language,
-                                            client,
-                                            collection,
-                                            repo_name,
-                                            model,
-                                            vector_name,
-                                        )
-                                        ok = status in ("success", "skipped")
-                                    except Exception as se:
-                                        try:
-                                            print(f"[SMART_REINDEX][watcher] Smart reindexing failed for {p}: {se}")
-                                        except Exception:
-                                            pass
-                                        ok = False
-                                else:
-                                    try:
-                                        print(f"[SMART_REINDEX][watcher] Using full reindexing for {p} ({smart_reason})")
-                                    except Exception:
-                                        pass
-                except _SkipUnchanged:
-                    raise  # Propagate skip to outer handler
-                except Exception as e_smart:
+                    env.update({str(k): str(v) for k, v in state_env.items() if k})
+                except Exception:
+                    pass
+                env["COLLECTION_NAME"] = collection
+                if QDRANT_URL:
+                    env["QDRANT_URL"] = QDRANT_URL
+                if repo_name:
+                    env["REPO_NAME"] = repo_name
+                result = subprocess.run(cmd, env=env, capture_output=True, text=True)
+                if result.returncode != 0:
                     try:
-                        print(f"[SMART_REINDEX][watcher] Smart reindexing disabled or preview failed for {p}: {e_smart}")
+                        logger.error(
+                            "watch_index::subprocess_index_failed",
+                            extra={
+                                "repo_key": repo_key,
+                                "collection": collection,
+                                "file": str(p),
+                                "returncode": result.returncode,
+                                "stdout": (result.stdout or "").strip(),
+                                "stderr": (result.stderr or "").strip(),
+                            },
+                        )
+                    except Exception:
+                        try:
+                            print(
+                                f"[indexed_subprocess_error] {p} -> {collection} returncode={result.returncode}"
+                            )
+                        except Exception:
+                            pass
+                else:
+                    try:
+                        print(f"[indexed_subprocess] {p} -> {collection}")
                     except Exception:
                         pass
-
-                # Fallback: full single-file reindex. Pseudo/tags are inlined by default;
-                # when PSEUDO_BACKFILL_ENABLED=1 we run base-only and rely on backfill.
-                if not ok:
-                    flag = (os.environ.get("PSEUDO_BACKFILL_ENABLED") or "").strip().lower()
-                    pseudo_mode = "off" if flag in {"1", "true", "yes", "on"} else "full"
-                    ok = idx.index_single_file(
-                        client,
-                        model,
-                        collection,
-                        vector_name,
+                repo_progress[repo_key] = repo_progress.get(repo_key, 0) + 1
+                try:
+                    _update_progress(
+                        repo_key,
+                        started_at,
+                        repo_progress[repo_key],
+                        len(repo_files),
                         p,
-                        dedupe=True,
-                        skip_unchanged=False,
-                        pseudo_mode=pseudo_mode,
-                        repo_name_for_cache=repo_name,
                     )
+                except Exception:
+                    pass
+                continue
+            except Exception:
+                pass
+        if client is not None and model is not None:
+            try:
+                try:
+                    idx.ensure_collection_and_indexes_once(
+                        client, collection, model_dim, vector_name
+                    )
+                except Exception:
+                    pass
+                ok = False
+                text: str | None = None
+                try:
+                    text = p.read_text(encoding="utf-8", errors="ignore")
+                except Exception:
+                    text = None
+                if text is not None:
+                    try:
+                        language = idx.detect_language(p)
+                    except Exception:
+                        language = ""
+                    try:
+                        file_hash = hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest()
+                    except Exception:
+                        file_hash = ""
+                    if file_hash:
+                        # Fast path: skip if content hash matches cached hash (file unchanged)
+                        # Safety: startup health check clears stale cache per-repo
+                        try:
+                            cached_hash = get_cached_file_hash(str(p), repo_name) if repo_name else None
+                            if cached_hash and cached_hash == file_hash:
+                                print(f"[skip_unchanged] {p} (hash match)")
+                                ok = True
+                                raise _SkipUnchanged()
+                        except _SkipUnchanged:
+                            raise
+                        except Exception:
+                            pass  # hash check failed, proceed with reindex
+
+                        try:
+                            use_smart, smart_reason = idx.should_use_smart_reindexing(str(p), file_hash)
+                        except Exception:
+                            use_smart, smart_reason = False, "smart_check_failed"
+
+                        # Bootstrap: if we have no symbol cache yet, still run smart path once
+                        bootstrap = smart_reason == "no_cached_symbols"
+                        if use_smart or bootstrap:
+                            msg_kind = "smart reindexing" if use_smart else "bootstrap (no_cached_symbols) for smart reindex"
+                            try:
+                                print(f"[SMART_REINDEX][watcher] Using {msg_kind} for {p} ({smart_reason})")
+                            except Exception:
+                                pass
+                            try:
+                                status = idx.process_file_with_smart_reindexing(
+                                    p,
+                                    text,
+                                    language,
+                                    client,
+                                    collection,
+                                    repo_name,
+                                    model,
+                                    vector_name,
+                                )
+                                ok = status in ("success", "skipped")
+                            except Exception as se:
+                                try:
+                                    print(f"[SMART_REINDEX][watcher] Smart reindexing failed for {p}: {se}")
+                                except Exception:
+                                    pass
+                                ok = False
+                        else:
+                            try:
+                                print(f"[SMART_REINDEX][watcher] Using full reindexing for {p} ({smart_reason})")
+                            except Exception:
+                                pass
+
+                    # Fallback: full single-file reindex. Pseudo/tags are inlined by default;
+                    # when PSEUDO_BACKFILL_ENABLED=1 we run base-only and rely on backfill.
+                    if not ok:
+                        flag = (os.environ.get("PSEUDO_BACKFILL_ENABLED") or "").strip().lower()
+                        pseudo_mode = "off" if flag in {"1", "true", "yes", "on"} else "full"
+                        ok = idx.index_single_file(
+                            client,
+                            model,
+                            collection,
+                            vector_name,
+                            p,
+                            dedupe=True,
+                            skip_unchanged=False,
+                            pseudo_mode=pseudo_mode,
+                            repo_name_for_cache=repo_name,
+                        )
             except _SkipUnchanged:
                 # File unchanged - skip without error but still count towards progress
                 status = "skipped"
@@ -1219,11 +1369,31 @@ def _process_paths(paths, client, model, vector_name: str, model_dim: int, works
                     pass
                 continue
             except Exception as e:
+                repo_progress[repo_key] = repo_progress.get(repo_key, 0) + 1
                 try:
-                    print(f"[index_error] {p}: {e}")
+                    logger.error(
+                        "watch_index::_process_paths error",
+                        extra={
+                            "repo_key": repo_key,
+                            "collection": collection,
+                            "file": str(p),
+                        },
+                        exc_info=True,
+                    )
                 except Exception:
                     pass
-                ok = False
+                try:
+                    _update_progress(
+                        repo_key,
+                        started_at,
+                        repo_progress[repo_key],
+                        len(repo_files),
+                        p,
+                    )
+                except Exception:
+                    pass
+                continue
+
             status = "indexed" if ok else "skipped"
             print(f"[{status}] {p} -> {collection}")
             if ok:
@@ -1236,21 +1406,32 @@ def _process_paths(paths, client, model, vector_name: str, model_dim: int, works
                 _log_activity(
                     repo_key, "skipped", p, {"reason": "no-change-or-error"}
                 )
+            repo_progress[repo_key] = repo_progress.get(repo_key, 0) + 1
+            try:
+                _update_progress(
+                    repo_key,
+                    started_at,
+                    repo_progress[repo_key],
+                    len(repo_files),
+                    p,
+                )
+            except Exception:
+                pass
         else:
             print(f"Not processing locally: {p}")
             _log_activity(repo_key, "skipped", p, {"reason": "remote-mode"})
 
-        repo_progress[repo_key] = repo_progress.get(repo_key, 0) + 1
-        try:
-            _update_progress(
-                repo_key,
-                started_at,
-                repo_progress[repo_key],
-                len(repo_files),
-                p,
-            )
-        except Exception:
-            pass
+            repo_progress[repo_key] = repo_progress.get(repo_key, 0) + 1
+            try:
+                _update_progress(
+                    repo_key,
+                    started_at,
+                    repo_progress[repo_key],
+                    len(repo_files),
+                    p,
+                )
+            except Exception:
+                pass
 
     for repo_path in repo_groups.keys():
         try:

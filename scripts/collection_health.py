@@ -21,6 +21,8 @@ from scripts.workspace_state import (
     _write_cache,
     get_workspace_state,
     update_workspace_state,
+    clear_symbol_cache,
+    is_multi_repo_mode,
 )
 
 logger = logging.getLogger(__name__)
@@ -140,6 +142,39 @@ def clear_repo_cache(repo_name: str) -> bool:
     except Exception as e:
         logger.error(f"Failed to clear repo cache for {repo_name}: {e}")
         return False
+
+
+def clear_indexing_caches(workspace_path: str, repo_name: Optional[str] = None) -> Dict[str, Any]:
+    """Clear file-hash and symbol caches for the workspace/repo."""
+    result: Dict[str, Any] = {
+        "file_hash_cache": False,
+        "symbol_cache_dirs": 0,
+    }
+
+    multi_repo = False
+    try:
+        multi_repo = is_multi_repo_mode()
+    except Exception:
+        multi_repo = False
+
+    try:
+        if multi_repo and repo_name:
+            result["file_hash_cache"] = clear_repo_cache(repo_name)
+        else:
+            result["file_hash_cache"] = clear_cache(workspace_path)
+    except Exception as e:
+        result["file_hash_error"] = str(e)
+
+    if clear_symbol_cache:
+        try:
+            cleared_dirs = clear_symbol_cache(workspace_path, repo_name)
+            result["symbol_cache_dirs"] = cleared_dirs
+        except Exception as e:
+            result["symbol_cache_error"] = str(e)
+    else:
+        result["symbol_cache_error"] = "clear_symbol_cache unavailable"
+
+    return result
 
 
 def get_repo_cached_files_count(repo_name: str) -> int:

@@ -12,9 +12,7 @@ def test_main_resolves_collection_from_state(monkeypatch, tmp_path):
     monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
     monkeypatch.setenv("EMBEDDING_MODEL", "fake")
 
-    # Stub workspace_state.get_collection_name to return a resolved name
-    ws = importlib.import_module("scripts.workspace_state")
-    monkeypatch.setattr(ws, "get_collection_name", lambda p: "repo-abc123", raising=True)
+    # Single-repo mode: watch_index.main should keep COLLECTION_NAME from env.
 
     wi = importlib.import_module("scripts.watch_index")
     # Reload to re-read env defaults (COLLECTION) in module globals
@@ -66,9 +64,9 @@ def test_main_resolves_collection_from_state(monkeypatch, tmp_path):
     # Precondition: module-level COLLECTION should reflect placeholder at import time
     assert wi.COLLECTION == os.environ.get("COLLECTION_NAME") == "my-collection"
 
-    # Run main(); it should resolve COLLECTION via get_collection_name before any state writes
+    # Run main(); in single-repo mode it should keep the env-provided COLLECTION_NAME
     wi.main()
 
-    # Postcondition: global COLLECTION mutated to resolved name, not the placeholder
-    assert wi.COLLECTION == "repo-abc123"
+    # Postcondition: global COLLECTION remains the env-provided name
+    assert wi.COLLECTION == "my-collection"
 
