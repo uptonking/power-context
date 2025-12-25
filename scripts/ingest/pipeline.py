@@ -643,11 +643,24 @@ def process_file_with_smart_reindexing(
     - Reusing existing embeddings/lexical vectors for unchanged chunks (by code content), and
     - Re-embedding only for changed chunks.
     """
+    # Allow test monkeypatching on ingest_code.* to be honored here.
+    # Must be done FIRST before any helper calls.
+    _ingest_mod = None
+    try:
+        import importlib
+        _ingest_mod = importlib.import_module("scripts.ingest_code")
+    except Exception:
+        _ingest_mod = None
+    _embed_batch = getattr(_ingest_mod, "embed_batch", embed_batch) if _ingest_mod else embed_batch
+    _upsert_points_fn = getattr(_ingest_mod, "upsert_points", upsert_points) if _ingest_mod else upsert_points
+    _delete_points_fn = getattr(_ingest_mod, "delete_points_by_path", delete_points_by_path) if _ingest_mod else delete_points_by_path
+    _should_process_pseudo = getattr(_ingest_mod, "should_process_pseudo_for_chunk", should_process_pseudo_for_chunk) if _ingest_mod else should_process_pseudo_for_chunk
+
     try:
         p = Path(str(file_path))
         if _should_skip_explicit_file_by_excluder(p):
             try:
-                delete_points_by_path(client, current_collection, str(p))
+                _delete_points_fn(client, current_collection, str(p))
             except Exception:
                 pass
             print(f"[SMART_REINDEX] Skipping excluded file: {file_path}")
@@ -844,7 +857,7 @@ def process_file_with_smart_reindexing(
             },
         }
 
-        needs_pseudo_gen, cached_pseudo, cached_tags = should_process_pseudo_for_chunk(
+        needs_pseudo_gen, cached_pseudo, cached_tags = _should_process_pseudo(
             fp, ch, changed_set
         )
 
@@ -1003,7 +1016,7 @@ def process_file_with_smart_reindexing(
 
     new_points: list[models.PointStruct] = []
     if embed_texts:
-        vectors = embed_batch(model, embed_texts)
+        vectors = _embed_batch(model, embed_texts)
         for pid, v, lx, pl, lt in zip(embed_ids, vectors, embed_lex, embed_payloads, embed_lex_text):
             if vector_name:
                 vecs = {vector_name: v, LEX_VECTOR_NAME: lx}
@@ -1023,12 +1036,12 @@ def process_file_with_smart_reindexing(
     all_points = reused_points + new_points
 
     try:
-        delete_points_by_path(client, current_collection, fp)
+        _delete_points_fn(client, current_collection, fp)
     except Exception as e:
         print(f"[SMART_REINDEX] Failed to delete old points for {file_path}: {e}")
 
     if all_points:
-        upsert_points(client, current_collection, all_points)
+        _upsert_points_fn(client, current_collection, all_points)
 
     try:
         if set_cached_symbols:
