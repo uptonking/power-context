@@ -75,7 +75,8 @@ def _extract_imports(language: str, text: str) -> List[str]:
             if m:
                 imps.append(m.group(1))
                 continue
-            m = re.match(r"^\s*require\(\s*['\"]([^'\"]+)['\"]\s*\)", ln)
+            # Match require statements: require('x'), const x = require('x'), etc.
+            m = re.search(r"require\(\s*['\"]([^'\"]+)['\"]\s*\)", ln)
             if m:
                 imps.append(m.group(1))
                 continue
@@ -105,7 +106,13 @@ def _extract_imports(language: str, text: str) -> List[str]:
                 continue
     elif language == "csharp":
         for ln in lines:
-            m = re.match(r"^\s*using\s+(?:static\s+)?([A-Za-z_][\w\._]*)(?:\s*;|\s*=)", ln)
+            # Match: using System; using static System.Math; using Alias = System.Text;
+            m = re.match(r"^\s*using\s+(?:static\s+)?([A-Za-z_][\w\._]*)\s*;", ln)
+            if m:
+                imps.append(m.group(1))
+                continue
+            # Match alias: using Alias = Namespace.Type;
+            m = re.match(r"^\s*using\s+\w+\s*=\s*([A-Za-z_][\w\._]*)\s*;", ln)
             if m:
                 imps.append(m.group(1))
                 continue
@@ -123,6 +130,44 @@ def _extract_imports(language: str, text: str) -> List[str]:
     elif language == "rust":
         for ln in lines:
             m = re.match(r"^\s*use\s+([^;]+);", ln)
+            if m:
+                imps.append(m.group(1).strip())
+                continue
+    elif language in ("c", "cpp"):
+        for ln in lines:
+            m = re.match(r'^\s*#include\s*[<"]([^>"]+)[>"]', ln)
+            if m:
+                imps.append(m.group(1))
+                continue
+    elif language == "ruby":
+        for ln in lines:
+            m = re.match(r"^\s*require\s+['\"]([^'\"]+)['\"]", ln)
+            if m:
+                imps.append(m.group(1))
+                continue
+            m = re.match(r"^\s*require_relative\s+['\"]([^'\"]+)['\"]", ln)
+            if m:
+                imps.append(m.group(1))
+                continue
+            m = re.match(r"^\s*load\s+['\"]([^'\"]+)['\"]", ln)
+            if m:
+                imps.append(m.group(1))
+                continue
+    elif language == "kotlin":
+        for ln in lines:
+            m = re.match(r"^\s*import\s+([\w\.\*]+)", ln)
+            if m:
+                imps.append(m.group(1))
+                continue
+    elif language == "swift":
+        for ln in lines:
+            m = re.match(r"^\s*import\s+(\w+)", ln)
+            if m:
+                imps.append(m.group(1))
+                continue
+    elif language == "scala":
+        for ln in lines:
+            m = re.match(r"^\s*import\s+([\w\.\{\}\,\s_]+)", ln)
             if m:
                 imps.append(m.group(1).strip())
                 continue
@@ -177,12 +222,99 @@ def _extract_calls(language: str, text: str) -> List[str]:
     return out[:200]
 
 
+# Languages that have tree-sitter call extraction support
+_TS_CALL_LANGUAGES = {
+    "python", "javascript", "typescript", "go", "rust", "java", "c", "cpp", "ruby"
+}
+
+# Call expression node types per language for tree-sitter
+_TS_CALL_NODE_TYPES = {
+    "python": ["call"],
+    "javascript": ["call_expression"],
+    "typescript": ["call_expression"],
+    "go": ["call_expression"],
+    "rust": ["call_expression", "macro_invocation"],
+    "java": ["method_invocation"],
+    "c": ["call_expression"],
+    "cpp": ["call_expression"],
+    "ruby": ["call", "method_call"],
+}
+
+
+def _ts_extract_calls_generic(language: str, text: str) -> List[str]:
+    """Extract function/method calls using tree-sitter for any supported language."""
+    from scripts.ingest.tree_sitter import _ts_parser
+    
+    parser = _ts_parser(language)
+    if not parser:
+        return _extract_calls(language, text)
+    
+    data = text.encode("utf-8")
+    try:
+        tree = parser.parse(data)
+        if tree is None:
+            return _extract_calls(language, text)
+        root = tree.root_node
+    except Exception:
+        return _extract_calls(language, text)
+    
+    def node_text(n):
+        return data[n.start_byte:n.end_byte].decode("utf-8", errors="ignore")
+    
+    calls: List[str] = []
+    call_types = set(_TS_CALL_NODE_TYPES.get(language, ["call_expression"]))
+    
+    def walk(n):
+        if n.type in call_types:
+            # Try to get function name from various field names
+            func = (
+                n.child_by_field_name("function") or
+                n.child_by_field_name("method") or
+                n.child_by_field_name("name")
+            )
+            if func:
+                name = node_text(func)
+                # Extract just the function/method name, not object.method chains
+                # Split on . : -> and take the last part
+                base = re.split(r"[\.:>\-]+", name)[-1].strip()
+                if base and re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", base):
+                    calls.append(base)
+            else:
+                # Fallback: try first child for languages like Ruby
+                for child in n.children:
+                    if child.type in ("identifier", "constant"):
+                        name = node_text(child)
+                        if name and re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", name):
+                            calls.append(name)
+                        break
+        for c in n.children:
+            walk(c)
+    
+    walk(root)
+    
+    # Deduplicate preserving order
+    seen = set()
+    calls_dedup = []
+    for x in calls:
+        if x not in seen:
+            calls_dedup.append(x)
+            seen.add(x)
+    return calls_dedup[:200]
+
+
 def _get_imports_calls(language: str, text: str) -> Tuple[List[str], List[str]]:
     """Get imports and calls for a file, using tree-sitter when available."""
     from scripts.ingest.tree_sitter import _use_tree_sitter, _ts_parser
     
-    if _use_tree_sitter() and language == "python":
-        return _ts_extract_imports_calls_python(text)
+    # Use tree-sitter for Python (specialized) or generic for other supported languages
+    if _use_tree_sitter():
+        if language == "python":
+            return _ts_extract_imports_calls_python(text)
+        elif language in _TS_CALL_LANGUAGES:
+            imports = _extract_imports(language, text)
+            calls = _ts_extract_calls_generic(language, text)
+            return imports, calls
+    
     return _extract_imports(language, text), _extract_calls(language, text)
 
 
