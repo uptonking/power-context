@@ -669,6 +669,30 @@ def process_file_with_smart_reindexing(
 
     file_hash = hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest()
 
+    repo_id: str | None = None
+    repo_rel_path: str | None = None
+    try:
+        repo_tag = per_file_repo
+        if logical_repo_reuse_enabled() and get_workspace_state is not None:
+            ws_root = os.environ.get("WATCH_ROOT") or os.environ.get("WORKSPACE_PATH") or "/work"
+            state = get_workspace_state(ws_root, repo_tag)
+            lrid = state.get("logical_repo_id") if isinstance(state, dict) else None
+            if isinstance(lrid, str) and lrid.strip():
+                repo_id = lrid.strip()
+            try:
+                ws_base = Path(ws_root).resolve()
+                repo_root = ws_base
+                if repo_tag:
+                    candidate = ws_base / str(repo_tag)
+                    if candidate.exists():
+                        repo_root = candidate
+                rel = file_path.resolve().relative_to(repo_root)
+                repo_rel_path = rel.as_posix()
+            except Exception:
+                repo_rel_path = None
+    except Exception as e:
+        print(f"[SMART_REINDEX] Failed to derive logical repo identity for {file_path}: {e}")
+
     symbol_meta = extract_symbols_with_tree_sitter(fp)
     if not symbol_meta:
         print(f"[SMART_REINDEX] No symbols found in {file_path}, falling back to full reindex")
@@ -815,6 +839,8 @@ def process_file_with_smart_reindexing(
                 "author_count": int(author_count),
                 "host_path": _host_path,
                 "container_path": _container_path,
+                "repo_id": repo_id,
+                "repo_rel_path": repo_rel_path,
             },
         }
 
@@ -925,6 +951,13 @@ def process_file_with_smart_reindexing(
                     if isinstance(vec, dict):
                         vec = dict(vec)
                         vec[LEX_VECTOR_NAME] = refreshed_lex
+                        if LEX_SPARSE_MODE and aug_lex_text:
+                            try:
+                                sparse_vec = _lex_sparse_vector_text(aug_lex_text)
+                                if sparse_vec.get("indices"):
+                                    vec[LEX_SPARSE_NAME] = models.SparseVector(**sparse_vec)
+                            except Exception:
+                                pass
                     else:
                         vecs = {vector_name: vec, LEX_VECTOR_NAME: refreshed_lex}
                         try:
@@ -932,6 +965,13 @@ def process_file_with_smart_reindexing(
                                 vecs[MINI_VECTOR_NAME] = project_mini(list(vec), MINI_VEC_DIM)
                         except Exception:
                             pass
+                        if LEX_SPARSE_MODE and aug_lex_text:
+                            try:
+                                sparse_vec = _lex_sparse_vector_text(aug_lex_text)
+                                if sparse_vec.get("indices"):
+                                    vecs[LEX_SPARSE_NAME] = models.SparseVector(**sparse_vec)
+                            except Exception:
+                                pass
                         vec = vecs
                 else:
                     if isinstance(vec, dict):
