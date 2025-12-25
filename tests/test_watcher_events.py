@@ -30,6 +30,7 @@ class E:
 
 @pytest.mark.unit
 def test_on_deleted_calls_delete_points(monkeypatch, tmp_path):
+    monkeypatch.setenv("MULTI_REPO_MODE", "0")
     q = FakeQueue()
     handler = wi.IndexHandler(root=tmp_path, queue=q, client=FakeClient(), collection="c")
 
@@ -52,6 +53,7 @@ def test_on_deleted_calls_delete_points(monkeypatch, tmp_path):
 
 @pytest.mark.unit
 def test_on_moved_enqueues_new_dest(monkeypatch, tmp_path):
+    monkeypatch.setenv("MULTI_REPO_MODE", "0")
     q = FakeQueue()
     handler = wi.IndexHandler(root=tmp_path, queue=q, client=FakeClient(), collection="c")
 
@@ -71,6 +73,7 @@ def test_on_moved_enqueues_new_dest(monkeypatch, tmp_path):
 
 @pytest.mark.unit
 def test_ignore_reload_rebuilds_excluder(monkeypatch, tmp_path):
+    monkeypatch.setenv("MULTI_REPO_MODE", "0")
     # Place .qdrantignore; construct handler (captures mtime)
     ign = tmp_path / ".qdrantignore"
     ign.write_text("# initial\n")
@@ -88,6 +91,7 @@ def test_ignore_reload_rebuilds_excluder(monkeypatch, tmp_path):
 
 @pytest.mark.unit
 def test_remote_git_manifest_is_enqueued_even_if_excluded(monkeypatch, tmp_path):
+    monkeypatch.setenv("MULTI_REPO_MODE", "0")
     q = FakeQueue()
     handler = wi.IndexHandler(root=tmp_path, queue=q, client=FakeClient(), collection="c")
 

@@ -20,7 +20,8 @@ from typing import Dict, Any, Optional, List, Literal, TypedDict
 import threading
 import time
 
-_SLUGGED_REPO_RE = re.compile(r"^.+-[0-9a-f]{16}$")
+_CANONICAL_SLUG_RE = re.compile(r"^.+-[0-9a-f]{16}$")
+_SLUGGED_REPO_RE = re.compile(r"^.+-[0-9a-f]{16}(?:_old)?$")
 _managed_slug_cache_lock = threading.Lock()
 _managed_slug_cache: set[str] = set()
 _managed_slug_cache_neg: set[str] = set()
@@ -29,6 +30,14 @@ _cache_memo_lock = threading.Lock()
 _cache_memo: Dict[str, Dict[str, Any]] = {}
 _cache_memo_sig: Dict[str, tuple[int, int]] = {}
 _cache_memo_last_check: Dict[str, float] = {}
+
+
+def is_staging_enabled() -> bool:
+    raw = os.environ.get("CTXCE_STAGING_ENABLED", "")
+    v = (raw or "").strip().lower()
+    if not v:
+        return False
+    return v in {"1", "true", "yes", "on"}
 
 
 def _cache_memo_recheck_seconds() -> float:
@@ -162,6 +171,19 @@ class OriginInfo(TypedDict, total=False):
     updated_at: Optional[str]
 
 
+class StagingInfo(TypedDict, total=False):
+    collection: Optional[str]
+    status: Optional[IndexingStatus]
+    started_at: Optional[str]
+    updated_at: Optional[str]
+    env_hash: Optional[str]
+    environment: Optional[Dict[str, str]]
+    indexing_config: Optional[Dict[str, Any]]
+    indexing_config_hash: Optional[str]
+    workspace_path: Optional[str]
+    repo_name: Optional[str]
+
+
 class WorkspaceState(TypedDict, total=False):
     created_at: str
     updated_at: str
@@ -171,6 +193,17 @@ class WorkspaceState(TypedDict, total=False):
     qdrant_stats: Optional[Dict[str, Any]]
     origin: Optional[OriginInfo]
     logical_repo_id: Optional[str]
+    indexing_config: Optional[Dict[str, Any]]
+    indexing_config_hash: Optional[str]
+    indexing_env: Optional[Dict[str, str]]
+    indexing_config_pending: Optional[Dict[str, Any]]
+    indexing_config_pending_hash: Optional[str]
+    indexing_env_pending: Optional[Dict[str, str]]
+    previous_collection: Optional[str]
+    serving_collection: Optional[str]
+    active_repo_slug: Optional[str]
+    serving_repo_slug: Optional[str]
+    staging: Optional[StagingInfo]
 
 def is_multi_repo_mode() -> bool:
     """Check if multi-repo mode is enabled."""
@@ -519,6 +552,40 @@ def indexing_lock():
     """
     yield
 
+def _git_remote_repo_name(repo_path: Path) -> Optional[str]:
+    """Return canonical repo name from git remote origin URL or toplevel."""
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(repo_path), "config", "--get", "remote.origin.url"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            url = r.stdout.strip()
+            name = url.rstrip("/").rsplit("/", 1)[-1]
+            if name.endswith(".git"):
+                name = name[:-4]
+            if name:
+                return name
+    except Exception:
+        pass
+
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(repo_path), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        top = (r.stdout or "").strip()
+        if r.returncode == 0 and top:
+            return Path(top).name
+    except Exception:
+        pass
+    return None
+
+
 def _detect_repo_name_from_path(path: Path) -> str:
     """Detect repository name from path using git remote origin URL.
 
@@ -558,29 +625,9 @@ def _detect_repo_name_from_path(path: Path) -> str:
 
     try:
         base = path if path.is_dir() else path.parent
-        # First try: get repo name from git remote origin URL (canonical name)
-        try:
-            r = subprocess.run(
-                ["git", "-C", str(base), "config", "--get", "remote.origin.url"],
-                capture_output=True, text=True, timeout=5
-            )
-            if r.returncode == 0 and r.stdout.strip():
-                url = r.stdout.strip()
-                # Extract repo name from URL (e.g., git@github.com:user/repo.git -> repo)
-                name = url.rstrip("/").rsplit("/", 1)[-1]
-                if name.endswith(".git"):
-                    name = name[:-4]
-                if name:
-                    return name
-        except Exception:
-            pass
-
-        # Second try: get git toplevel directory name
-        r = subprocess.run(["git", "-C", str(base), "rev-parse", "--show-toplevel"],
-                           capture_output=True, text=True, timeout=5)
-        top = (r.stdout or "").strip()
-        if r.returncode == 0 and top:
-            return Path(top).name
+        git_name = _git_remote_repo_name(base)
+        if git_name:
+            return git_name
     except Exception:
         pass
     try:
@@ -696,6 +743,12 @@ def get_workspace_state(
                                 _atomic_write_state(state_path, state)
                             except Exception as e:
                                 print(f"[workspace_state] Failed to persist logical_repo_id to {state_path}: {e}")
+                        modified = _ensure_repo_slug_defaults(state, repo_name)
+                        if modified:
+                            try:
+                                _atomic_write_state(state_path, state)
+                            except Exception:
+                                pass
                         return state
                 except (json.JSONDecodeError, ValueError, OSError) as e:
                     print(f"[workspace_state] Failed to read state from {state_path}: {e}")
@@ -710,6 +763,7 @@ def get_workspace_state(
                 "qdrant_collection": collection_name,
                 "indexing_status": {"state": "idle"},
             }
+            _ensure_repo_slug_defaults(state, repo_name)
 
             if logical_repo_reuse_enabled():
                 try:
@@ -740,7 +794,11 @@ def update_workspace_state(
     if is_multi_repo_mode() and repo_name:
         try:
             ws_root = Path(_resolve_workspace_root())
-            if not (ws_root / repo_name).exists():
+            # Allow updates when the repo state dir exists, even if the workspace
+            # directory is not present (e.g. dev-remote simulations where only
+            # .codebase state is persisted).
+            state_dir = _get_repo_state_dir(repo_name)
+            if not (ws_root / repo_name).exists() and not state_dir.exists():
                 return {}
         except Exception:
             return {}
@@ -751,6 +809,8 @@ def update_workspace_state(
         for key, value in updates.items():
             if key in state or key in WorkspaceState.__annotations__:
                 state[key] = value
+
+        _ensure_repo_slug_defaults(state, repo_name)
 
         state["updated_at"] = datetime.now().isoformat()
 
@@ -790,6 +850,199 @@ def update_indexing_status(
         workspace_path=workspace_path,
         updates={"indexing_status": status},
         repo_name=repo_name,
+    )
+
+
+def set_staging_state(
+    *,
+    workspace_path: Optional[str] = None,
+    repo_name: Optional[str] = None,
+    staging: Optional[StagingInfo] = None,
+) -> WorkspaceState:
+    """Persist staging metadata for a workspace/repo."""
+    updates: Dict[str, Any] = {"staging": staging}
+    if staging:
+        staging.setdefault("updated_at", datetime.now().isoformat())
+    return update_workspace_state(
+        workspace_path=workspace_path,
+        repo_name=repo_name,
+        updates=updates,
+    )
+
+
+def promote_pending_indexing_config(
+    *,
+    workspace_path: Optional[str] = None,
+    repo_name: Optional[str] = None,
+) -> WorkspaceState:
+    """Promote pending indexing config/env snapshots to active."""
+    state = get_workspace_state(workspace_path, repo_name) or {}
+    pending_cfg = state.get("indexing_config_pending")
+    pending_hash = state.get("indexing_config_pending_hash")
+    pending_env = state.get("indexing_env_pending")
+
+    if not pending_cfg and not pending_env:
+        return state
+
+    cfg = pending_cfg or state.get("indexing_config") or get_indexing_config_snapshot()
+    cfg_hash = pending_hash or compute_indexing_config_hash(cfg)
+    env_snapshot = pending_env or state.get("indexing_env") or dict(os.environ)
+
+    return persist_indexing_config(
+        workspace_path=workspace_path,
+        repo_name=repo_name,
+        config=cfg,
+        config_hash=cfg_hash,
+        environment=env_snapshot,
+        pending=False,
+    )
+
+
+def get_collection_state_snapshot(
+    *,
+    workspace_path: Optional[str],
+    repo_name: Optional[str],
+) -> Dict[str, Any]:
+    """Return current active + staging collection metadata for bridge/search consumers."""
+    state = get_workspace_state(workspace_path, repo_name) or {}
+    if not isinstance(state, dict):
+        state = {}
+
+    resolved_workspace = state.get("workspace_path") or workspace_path
+    active_collection = state.get("qdrant_collection")
+    serving_collection = state.get("serving_collection") or active_collection
+    active_repo_slug = state.get("active_repo_slug") or repo_name
+    serving_repo_slug = state.get("serving_repo_slug") or active_repo_slug
+
+    snapshot: Dict[str, Any] = {
+        "workspace_path": resolved_workspace,
+        "repo_name": repo_name,
+        "active_collection": active_collection,
+        "serving_collection": serving_collection,
+        "previous_collection": state.get("previous_collection"),
+        "active_repo_slug": active_repo_slug,
+        "serving_repo_slug": serving_repo_slug,
+        "indexing_status": state.get("indexing_status"),
+        "staging": None,
+    }
+
+    staging_enabled = bool(is_staging_enabled() if callable(is_staging_enabled) else False)
+    staging_info = state.get("staging")
+    if staging_enabled and isinstance(staging_info, dict) and staging_info.get("collection"):
+        snapshot["staging"] = {
+            "collection": staging_info.get("collection"),
+            "status": staging_info.get("status"),
+            "started_at": staging_info.get("started_at"),
+            "updated_at": staging_info.get("updated_at"),
+            "env_hash": staging_info.get("env_hash"),
+            "workspace_path": staging_info.get("workspace_path"),
+            "repo_name": staging_info.get("repo_name") or repo_name,
+        }
+
+    return snapshot
+
+
+def get_staging_targets(
+    *,
+    workspace_path: Optional[str],
+    repo_name: Optional[str],
+) -> Dict[str, Any]:
+    """Return canonical/old slug hints plus staging metadata if staging is active."""
+
+    snapshot = get_collection_state_snapshot(workspace_path=workspace_path, repo_name=repo_name)
+    if not snapshot:
+        return {}
+
+    active_slug = snapshot.get("active_repo_slug") or repo_name
+    serving_slug = snapshot.get("serving_repo_slug") or active_slug
+    staging_info = snapshot.get("staging")
+
+    canonical_slug: Optional[str] = None
+    if isinstance(active_slug, str) and active_slug.strip():
+        canonical_slug = active_slug[:-4] if active_slug.endswith("_old") else active_slug
+    elif isinstance(serving_slug, str) and serving_slug.strip():
+        canonical_slug = serving_slug[:-4] if serving_slug.endswith("_old") else serving_slug
+    elif repo_name:
+        canonical_slug = str(repo_name)
+
+    result: Dict[str, Any] = {
+        "workspace_path": snapshot.get("workspace_path") or workspace_path,
+        "repo_name": repo_name,
+        "active_slug": active_slug,
+        "serving_slug": serving_slug,
+        "staging": staging_info if isinstance(staging_info, dict) else None,
+    }
+
+    if canonical_slug:
+        result["canonical_slug"] = canonical_slug
+        result["old_slug"] = f"{canonical_slug}_old"
+
+    return result
+
+
+def update_staging_status(
+    *,
+    workspace_path: Optional[str],
+    repo_name: Optional[str],
+    status: IndexingStatus,
+) -> WorkspaceState:
+    state = get_workspace_state(workspace_path, repo_name)
+    staging = dict(state.get("staging", {}) or {})
+    if not staging:
+        return state
+    staging["status"] = status
+    staging["updated_at"] = datetime.now().isoformat()
+    return set_staging_state(
+        workspace_path=workspace_path,
+        repo_name=repo_name,
+        staging=staging,
+    )
+
+
+def clear_staging_collection(
+    *,
+    workspace_path: Optional[str],
+    repo_name: Optional[str],
+) -> WorkspaceState:
+    return set_staging_state(workspace_path=workspace_path, repo_name=repo_name, staging=None)
+
+
+def activate_staging_collection(
+    *,
+    workspace_path: Optional[str],
+    repo_name: Optional[str],
+) -> WorkspaceState:
+    state = get_workspace_state(workspace_path, repo_name)
+    staging = dict(state.get("staging", {}) or {})
+    collection = staging.get("collection")
+    if not collection:
+        return state
+
+    updates: Dict[str, Any] = {
+        "previous_collection": state.get("qdrant_collection"),
+        "qdrant_collection": collection,
+        "staging": None,
+    }
+
+    status = staging.get("status")
+    if isinstance(status, dict):
+        updates["indexing_status"] = status
+
+    if staging.get("indexing_config"):
+        updates["indexing_config"] = staging.get("indexing_config")
+    if staging.get("indexing_config_hash"):
+        updates["indexing_config_hash"] = staging.get("indexing_config_hash")
+    if staging.get("environment"):
+        updates["indexing_env"] = staging.get("environment")
+    # Clear pending snapshots once activation succeeds
+    updates["indexing_config_pending"] = None
+    updates["indexing_config_pending_hash"] = None
+    updates["indexing_env_pending"] = None
+
+    return update_workspace_state(
+        workspace_path=workspace_path,
+        repo_name=repo_name,
+        updates=updates,
     )
 
 
@@ -906,43 +1159,85 @@ def _normalize_repo_name_for_collection(repo_name: str) -> str:
     base repo directory name, so strip a trailing 16-hex segment when present.
     """
     try:
-        m = re.match(r"^(.*)-([0-9a-f]{16})$", repo_name)
+        # Special-case staging clone slugs ("..._old"): we still want to strip the
+        # remote-upload 16-hex suffix from the *base* repo name.
+        is_old = False
+        raw = repo_name
+        try:
+            if raw.endswith("_old"):
+                is_old = True
+                raw = raw[:-4]
+        except Exception:
+            is_old = False
+            raw = repo_name
+
+        m = re.match(r"^(.*)-([0-9a-f]{16})$", raw)
         if m:
             base = (m.group(1) or "").strip()
             if base:
-                return base
+                return f"{base}_old" if is_old else base
     except Exception:
         pass
     return repo_name
+
+
+def _collection_name_for_repo_slug(normalized_repo: str, *, is_old_slug: bool) -> Optional[str]:
+    if not normalized_repo:
+        return None
+
+    # If repo_name is a staging clone slug ("..._old"), compute the canonical collection name
+    # from the base repo and then append "_old".
+    if is_old_slug:
+        try:
+            base_repo = normalized_repo[:-4] if normalized_repo.endswith("_old") else normalized_repo
+            base_coll = _generate_collection_name_from_repo(base_repo)
+            return f"{base_coll}_old"
+        except Exception:
+            return None
+
+    if is_multi_repo_mode():
+        return _generate_collection_name_from_repo(normalized_repo)
+
+    return None
 
 
 def get_collection_name(repo_name: Optional[str] = None) -> str:
     """Get collection name for repository or workspace.
 
     Priority:
-    1. Explicit COLLECTION_NAME env var - always wins when set to a real value
-    2. Multi-repo mode: generate from repo name
-    3. Single-repo mode with repo name: generate from repo name
-    4. Fallback: "global-collection"
+    1. Explicit COLLECTION_NAME env var - master override when set to a real value
+       (if repo_name is an *_old clone, append _old to the override unless already present)
+    2. Derive from repo slug (including *_old suffix handling)
+    3. Fallback: "global-collection"
 
     This ensures COLLECTION_NAME works as a master override in both local dev
-    and container environments, while still allowing auto-generation when
-    COLLECTION_NAME is not set or is a placeholder.
+    and container environments, while still allowing deterministic derivation
+    from repo slugs (including staging clone slugs).
     """
-    # COLLECTION_NAME always wins when explicitly set to a real value
+
+    # COLLECTION_NAME always wins when explicitly set to a real value.
     env_coll = os.environ.get("COLLECTION_NAME", "").strip()
     if env_coll and env_coll not in PLACEHOLDER_COLLECTION_NAMES:
+        try:
+            if isinstance(repo_name, str) and repo_name.endswith("_old") and not env_coll.endswith("_old"):
+                return f"{env_coll}_old"
+        except Exception:
+            pass
         return env_coll
 
     normalized = _normalize_repo_name_for_collection(repo_name) if repo_name else None
+    is_old_slug = False
+    try:
+        if isinstance(repo_name, str) and repo_name.endswith("_old"):
+            is_old_slug = True
+    except Exception:
+        is_old_slug = False
 
-    # In multi-repo mode, generate repo-specific collection names
-    if is_multi_repo_mode() and normalized:
-        return _generate_collection_name_from_repo(normalized)
-
-    # Use repo name if provided (for single-repo mode with repo name)
+    derived = None
     if normalized:
-        return _generate_collection_name_from_repo(normalized)
+        derived = _collection_name_for_repo_slug(normalized, is_old_slug=is_old_slug)
+    if derived:
+        return derived
 
     # Default fallback
     return "global-collection"
@@ -989,35 +1284,73 @@ def _detect_repo_name_from_path_by_structure(path: Path) -> str:
 
     return None
 
+def _normalize_repo_slug(candidate: Optional[str]) -> Optional[str]:
+    if not candidate:
+        return None
+    if _SLUGGED_REPO_RE.match(candidate):
+        return candidate
+    return None
+
+
 def _extract_repo_name_from_path(workspace_path: str) -> str:
-    """Extract repository name from workspace path.
+    """Extract repository slug or canonical name from workspace path.
 
-    Uses git-based detection first (canonical repo name from remote origin URL),
-    falls back to folder structure detection when git is unavailable.
+    Accepts canonical slugs (repo-hash), `_old` slugs, and falls back to git remote name.
     """
-    path = Path(workspace_path)
+    if not workspace_path:
+        return ""
 
-    # First try git-based detection (uses remote origin URL for canonical name)
-    git_name = _detect_repo_name_from_path(path)
-    if git_name:
-        try:
-            ws_root = Path(_resolve_workspace_root()).resolve()
-        except Exception:
-            ws_root = Path(_resolve_workspace_root())
-        if ws_root.name and git_name == ws_root.name:
-            git_name = None
-    if git_name and git_name != "workspace":
-        return git_name
+    try:
+        path = Path(workspace_path).resolve()
+    except Exception:
+        path = Path(workspace_path)
 
-    # Fallback to structure-based detection when git is unavailable
-    structure_name = _detect_repo_name_from_path_by_structure(path)
-    if structure_name:
-        return structure_name
+    slug = _server_managed_slug_from_path(path)
+    if slug:
+        return slug
 
-    # Final fallback
-    return git_name or "workspace"
+    try:
+        repo_path = path if path.is_dir() else path.parent
+        if (repo_path / ".git").exists():
+            name = _git_remote_repo_name(repo_path)
+            if name:
+                return name
+    except Exception:
+        pass
 
-# Cache functions for file hash tracking
+    try:
+        candidate = _normalize_repo_slug(path.name)
+        if candidate:
+            return candidate
+    except Exception:
+        pass
+
+    try:
+        candidate = _normalize_repo_slug(path.parent.name)
+        if candidate:
+            return candidate
+    except Exception:
+        pass
+
+    return path.name
+
+
+def _ensure_repo_slug_defaults(state: WorkspaceState, repo_name: Optional[str]) -> bool:
+    modified = False
+    active_slug = state.get("active_repo_slug")
+    if not active_slug and repo_name:
+        state["active_repo_slug"] = repo_name
+        active_slug = repo_name
+        modified = True
+    serving_slug = state.get("serving_repo_slug")
+    if not serving_slug:
+        state["serving_repo_slug"] = active_slug or repo_name
+        modified = True
+    if not state.get("serving_collection") and state.get("qdrant_collection"):
+        state["serving_collection"] = state.get("qdrant_collection")
+        modified = True
+    return modified
+
 def _get_cache_path(workspace_path: str) -> Path:
     """Get the path to the cache.json file."""
     try:
@@ -1364,6 +1697,102 @@ def get_collection_mappings(search_root: Optional[str] = None) -> List[Dict[str,
     return mappings
 
 
+def _env_truthy(name: str, default: bool = False) -> bool:
+    try:
+        v = os.environ.get(name)
+        if v is None:
+            return bool(default)
+        return str(v).strip().lower() in {"1", "true", "yes", "on"}
+    except Exception:
+        return bool(default)
+
+
+def _env_int(name: str) -> Optional[int]:
+    try:
+        v = os.environ.get(name)
+        if v is None:
+            return None
+        v = str(v).strip()
+        if not v:
+            return None
+        return int(v)
+    except Exception:
+        return None
+
+
+def get_indexing_config_snapshot() -> Dict[str, Any]:
+    return {
+        "embedding_model": os.environ.get("EMBEDDING_MODEL"),
+        "embedding_provider": os.environ.get("EMBEDDING_PROVIDER"),
+        "refrag_mode": _env_truthy("REFRAG_MODE", False),
+        "qwen3_embedding_enabled": _env_truthy("QWEN3_EMBEDDING_ENABLED", False),
+        "index_semantic_chunks": _env_truthy("INDEX_SEMANTIC_CHUNKS", True),
+        "index_micro_chunks": _env_truthy("INDEX_MICRO_CHUNKS", False),
+        "micro_chunk_tokens": _env_int("MICRO_CHUNK_TOKENS"),
+        "micro_chunk_stride": _env_int("MICRO_CHUNK_STRIDE"),
+        "max_micro_chunks_per_file": _env_int("MAX_MICRO_CHUNKS_PER_FILE"),
+        "index_chunk_lines": _env_int("INDEX_CHUNK_LINES"),
+        "index_chunk_overlap": _env_int("INDEX_CHUNK_OVERLAP"),
+        "use_tree_sitter": _env_truthy("USE_TREE_SITTER", False),
+        "index_use_enhanced_ast": _env_truthy("INDEX_USE_ENHANCED_AST", False),
+        "mini_vec_dim": _env_int("MINI_VEC_DIM"),
+        "lex_sparse_mode": _env_truthy("LEX_SPARSE_MODE", False),
+    }
+
+
+def compute_indexing_config_hash(cfg: Dict[str, Any]) -> str:
+    try:
+        payload = json.dumps(cfg, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    except Exception:
+        payload = str(cfg)
+    return hashlib.sha1(payload.encode("utf-8", errors="ignore")).hexdigest()
+
+
+def persist_indexing_config(
+    *,
+    workspace_path: Optional[str] = None,
+    repo_name: Optional[str] = None,
+    environment: Optional[Dict[str, str]] = None,
+    config: Optional[Dict[str, Any]] = None,
+    config_hash: Optional[str] = None,
+    pending: bool = False,
+) -> WorkspaceState:
+    state = get_workspace_state(workspace_path, repo_name) or {}
+    if not isinstance(state, dict):
+        state = {}
+
+    cfg = config or get_indexing_config_snapshot()
+    cfg_hash = config_hash or compute_indexing_config_hash(cfg)
+    env_snapshot = environment or dict(os.environ)
+
+    updates: Dict[str, Any] = {}
+    if pending:
+        # Avoid clobbering an existing pending snapshot (e.g. staging pending env)
+        # unless the caller explicitly provides an override.
+        if config is not None or state.get("indexing_config_pending") is None:
+            updates["indexing_config_pending"] = cfg
+            updates["indexing_config_pending_hash"] = cfg_hash
+        if environment is not None or state.get("indexing_env_pending") is None:
+            updates["indexing_env_pending"] = env_snapshot
+    else:
+        updates["indexing_config"] = cfg
+        updates["indexing_config_hash"] = cfg_hash
+        # Only overwrite indexing_env when explicitly provided or missing.
+        # This prevents background services (watcher/indexer) from clobbering an
+        # already persisted env snapshot (including staging-promoted env).
+        if environment is not None or not state.get("indexing_env"):
+            updates["indexing_env"] = env_snapshot
+        updates["indexing_config_pending"] = None
+        updates["indexing_config_pending_hash"] = None
+        updates["indexing_env_pending"] = None
+
+    return update_workspace_state(
+        workspace_path=workspace_path,
+        repo_name=repo_name,
+        updates=updates,
+    )
+
+
 def find_collection_for_logical_repo(logical_repo_id: str, search_root: Optional[str] = None) -> Optional[str]:
     if not logical_repo_reuse_enabled():
         return None
@@ -1645,6 +2074,62 @@ def remove_cached_symbols(file_path: str) -> None:
             cache_path.unlink()
     except Exception:
         pass
+
+
+def clear_symbol_cache(
+    workspace_path: Optional[str] = None,
+    repo_name: Optional[str] = None,
+) -> int:
+    """
+    Clear symbol cache files for a workspace/repo.
+
+    Returns the number of symbol cache directories removed.
+    """
+    dirs_removed = 0
+    workspace_root = workspace_path or _resolve_workspace_root()
+
+    target_dirs: List[Path] = []
+    if is_multi_repo_mode() and repo_name:
+        target_dirs.append(_get_repo_state_dir(repo_name) / "symbols")
+    else:
+        try:
+            cache_parent = _get_cache_path(workspace_root).parent
+        except Exception:
+            cache_parent = Path(workspace_root) / ".codebase"
+        target_dirs.append(cache_parent / "symbols")
+
+    for symbols_dir in target_dirs:
+        if not symbols_dir.exists():
+            continue
+        for cache_file in symbols_dir.glob("*.json"):
+            file_path = ""
+            try:
+                with cache_file.open("r", encoding="utf-8-sig") as f:
+                    data = json.load(f)
+                file_path = str(data.get("file_path") or "")
+            except Exception:
+                file_path = ""
+            if file_path:
+                remove_cached_symbols(file_path)
+            else:
+                try:
+                    cache_file.unlink()
+                except Exception:
+                    pass
+
+        # Best-effort cleanup of empty symbols directory
+        try:
+            next(symbols_dir.iterdir())
+        except StopIteration:
+            try:
+                symbols_dir.rmdir()
+                dirs_removed += 1
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    return dirs_removed
 
 
 def compare_symbol_changes(old_symbols: dict, new_symbols: dict) -> tuple[list, list]:
