@@ -62,17 +62,6 @@ import contextlib
 # when this file is executed directly (sys.path[0] may be /work/scripts).
 # Supports multiple roots via WORK_ROOTS env (comma-separated), defaults to /work and /app.
 _roots_env = os.environ.get("WORK_ROOTS", "")
-
-# Session state imported from mcp_workspace shim (-> scripts.mcp.workspace)
-from scripts.mcp_workspace import (
-    _MEM_COLL_CACHE,
-    SESSION_DEFAULTS,
-    SESSION_DEFAULTS_BY_SESSION,
-    _SESSION_LOCK,
-    _SESSION_CTX_LOCK,
-)
-
-
 _roots = [p.strip() for p in _roots_env.split(",") if p.strip()] or ["/work", "/app"]
 try:
     for _root in _roots:
@@ -80,6 +69,16 @@ try:
             sys.path.insert(0, _root)
 except Exception:
     pass
+
+# Session state imported from mcp_workspace shim (-> scripts.mcp.workspace)
+# Must be after sys.path setup
+from scripts.mcp_workspace import (
+    _MEM_COLL_CACHE,
+    SESSION_DEFAULTS,
+    SESSION_DEFAULTS_BY_SESSION,
+    _SESSION_LOCK,
+    _SESSION_CTX_LOCK,
+)
 
 # Import structured logging and error handling (after sys.path setup)
 try:
