@@ -55,7 +55,7 @@ def main():
             for lock in glob.glob('/tmp/rerank_weights/eval_*.lock'):
                 try:
                     os.remove(lock)
-                except:
+                except Exception:
                     pass
 
             learner = CollectionLearner(collection='eval')

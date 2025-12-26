@@ -2517,7 +2517,7 @@ async def _context_answer_impl(
         def safe_float(val, default=0.0, **kw):
             try:
                 return float(val) if val is not None else default
-            except:
+            except Exception:
                 return default
 
     # Get embedding model function

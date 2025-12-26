@@ -211,7 +211,7 @@ print(json.dumps(result, indent=2))
         if line.startswith("RETURNCODE:"):
             try:
                 returncode = int(line.split(":", 1)[1].strip())
-            except:
+            except ValueError:
                 pass
 
     return {
