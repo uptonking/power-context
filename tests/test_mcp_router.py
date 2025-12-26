@@ -130,7 +130,8 @@ class TestBuildPlan:
 
     def test_build_plan_returns_list(self, router_module):
         """build_plan returns a list of (tool, args) tuples."""
-        plan = router_module.build_plan("find the main function")
+        # Use a query that triggers rule-based classification (avoids embedding model)
+        plan = router_module.build_plan("list collections")
 
         assert isinstance(plan, list)
         assert len(plan) >= 1
@@ -169,13 +170,13 @@ class TestBuildPlan:
         assert tool_name == "search_config_for"
 
     def test_build_plan_includes_query(self, router_module):
-        """build_plan includes the query in args."""
-        plan = router_module.build_plan("find the main function")
+        """build_plan includes the query in args for search tools."""
+        # Use a query that triggers rule-based classification (avoids embedding model)
+        plan = router_module.build_plan("find tests for authentication")
 
         tool_name, args = plan[0]
-        # Most search tools include query or queries
-        has_query = "query" in args or "queries" in args
-        assert has_query or tool_name in {"qdrant_status", "qdrant_list", "qdrant_prune"}
+        # search_tests_for includes query in args
+        assert "query" in args or tool_name in {"qdrant_status", "qdrant_list", "qdrant_prune"}
 
 
 # ============================================================================
