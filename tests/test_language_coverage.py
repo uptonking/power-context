@@ -325,22 +325,18 @@ class TestTreeSitterCallExtraction:
         return _ts_extract_calls_generic
     
     @pytest.fixture
-    def ts_available(self):
-        """Check if tree-sitter is available."""
+    def ts_languages(self):
+        """Return dict of available tree-sitter languages."""
         try:
-            from scripts.ingest.tree_sitter import _use_tree_sitter
-            return _use_tree_sitter()
+            from scripts.ingest.tree_sitter import _TS_LANGUAGES, _TS_AVAILABLE
+            return _TS_LANGUAGES if _TS_AVAILABLE else {}
         except ImportError:
-            return False
+            return {}
     
-    @pytest.mark.skipif(
-        not pytest.importorskip("tree_sitter", reason="tree_sitter not available"),
-        reason="tree_sitter not available"
-    )
-    def test_javascript_ts_calls(self, ts_extract_calls, ts_available):
+    def test_javascript_ts_calls(self, ts_extract_calls, ts_languages):
         """Test JavaScript call extraction with tree-sitter."""
-        if not ts_available:
-            pytest.skip("tree-sitter not available")
+        if "javascript" not in ts_languages:
+            pytest.skip("tree-sitter javascript parser not available")
         
         code = '''
 function main() {
@@ -355,14 +351,10 @@ function main() {
         assert len(calls) > 0
         assert "process" in calls or "log" in calls or "fetchData" in calls or "map" in calls
     
-    @pytest.mark.skipif(
-        not pytest.importorskip("tree_sitter", reason="tree_sitter not available"),
-        reason="tree_sitter not available"
-    )
-    def test_go_ts_calls(self, ts_extract_calls, ts_available):
+    def test_go_ts_calls(self, ts_extract_calls, ts_languages):
         """Test Go call extraction with tree-sitter."""
-        if not ts_available:
-            pytest.skip("tree-sitter not available")
+        if "go" not in ts_languages:
+            pytest.skip("tree-sitter go parser not available")
         
         code = '''
 package main
@@ -379,14 +371,10 @@ func main() {
         # Should find function calls
         assert len(calls) >= 0  # May be empty if parser not available
     
-    @pytest.mark.skipif(
-        not pytest.importorskip("tree_sitter", reason="tree_sitter not available"),
-        reason="tree_sitter not available"
-    )
-    def test_rust_ts_calls(self, ts_extract_calls, ts_available):
+    def test_rust_ts_calls(self, ts_extract_calls, ts_languages):
         """Test Rust call extraction with tree-sitter."""
-        if not ts_available:
-            pytest.skip("tree-sitter not available")
+        if "rust" not in ts_languages:
+            pytest.skip("tree-sitter rust parser not available")
         
         code = '''
 fn main() {

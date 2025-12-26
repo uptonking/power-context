@@ -1360,7 +1360,7 @@ class RemoteUploadClient:
             try:
                 error_detail = response.json()
                 error_msg += f": {error_detail.get('error', {}).get('message', 'Unknown error')}"
-            except:
+            except Exception:
                 error_msg += f": {response.text[:100]}"
 
             return {"success": False, "error": {"code": "STATUS_ERROR", "message": error_msg}}
