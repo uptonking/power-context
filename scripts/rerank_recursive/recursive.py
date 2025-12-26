@@ -49,11 +49,19 @@ class RecursiveReranker:
         hidden_dim: int = 512,
         early_stop: bool = True,
         blend_with_initial: float = 0.3,
+        alpha_scheduler: Optional[Any] = None,
     ):
         self.n_iterations = n_iterations
         self.dim = dim
         self.early_stop = early_stop
         self.blend_with_initial = blend_with_initial
+
+        # Alpha scheduler: if None, use CosineAlphaScheduler by default
+        if alpha_scheduler is None:
+            from scripts.rerank_recursive.alpha_scheduler import CosineAlphaScheduler
+            self.alpha_scheduler = CosineAlphaScheduler(n_iterations=n_iterations)
+        else:
+            self.alpha_scheduler = alpha_scheduler
 
         self.scorer = TinyScorer(dim=dim, hidden_dim=hidden_dim)
         self.refiner = LatentRefiner(dim=dim)
@@ -217,11 +225,13 @@ class RecursiveReranker:
 
         state = RefinementState(z=z, scores=scores, iteration=0)
         state.score_history.append(scores.copy())
+        alpha_trajectory = []  # Track alpha values used
 
         for i in range(self.n_iterations):
             state.iteration = i + 1
             new_scores = self.scorer.forward(query_emb, doc_embs, state.z)
-            alpha = 0.5
+            alpha = self.alpha_scheduler.get_alpha(i)
+            alpha_trajectory.append(alpha)
             state.scores = alpha * new_scores + (1 - alpha) * state.scores
             state.score_history.append(state.scores.copy())
             state.z = self.refiner.refine(state.z, query_emb, doc_embs, state.scores)
@@ -254,6 +264,7 @@ class RecursiveReranker:
             candidate["recursive_iterations"] = state.iteration
             trajectory = [float(h[idx]) for h in state.score_history]
             candidate["score_trajectory"] = trajectory
+            candidate["alpha_trajectory"] = alpha_trajectory[:state.iteration]  # Alpha values used
             fname_boost = _compute_fname_boost(query, candidate, fname_boost_factor)
             candidate["score"] = float(final_scores[idx]) + fname_boost
             if fname_boost > 0:

@@ -53,6 +53,12 @@ from scripts.rerank_recursive.expander import QueryExpander
 # Early stopping
 from scripts.rerank_recursive.confidence import ConfidenceEstimator
 
+# Alpha scheduling
+from scripts.rerank_recursive.alpha_scheduler import (
+    CosineAlphaScheduler,
+    LearnedAlphaWeights,
+)
+
 # Main rerankers and functions
 from scripts.rerank_recursive.recursive import (
     RecursiveReranker,
@@ -78,6 +84,8 @@ __all__ = [
     "LearnedHybridWeights",
     "QueryExpander",
     "ConfidenceEstimator",
+    "CosineAlphaScheduler",
+    "LearnedAlphaWeights",
     "RecursiveReranker",
     "ONNXRecursiveReranker",
     "SessionAwareReranker",
