@@ -33,6 +33,9 @@ services:
       - FASTMCP_HOST=${FASTMCP_HOST}
       - FASTMCP_PORT=${FASTMCP_PORT}
       - QDRANT_URL=${QDRANT_URL}
+      # OpenLit observability (optional - enable via OPENLIT_ENABLED=1)
+      - OPENLIT_ENABLED=${OPENLIT_ENABLED:-0}
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://openlit:4318}
       # Optional auth configuration (fully opt-in via .env)
       - CTXCE_AUTH_ENABLED=${CTXCE_AUTH_ENABLED:-0}
       - CTXCE_MCP_ACL_ENFORCE=${CTXCE_MCP_ACL_ENFORCE:-0}
@@ -96,6 +99,9 @@ services:
       - FASTMCP_HOST=${FASTMCP_HOST}
       - FASTMCP_INDEXER_PORT=${FASTMCP_INDEXER_PORT}
       - QDRANT_URL=${QDRANT_URL}
+      # OpenLit observability (optional)
+      - OPENLIT_ENABLED=${OPENLIT_ENABLED:-0}
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
       # Optional auth configuration (fully opt-in via .env)
       - CTXCE_AUTH_ENABLED=${CTXCE_AUTH_ENABLED:-0}
       - CTXCE_MCP_ACL_ENFORCE=${CTXCE_MCP_ACL_ENFORCE:-0}
@@ -214,6 +220,9 @@ services:
       - FASTMCP_PORT=8000
       - FASTMCP_TRANSPORT=${FASTMCP_HTTP_TRANSPORT}
       - QDRANT_URL=${QDRANT_URL}
+      # OpenLit observability (optional - enable via OPENLIT_ENABLED=1)
+      - OPENLIT_ENABLED=${OPENLIT_ENABLED:-0}
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://openlit:4318}
       # Optional auth configuration (fully opt-in via .env)
       - CTXCE_AUTH_ENABLED=${CTXCE_AUTH_ENABLED:-0}
       - CTXCE_MCP_ACL_ENFORCE=${CTXCE_MCP_ACL_ENFORCE:-0}

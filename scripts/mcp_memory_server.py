@@ -1,19 +1,27 @@
+# ---------------------------------------------------------------------------
+# CRITICAL: OpenLit must be initialized BEFORE any qdrant_client imports
+# to properly instrument vector DB calls.
+# ---------------------------------------------------------------------------
 import os
+import sys as _sys
+
+# Ensure repo roots are importable so 'scripts' resolves inside container
+_roots_env = os.environ.get("WORK_ROOTS", "")
+_roots = [p.strip() for p in _roots_env.split(",") if p.strip()] or ["/work", "/app"]
+for _root in _roots:
+    if _root and _root not in _sys.path:
+        _sys.path.insert(0, _root)
+
+# Now import OpenLit init (before any other scripts imports that may use qdrant)
+try:
+    from scripts import openlit_init  # noqa: F401 - triggers early instrumentation
+except ImportError:
+    pass  # OpenLit not available
+
 from typing import Any, Dict, Optional, List
 import json
 import threading
 from weakref import WeakKeyDictionary
-
-# Ensure repo roots are importable so 'scripts' resolves inside container
-import sys as _sys
-_roots_env = os.environ.get("WORK_ROOTS", "")
-_roots = [p.strip() for p in _roots_env.split(",") if p.strip()] or ["/work", "/app"]
-try:
-    for _root in _roots:
-        if _root and _root not in _sys.path:
-            _sys.path.insert(0, _root)
-except Exception:
-    pass
 
 
 # FastMCP server and request Context (ctx) for per-connection state
@@ -425,6 +433,10 @@ def find(
     Cold-start option: set MEMORY_COLD_SKIP_DENSE=1 to skip dense embedding until the
     model is cached (useful on slow storage).
     """
+    # Handle 'q' alias for query (from kwargs)
+    if not query and kwargs.get("q"):
+        query = kwargs.get("q")
+
     sess = _require_auth_session(session)
     coll = _resolve_collection(collection, session=session, ctx=ctx, extra_kwargs=kwargs)
     _require_collection_access((sess or {}).get("user_id") if sess else None, coll, "read")

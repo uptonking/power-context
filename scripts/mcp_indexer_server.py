@@ -23,8 +23,25 @@ Conventions:
 Note: We use the fastmcp library for quick SSE hosting. If you change to another
 MCP server framework, keep the tool names and args stable.
 """
-
 from __future__ import annotations
+
+# ---------------------------------------------------------------------------
+# CRITICAL: OpenLit must be initialized BEFORE any qdrant_client imports
+# to properly instrument vector DB calls. This import must come first!
+# ---------------------------------------------------------------------------
+import os as _os
+import sys as _sys
+_roots_env = _os.environ.get("WORK_ROOTS", "")
+_roots = [p.strip() for p in _roots_env.split(",") if p.strip()] or ["/work", "/app"]
+for _root in _roots:
+    if _root and _root not in _sys.path:
+        _sys.path.insert(0, _root)
+
+# Now import OpenLit init (before any other scripts imports)
+try:
+    from scripts import openlit_init  # noqa: F401 - triggers early instrumentation
+except ImportError:
+    pass  # OpenLit not available
 import json
 import asyncio
 import re
@@ -69,6 +86,9 @@ try:
             sys.path.insert(0, _root)
 except Exception:
     pass
+
+# Note: OpenLit initialization is handled by early import of scripts.openlit_init
+# at the top of this file (before any qdrant_client imports)
 
 # Session state imported from mcp_workspace shim (-> scripts.mcp.workspace)
 # Must be after sys.path setup
@@ -151,7 +171,7 @@ from scripts.mcp_impl.info_request import (
     _calculate_confidence,
 )
 from scripts.mcp_impl.admin_tools import _collection_map_impl
-from scripts.mcp_impl.memory import _memory_store_impl
+from scripts.mcp_impl.memory import _memory_store_impl, _memory_find_impl
 from scripts.mcp_impl.search_specialized import (
     _search_tests_for_impl,
     _search_config_for_impl,
@@ -1960,6 +1980,41 @@ async def expand_query(
     - {"alternates": list[str]} or {"alternates": [], "hint": "..."} if decoder disabled
     """
     return await _expand_query_impl(query=query, max_new=max_new, session=session)
+
+
+# ---------------------------------------------------------------------------
+# memory_find - thin wrapper delegating to _memory_find_impl
+# ---------------------------------------------------------------------------
+@mcp.tool()
+async def memory_find(
+    query: str,
+    limit: Optional[int] = None,
+    collection: Optional[str] = None,
+    top_k: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Find memory entries by vector similarity (dense + lexical fusion).
+
+    When to use:
+    - Search for previously stored memories/notes
+    - Retrieve context from the memory collection
+
+    Parameters:
+    - query: str. Search query text.
+    - limit: int (default 5). Maximum results to return.
+    - collection: str (optional). Target collection override.
+    - top_k: int (optional). Alias for limit.
+
+    Returns:
+    - {ok: true, results: [{id, score, information, metadata}, ...], count: N}
+    """
+    return await _memory_find_impl(
+        query=query,
+        limit=limit,
+        collection=collection,
+        top_k=top_k,
+        default_collection_fn=_default_collection,
+        get_embedding_model_fn=_get_embedding_model,
+    )
 
 
 _relax_var_kwarg_defaults()
