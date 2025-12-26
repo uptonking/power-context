@@ -52,7 +52,7 @@ class CosineAlphaScheduler:
     
     def get_alpha(self, iteration: int) -> float:
         """Get alpha for a specific iteration (0-indexed)."""
-        idx = min(iteration, len(self._schedule) - 1)
+        idx = max(0, min(iteration, len(self._schedule) - 1))
         return self._schedule[idx]
     
     def get_schedule(self) -> List[float]:
@@ -133,7 +133,7 @@ class LearnedAlphaWeights:
     def get_alpha(self, iteration: int) -> float:
         """Get alpha for a specific iteration (0-indexed)."""
         self.maybe_reload_weights()
-        idx = min(iteration, len(self.raw_weights) - 1)
+        idx = max(0, min(iteration, len(self.raw_weights) - 1))
         return float(self._sigmoid(self.raw_weights[idx]))
     
     def get_schedule(self) -> List[float]:
@@ -159,6 +159,8 @@ class LearnedAlphaWeights:
         iteration: int,
         blended_scores: np.ndarray,
         teacher_scores: np.ndarray,
+        new_scores: Optional[np.ndarray] = None,
+        prev_scores: Optional[np.ndarray] = None,
     ) -> float:
         """Learn alpha to minimize ranking difference with teacher.
         
@@ -169,6 +171,8 @@ class LearnedAlphaWeights:
             iteration: Which iteration's alpha to update
             blended_scores: (n_docs,) our blended scores at this iteration
             teacher_scores: (n_docs,) ground truth scores
+            new_scores: (n_docs,) optional - the "new" signal before blending
+            prev_scores: (n_docs,) optional - the "previous" signal before blending
             
         Returns:
             Gradient magnitude (for logging)
@@ -176,22 +180,45 @@ class LearnedAlphaWeights:
         if len(blended_scores) < 2:
             return 0.0
         
-        idx = min(iteration, len(self.raw_weights) - 1)
+        idx = max(0, min(iteration, len(self.raw_weights) - 1))
         alpha = self._sigmoid(self.raw_weights[idx:idx+1])[0]
         
-        # Compute ranking agreement: Spearman-like
+        # Compute ranking agreement
         our_order = np.argsort(-blended_scores)
         teacher_order = np.argsort(-teacher_scores)
         
-        # Simple gradient: if rankings don't match, adjust alpha
-        # Direction: if new_scores would have helped, increase alpha; else decrease
-        n_mismatches = np.sum(our_order[:3] != teacher_order[:3])
+        # Count top-k mismatches
+        k = min(3, len(blended_scores))
+        n_mismatches = np.sum(our_order[:k] != teacher_order[:k])
         
         if n_mismatches == 0:
             return 0.0  # Perfect match, no update needed
         
-        # Gradient through sigmoid
-        grad = n_mismatches * 0.1 * self._sigmoid_grad(np.array([alpha]))[0]
+        # Determine gradient direction based on which signal would have helped
+        grad_direction = 1.0  # Default: increase alpha (trust new scores more)
+        
+        if new_scores is not None and prev_scores is not None:
+            # Compare: would higher alpha (more new_scores) or lower alpha (more prev_scores) help?
+            new_order = np.argsort(-new_scores)
+            prev_order = np.argsort(-prev_scores)
+            
+            # Count how many top-k matches each signal has with teacher
+            new_matches = np.sum(new_order[:k] == teacher_order[:k])
+            prev_matches = np.sum(prev_order[:k] == teacher_order[:k])
+            
+            if prev_matches > new_matches:
+                # Previous scores are better aligned with teacher → decrease alpha
+                grad_direction = -1.0
+            elif new_matches > prev_matches:
+                # New scores are better aligned with teacher → increase alpha
+                grad_direction = 1.0
+            else:
+                # Tie: small nudge toward middle (alpha=0.5)
+                grad_direction = 0.5 - alpha  # Pull toward 0.5
+        
+        # Gradient through sigmoid, scaled by mismatches and direction
+        sigmoid_grad = self._sigmoid_grad(np.array([alpha]))[0]
+        grad = n_mismatches * 0.1 * sigmoid_grad * grad_direction
         
         # Momentum SGD
         momentum = 0.9
