@@ -6,7 +6,6 @@ Contains:
 - Identifier tokenization
 - Embedding cache management
 """
-import os
 import re
 import hashlib
 import threading

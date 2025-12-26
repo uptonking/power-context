@@ -5,7 +5,7 @@ Inspired by TRM: minimal parameters, maximum iterations.
 """
 import os
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 

@@ -30,6 +30,7 @@ from scripts.rerank_recursive import (
     ConfidenceEstimator,
     RecursiveReranker,
     ONNXRecursiveReranker,
+    SessionAwareReranker,
     # Utilities
     _COMMON_TOKENS,
     _split_identifier,
@@ -44,6 +45,8 @@ from scripts.rerank_recursive import (
     rerank_recursive,
     rerank_recursive_inprocess,
     rerank_with_learning,
+    rerank_with_session,
+    get_recursive_reranker,
     _get_learning_reranker,
     # Constants
     HAS_ONNX,
@@ -62,6 +65,7 @@ __all__ = [
     "ConfidenceEstimator",
     "RecursiveReranker",
     "ONNXRecursiveReranker",
+    "SessionAwareReranker",
     # Utilities
     "_COMMON_TOKENS",
     "_split_identifier",
@@ -76,6 +80,8 @@ __all__ = [
     "rerank_recursive",
     "rerank_recursive_inprocess",
     "rerank_with_learning",
+    "rerank_with_session",
+    "get_recursive_reranker",
     "_get_learning_reranker",
     # Constants
     "HAS_ONNX",
