@@ -48,7 +48,9 @@ def chunk_semantic(
     # Try enhanced AST analyzer first (if available)
     # Note: ast_analyzer can use Python's built-in ast module even without tree-sitter
     use_enhanced = os.environ.get("INDEX_USE_ENHANCED_AST", "1").lower() in {"1", "true", "yes", "on"}
-    _ast_supported = language in _TS_LANGUAGES or language == "python"  # Python has built-in ast fallback
+    # Enhanced AST analyzer is intended for languages it can reliably structure-chunk.
+    # Keep this tight so other languages fall through to symbol-range chunking.
+    _ast_supported = language in {"python", "javascript", "typescript"}
     if use_enhanced and _AST_ANALYZER_AVAILABLE and _ast_supported:
         try:
             chunks = chunk_code_semantically(text, language, max_lines, overlap)
