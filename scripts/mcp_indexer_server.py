@@ -171,6 +171,7 @@ from scripts.mcp_impl.info_request import (
     _calculate_confidence,
 )
 from scripts.mcp_impl.admin_tools import _collection_map_impl
+from scripts.mcp_impl.memory import _memory_store_impl, _memory_find_impl
 from scripts.mcp_impl.search_specialized import (
     _search_tests_for_impl,
     _search_config_for_impl,
@@ -731,6 +732,30 @@ async def collection_map(
         include_samples=include_samples,
         limit=limit,
         coerce_bool_fn=_coerce_bool,
+    )
+
+
+# ---------------------------------------------------------------------------
+# memory_store - thin wrapper delegating to _memory_store_impl
+# ---------------------------------------------------------------------------
+@mcp.tool()
+async def memory_store(
+    information: str,
+    metadata: Optional[Dict[str, Any]] = None,
+    collection: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Store a free-form memory entry in Qdrant using the active collection.
+
+    - Embeds the text and writes both dense and lexical vectors (plus mini vector in ReFRAG mode).
+    - Honors explicit collection overrides; otherwise falls back to workspace/env defaults.
+    - Returns a payload compatible with context-aware tools.
+    """
+    return await _memory_store_impl(
+        information=information,
+        metadata=metadata,
+        collection=collection,
+        default_collection_fn=_default_collection,
+        get_embedding_model_fn=_get_embedding_model,
     )
 
 
@@ -1955,6 +1980,41 @@ async def expand_query(
     - {"alternates": list[str]} or {"alternates": [], "hint": "..."} if decoder disabled
     """
     return await _expand_query_impl(query=query, max_new=max_new, session=session)
+
+
+# ---------------------------------------------------------------------------
+# memory_find - thin wrapper delegating to _memory_find_impl
+# ---------------------------------------------------------------------------
+@mcp.tool()
+async def memory_find(
+    query: str,
+    limit: Optional[int] = None,
+    collection: Optional[str] = None,
+    top_k: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Find memory entries by vector similarity (dense + lexical fusion).
+
+    When to use:
+    - Search for previously stored memories/notes
+    - Retrieve context from the memory collection
+
+    Parameters:
+    - query: str. Search query text.
+    - limit: int (default 5). Maximum results to return.
+    - collection: str (optional). Target collection override.
+    - top_k: int (optional). Alias for limit.
+
+    Returns:
+    - {ok: true, results: [{id, score, information, metadata}, ...], count: N}
+    """
+    return await _memory_find_impl(
+        query=query,
+        limit=limit,
+        collection=collection,
+        top_k=top_k,
+        default_collection_fn=_default_collection,
+        get_embedding_model_fn=_get_embedding_model,
+    )
 
 
 _relax_var_kwarg_defaults()
