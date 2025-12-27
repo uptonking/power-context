@@ -66,14 +66,11 @@ def chunk_semantic(
             if os.environ.get("DEBUG_INDEXING"):
                 print(f"[DEBUG] Enhanced AST chunking failed, falling back: {e}")
     
-    if not _use_tree_sitter() or language not in _TS_LANGUAGES:
-        # Fallback to line-based chunking
-        return chunk_lines(text, max_lines, overlap)
-
     lines = text.splitlines()
     n = len(lines)
 
-    # Extract symbols with line ranges
+    # Extract symbols with line ranges (works for many languages via regex fallbacks,
+    # and may optionally use tree-sitter when enabled).
     symbols = _extract_symbols(language, text)
     if not symbols:
         return chunk_lines(text, max_lines, overlap)

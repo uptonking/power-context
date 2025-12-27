@@ -182,6 +182,10 @@ from scripts.mcp_impl.search_history import (
     _search_commits_for_impl,
     _change_history_for_path_impl,
 )
+from scripts.mcp_impl.symbol_graph import (
+    _symbol_graph_impl,
+    _format_symbol_graph_toon,
+)
 
 # Global lock to guard temporary env toggles used during ReFRAG retrieval/decoding
 _ENV_LOCK = threading.Lock()
@@ -1422,6 +1426,64 @@ async def search_importers_for(
         ctx=ctx,
         repo_search_fn=repo_search,
     )
+
+
+@mcp.tool()
+async def symbol_graph(
+    symbol: str = None,
+    query_type: str = "callers",
+    limit: Any = None,
+    language: Any = None,
+    under: Any = None,
+    session: Any = None,
+    output_format: Any = None,
+    ctx: Context = None,
+) -> Dict[str, Any]:
+    """Query the symbol graph to find callers, definitions, or importers.
+
+    When to use:
+    - "Who calls X?" → query_type="callers"
+    - "Where is X defined?" → query_type="definition"
+    - "What imports Y?" → query_type="importers"
+
+    Key parameters:
+    - symbol: str. The function, class, or module name to search for.
+    - query_type: str. One of "callers", "definition", "importers".
+    - limit: int (default 20). Maximum results to return.
+    - language: str (optional). Filter by programming language.
+    - under: str (optional). Filter by path prefix.
+    - output_format: "json" (default) or "toon" for token-efficient format.
+
+    Returns:
+    - {"results": [...], "symbol": str, "query_type": str, "count": int}
+    - Each result includes path, start_line, end_line, symbol_path, and relevant context.
+
+    Example:
+    - symbol_graph(symbol="get_embedding_model", query_type="callers")
+    - symbol_graph(symbol="ASTAnalyzer", query_type="definition")
+    - symbol_graph(symbol="qdrant_client", query_type="importers")
+    """
+    if not symbol or not str(symbol).strip():
+        return {"error": "symbol parameter is required", "results": []}
+
+    _limit = safe_int(limit, default=20, logger=logger, context="symbol_graph.limit")
+
+    result = await _symbol_graph_impl(
+        symbol=str(symbol).strip(),
+        query_type=query_type or "callers",
+        limit=_limit,
+        language=str(language).strip() if language else None,
+        under=str(under).strip() if under else None,
+        session=str(session).strip() if session else None,
+        ctx=ctx,
+    )
+
+    # Format output
+    use_toon = _should_use_toon(output_format)
+    if use_toon:
+        return {"text": _format_symbol_graph_toon(result), **result}
+
+    return result
 
 
 @mcp.tool()
