@@ -19,6 +19,8 @@ import os
 import re
 from typing import Any, Optional
 
+from scripts.llm_utils import strip_markdown_fences as _strip_markdown_fences
+
 
 # ---------------------------------------------------------------------------
 # Model version configuration - backwards compatible with GLM 4.5, 4.6, 4.7
@@ -512,7 +514,7 @@ def generate_pseudo_tags_batch(
     for out in results:
         pseudo, tags = "", []
         try:
-            obj = _json.loads(out)
+            obj = _json.loads(_strip_markdown_fences(out))
             if isinstance(obj, dict):
                 p = obj.get("pseudo")
                 t = obj.get("tags")

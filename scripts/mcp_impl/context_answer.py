@@ -1843,6 +1843,9 @@ def _ca_build_citations_and_context(
             _cit["host_path"] = _norm(str(_hostp))
         if _contp:
             _cit["container_path"] = str(_contp)
+        # Expose adaptive span sizing flag if present
+        if it.get("_adaptive_expanded"):
+            _cit["adaptive_expanded"] = True
         citations.append(_cit)
 
         snippet = str(it.get("text") or "").strip()

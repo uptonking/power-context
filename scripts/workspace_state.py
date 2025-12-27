@@ -421,7 +421,12 @@ _SHARED_LOCK_DIR = Path("/work/.codebase")
 # (it might not exist at import time but will be created during indexing)
 if Path("/work").exists():
     _FILE_LOCKS_DIR = _SHARED_LOCK_DIR / "file_locks"
-    _FILE_LOCKS_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        _FILE_LOCKS_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        # Read-only filesystem (e.g. Docker bind mount), fall back to /tmp
+        _FILE_LOCKS_DIR = Path("/tmp/context-engine-locks")
+        _FILE_LOCKS_DIR.mkdir(parents=True, exist_ok=True)
 else:
     _FILE_LOCKS_DIR = Path("/tmp/context-engine-locks")
     _FILE_LOCKS_DIR.mkdir(parents=True, exist_ok=True)

@@ -13,6 +13,7 @@ __all__ = [
     "_mmr_diversify", "_merge_and_budget_spans",
     "_detect_implementation_intent", "_IMPL_INTENT_PATTERNS",
     "_get_collection_stats", "_COLL_STATS_CACHE", "_COLL_STATS_TTL",
+    "_get_symbol_extent", "ADAPTIVE_SPAN_SIZING",
 ]
 
 import os
@@ -93,6 +94,13 @@ MICRO_OUT_MAX_SPANS = _safe_int(os.environ.get("MICRO_OUT_MAX_SPANS", str(_MICRO
 MICRO_MERGE_LINES = _safe_int(os.environ.get("MICRO_MERGE_LINES", str(_MICRO_DEFAULTS[1])), _MICRO_DEFAULTS[1])
 MICRO_BUDGET_TOKENS = _safe_int(os.environ.get("MICRO_BUDGET_TOKENS", str(_MICRO_DEFAULTS[2])), _MICRO_DEFAULTS[2])
 MICRO_TOKENS_PER_LINE = _safe_int(os.environ.get("MICRO_TOKENS_PER_LINE", str(_MICRO_DEFAULTS[3])), _MICRO_DEFAULTS[3])
+
+# Adaptive Span Sizing: expand spans to full symbol boundaries when budget permits
+ADAPTIVE_SPAN_SIZING = os.environ.get("ADAPTIVE_SPAN_SIZING", "1").strip().lower() in {"1", "true", "yes", "on"}
+# Internal limits (not configurable - just sensible defaults)
+_ADAPTIVE_MAX_EXPAND_LINES = 80      # Max extra lines per expansion
+_ADAPTIVE_MAX_BUDGET_PCT = 0.4       # Max % of budget a single expansion can use
+_ADAPTIVE_MAX_EXPANDED = 3           # Max spans to expand
 
 # Intent detection for implementation preference
 INTENT_IMPL_BOOST = _safe_float(os.environ.get("HYBRID_INTENT_IMPL_BOOST", "0.15"), 0.15)
@@ -476,13 +484,152 @@ def _mmr_diversify(ranked: List[Dict[str, Any]], k: int = 60, lambda_: float = 0
 
 
 # ---------------------------------------------------------------------------
+# Adaptive Span Sizing: Symbol extent lookup
+# ---------------------------------------------------------------------------
+
+# Cache for symbol extents: {(collection, path, symbol): (start, end)}
+_SYMBOL_EXTENT_CACHE: Dict[Tuple[str, str, str], Tuple[int, int]] = {}
+_SYMBOL_EXTENT_CACHE_MAX = 500
+_SYMBOL_EXTENT_CLIENT: Any = None
+
+
+def _get_symbol_extent(
+    path: str,
+    symbol: str,
+    collection: str = "",
+    qdrant_client: Any = None,
+) -> Tuple[int, int]:
+    """Query Qdrant for the full extent of a symbol (function/class).
+
+    Returns (start_line, end_line) for the complete symbol, or (0, 0) if not found.
+    Uses cached lookups to minimize Qdrant queries.
+    """
+    if not symbol or not path:
+        return (0, 0)
+
+    cache_key = (collection, path, symbol)
+    if cache_key in _SYMBOL_EXTENT_CACHE:
+        return _SYMBOL_EXTENT_CACHE[cache_key]
+
+    # Lazy import to avoid circular dependencies
+    try:
+        from qdrant_client import QdrantClient, models
+    except ImportError:
+        return (0, 0)
+
+    if not collection:
+        collection = os.environ.get("COLLECTION_NAME", "")
+    if not collection:
+        return (0, 0)
+
+    try:
+        global _SYMBOL_EXTENT_CLIENT
+        if qdrant_client is None:
+            # Reuse a single client instance to avoid repeated connection setup.
+            if _SYMBOL_EXTENT_CLIENT is None:
+                qdrant_url = os.environ.get("QDRANT_URL", "http://localhost:6333")
+                try:
+                    timeout_s = float(os.environ.get("ADAPTIVE_SPAN_QDRANT_TIMEOUT", "1.0") or 1.0)
+                except Exception:
+                    timeout_s = 1.0
+                _SYMBOL_EXTENT_CLIENT = QdrantClient(
+                    url=qdrant_url,
+                    api_key=os.environ.get("QDRANT_API_KEY"),
+                    timeout=timeout_s,
+                )
+            qdrant_client = _SYMBOL_EXTENT_CLIENT
+
+        # Query for all chunks with same path and symbol identifier.
+        # Prefer symbol_path when provided, but also accept plain symbol for compatibility.
+        filt = models.Filter(
+            must=[
+                models.FieldCondition(
+                    key="metadata.path",
+                    match=models.MatchValue(value=path),
+                ),
+            ],
+            should=[
+                models.FieldCondition(
+                    key="metadata.symbol_path",
+                    match=models.MatchValue(value=symbol),
+                ),
+                models.FieldCondition(
+                    key="metadata.symbol",
+                    match=models.MatchValue(value=symbol),
+                ),
+            ],
+        )
+
+        # Bound the amount of scrolling work; micro-chunking can produce many points.
+        try:
+            per_page = int(os.environ.get("ADAPTIVE_SPAN_SCROLL_LIMIT", "128") or 128)
+        except Exception:
+            per_page = 128
+        per_page = max(16, min(per_page, 512))
+        max_total = max(64, min(per_page * 4, 1024))
+
+        points: list[Any] = []
+        offset = None
+        while len(points) < max_total:
+            batch, offset = qdrant_client.scroll(
+                collection_name=collection,
+                scroll_filter=filt,
+                with_payload=True,
+                limit=min(per_page, max_total - len(points)),
+                offset=offset,
+            )
+            if not batch:
+                break
+            points.extend(batch)
+
+        if not points:
+            _SYMBOL_EXTENT_CACHE[cache_key] = (0, 0)
+            return (0, 0)
+
+        # Find min start_line and max end_line across all chunks
+        min_start = float("inf")
+        max_end = 0
+        for pt in points:
+            md = (pt.payload or {}).get("metadata") or {}
+            start = int(md.get("start_line") or 0)
+            end = int(md.get("end_line") or 0)
+            if start > 0 and end > 0:
+                min_start = min(min_start, start)
+                max_end = max(max_end, end)
+
+        if min_start == float("inf") or max_end == 0:
+            _SYMBOL_EXTENT_CACHE[cache_key] = (0, 0)
+            return (0, 0)
+
+        result = (int(min_start), int(max_end))
+
+        # Cache management: evict oldest entries if cache is full
+        if len(_SYMBOL_EXTENT_CACHE) >= _SYMBOL_EXTENT_CACHE_MAX:
+            # Simple FIFO eviction - remove first 100 entries
+            keys_to_remove = list(_SYMBOL_EXTENT_CACHE.keys())[:100]
+            for k in keys_to_remove:
+                _SYMBOL_EXTENT_CACHE.pop(k, None)
+
+        _SYMBOL_EXTENT_CACHE[cache_key] = result
+        return result
+
+    except Exception as e:
+        if os.environ.get("DEBUG_ADAPTIVE_SPAN"):
+            logger.debug(f"Symbol extent lookup failed: {e}")
+        return (0, 0)
+
+
+# ---------------------------------------------------------------------------
 # Micro-span budgeting
 # ---------------------------------------------------------------------------
 
 def _merge_and_budget_spans(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Given ranked items with metadata path/start_line/end_line, merge nearby spans
     per path and enforce a token budget using a simple tokens-per-line estimate.
-    
+
+    When ADAPTIVE_SPAN_SIZING is enabled, attempts to expand spans to full symbol
+    boundaries (functions/classes) if the expanded span fits within budget.
+
     Returns a filtered/merged list preserving score order as much as possible.
     """
     try:
@@ -502,17 +649,37 @@ def _merge_and_budget_spans(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     except (ValueError, TypeError):
         out_max_spans = MICRO_OUT_MAX_SPANS
 
+    # Adaptive span sizing - just use the hardcoded internal limits
+    adaptive_enabled = ADAPTIVE_SPAN_SIZING
+    expanded_count = 0
+    collection = os.environ.get("COLLECTION_NAME", "")
+
     clusters: Dict[str, List[Dict[str, Any]]] = {}
     for m in items:
         md = {}
+        symbol = ""
         try:
             if isinstance(m, dict):
                 if m.get("path") or m.get("start_line") or m.get("end_line"):
-                    md = {"path": m.get("path"), "start_line": m.get("start_line"), "end_line": m.get("end_line")}
+                    md = {
+                        "path": m.get("path"),
+                        "start_line": m.get("start_line"),
+                        "end_line": m.get("end_line"),
+                        "symbol": m.get("symbol", ""),
+                    }
                 else:
                     pt = m.get("pt", {})
                     if hasattr(pt, "payload") and getattr(pt, "payload"):
                         md = (pt.payload or {}).get("metadata") or {}
+                # Prefer symbol_path for uniqueness, but fall back to plain symbol.
+                rels = m.get("relations") if isinstance(m.get("relations"), dict) else {}
+                symbol = str(
+                    m.get("symbol")
+                    or (rels or {}).get("symbol_path")
+                    or (md or {}).get("symbol_path")
+                    or (md or {}).get("symbol")
+                    or ""
+                )
         except Exception:
             md = {}
         path = str((md or {}).get("path") or "")
@@ -533,10 +700,13 @@ def _merge_and_budget_spans(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]
                     c["m"] = m
                 c["start"] = min(c["start"], start_line)
                 c["end"] = max(c["end"], end_line)
+                # Keep track of symbol if available
+                if symbol and not c.get("symbol"):
+                    c["symbol"] = symbol
                 merged = True
                 break
         if not merged:
-            lst.append({"start": start_line, "end": end_line, "m": m, "p": path})
+            lst.append({"start": start_line, "end": end_line, "m": m, "p": path, "symbol": symbol})
 
     budget = budget_tokens
     out: List[Dict[str, Any]] = []
@@ -565,21 +735,50 @@ def _merge_and_budget_spans(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     for c in flattened:
         m = c["m"]
         path = str(c.get("p") or "")
+        symbol = str(c.get("symbol") or "")
         if per_path_counts.get(path, 0) >= out_max_spans:
             continue
-        need = _line_tokens(c["start"], c["end"])
+
+        span_start = c["start"]
+        span_end = c["end"]
+        expanded = False
+
+        # Adaptive Span Sizing: try to expand to full symbol boundaries
+        if adaptive_enabled and symbol and collection and expanded_count < _ADAPTIVE_MAX_EXPANDED:
+            try:
+                sym_start, sym_end = _get_symbol_extent(path, symbol, collection)
+                if sym_start > 0 and sym_end > 0:
+                    expand_lines = (sym_end - sym_start + 1) - (span_end - span_start + 1)
+                    if 0 < expand_lines <= _ADAPTIVE_MAX_EXPAND_LINES:
+                        expanded_need = _line_tokens(sym_start, sym_end)
+                        max_for_single = int(budget * _ADAPTIVE_MAX_BUDGET_PCT)
+                        if expanded_need <= budget and expanded_need <= max_for_single:
+                            span_start = sym_start
+                            span_end = sym_end
+                            expanded = True
+                            expanded_count += 1
+                            if os.environ.get("DEBUG_ADAPTIVE_SPAN"):
+                                logger.debug(f"Expanded '{symbol}' [{c['start']}-{c['end']}] -> [{sym_start}-{sym_end}]")
+            except Exception as e:
+                if os.environ.get("DEBUG_ADAPTIVE_SPAN"):
+                    logger.debug(f"Span expansion failed: {e}")
+
+        need = _line_tokens(span_start, span_end)
         if need <= budget:
             budget -= need
             per_path_counts[path] = per_path_counts.get(path, 0) + 1
-            out.append({"m": m, "start": c["start"], "end": c["end"], "need_tokens": need})
+            out.append({
+                "m": m, "start": span_start, "end": span_end,
+                "need_tokens": need, "_expanded": expanded,
+            })
         elif budget > 0 and per_path_counts.get(path, 0) < out_max_spans:
             affordable_lines = max(1, budget // tokens_per_line)
-            trim_end = c["start"] + affordable_lines - 1
-            if trim_end >= c["start"]:
-                trimmed_need = _line_tokens(c["start"], trim_end)
+            trim_end = span_start + affordable_lines - 1
+            if trim_end >= span_start:
+                trimmed_need = _line_tokens(span_start, trim_end)
                 budget -= trimmed_need
                 per_path_counts[path] = per_path_counts.get(path, 0) + 1
-                out.append({"m": m, "start": c["start"], "end": trim_end, "need_tokens": trimmed_need, "_trimmed": True})
+                out.append({"m": m, "start": span_start, "end": trim_end, "need_tokens": trimmed_need, "_trimmed": True})
         if budget <= 0:
             break
 
@@ -592,6 +791,8 @@ def _merge_and_budget_spans(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]
         m["_merged_start"] = c["start"]
         m["_merged_end"] = c["end"]
         m["_budget_tokens"] = c["need_tokens"]
+        if c.get("_expanded"):
+            m["_adaptive_expanded"] = True
         result.append(m)
     return result
 

@@ -326,8 +326,9 @@ def generate_commit_summary(md: Dict[str, Any], diff_text: str) -> tuple[str, li
                 stop=["\n\n"],
             )
         import json as _json
+        from scripts.llm_utils import strip_markdown_fences
         try:
-            obj = _json.loads(out)
+            obj = _json.loads(strip_markdown_fences(out))
             if isinstance(obj, dict):
                 g = obj.get("goal")
                 s = obj.get("symbols")
