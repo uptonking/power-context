@@ -1236,7 +1236,25 @@ class ASTAnalyzer:
 
         try:
             lang = _TS_LANGUAGES[language]
-            parser = Parser(lang)
+            # Support both APIs:
+            # - tree_sitter<0.25 (or some builds): Parser(lang)
+            # - tree_sitter>=0.25: Parser(); parser.set_language(lang)
+            parser = None
+            try:
+                p = Parser()  # type: ignore[call-arg]
+                if hasattr(p, "set_language"):
+                    p.set_language(lang)  # type: ignore[attr-defined]
+                    parser = p
+                else:
+                    try:
+                        setattr(p, "language", lang)
+                        parser = p
+                    except Exception:
+                        parser = None
+            except Exception:
+                parser = None
+            if parser is None:
+                parser = Parser(lang)  # type: ignore[misc]
             self._parsers[language] = parser
             return parser
         except Exception as e:
