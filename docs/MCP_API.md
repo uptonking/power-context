@@ -760,6 +760,61 @@ Find files likely importing or referencing a module/symbol.
 
 **Returns:** Same shape as `repo_search()`.
 
+### symbol_graph()
+
+First-class symbol graph navigation using indexed metadata fields:
+- `metadata.calls` (call graph)
+- `metadata.imports` (imports graph)
+- `metadata.symbol` / `metadata.symbol_path` (definitions)
+
+Supports three query types:
+- `"callers"`: "Who calls X?"
+- `"definition"`: "Where is X defined?"
+- `"importers"`: "What imports Y?"
+
+If there are no graph hits, `symbol_graph` falls back to semantic search and returns the same response shape.
+
+**Parameters:**
+- `symbol` (str, required): Symbol name (function/class/module) to navigate
+- `query_type` (str, default `"callers"`): One of `"callers"`, `"definition"`, `"importers"`
+- `limit` (int, default 20): Max results
+- `language` (str, optional): Filter by language
+- `under` (str, optional): Path prefix filter (directory)
+- `output_format` (str, optional): `"json"` (default) or `"toon"`
+
+**Examples:**
+
+```json
+{"symbol": "ASTAnalyzer", "query_type": "definition", "limit": 10}
+```
+
+```json
+{"symbol": "get_embedding_model", "query_type": "callers", "under": "scripts/", "limit": 10}
+```
+
+```json
+{"symbol": "qdrant_client", "query_type": "importers", "limit": 10}
+```
+
+**Returns:**
+```json
+{
+  "results": [
+    {
+      "path": "scripts/ingest/chunking.py",
+      "start_line": 12,
+      "end_line": 88,
+      "symbol_path": "ASTAnalyzer",
+      "kind": "class"
+    }
+  ],
+  "symbol": "ASTAnalyzer",
+  "query_type": "definition",
+  "count": 1,
+  "collection": "codebase"
+}
+```
+
 ### change_history_for_path()
 
 Summarize recent change metadata for a file path from the index.

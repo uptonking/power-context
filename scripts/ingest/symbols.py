@@ -588,6 +588,482 @@ def _ts_extract_symbols_yaml(text: str) -> List[_Sym]:
     return syms
 
 
+def _ts_extract_symbols_go(text: str) -> List[_Sym]:
+    """Extract Go symbols using tree-sitter."""
+    parser = _ts_parser("go")
+    if not parser:
+        return []
+    try:
+        tree = parser.parse(text.encode("utf-8"))
+        if tree is None:
+            return []
+        root = tree.root_node
+    except (ValueError, Exception) as e:
+        print(f"[WARN] Tree-sitter parse failed for Go: {e}")
+        return []
+
+    syms: List[_Sym] = []
+    text_bytes = text.encode("utf-8")
+
+    def node_text(n):
+        return text_bytes[n.start_byte:n.end_byte].decode("utf-8", errors="ignore")
+
+    def walk(node):
+        ntype = node.type
+
+        # Functions
+        if ntype == "function_declaration":
+            name_node = node.child_by_field_name("name")
+            fn = node_text(name_node) if name_node else ""
+            syms.append(_Sym(
+                kind="function",
+                name=fn,
+                start=node.start_point[0] + 1,
+                end=node.end_point[0] + 1,
+            ))
+
+        # Methods (func (r *Receiver) Name())
+        elif ntype == "method_declaration":
+            name_node = node.child_by_field_name("name")
+            method_name = node_text(name_node) if name_node else ""
+            receiver = node.child_by_field_name("receiver")
+            receiver_type = ""
+            if receiver:
+                # Recursively find type_identifier in receiver subtree
+                def find_type_identifier(n):
+                    if n.type == "type_identifier":
+                        return node_text(n)
+                    for c in n.children:
+                        result = find_type_identifier(c)
+                        if result:
+                            return result
+                    return ""
+                receiver_type = find_type_identifier(receiver)
+            path = f"{receiver_type}.{method_name}" if receiver_type else method_name
+            syms.append(_Sym(
+                kind="method",
+                name=method_name,
+                path=path,
+                start=node.start_point[0] + 1,
+                end=node.end_point[0] + 1,
+            ))
+
+        # Types (struct, interface)
+        elif ntype == "type_declaration":
+            for child in node.children:
+                if child.type == "type_spec":
+                    name_node = child.child_by_field_name("name")
+                    type_name = node_text(name_node) if name_node else ""
+                    type_node = child.child_by_field_name("type")
+                    kind = "type"
+                    if type_node:
+                        if type_node.type == "struct_type":
+                            kind = "struct"
+                        elif type_node.type == "interface_type":
+                            kind = "interface"
+                    syms.append(_Sym(
+                        kind=kind,
+                        name=type_name,
+                        start=child.start_point[0] + 1,
+                        end=child.end_point[0] + 1,
+                    ))
+
+        for child in node.children:
+            walk(child)
+
+    walk(root)
+    return syms
+
+
+def _ts_extract_symbols_java(text: str) -> List[_Sym]:
+    """Extract Java symbols using tree-sitter."""
+    parser = _ts_parser("java")
+    if not parser:
+        return []
+    try:
+        tree = parser.parse(text.encode("utf-8"))
+        if tree is None:
+            return []
+        root = tree.root_node
+    except (ValueError, Exception) as e:
+        print(f"[WARN] Tree-sitter parse failed for Java: {e}")
+        return []
+
+    syms: List[_Sym] = []
+    text_bytes = text.encode("utf-8")
+
+    def node_text(n):
+        return text_bytes[n.start_byte:n.end_byte].decode("utf-8", errors="ignore")
+
+    class_stack: List[str] = []
+
+    def walk(node):
+        ntype = node.type
+
+        # Class declarations
+        if ntype == "class_declaration":
+            name_node = node.child_by_field_name("name")
+            cls = node_text(name_node) if name_node else ""
+            syms.append(_Sym(
+                kind="class",
+                name=cls,
+                start=node.start_point[0] + 1,
+                end=node.end_point[0] + 1,
+            ))
+            class_stack.append(cls)
+            for child in node.children:
+                walk(child)
+            class_stack.pop()
+            return
+
+        # Interface declarations
+        elif ntype == "interface_declaration":
+            name_node = node.child_by_field_name("name")
+            iface = node_text(name_node) if name_node else ""
+            syms.append(_Sym(
+                kind="interface",
+                name=iface,
+                start=node.start_point[0] + 1,
+                end=node.end_point[0] + 1,
+            ))
+            class_stack.append(iface)
+            for child in node.children:
+                walk(child)
+            class_stack.pop()
+            return
+
+        # Enum declarations
+        elif ntype == "enum_declaration":
+            name_node = node.child_by_field_name("name")
+            enum = node_text(name_node) if name_node else ""
+            syms.append(_Sym(
+                kind="enum",
+                name=enum,
+                start=node.start_point[0] + 1,
+                end=node.end_point[0] + 1,
+            ))
+
+        # Method declarations
+        elif ntype == "method_declaration":
+            name_node = node.child_by_field_name("name")
+            method = node_text(name_node) if name_node else ""
+            path = f"{class_stack[-1]}.{method}" if class_stack else method
+            syms.append(_Sym(
+                kind="method",
+                name=method,
+                path=path,
+                start=node.start_point[0] + 1,
+                end=node.end_point[0] + 1,
+            ))
+
+        # Constructor declarations
+        elif ntype == "constructor_declaration":
+            name_node = node.child_by_field_name("name")
+            ctor = node_text(name_node) if name_node else ""
+            path = f"{class_stack[-1]}.{ctor}" if class_stack else ctor
+            syms.append(_Sym(
+                kind="constructor",
+                name=ctor,
+                path=path,
+                start=node.start_point[0] + 1,
+                end=node.end_point[0] + 1,
+            ))
+
+        for child in node.children:
+            walk(child)
+
+    walk(root)
+    return syms
+
+
+def _ts_extract_symbols_rust(text: str) -> List[_Sym]:
+    """Extract Rust symbols using tree-sitter."""
+    parser = _ts_parser("rust")
+    if not parser:
+        return []
+    try:
+        tree = parser.parse(text.encode("utf-8"))
+        if tree is None:
+            return []
+        root = tree.root_node
+    except (ValueError, Exception) as e:
+        print(f"[WARN] Tree-sitter parse failed for Rust: {e}")
+        return []
+
+    syms: List[_Sym] = []
+    text_bytes = text.encode("utf-8")
+
+    def node_text(n):
+        return text_bytes[n.start_byte:n.end_byte].decode("utf-8", errors="ignore")
+
+    impl_stack: List[str] = []
+
+    def walk(node):
+        ntype = node.type
+
+        # Functions
+        if ntype == "function_item":
+            name_node = node.child_by_field_name("name")
+            fn = node_text(name_node) if name_node else ""
+            if impl_stack:
+                path = f"{impl_stack[-1]}::{fn}"
+                kind = "method"
+            else:
+                path = fn
+                kind = "function"
+            syms.append(_Sym(
+                kind=kind,
+                name=fn,
+                path=path,
+                start=node.start_point[0] + 1,
+                end=node.end_point[0] + 1,
+            ))
+
+        # Impl blocks
+        elif ntype == "impl_item":
+            type_node = node.child_by_field_name("type")
+            impl_type = node_text(type_node).split("<")[0].strip() if type_node else ""
+            syms.append(_Sym(
+                kind="impl",
+                name=impl_type,
+                start=node.start_point[0] + 1,
+                end=node.end_point[0] + 1,
+            ))
+            impl_stack.append(impl_type)
+            for child in node.children:
+                walk(child)
+            impl_stack.pop()
+            return
+
+        # Structs
+        elif ntype == "struct_item":
+            name_node = node.child_by_field_name("name")
+            struct = node_text(name_node) if name_node else ""
+            syms.append(_Sym(
+                kind="struct",
+                name=struct,
+                start=node.start_point[0] + 1,
+                end=node.end_point[0] + 1,
+            ))
+
+        # Enums
+        elif ntype == "enum_item":
+            name_node = node.child_by_field_name("name")
+            enum = node_text(name_node) if name_node else ""
+            syms.append(_Sym(
+                kind="enum",
+                name=enum,
+                start=node.start_point[0] + 1,
+                end=node.end_point[0] + 1,
+            ))
+
+        # Traits
+        elif ntype == "trait_item":
+            name_node = node.child_by_field_name("name")
+            trait = node_text(name_node) if name_node else ""
+            syms.append(_Sym(
+                kind="trait",
+                name=trait,
+                start=node.start_point[0] + 1,
+                end=node.end_point[0] + 1,
+            ))
+
+        # Modules
+        elif ntype == "mod_item":
+            name_node = node.child_by_field_name("name")
+            mod = node_text(name_node) if name_node else ""
+            syms.append(_Sym(
+                kind="module",
+                name=mod,
+                start=node.start_point[0] + 1,
+                end=node.end_point[0] + 1,
+            ))
+
+        for child in node.children:
+            walk(child)
+
+    walk(root)
+    return syms
+
+
+def _ts_extract_symbols_csharp(text: str) -> List[_Sym]:
+    """Extract C# symbols using tree-sitter."""
+    parser = _ts_parser("c_sharp")
+    if not parser:
+        # Try alias
+        parser = _ts_parser("csharp")
+    if not parser:
+        return []
+    try:
+        tree = parser.parse(text.encode("utf-8"))
+        if tree is None:
+            return []
+        root = tree.root_node
+    except (ValueError, Exception) as e:
+        print(f"[WARN] Tree-sitter parse failed for C#: {e}")
+        return []
+
+    syms: List[_Sym] = []
+    text_bytes = text.encode("utf-8")
+
+    def node_text(n):
+        return text_bytes[n.start_byte:n.end_byte].decode("utf-8", errors="ignore")
+
+    type_stack: List[str] = []
+
+    def walk(node):
+        ntype = node.type
+
+        # Class declarations
+        if ntype == "class_declaration":
+            name_node = node.child_by_field_name("name")
+            cls = node_text(name_node) if name_node else ""
+            syms.append(_Sym(
+                kind="class",
+                name=cls,
+                start=node.start_point[0] + 1,
+                end=node.end_point[0] + 1,
+            ))
+            type_stack.append(cls)
+            for child in node.children:
+                walk(child)
+            type_stack.pop()
+            return
+
+        # Interface declarations
+        elif ntype == "interface_declaration":
+            name_node = node.child_by_field_name("name")
+            iface = node_text(name_node) if name_node else ""
+            syms.append(_Sym(
+                kind="interface",
+                name=iface,
+                start=node.start_point[0] + 1,
+                end=node.end_point[0] + 1,
+            ))
+            type_stack.append(iface)
+            for child in node.children:
+                walk(child)
+            type_stack.pop()
+            return
+
+        # Struct declarations
+        elif ntype == "struct_declaration":
+            name_node = node.child_by_field_name("name")
+            struct = node_text(name_node) if name_node else ""
+            syms.append(_Sym(
+                kind="struct",
+                name=struct,
+                start=node.start_point[0] + 1,
+                end=node.end_point[0] + 1,
+            ))
+            type_stack.append(struct)
+            for child in node.children:
+                walk(child)
+            type_stack.pop()
+            return
+
+        # Enum declarations
+        elif ntype == "enum_declaration":
+            name_node = node.child_by_field_name("name")
+            enum = node_text(name_node) if name_node else ""
+            syms.append(_Sym(
+                kind="enum",
+                name=enum,
+                start=node.start_point[0] + 1,
+                end=node.end_point[0] + 1,
+            ))
+
+        # Method declarations
+        elif ntype == "method_declaration":
+            name_node = node.child_by_field_name("name")
+            method = node_text(name_node) if name_node else ""
+            path = f"{type_stack[-1]}.{method}" if type_stack else method
+            syms.append(_Sym(
+                kind="method",
+                name=method,
+                path=path,
+                start=node.start_point[0] + 1,
+                end=node.end_point[0] + 1,
+            ))
+
+        # Constructor declarations
+        elif ntype == "constructor_declaration":
+            name_node = node.child_by_field_name("name")
+            ctor = node_text(name_node) if name_node else ""
+            path = f"{type_stack[-1]}.{ctor}" if type_stack else ctor
+            syms.append(_Sym(
+                kind="constructor",
+                name=ctor,
+                path=path,
+                start=node.start_point[0] + 1,
+                end=node.end_point[0] + 1,
+            ))
+
+        # Property declarations
+        elif ntype == "property_declaration":
+            name_node = node.child_by_field_name("name")
+            prop = node_text(name_node) if name_node else ""
+            path = f"{type_stack[-1]}.{prop}" if type_stack else prop
+            syms.append(_Sym(
+                kind="property",
+                name=prop,
+                path=path,
+                start=node.start_point[0] + 1,
+                end=node.end_point[0] + 1,
+            ))
+
+        for child in node.children:
+            walk(child)
+
+    walk(root)
+    return syms
+
+
+def _ts_extract_symbols_bash(text: str) -> List[_Sym]:
+    """Extract Bash/Shell symbols using tree-sitter."""
+    parser = _ts_parser("bash")
+    if not parser:
+        parser = _ts_parser("shell")
+    if not parser:
+        parser = _ts_parser("sh")
+    if not parser:
+        return []
+    try:
+        tree = parser.parse(text.encode("utf-8"))
+        if tree is None:
+            return []
+        root = tree.root_node
+    except (ValueError, Exception) as e:
+        print(f"[WARN] Tree-sitter parse failed for Bash: {e}")
+        return []
+
+    syms: List[_Sym] = []
+    text_bytes = text.encode("utf-8")
+
+    def node_text(n):
+        return text_bytes[n.start_byte:n.end_byte].decode("utf-8", errors="ignore")
+
+    def walk(node):
+        ntype = node.type
+
+        # Function definitions
+        if ntype == "function_definition":
+            name_node = node.child_by_field_name("name")
+            fn = node_text(name_node) if name_node else ""
+            syms.append(_Sym(
+                kind="function",
+                name=fn,
+                start=node.start_point[0] + 1,
+                end=node.end_point[0] + 1,
+            ))
+
+        for child in node.children:
+            walk(child)
+
+    walk(root)
+    return syms
+
+
 def _ts_extract_symbols(language: str, text: str) -> List[_Sym]:
     """Extract symbols using tree-sitter for supported languages."""
     if language == "python":
@@ -666,6 +1142,18 @@ def _ts_extract_symbols(language: str, text: str) -> List[_Sym]:
 
     if language == "yaml":
         return _ts_extract_symbols_yaml(text)
+
+    # New tree-sitter extractors
+    if language == "go":
+        return _ts_extract_symbols_go(text)
+    if language == "java":
+        return _ts_extract_symbols_java(text)
+    if language == "rust":
+        return _ts_extract_symbols_rust(text)
+    if language in ("csharp", "c_sharp"):
+        return _ts_extract_symbols_csharp(text)
+    if language in ("shell", "bash", "sh"):
+        return _ts_extract_symbols_bash(text)
 
     return []
 

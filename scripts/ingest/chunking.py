@@ -45,10 +45,33 @@ def chunk_semantic(
     # Import here to avoid circular imports
     from scripts.ingest.symbols import _extract_symbols
     
-    # Try enhanced AST analyzer first (if available)
-    # Note: ast_analyzer can use Python's built-in ast module even without tree-sitter
+    # Try enhanced AST analyzer first (if available).
+    # This is capability-driven: only use it when the analyzer can actually support the
+    # requested language given current USE_TREE_SITTER configuration.
     use_enhanced = os.environ.get("INDEX_USE_ENHANCED_AST", "1").lower() in {"1", "true", "yes", "on"}
-    _ast_supported = language in _TS_LANGUAGES or language == "python"  # Python has built-in ast fallback
+    _ast_supported = False
+    if use_enhanced and _AST_ANALYZER_AVAILABLE:
+        try:
+            # ast_analyzer internally respects USE_TREE_SITTER when constructing the analyzer
+            # (see scripts/ast_analyzer.py:get_ast_analyzer).
+            from scripts.ast_analyzer import get_ast_analyzer  # type: ignore
+
+            analyzer = get_ast_analyzer()
+            lang_key = str(language or "").strip().lower()
+            # Supported either via builtin ast (python) or via tree-sitter when enabled.
+            caps = getattr(analyzer, "supported_languages", {}) or {}
+            lang_caps = caps.get(lang_key) if isinstance(caps, dict) else None
+            if lang_key == "python":
+                _ast_supported = True
+            elif (
+                isinstance(lang_caps, dict)
+                and bool(lang_caps.get("tree_sitter"))
+                and bool(getattr(analyzer, "use_tree_sitter", False))
+            ):
+                _ast_supported = True
+        except Exception:
+            _ast_supported = False
+
     if use_enhanced and _AST_ANALYZER_AVAILABLE and _ast_supported:
         try:
             chunks = chunk_code_semantically(text, language, max_lines, overlap)
@@ -66,14 +89,11 @@ def chunk_semantic(
             if os.environ.get("DEBUG_INDEXING"):
                 print(f"[DEBUG] Enhanced AST chunking failed, falling back: {e}")
     
-    if not _use_tree_sitter() or language not in _TS_LANGUAGES:
-        # Fallback to line-based chunking
-        return chunk_lines(text, max_lines, overlap)
-
     lines = text.splitlines()
     n = len(lines)
 
-    # Extract symbols with line ranges
+    # Extract symbols with line ranges (works for many languages via regex fallbacks,
+    # and may optionally use tree-sitter when enabled).
     symbols = _extract_symbols(language, text)
     if not symbols:
         return chunk_lines(text, max_lines, overlap)
