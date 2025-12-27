@@ -46,7 +46,15 @@ import scripts.ingest_code as idx  # noqa: E402
 logger = LOGGER
 ROOT = WATCH_ROOT
 # Back-compat: legacy modules/tests expect a module-level COLLECTION constant.
-COLLECTION = os.environ.get("COLLECTION_NAME", default_collection_name())
+# We use a sentinel and a getter to ensure the resolved value is returned.
+_COLLECTION: Optional[str] = None
+
+
+def get_collection() -> str:
+    """Return the resolved collection name or the env default."""
+    if _COLLECTION is not None:
+        return _COLLECTION
+    return default_collection_name()
 
 
 def main() -> None:
@@ -62,7 +70,7 @@ def main() -> None:
     except Exception:
         multi_repo_enabled = False
 
-    default_collection = os.environ.get("COLLECTION_NAME", "codebase")
+    default_collection = default_collection_name()
     # In multi-repo mode, per-repo collections are resolved via _get_collection_for_file
     # and workspace_state; avoid deriving a root-level collection like "/work-<hash>".
     if _get_coll and not multi_repo_enabled:
@@ -77,8 +85,9 @@ def main() -> None:
     else:
         print("[single_repo] Single-repo mode enabled - using single collection")
 
-    global COLLECTION
-    COLLECTION = default_collection
+    global _COLLECTION, COLLECTION
+    _COLLECTION = default_collection
+    COLLECTION = _COLLECTION
 
     print(
         f"Watch mode: root={ROOT} qdrant={QDRANT_URL} collection={default_collection} model={MODEL}"
@@ -173,3 +182,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+# For legacy compatibility, provide a global COLLECTION variable. 
+# Due to import binding, this will reflect the state at the end of the module execution.
+COLLECTION = get_collection()
