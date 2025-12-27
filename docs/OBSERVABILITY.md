@@ -48,6 +48,23 @@ OPENLIT_ENABLED=1
 | **LLMs** | GLM-4.x, Ollama, llama.cpp (via OpenAI-compatible API) |
 | **Search** | `repo_search`, `context_search`, `context_answer` |
 
+### Screenshots
+
+<p align="center">
+  <img src="../llm.png" alt="LLM Traces" width="50%"/>
+</p>
+<p align="center"><em>LLM call traces with token usage and latency</em></p>
+
+<p align="center">
+  <img src="../traces.png" alt="Request Traces" width="50%"/>
+</p>
+<p align="center"><em>End-to-end request traces showing search pipeline</em></p>
+
+<p align="center">
+  <img src="../vectors.png" alt="Vector DB Operations" width="50%"/>
+</p>
+<p align="center"><em>Qdrant vector database operations</em></p>
+
 ## Configuration
 
 | Variable | Default | Description |
