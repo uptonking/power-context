@@ -30,27 +30,54 @@ def init_openlit():
         _app_name = os.environ.get("OPENLIT_APP_NAME", "context-engine")
         _environment = os.environ.get("OPENLIT_ENVIRONMENT", "development")
         
-        # Initialize OpenLit - this patches imported libraries
-        # Use capture_message_content (v1.36+) to capture request/response content
+        # Initialize OpenLit with modern params
         openlit.init(
             otlp_endpoint=_otel_endpoint,
-            application_name=_app_name,
+            service_name=_app_name,
             environment=_environment,
-            disabled_instrumentors=None,  # Don't disable anything
-            capture_message_content=True,  # Capture prompts/responses for tracing
+            disabled_instrumentors=None,
+            capture_message_content=True,
         )
         
-        print(f"[OpenLit] Initialized with endpoint={_otel_endpoint}, app={_app_name}")
+        print(f"[OpenLit] Initialized with endpoint={_otel_endpoint}, service={_app_name}")
         
-        # Explicitly instrument Qdrant (belt-and-suspenders for late imports)
+        # Get tracer provider for explicit instrumentation
+        # OpenLit creates its own tracer provider during init()
+        tracer_provider = None
+        try:
+            from opentelemetry import trace
+            tracer_provider = trace.get_tracer_provider()
+            print(f"[OpenLit] Got tracer_provider from opentelemetry: {type(tracer_provider).__name__}")
+        except ImportError as e:
+            print(f"[OpenLit] opentelemetry not available: {e}")
+        except Exception as e:
+            print(f"[OpenLit] tracer_provider error: {e}")
+        
+        # Fallback to OpenLit's tracer provider
+        if tracer_provider is None and hasattr(openlit, 'tracer_provider'):
+            tracer_provider = openlit.tracer_provider
+            print(f"[OpenLit] Using openlit.tracer_provider: {type(tracer_provider).__name__ if tracer_provider else 'None'}")
+        
+        if tracer_provider is None:
+            print("[OpenLit] WARNING: tracer_provider is None - hierarchy linking may not work")
+        
+        # Explicitly instrument OpenAI for GLM API calls
+        try:
+            from openlit.instrumentation.openai import OpenAIInstrumentor
+            OpenAIInstrumentor().instrument(
+                tracer_provider=tracer_provider,
+                environment=_environment,
+                application_name=_app_name,
+            )
+            print("[OpenLit] OpenAI instrumentation enabled (for GLM API)")
+        except ImportError:
+            print("[OpenLit] OpenAI instrumentor not found")
+        except Exception as e:
+            print(f"[OpenLit] OpenAI instrumentation failed: {e}")
+        
+        # Explicitly instrument Qdrant
         try:
             from openlit.instrumentation.qdrant import QdrantInstrumentor
-            
-            # Get tracer provider if available
-            tracer_provider = None
-            if hasattr(openlit, 'tracer_provider'):
-                tracer_provider = openlit.tracer_provider
-            
             QdrantInstrumentor().instrument(
                 tracer_provider=tracer_provider,
                 environment=_environment,
@@ -58,7 +85,7 @@ def init_openlit():
             )
             print("[OpenLit] Qdrant instrumentation enabled")
         except ImportError:
-            print("[OpenLit] Qdrant instrumentor not found (openlit may be outdated)")
+            print("[OpenLit] Qdrant instrumentor not found")
         except Exception as e:
             print(f"[OpenLit] Qdrant instrumentation failed: {e}")
         
