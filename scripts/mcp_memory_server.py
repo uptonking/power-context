@@ -550,7 +550,6 @@ def memory_store(
     collection: Optional[str] = None,
     session: Optional[str] = None,
     ctx: Context = None,
-    **kwargs: Any,
 ) -> Dict[str, Any]:
     """Store a memory entry into Qdrant (alias for 'store').
 
@@ -562,7 +561,6 @@ def memory_store(
         collection=collection,
         session=session,
         ctx=ctx,
-        **kwargs,
     )
 
 
@@ -574,7 +572,6 @@ def memory_find(
     top_k: Optional[int] = None,
     session: Optional[str] = None,
     ctx: Context = None,
-    **kwargs: Any,
 ) -> Dict[str, Any]:
     """Find memory entries by vector similarity (alias for 'find').
 
@@ -588,7 +585,6 @@ def memory_find(
         top_k=top_k,
         session=session,
         ctx=ctx,
-        **kwargs,
     )
 
 
