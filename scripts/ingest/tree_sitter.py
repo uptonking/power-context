@@ -140,7 +140,23 @@ def _ts_parser(lang_key: str):
 
     try:
         lang = _TS_LANGUAGES[lang_key]
-        return Parser(lang)
+        # Support both APIs:
+        # - tree_sitter<0.25 (or some builds): Parser(lang)
+        # - tree_sitter>=0.25: Parser(); parser.set_language(lang)
+        try:
+            p = Parser()  # type: ignore[call-arg]
+            if hasattr(p, "set_language"):
+                p.set_language(lang)  # type: ignore[attr-defined]
+                return p
+            # Fallback if set_language isn't present but language attribute is
+            try:
+                setattr(p, "language", lang)
+                return p
+            except Exception:
+                pass
+        except Exception:
+            pass
+        return Parser(lang)  # type: ignore[misc]
     except Exception:
         return None
 

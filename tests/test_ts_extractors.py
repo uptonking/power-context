@@ -6,8 +6,13 @@ Tests the new tree-sitter extraction handlers for Go, Java, Rust, C#, and Bash.
 import pytest
 import os
 
-# Temporarily disable tree-sitter to test extractors directly
-os.environ["USE_TREE_SITTER"] = "1"
+# These tests require tree-sitter parsing to be enabled.
+# Other tests may disable it globally (env var), so force-enable it for this file.
+@pytest.fixture(autouse=True)
+def _force_tree_sitter_enabled(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("USE_TREE_SITTER", "1")
+
+from scripts.ingest.tree_sitter import _ts_parser
 
 from scripts.ingest.symbols import (
     _ts_extract_symbols_go,
@@ -17,6 +22,68 @@ from scripts.ingest.symbols import (
     _ts_extract_symbols_bash,
     _ts_extract_symbols,
 )
+
+def _bool_env(name: str) -> bool:
+    v = os.environ.get(name)
+    if v is None:
+        return False
+    return str(v).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _ts_diag(lang_key: str) -> str:
+    """Produce a useful diagnostic when tree-sitter is unexpectedly unavailable."""
+    try:
+        from scripts.ingest import tree_sitter as ts
+    except Exception as e:
+        return f"failed to import scripts.ingest.tree_sitter: {e!r}"
+
+    pkg_map = {
+        "go": "tree_sitter_go",
+        "java": "tree_sitter_java",
+        "rust": "tree_sitter_rust",
+        "c_sharp": "tree_sitter_c_sharp",
+        "csharp": "tree_sitter_c_sharp",
+        "bash": "tree_sitter_bash",
+        "shell": "tree_sitter_bash",
+        "sh": "tree_sitter_bash",
+    }
+    pkg = pkg_map.get(lang_key)
+    pkg_status = "n/a"
+    if pkg:
+        try:
+            __import__(pkg)
+            pkg_status = "import ok"
+        except Exception as e:
+            pkg_status = f"import failed: {e!r}"
+
+    try:
+        __import__("tree_sitter")
+        core_status = "import ok"
+    except Exception as e:
+        core_status = f"import failed: {e!r}"
+
+    try:
+        loaded = sorted(list(getattr(ts, "_TS_LANGUAGES", {}).keys()))
+    except Exception:
+        loaded = []
+
+    return (
+        f"USE_TREE_SITTER={os.environ.get('USE_TREE_SITTER')!r}, "
+        f"TS_AVAILABLE={getattr(ts, '_TS_AVAILABLE', None)!r}, "
+        f"Parser_is_None={getattr(ts, 'Parser', None) is None}, "
+        f"tree_sitter={core_status}, "
+        f"{pkg}={pkg_status}, "
+        f"loaded_lang_keys={loaded}"
+    )
+
+
+def _require_ts(lang_key: str, label: str) -> None:
+    """Skip only when the tree-sitter parser/grammar truly isn't available."""
+    if _ts_parser(lang_key) is None:
+        # In CI we expect requirements to be installed; skipping hides real regressions.
+        if _bool_env("CI") or _bool_env("FORCE_TREE_SITTER_TESTS"):
+            pytest.fail(f"{label} not installed or not loadable in CI. {_ts_diag(lang_key)}")
+        pytest.skip(f"{label} not installed or not loadable")
 
 
 class TestGoExtractor:
@@ -34,9 +101,9 @@ func main() {
     HelloWorld()
 }
 '''
+        _require_ts("go", "tree-sitter-go")
         syms = _ts_extract_symbols_go(code)
-        if not syms:  # Tree-sitter not available
-            pytest.skip("tree-sitter-go not installed")
+        assert syms, "tree-sitter-go parser available but extractor returned no symbols"
         names = [s.get("name") for s in syms]
         assert "HelloWorld" in names
         assert "main" in names
@@ -56,9 +123,9 @@ func (s *Server) Start() error {
 func (s Server) Stop() {
 }
 '''
+        _require_ts("go", "tree-sitter-go")
         syms = _ts_extract_symbols_go(code)
-        if not syms:
-            pytest.skip("tree-sitter-go not installed")
+        assert syms, "tree-sitter-go parser available but extractor returned no symbols"
         
         # Find methods
         methods = [s for s in syms if s.get("kind") == "method"]
@@ -83,9 +150,9 @@ type MyHandler struct {
     name string
 }
 '''
+        _require_ts("go", "tree-sitter-go")
         syms = _ts_extract_symbols_go(code)
-        if not syms:
-            pytest.skip("tree-sitter-go not installed")
+        assert syms, "tree-sitter-go parser available but extractor returned no symbols"
         
         kinds = {s.get("name"): s.get("kind") for s in syms}
         assert kinds.get("Handler") == "interface"
@@ -107,9 +174,9 @@ class TestJavaExtractor:
     }
 }
 '''
+        _require_ts("java", "tree-sitter-java")
         syms = _ts_extract_symbols_java(code)
-        if not syms:
-            pytest.skip("tree-sitter-java not installed")
+        assert syms, "tree-sitter-java parser available but extractor returned no symbols"
         
         names = [s.get("name") for s in syms]
         assert "Calculator" in names
@@ -128,9 +195,9 @@ class TestJavaExtractor:
     Object findById(String id);
 }
 '''
+        _require_ts("java", "tree-sitter-java")
         syms = _ts_extract_symbols_java(code)
-        if not syms:
-            pytest.skip("tree-sitter-java not installed")
+        assert syms, "tree-sitter-java parser available but extractor returned no symbols"
         
         repo = next((s for s in syms if s.get("name") == "Repository"), None)
         assert repo is not None
@@ -150,9 +217,9 @@ pub fn greet(name: &str) -> String {
     format!("Hello, {}", name)
 }
 '''
+        _require_ts("rust", "tree-sitter-rust")
         syms = _ts_extract_symbols_rust(code)
-        if not syms:
-            pytest.skip("tree-sitter-rust not installed")
+        assert syms, "tree-sitter-rust parser available but extractor returned no symbols"
         
         names = [s.get("name") for s in syms]
         assert "main" in names
@@ -175,9 +242,9 @@ impl Config {
     }
 }
 '''
+        _require_ts("rust", "tree-sitter-rust")
         syms = _ts_extract_symbols_rust(code)
-        if not syms:
-            pytest.skip("tree-sitter-rust not installed")
+        assert syms, "tree-sitter-rust parser available but extractor returned no symbols"
         
         # Should find struct and impl methods
         names = [s.get("name") for s in syms]
@@ -196,9 +263,9 @@ impl Config {
     fn handle(&self, req: Request) -> Response;
 }
 '''
+        _require_ts("rust", "tree-sitter-rust")
         syms = _ts_extract_symbols_rust(code)
-        if not syms:
-            pytest.skip("tree-sitter-rust not installed")
+        assert syms, "tree-sitter-rust parser available but extractor returned no symbols"
         
         handler = next((s for s in syms if s.get("name") == "Handler"), None)
         assert handler is not None
@@ -225,9 +292,10 @@ class TestCSharpExtractor:
     }
 }
 '''
+        if _ts_parser("c_sharp") is None and _ts_parser("csharp") is None:
+            pytest.skip("tree-sitter-c-sharp not installed or not loadable")
         syms = _ts_extract_symbols_csharp(code)
-        if not syms:
-            pytest.skip("tree-sitter-c-sharp not installed")
+        assert syms, "tree-sitter-c-sharp parser available but extractor returned no symbols"
         
         names = [s.get("name") for s in syms]
         assert "UserService" in names
@@ -241,9 +309,10 @@ class TestCSharpExtractor:
     object Find(string id);
 }
 '''
+        if _ts_parser("c_sharp") is None and _ts_parser("csharp") is None:
+            pytest.skip("tree-sitter-c-sharp not installed or not loadable")
         syms = _ts_extract_symbols_csharp(code)
-        if not syms:
-            pytest.skip("tree-sitter-c-sharp not installed")
+        assert syms, "tree-sitter-c-sharp parser available but extractor returned no symbols"
         
         repo = next((s for s in syms if s.get("name") == "IRepository"), None)
         assert repo is not None
@@ -271,9 +340,10 @@ main() {
     cleanup
 }
 '''
+        if _ts_parser("bash") is None and _ts_parser("shell") is None and _ts_parser("sh") is None:
+            pytest.skip("tree-sitter-bash not installed or not loadable")
         syms = _ts_extract_symbols_bash(code)
-        if not syms:
-            pytest.skip("tree-sitter-bash not installed")
+        assert syms, "tree-sitter-bash parser available but extractor returned no symbols"
         
         names = [s.get("name") for s in syms]
         # At minimum should find function definitions
