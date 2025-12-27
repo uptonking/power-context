@@ -44,7 +44,7 @@ OPENLIT_ENABLED=1
 
 | Component | Operations |
 |-----------|------------|
-| **Qdrant** | `.search()`, `.scroll()`, `.upsert()`, `.delete()` |
+| **Qdrant** | `.query_points()`, `.scroll()`, `.upsert()`, `.delete()` |
 | **LLMs** | GLM-4.x, Ollama, llama.cpp (via OpenAI-compatible API) |
 | **Search** | `repo_search`, `context_search`, `context_answer` |
 
