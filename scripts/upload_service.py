@@ -18,6 +18,28 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 from datetime import datetime
 
+# ---------------------------------------------------------------------------
+# OpenLit Observability (optional - only if OPENLIT_ENABLED=1)
+# ---------------------------------------------------------------------------
+_OPENLIT_ENABLED = os.environ.get("OPENLIT_ENABLED", "0").lower() in ("1", "true", "yes")
+if _OPENLIT_ENABLED:
+    try:
+        import openlit
+        _otel_endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "http://openlit:4318")
+        openlit.init(otlp_endpoint=_otel_endpoint)
+        # Explicitly instrument Qdrant for vector DB operations
+        try:
+            from openlit.instrumentation.qdrant import QdrantInstrumentation
+            QdrantInstrumentation().instrument()
+            print(f"[OpenLit] Upload service Qdrant instrumentation enabled")
+        except Exception as qe:
+            print(f"[OpenLit] Qdrant instrumentation failed: {qe}")
+        print(f"[OpenLit] Upload service observability enabled, exporting to {_otel_endpoint}")
+    except ImportError:
+        print("[OpenLit] SDK not installed, skipping observability")
+    except Exception as e:
+        print(f"[OpenLit] Failed to initialize: {e}")
+
 import uvicorn
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Request, status
 from fastapi.responses import JSONResponse, RedirectResponse
