@@ -228,9 +228,10 @@ def _llm_expand_queries(
     def _parse_alts(out: str) -> List[str]:
         """Parse alternatives from LLM output."""
         alts: List[str] = []
-        # Try direct JSON parse
+        # Try direct JSON parse (strip markdown code fences if present)
         try:
-            parsed = json.loads(out)
+            from scripts.llm_utils import strip_markdown_fences
+            parsed = json.loads(strip_markdown_fences(out))
             if isinstance(parsed, list):
                 for s in parsed:
                     if isinstance(s, str) and s.strip() and s not in queries:

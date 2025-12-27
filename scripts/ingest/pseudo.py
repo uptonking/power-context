@@ -95,8 +95,9 @@ def generate_pseudo_tags(text: str) -> Tuple[str, List[str]]:
                 stop=["\n\n"],
             )
         import json as _json
+        from scripts.llm_utils import strip_markdown_fences
         try:
-            obj = _json.loads(out)
+            obj = _json.loads(strip_markdown_fences(out))
             if isinstance(obj, dict):
                 p = obj.get("pseudo")
                 t = obj.get("tags")
