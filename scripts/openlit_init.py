@@ -27,16 +27,17 @@ def init_openlit():
         import openlit
         
         _otel_endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "http://openlit:4318")
-        _app_name = "context-engine"
-        _environment = "development"
+        _app_name = os.environ.get("OPENLIT_APP_NAME", "context-engine")
+        _environment = os.environ.get("OPENLIT_ENVIRONMENT", "development")
         
         # Initialize OpenLit - this patches imported libraries
+        # Use capture_message_content (v1.36+) to capture request/response content
         openlit.init(
             otlp_endpoint=_otel_endpoint,
             application_name=_app_name,
             environment=_environment,
             disabled_instrumentors=None,  # Don't disable anything
-            trace_content=True,  # Capture request/response content for better tracing
+            capture_message_content=True,  # Capture prompts/responses for tracing
         )
         
         print(f"[OpenLit] Initialized with endpoint={_otel_endpoint}, app={_app_name}")
