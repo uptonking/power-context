@@ -85,3 +85,26 @@ def test_merge_and_budget_spans_works_without_explicit_budget(monkeypatch):
     assert len(merged) >= 1
     assert merged[0]["_merged_start"] <= merged[0]["_merged_end"]
     assert isinstance(merged[0]["_budget_tokens"], int)
+
+
+def test_adaptive_span_sizing_failure_is_non_fatal(monkeypatch):
+    """Adaptive span sizing must never break budgeting if extent lookup fails."""
+    monkeypatch.setenv("MICRO_TOKENS_PER_LINE", "10")
+    monkeypatch.setenv("MICRO_BUDGET_TOKENS", "200")
+    monkeypatch.setenv("MICRO_MERGE_LINES", "1")
+    monkeypatch.setenv("MICRO_OUT_MAX_SPANS", "3")
+
+    # Enable adaptive path (needs both collection + symbol)
+    monkeypatch.setenv("COLLECTION_NAME", "dummy")
+
+    # Force extent lookup to throw; the budgeter should swallow it.
+    import scripts.hybrid_ranking as hr
+    monkeypatch.setattr(hr, "_get_symbol_extent", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    items = [
+        {"path": "x.py", "start_line": 10, "end_line": 12, "score": 1.0, "symbol": "MySymbol"},
+        {"path": "y.py", "start_line": 1, "end_line": 2, "score": 0.9, "symbol": "OtherSymbol"},
+    ]
+    merged = _merge_and_budget_spans(items)
+    assert len(merged) >= 1
+    assert merged[0]["_merged_start"] <= merged[0]["_merged_end"]
