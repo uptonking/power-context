@@ -20,9 +20,66 @@ from scripts.ingest.symbols import (
     _ts_extract_symbols,
 )
 
+def _bool_env(name: str) -> bool:
+    v = os.environ.get(name)
+    if v is None:
+        return False
+    return str(v).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _ts_diag(lang_key: str) -> str:
+    """Produce a useful diagnostic when tree-sitter is unexpectedly unavailable."""
+    try:
+        from scripts.ingest import tree_sitter as ts
+    except Exception as e:
+        return f"failed to import scripts.ingest.tree_sitter: {e!r}"
+
+    pkg_map = {
+        "go": "tree_sitter_go",
+        "java": "tree_sitter_java",
+        "rust": "tree_sitter_rust",
+        "c_sharp": "tree_sitter_c_sharp",
+        "csharp": "tree_sitter_c_sharp",
+        "bash": "tree_sitter_bash",
+        "shell": "tree_sitter_bash",
+        "sh": "tree_sitter_bash",
+    }
+    pkg = pkg_map.get(lang_key)
+    pkg_status = "n/a"
+    if pkg:
+        try:
+            __import__(pkg)
+            pkg_status = "import ok"
+        except Exception as e:
+            pkg_status = f"import failed: {e!r}"
+
+    try:
+        __import__("tree_sitter")
+        core_status = "import ok"
+    except Exception as e:
+        core_status = f"import failed: {e!r}"
+
+    try:
+        loaded = sorted(list(getattr(ts, "_TS_LANGUAGES", {}).keys()))
+    except Exception:
+        loaded = []
+
+    return (
+        f"USE_TREE_SITTER={os.environ.get('USE_TREE_SITTER')!r}, "
+        f"TS_AVAILABLE={getattr(ts, '_TS_AVAILABLE', None)!r}, "
+        f"Parser_is_None={getattr(ts, 'Parser', None) is None}, "
+        f"tree_sitter={core_status}, "
+        f"{pkg}={pkg_status}, "
+        f"loaded_lang_keys={loaded}"
+    )
+
+
 def _require_ts(lang_key: str, label: str) -> None:
     """Skip only when the tree-sitter parser/grammar truly isn't available."""
     if _ts_parser(lang_key) is None:
+        # In CI we expect requirements to be installed; skipping hides real regressions.
+        if _bool_env("CI") or _bool_env("FORCE_TREE_SITTER_TESTS"):
+            pytest.fail(f"{label} not installed or not loadable in CI. {_ts_diag(lang_key)}")
         pytest.skip(f"{label} not installed or not loadable")
 
 
