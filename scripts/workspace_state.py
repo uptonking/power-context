@@ -803,15 +803,18 @@ def update_workspace_state(
         except Exception:
             return {}
 
+
     lock = _get_state_lock(workspace_path, repo_name)
     with lock:
         state = get_workspace_state(workspace_path, repo_name)
+        if not state:
+            return {}
+
         for key, value in updates.items():
             if key in state or key in WorkspaceState.__annotations__:
                 state[key] = value
 
         _ensure_repo_slug_defaults(state, repo_name)
-
         state["updated_at"] = datetime.now().isoformat()
 
         if is_multi_repo_mode() and repo_name:
@@ -828,6 +831,128 @@ def update_workspace_state(
 
         _atomic_write_state(state_path, state)
         return state
+
+
+def initialize_watcher_state(
+    workspace_path: str,
+    multi_repo_enabled: bool,
+    default_collection: str
+) -> None:
+    """Initialize workspace state for the watcher."""
+    if multi_repo_enabled:
+        root_repo_name = _extract_repo_name_from_path(workspace_path)
+        if root_repo_name:
+            root_collection = get_collection_name(root_repo_name)
+            try:
+                if persist_indexing_config:
+                    persist_indexing_config(
+                        workspace_path=workspace_path,
+                        repo_name=root_repo_name,
+                        pending=True,
+                    )
+            except Exception:
+                pass
+            update_indexing_status(
+                repo_name=root_repo_name,
+                status={"state": "watching"},
+            )
+            print(
+                f"[workspace_state] Initialized repo state: {root_repo_name} -> {root_collection}"
+            )
+        else:
+            print(
+                "[workspace_state] Multi-repo: root path is not a repo; skipping state initialization"
+            )
+    else:
+        updates = {"qdrant_collection": default_collection}
+        try:
+            if get_indexing_config_snapshot and compute_indexing_config_hash:
+                cfg = get_indexing_config_snapshot()
+                updates["indexing_config"] = cfg
+                updates["indexing_config_hash"] = compute_indexing_config_hash(cfg)
+        except Exception:
+            pass
+        update_workspace_state(workspace_path=workspace_path, updates=updates)
+        try:
+            if persist_indexing_config:
+                persist_indexing_config(
+                    workspace_path=workspace_path,
+                    repo_name=None,
+                    pending=True,
+                )
+        except Exception:
+            pass
+        update_indexing_status(status={"state": "watching"})
+
+
+def set_indexing_started(workspace_path: str, total_files: int) -> None:
+    """Set status to indexing with start time."""
+    try:
+        repo_name = _extract_repo_name_from_path(Path(workspace_path))
+        update_indexing_status(
+            repo_name=repo_name,
+            status={
+                "state": "indexing",
+                "started_at": datetime.now().isoformat(),
+                "progress": {"files_processed": 0, "total_files": int(total_files)},
+            },
+        )
+    except Exception:
+        pass
+
+
+def set_indexing_progress(
+    workspace_path: str,
+    started_at: str,
+    processed: int,
+    total: int,
+    current_file: Optional[str],
+) -> None:
+    """Update indexing progress."""
+    try:
+        repo_name = _extract_repo_name_from_path(Path(workspace_path))
+        update_indexing_status(
+            repo_name=repo_name,
+            status={
+                "state": "indexing",
+                "started_at": started_at,
+                "progress": {
+                    "files_processed": int(processed),
+                    "total_files": int(total),
+                    "current_file": str(current_file) if current_file else None,
+                },
+            },
+        )
+    except Exception:
+        pass
+
+
+def log_watcher_activity(
+    workspace_path: str, action: str, file_path: str, details: Dict | None = None
+) -> None:
+    """Log watcher activity with validation."""
+    try:
+        repo_name = _extract_repo_name_from_path(Path(workspace_path))
+
+        valid_actions = {
+            "indexed",
+            "deleted",
+            "skipped",
+            "scan-completed",
+            "initialized",
+            "moved",
+        }
+        if action not in valid_actions:
+            action = "indexed"
+
+        log_activity(
+            repo_name=repo_name,
+            action=action,  # type: ignore[arg-type]
+            file_path=str(file_path),
+            details=details,
+        )
+    except Exception:
+        pass
 
 def update_indexing_status(
     workspace_path: Optional[str] = None,

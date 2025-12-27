@@ -56,6 +56,11 @@ def test_main_resolves_collection_from_state(monkeypatch, tmp_path):
             pass
     monkeypatch.setattr(wi, "Observer", FakeObserver, raising=True)
 
+    # Mock collection_health to avoid FS access
+    heal_mod = importlib.import_module("scripts.collection_health")
+    monkeypatch.setattr(heal_mod, "auto_heal_if_needed", lambda *a, **k: {}, raising=False)
+    monkeypatch.setattr(heal_mod, "auto_heal_multi_repo", lambda *a, **k: {}, raising=False)
+
     # Make the main loop exit immediately by raising KeyboardInterrupt on sleep
     def _raise_kb(_):
         raise KeyboardInterrupt()
