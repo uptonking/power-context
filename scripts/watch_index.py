@@ -5,6 +5,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from typing import Optional
 
 from qdrant_client import QdrantClient
 from watchdog.observers import Observer
