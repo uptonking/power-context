@@ -170,6 +170,56 @@ try:
 except Exception:
     pass
 
+
+def _relax_var_kwarg_defaults() -> None:
+    """Allow tools that rely on **kwargs compatibility shims to be invoked without
+    callers supplying an explicit 'kwargs' or 'arguments' field.
+    
+    This patches Pydantic models to add default_factory=dict for kwargs/arguments,
+    making them optional instead of required.
+    """
+    try:
+        from pydantic_core import PydanticUndefined as _PydanticUndefined  # type: ignore
+    except Exception:  # pragma: no cover - defensive
+        class _Sentinel:  # type: ignore
+            pass
+        _PydanticUndefined = _Sentinel()  # type: ignore
+
+    try:
+        tool_manager = getattr(mcp, "_tool_manager", None)
+        tools = getattr(tool_manager, "_tools", {}) if tool_manager is not None else {}
+    except Exception:
+        tools = {}
+
+    for tool in tools.values():
+        try:
+            model = getattr(tool.fn_metadata, "arg_model", None)
+            if model is None:
+                continue
+            fields = getattr(model, "model_fields", {})
+            changed = False
+            for key in ("kwargs", "arguments"):
+                fld = fields.get(key)
+                if fld is None:
+                    continue
+                default = getattr(fld, "default", None)
+                default_factory = getattr(fld, "default_factory", None)
+                if default is _PydanticUndefined and default_factory is None:
+                    try:
+                        fld.default_factory = dict  # type: ignore[attr-defined]
+                    except Exception:
+                        fld.default_factory = lambda: {}  # type: ignore
+                    fld.default = None
+                    changed = True
+            if changed:
+                try:
+                    model.model_rebuild(force=True)
+                except Exception:
+                    pass
+        except Exception:
+            continue
+
+
 HOST = os.environ.get("FASTMCP_HOST", "0.0.0.0")
 PORT = int(os.environ.get("FASTMCP_PORT", "8000") or 8000)
 
@@ -317,10 +367,13 @@ if MEMORY_ENSURE_ON_START:
 def set_session_defaults(
     collection: Optional[str] = None,
     session: Optional[str] = None,
+    mode: Optional[str] = None,
+    language: Optional[str] = None,
+    under: Optional[str] = None,
     ctx: Context = None,
-    **kwargs: Any,
+    kwargs: Any = None,
 ) -> Dict[str, Any]:
-    """Set defaults (e.g., collection) for subsequent calls.
+    """Set defaults (e.g., collection, mode, language, under) for subsequent calls.
 
     Behavior:
     - If a request Context is provided (normal with FastMCP), store defaults per-connection
@@ -329,21 +382,25 @@ def set_session_defaults(
 
     Precedence everywhere: explicit collection > per-connection defaults > token defaults > env default.
     """
+    # Handle kwargs payload from some clients
     try:
         _extra = kwargs or {}
-        if isinstance(_extra, dict) and "kwargs" in _extra:
-            inner = _extra.get("kwargs")
-            if isinstance(inner, dict):
-                _extra = inner
-            elif isinstance(inner, str):
-                try:
-                    _extra = json.loads(inner)
-                except Exception:
-                    _extra = {}
-        if (not collection) and isinstance(_extra, dict) and _extra.get("collection") is not None:
-            collection = _extra.get("collection")
-        if (not session) and isinstance(_extra, dict) and _extra.get("session") is not None:
-            session = _extra.get("session")
+        if isinstance(_extra, str):
+            try:
+                _extra = json.loads(_extra)
+            except Exception:
+                _extra = {}
+        if isinstance(_extra, dict):
+            if not collection and _extra.get("collection"):
+                collection = _extra["collection"]
+            if not mode and _extra.get("mode"):
+                mode = _extra["mode"]
+            if not language and _extra.get("language"):
+                language = _extra["language"]
+            if not under and _extra.get("under"):
+                under = _extra["under"]
+            if not session and _extra.get("session"):
+                session = _extra["session"]
     except Exception:
         pass
 
@@ -351,6 +408,12 @@ def set_session_defaults(
     defaults: Dict[str, Any] = {}
     if isinstance(collection, str) and collection.strip():
         defaults["collection"] = collection.strip()
+    if isinstance(mode, str) and mode.strip():
+        defaults["mode"] = mode.strip()
+    if isinstance(language, str) and language.strip():
+        defaults["language"] = language.strip()
+    if isinstance(under, str) and under.strip():
+        defaults["under"] = under.strip()
 
     # Store per-connection (preferred, no token required)
     try:
@@ -391,14 +454,13 @@ def store(
     collection: Optional[str] = None,
     session: Optional[str] = None,
     ctx: Context = None,
-    **kwargs: Any,
 ) -> Dict[str, Any]:
     """Store a memory entry into Qdrant (dual vectors consistent with indexer).
 
     First call may be slower because the embedding model loads lazily.
     """
     sess = _require_auth_session(session)
-    coll = _resolve_collection(collection, session=session, ctx=ctx, extra_kwargs=kwargs)
+    coll = _resolve_collection(collection, session=session, ctx=ctx)
     _require_collection_access((sess or {}).get("user_id"), coll, "write")
     _ensure_once(coll)
     model = _get_embedding_model()
@@ -425,20 +487,20 @@ def find(
     collection: Optional[str] = None,
     top_k: Optional[int] = None,
     session: Optional[str] = None,
+    q: Optional[str] = None,
     ctx: Context = None,
-    **kwargs: Any,
 ) -> Dict[str, Any]:
     """Find memory-like entries by vector similarity (dense + lexical fusion).
 
     Cold-start option: set MEMORY_COLD_SKIP_DENSE=1 to skip dense embedding until the
     model is cached (useful on slow storage).
     """
-    # Handle 'q' alias for query (from kwargs)
-    if not query and kwargs.get("q"):
-        query = kwargs.get("q")
+    # Handle 'q' alias for query
+    if not query and q:
+        query = q
 
     sess = _require_auth_session(session)
-    coll = _resolve_collection(collection, session=session, ctx=ctx, extra_kwargs=kwargs)
+    coll = _resolve_collection(collection, session=session, ctx=ctx)
     _require_collection_access((sess or {}).get("user_id") if sess else None, coll, "read")
     _ensure_once(coll)
 
@@ -652,6 +714,13 @@ if __name__ == "__main__":
     # Start lightweight /readyz health endpoint in background (best-effort)
     try:
         _start_readyz_server()
+    except Exception:
+        pass
+
+    # Relax Pydantic model defaults for **kwargs compatibility
+    # This must be called AFTER all tools are registered but BEFORE mcp.run()
+    try:
+        _relax_var_kwarg_defaults()
     except Exception:
         pass
 
