@@ -6,8 +6,11 @@ Tests the new tree-sitter extraction handlers for Go, Java, Rust, C#, and Bash.
 import pytest
 import os
 
-# Temporarily disable tree-sitter to test extractors directly
-os.environ["USE_TREE_SITTER"] = "1"
+# These tests require tree-sitter parsing to be enabled.
+# Other tests may disable it globally (env var), so force-enable it for this file.
+@pytest.fixture(autouse=True)
+def _force_tree_sitter_enabled(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("USE_TREE_SITTER", "1")
 
 from scripts.ingest.tree_sitter import _ts_parser
 
