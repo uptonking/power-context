@@ -107,7 +107,13 @@ def _repo_name_or_none(repo_path: Optional[Path]) -> Optional[str]:
 
 
 def _get_collection_for_repo(repo_path: Path) -> str:
-    """Resolve Qdrant collection for a repo, with logical_repo_id-aware reuse."""
+    """Resolve Qdrant collection for a repo, with logical_repo_id-aware reuse.
+
+    In multi-repo mode, prefer reusing an existing canonical collection that has
+    already been associated with this logical repository (same git common dir)
+    by consulting workspace_state. Falls back to the legacy per-repo hashed
+    collection naming when no mapping exists.
+    """
 
     default_coll = default_collection_name()
     try:
@@ -116,6 +122,8 @@ def _get_collection_for_repo(repo_path: Path) -> str:
         repo_name = None
 
     # Multi-repo: always honor explicit serving/qdrant collection from state when present.
+    # This is required for staging/migration workflows (e.g. *_old repos) even when
+    # logical-repo reuse is disabled.
     if repo_name and is_multi_repo_mode():
         workspace_root = (
             os.environ.get("WORKSPACE_PATH")

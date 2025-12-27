@@ -45,6 +45,7 @@ import scripts.ingest_code as idx  # noqa: E402
 
 logger = LOGGER
 ROOT = WATCH_ROOT
+# Back-compat: legacy modules/tests expect a module-level COLLECTION constant.
 COLLECTION = os.environ.get("COLLECTION_NAME", default_collection_name())
 
 

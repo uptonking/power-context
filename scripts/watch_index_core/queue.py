@@ -54,6 +54,7 @@ class ChangeQueue:
                     self._timer.start()
             return
         try:
+            # Per-file locking in index_single_file handles indexer/watcher coordination
             todo: Iterable[Path] = paths
             while True:
                 try:

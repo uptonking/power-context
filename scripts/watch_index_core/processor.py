@@ -132,6 +132,8 @@ def _maybe_handle_staging_file(
         except Exception:
             cached_hash = None
         if cached_hash and cached_hash == file_hash:
+            # Fast path: skip if content hash matches cached hash (file unchanged)
+            # Safety: startup health check clears stale cache per-repo
             safe_print(f"[skip_unchanged] {path} (hash match)")
             _log_activity(repo_key, "skipped", path, {"reason": "hash_unchanged"})
             _advance_progress(repo_progress, repo_key, repo_files, started_at, path)
@@ -146,10 +148,17 @@ def _maybe_handle_staging_file(
     ]
     env = _build_subprocess_env(collection, repo_name, state_env)
     try:
+        # If a repo-specific indexing_env is present (staging), avoid mutating os.environ
+        # process-wide. Instead, run ingest_code in a subprocess with an explicit env dict.
+        # Cheap pre-flight hash check so we can skip unchanged files without spawning a subprocess.
         result = subprocess.run(cmd, env=env, capture_output=True, text=True)
     except Exception:
         return False
     if result.returncode != 0:
+        # TODO: Instead of launching one subprocess per file, queue changes and run a 
+        # single ingest_code.py --root <repo> pass with --no-skip-unchanged. That 
+        # reuses ingest’s own skip logic, but requires more plumbing (collect paths, 
+        # pass via manifest/CLI, etc.).
         try:
             logger.error(
                 "watch_index::subprocess_index_failed",
@@ -368,6 +377,7 @@ def _run_indexing_strategy(
                 use_smart, smart_reason = idx.should_use_smart_reindexing(str(path), file_hash)
             except Exception:
                 use_smart, smart_reason = False, "smart_check_failed"
+            # Bootstrap: if we have no symbol cache yet, still run smart path once
             bootstrap = smart_reason == "no_cached_symbols"
             if use_smart or bootstrap:
                 msg_kind = (
@@ -399,6 +409,8 @@ def _run_indexing_strategy(
                 safe_print(
                     f"[SMART_REINDEX][watcher] Using full reindexing for {path} ({smart_reason})"
                 )
+                # Fallback: full single-file reindex. Pseudo/tags are inlined by default;
+                # when PSEUDO_BACKFILL_ENABLED=1 we run base-only and rely on backfill.
     if not ok:
         pseudo_mode = "full" if get_boolean_env("PSEUDO_BACKFILL_ENABLED") else "off"
         ok = idx.index_single_file(

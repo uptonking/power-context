@@ -45,6 +45,8 @@ class IndexHandler(FileSystemEventHandler):
         self.client = client
         # Only pin to a fixed collection when explicitly provided.
         # Otherwise, allow multi-repo mode to resolve per-file collections.
+        # In multi-repo mode, per-file collections are resolved via _get_collection_for_file
+        # and workspace_state; avoid deriving a root-level collection like "/work-<hash>".
         self.default_collection = default_collection
         self.collection = collection
         self.excl = idx._Excluder(root)
@@ -71,6 +73,7 @@ class IndexHandler(FileSystemEventHandler):
             cur = (
                 self._ignore_path.stat().st_mtime if self._ignore_path.exists() else 0.0
             )
+            # Refresh ignore patterns if the file changed
             if cur != self._ignore_mtime:
                 self.excl = idx._Excluder(self.root)
                 self._ignore_mtime = cur
@@ -114,6 +117,7 @@ class IndexHandler(FileSystemEventHandler):
             rel_dir = "/"
         if self.excl.exclude_dir(rel_dir):
             return
+        # only code files (check extension AND extensionless files like Dockerfile)
         if not idx.is_indexable_file(p):
             return
         relf = (rel_dir.rstrip("/") + "/" + p.name).replace("//", "/")
