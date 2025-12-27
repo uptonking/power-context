@@ -59,13 +59,24 @@ class ChangeQueue:
                 try:
                     self._process_cb(list(todo))
                 except Exception as exc:
+                    # Log processing error via structured logging
                     try:
-                        print(f"[watcher_error] processing batch failed: {exc}")
-                    except Exception as inner_exc:  # pragma: no cover - logging fallback
                         LOGGER.error(
-                            "Exception in ChangeQueue._flush during batch processing",
-                            extra={"error": str(inner_exc)},
+                            "Processing batch failed in ChangeQueue._flush",
+                            extra={"error": str(exc), "batch_size": len(list(todo))},
+                            exc_info=True,
                         )
+                    except Exception as inner_exc:  # pragma: no cover - logging fallback
+                        # If logging fails, ensure we don't lose both errors
+                        import sys
+                        try:
+                            print(
+                                f"[watcher_error] logging failed: {inner_exc}, "
+                                f"original error: {exc}",
+                                file=sys.stderr,
+                            )
+                        except Exception:
+                            pass  # Last resort: can't even print
                 # drain any pending accumulated during processing
                 with self._lock:
                     if not self._pending:

@@ -34,40 +34,84 @@ def test_processor_handles_cache_read_errors(monkeypatch, tmp_path):
     # Mock to raise error
     monkeypatch.setattr(ws_mod, "get_cached_file_hash", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
     
-    # The _read_text_and_sha1 function should handle this gracefully
+    # Create a test file
     test_file = tmp_path / "test.txt"
-    test_file.write_text("content", encoding="utf-8")
+    test_file.write_text("test content", encoding="utf-8")
     
-    # This is tested indirectly via _maybe_handle_staging_file in processor
-    # Just verify the import works and module structure is correct
-    assert hasattr(proc_mod, "_read_text_and_sha1")
-    assert hasattr(proc_mod, "_process_paths")
+    # Exercise _read_text_and_sha1 - should handle errors gracefully and return content + hash
+    text, sha1 = proc_mod._read_text_and_sha1(test_file)
+    assert text == "test content"
+    assert sha1 is not None and len(sha1) == 40  # SHA1 hex length
 
 
 def test_handler_move_event_handles_cache_errors(monkeypatch, tmp_path):
-    """Verify on_moved handles set_cached_file_hash errors gracefully."""
+    """Verify on_moved handles cache errors gracefully by completing without raising."""
     handler_mod = importlib.import_module("scripts.watch_index_core.handler")
     ws_mod = importlib.import_module("scripts.workspace_state")
     
     # Mock workspace_state to raise
     monkeypatch.setattr(ws_mod, "get_cached_file_hash", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
     monkeypatch.setattr(ws_mod, "set_cached_file_hash", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(ws_mod, "remove_cached_file", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(ws_mod, "remove_cached_symbols", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
     
-    # Verify the handler tolerates these errors (tested via integration, not unit)
-    assert hasattr(handler_mod.IndexHandler, "on_moved")
+    # Create source and dest files
+    src_file = tmp_path / "src.py"
+    dest_file = tmp_path / "dest.py"
+    src_file.write_text("# code", encoding="utf-8")
+    dest_file.write_text("# code", encoding="utf-8")
+    
+    # Create handler and mock event
+    queue = MagicMock()
+    client = MagicMock()
+    client.scroll = MagicMock(return_value=([], None))  # No points to rename
+    h = handler_mod.IndexHandler(tmp_path, queue, client, "test-coll")
+    
+    # Create mock move event
+    event = MagicMock()
+    event.is_directory = False
+    event.src_path = str(src_file)
+    event.dest_path = str(dest_file)
+    
+    # Should complete without raising despite cache errors
+    result = h.on_moved(event)
+    assert result is None  # on_moved returns None
 
 
 def test_processor_handles_cache_remove_errors(monkeypatch, tmp_path):
     """Verify processor handles remove_cached_file errors when processing deletes."""
+    proc_mod = importlib.import_module("scripts.watch_index_core.processor")
     ws_mod = importlib.import_module("scripts.workspace_state")
     
     # Mock to raise
     monkeypatch.setattr(ws_mod, "remove_cached_file", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
     
-    # The processor should handle this gracefully in its delete path
-    # Verified via structure check
-    proc_mod = importlib.import_module("scripts.watch_index_core.processor")
-    assert hasattr(proc_mod, "_process_paths")
+    missing = tmp_path / "missing.py"
+    assert not missing.exists()
+
+    # Mock other dependencies
+    monkeypatch.setattr(proc_mod, "_detect_repo_for_file", lambda p: tmp_path)
+    monkeypatch.setattr(proc_mod, "_get_collection_for_file", lambda p: "coll")
+    monkeypatch.setattr(proc_mod, "_set_status_indexing", lambda *a, **k: None)
+    monkeypatch.setattr(proc_mod, "persist_indexing_config", lambda *a, **k: None)
+    monkeypatch.setattr(proc_mod, "update_indexing_status", lambda *a, **k: None)
+    monkeypatch.setattr(proc_mod, "get_workspace_state", lambda *a, **k: {})
+    monkeypatch.setattr(proc_mod, "is_staging_enabled", lambda: False)
+    monkeypatch.setattr(proc_mod, "_log_activity", lambda *a, **k: None)
+    monkeypatch.setattr(proc_mod, "_extract_repo_name_from_path", lambda *_: "repo")
+
+    # _process_paths should complete without raising despite cache errors
+    # This exercises the delete path when file doesn't exist
+    proc_mod._process_paths(
+        [missing],
+        client=None,
+        model=None,
+        vector_name="vec",
+        model_dim=1,
+        workspace_path=str(tmp_path),
+    )
+    # If we get here without exception, the error was handled gracefully
+
 
 
 def test_watch_index_core_config_root_dir_matches_project_root():

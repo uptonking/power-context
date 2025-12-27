@@ -57,8 +57,18 @@ def _process_git_history_manifest(
             )
         except Exception:
             pass
-        subprocess.Popen(cmd, env=env)
-    except Exception:
+        # Use subprocess.run for better error observability.
+        # NOTE: This blocks until ingest_history.py completes. If history ingestion
+        # is slow, this may need revisiting (e.g., revert to Popen fire-and-forget
+        # or run in a separate thread) to avoid blocking the watcher.
+        result = subprocess.run(cmd, env=env, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            logger.warning(
+                "[git_history_manifest] ingest_history.py failed for %s: exit=%d stderr=%s",
+                p, result.returncode, (result.stderr or "")[:500],
+            )
+    except Exception as e:
+        logger.warning("[git_history_manifest] error processing %s: %s", p, e)
         return
 
 
@@ -390,7 +400,7 @@ def _run_indexing_strategy(
                     f"[SMART_REINDEX][watcher] Using full reindexing for {path} ({smart_reason})"
                 )
     if not ok:
-        pseudo_mode = "off" if get_boolean_env("PSEUDO_BACKFILL_ENABLED") else "full"
+        pseudo_mode = "full" if get_boolean_env("PSEUDO_BACKFILL_ENABLED") else "off"
         ok = idx.index_single_file(
             client,
             model,

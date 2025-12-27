@@ -89,7 +89,9 @@ def _rename_in_store(
                 host_root = (
                     str(os.environ.get("HOST_INDEX_PATH") or "").strip().rstrip("/")
                 )
-                if ":" in host_root:  # Windows drive letter (e.g., "C:")
+                # Detect Windows drive letter using splitdrive (not raw colon check)
+                drive, _ = os.path.splitdrive(host_root)
+                if drive:  # Non-empty drive means Windows path like "C:"
                     host_root = ""
                 host_path = None
                 container_path = None
@@ -117,7 +119,11 @@ def _rename_in_store(
                     new_points.append(
                         models.PointStruct(id=new_id, vector=vec, payload=new_payload)
                     )
-                except Exception:
+                except Exception as e:
+                    LOGGER.warning(
+                        "[rename] Failed to create point id=%s for %s: %s",
+                        new_id, str(dest), e,
+                    )
                     continue
             if new_points:
                 LOGGER.debug(
@@ -134,8 +140,13 @@ def _rename_in_store(
 
         try:
             idx.delete_points_by_path(client, src_collection, str(src))
-        except Exception:
-            pass
+        except Exception as e:
+            LOGGER.warning(
+                "[rename] Failed to delete source points from %s for %s -> %s: %s",
+                src_collection, str(src), str(dest), e,
+            )
+            # Return partial success - points were moved but source cleanup failed
+            return moved, dest_hash
         return moved, dest_hash
     except Exception as exc:  # pragma: no cover - defensive logging
         try:

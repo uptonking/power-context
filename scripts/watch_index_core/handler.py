@@ -93,9 +93,9 @@ class IndexHandler(FileSystemEventHandler):
             return
 
         try:
-            if _get_global_state_dir is not None:
+            if callable(_get_global_state_dir):
                 global_state_dir = _get_global_state_dir()
-                if p.is_relative_to(global_state_dir):
+                if global_state_dir is not None and p.is_relative_to(global_state_dir):
                     return
         except (OSError, ValueError):
             pass
@@ -240,7 +240,9 @@ class IndexHandler(FileSystemEventHandler):
                         safe_print(f"[moved:reindex_src] {src} -> {dest} (dest skipped)")
                     except Exception:
                         pass
-                self._delete_points(src, src_collection)
+                else:
+                    # Non-indexable source file: use _delete_points for cleanup
+                    self._delete_points(src, src_collection)
             except Exception:
                 pass
         else:

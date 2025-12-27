@@ -8,7 +8,6 @@ Modules:
     processor: batch processing + ingest handoff
     rename: move/rename fast-path helpers
     pseudo: background pseudo backfill worker
-    state: workspace state/status utilities
 """
 
 from . import config, routing, queue, handler, processor, rename, pseudo
