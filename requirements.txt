@@ -1,5 +1,6 @@
 # Runtime dependencies (mirrors Dockerfiles)
-qdrant-client
+# Pin to 1.15.x - version 1.16+ removed .search() method which breaks OpenLit instrumentation
+qdrant-client>=1.15.0,<1.16.0
 fastembed
 watchdog
 onnxruntime
@@ -30,6 +31,7 @@ uvicorn[standard]
 python-multipart
 jinja2
 openai>=1.0
+openlit>=1.0.0  # LLM observability SDK
 
 # Test-only
 pytest

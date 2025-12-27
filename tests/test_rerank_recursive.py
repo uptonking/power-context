@@ -240,3 +240,132 @@ class TestRecursiveReranker:
         assert results[0]["symbol"] == "func_a"
         assert results[0]["custom"] == "value"
 
+
+class TestCosineAlphaScheduler:
+    """Tests for the cosine alpha scheduler."""
+
+    def test_schedule_length(self):
+        """Schedule should match n_iterations."""
+        from scripts.rerank_recursive import CosineAlphaScheduler
+        
+        scheduler = CosineAlphaScheduler(n_iterations=5)
+        schedule = scheduler.get_schedule()
+        
+        assert len(schedule) == 5
+
+    def test_schedule_decreasing(self):
+        """Alpha should decrease over iterations (cosine decay)."""
+        from scripts.rerank_recursive import CosineAlphaScheduler
+        
+        scheduler = CosineAlphaScheduler(n_iterations=3, alpha_max=0.7, alpha_min=0.3)
+        schedule = scheduler.get_schedule()
+        
+        assert schedule[0] > schedule[1] > schedule[2]
+        assert abs(schedule[0] - 0.7) < 0.01  # First should be alpha_max
+        assert abs(schedule[2] - 0.3) < 0.01  # Last should be alpha_min
+
+    def test_schedule_bounds(self):
+        """All alpha values should be within [alpha_min, alpha_max]."""
+        from scripts.rerank_recursive import CosineAlphaScheduler
+        
+        scheduler = CosineAlphaScheduler(n_iterations=10, alpha_max=0.8, alpha_min=0.2)
+        schedule = scheduler.get_schedule()
+        
+        for alpha in schedule:
+            assert 0.2 <= alpha <= 0.8
+
+    def test_single_iteration(self):
+        """Single iteration should return middle value."""
+        from scripts.rerank_recursive import CosineAlphaScheduler
+        
+        scheduler = CosineAlphaScheduler(n_iterations=1, alpha_max=0.8, alpha_min=0.2)
+        schedule = scheduler.get_schedule()
+        
+        assert len(schedule) == 1
+        assert abs(schedule[0] - 0.5) < 0.01  # Should be (0.8 + 0.2) / 2
+
+
+class TestLearnedAlphaWeights:
+    """Tests for the learnable alpha weights."""
+
+    def test_init_alpha(self):
+        """Initial alpha should match init_alpha parameter."""
+        from scripts.rerank_recursive import LearnedAlphaWeights
+        
+        learned = LearnedAlphaWeights(n_iterations=3, init_alpha=0.6)
+        schedule = learned.get_schedule()
+        
+        for alpha in schedule:
+            assert abs(alpha - 0.6) < 0.01
+
+    def test_get_alpha_clamped(self):
+        """get_alpha should clamp to valid iteration range."""
+        from scripts.rerank_recursive import LearnedAlphaWeights
+        
+        learned = LearnedAlphaWeights(n_iterations=3)
+        
+        # Should not crash for out-of-range iterations
+        alpha_neg = learned.get_alpha(-1)
+        alpha_over = learned.get_alpha(100)
+        
+        assert 0 < alpha_neg < 1
+        assert 0 < alpha_over < 1
+
+    def test_alpha_in_valid_range(self):
+        """All alpha values should be in (0, 1) due to sigmoid."""
+        from scripts.rerank_recursive import LearnedAlphaWeights
+        
+        learned = LearnedAlphaWeights(n_iterations=5, init_alpha=0.5)
+        schedule = learned.get_schedule()
+        
+        for alpha in schedule:
+            assert 0 < alpha < 1
+
+
+class TestAlphaIntegration:
+    """Tests for alpha scheduler integration with reranker."""
+
+    def test_alpha_trajectory_in_output(self):
+        """Reranked results should include alpha_trajectory."""
+        reranker = RecursiveReranker(n_iterations=3, dim=64)
+        
+        candidates = [
+            {"path": "a.py", "code": "def a(): pass"},
+        ]
+        
+        results = reranker.rerank("query", candidates)
+        
+        assert "alpha_trajectory" in results[0]
+        assert isinstance(results[0]["alpha_trajectory"], list)
+        assert len(results[0]["alpha_trajectory"]) > 0
+
+    def test_custom_scheduler(self):
+        """Should accept custom alpha scheduler."""
+        from scripts.rerank_recursive import LearnedAlphaWeights
+        
+        custom_scheduler = LearnedAlphaWeights(n_iterations=2, init_alpha=0.4)
+        reranker = RecursiveReranker(n_iterations=2, dim=64, alpha_scheduler=custom_scheduler)
+        
+        candidates = [
+            {"path": "a.py", "code": "def a(): pass"},
+        ]
+        
+        results = reranker.rerank("query", candidates)
+        
+        # Alpha should be close to 0.4 (our custom init)
+        for alpha in results[0]["alpha_trajectory"]:
+            assert abs(alpha - 0.4) < 0.1
+
+    def test_alpha_trajectory_matches_iterations(self):
+        """Alpha trajectory length should match actual iterations run."""
+        reranker = RecursiveReranker(n_iterations=3, dim=64, early_stop=False)
+        
+        candidates = [
+            {"path": "a.py", "code": "def a(): pass"},
+            {"path": "b.py", "code": "def b(): pass"},
+        ]
+        
+        results = reranker.rerank("query", candidates)
+        
+        # With early_stop=False, should run all iterations
+        assert len(results[0]["alpha_trajectory"]) == results[0]["recursive_iterations"]
