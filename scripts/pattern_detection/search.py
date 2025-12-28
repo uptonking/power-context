@@ -82,8 +82,6 @@ def _format_pattern_results_as_toon(
         Modified response with TOON-encoded results
     """
     try:
-        from scripts.toon_encoder import encode_search_results
-
         results = response.get("results", [])
         if isinstance(results, list):
             # Encode results to TOON format
@@ -91,8 +89,8 @@ def _format_pattern_results_as_toon(
             response["results"] = toon_results
         response["output_format"] = "toon"
         return response
-    except ImportError:
-        logger.debug("TOON encoder not available, returning JSON format")
+    except Exception:
+        logger.debug("TOON encoding failed, returning JSON format")
         return response
     except Exception as e:
         logger.debug(f"TOON encoding failed: {e}")
@@ -751,15 +749,18 @@ def _fallback_pattern_search(
 
     Uses scroll with in-memory pattern reranking since we can't do
     vector search with mismatched dimensions.
+
+    Note: limit is already inflated by caller for reranking; don't multiply again.
     """
     # Can't use pattern_vector (64-dim) against semantic vectors (384-dim)
     # Instead, scroll through relevant documents and rerank by pattern similarity
     try:
         # Scroll with filter to get candidate documents
+        # limit is pre-inflated by caller (e.g., limit*3 for reranking)
         semantic_results, _ = client.scroll(
             collection_name=collection,
             scroll_filter=search_filter,
-            limit=limit * 3,
+            limit=limit,
             with_payload=True,
             with_vectors=False,
         )
@@ -836,7 +837,12 @@ def _apply_hybrid_scoring(
     language: str,
     semantic_weight: float,
 ) -> List[PatternSearchResult]:
-    """Apply hybrid scoring combining structural and semantic similarity."""
+    """
+    Apply hybrid scoring combining structural/AROMA and semantic similarity.
+
+    If AROMA reranking ran first, blends AROMA's combined_score with semantic.
+    Otherwise blends raw structural score with semantic.
+    """
     try:
         # Get embeddings for semantic comparison
         from scripts.embeddings import get_embedding_model
@@ -853,11 +859,14 @@ def _apply_hybrid_scoring(
                 semantic_sim = dot / (norm_q * norm_s) if norm_q and norm_s else 0
 
                 result.semantic_score = semantic_sim
+                # Blend with existing combined_score (from AROMA) or raw score
+                base_score = result.combined_score if result.combined_score is not None else result.score
                 result.combined_score = (
-                    (1 - semantic_weight) * result.score +
+                    (1 - semantic_weight) * base_score +
                     semantic_weight * semantic_sim
                 )
-            else:
+            # If no snippet but has AROMA score, keep it; otherwise use raw score
+            elif result.combined_score is None:
                 result.combined_score = result.score
 
         # Re-sort by combined score

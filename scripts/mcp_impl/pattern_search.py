@@ -133,7 +133,6 @@ async def _pattern_search_impl(
 
     # Defaults aligned with core pattern_search API for consistent behavior
     eff_limit = _coerce_int(limit, 10)
-    eff_min_score = _coerce_float(min_score, 0.5)
     eff_include_snippet = _coerce_bool(include_snippet, True)
     eff_context_lines = _coerce_int(context_lines, 3)
     eff_hybrid = _coerce_bool(hybrid, False)
