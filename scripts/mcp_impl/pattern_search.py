@@ -104,18 +104,20 @@ async def _pattern_search_impl(
         if v is None:
             return d
         if isinstance(v, bool):
-        # Apply min_score filtering for NL results (not supported natively).
-        # TOON returns a string for results; only filter when we actually have a list.
-        if (
-            not is_code
-            and eff_min_score > 0
-            and isinstance(result.get("results"), list)
-        ):
-            result["results"] = [
-                r for r in result["results"]
-                if r.get("score", 0) >= eff_min_score
-            ]
-            result["total"] = len(result["results"])
+            return v
+        if isinstance(v, str):
+            return v.strip().lower() in ("1", "true", "yes", "on")
+        return bool(v)
+
+    _coerce_bool = coerce_bool_fn or _default_coerce_bool
+    _coerce_int = coerce_int_fn or (lambda v, d: int(v) if v is not None else d)
+    _coerce_float = coerce_float_fn or (lambda v, d: float(v) if v is not None else d)
+
+    # Defaults aligned with core pattern_search API for consistent behavior
+    eff_limit = _coerce_int(limit, 10)
+    eff_min_score = _coerce_float(min_score, 0.5)
+    eff_include_snippet = _coerce_bool(include_snippet, True)
+    eff_context_lines = _coerce_int(context_lines, 3)
     eff_hybrid = _coerce_bool(hybrid, False)
     eff_semantic_weight = _coerce_float(semantic_weight, 0.3)
     eff_compact = _coerce_bool(compact, False)
