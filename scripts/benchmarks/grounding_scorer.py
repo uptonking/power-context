@@ -27,6 +27,11 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from dotenv import load_dotenv
 load_dotenv(PROJECT_ROOT / ".env")
 
+# Fix Qdrant URL for running outside Docker
+qdrant_url = os.environ.get("QDRANT_URL", "http://localhost:6333")
+if "qdrant:" in qdrant_url:
+    os.environ["QDRANT_URL"] = "http://localhost:6333"
+
 # Timeout for each query (seconds)
 QUERY_TIMEOUT = 60
 

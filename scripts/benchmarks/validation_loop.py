@@ -16,7 +16,18 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+# Add project root to path
+PROJECT_ROOT = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+# Load environment variables from .env
+from dotenv import load_dotenv
+load_dotenv(PROJECT_ROOT / ".env")
+
+# Fix Qdrant URL for running outside Docker
+qdrant_url = os.environ.get("QDRANT_URL", "http://localhost:6333")
+if "qdrant:" in qdrant_url:
+    os.environ["QDRANT_URL"] = "http://localhost:6333"
 
 from scripts.benchmarks.trace_optimizer import query_clickhouse, analyze_traces, TraceInsight
 

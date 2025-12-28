@@ -20,8 +20,18 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+# Add project root to path
+PROJECT_ROOT = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 
+# Load environment variables from .env
+from dotenv import load_dotenv
+load_dotenv(PROJECT_ROOT / ".env")
+
+# Fix Qdrant URL for running outside Docker
+qdrant_url = os.environ.get("QDRANT_URL", "http://localhost:6333")
+if "qdrant:" in qdrant_url:
+    os.environ["QDRANT_URL"] = "http://localhost:6333"
 
 @dataclass
 class SearchResult:
@@ -107,38 +117,43 @@ GROUND_TRUTH_QUERIES = [
 async def search_dense_only(query: str, limit: int = 10) -> SearchResult:
     """Execute dense-only vector search."""
     start = time.time()
-    
+
     try:
         from scripts.hybrid_search import run_hybrid_search
-        from scripts.qdrant_client_manager import get_qdrant_client
-        from scripts.embedder import get_embedding_model
-        
-        collection = os.environ.get("COLLECTION_NAME", "Context-Engine")
-        client = get_qdrant_client()
-        model = get_embedding_model()
-        
-        # Dense search with lexical weight = 0
-        results = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: run_hybrid_search(
-                client=client,
-                collection_name=collection,
-                query=query,
-                model=model,
-                limit=limit,
-                dense_weight=1.0,
-                lexical_weight=0.0,
+
+        # Set weights for dense-only via env vars (temporarily)
+        old_dense = os.environ.get("HYBRID_DENSE_WEIGHT", "1.5")
+        old_lex = os.environ.get("HYBRID_LEXICAL_WEIGHT", "0.20")
+        old_lex_vec = os.environ.get("HYBRID_LEX_VECTOR_WEIGHT", "0.20")
+
+        os.environ["HYBRID_DENSE_WEIGHT"] = "1.0"
+        os.environ["HYBRID_LEXICAL_WEIGHT"] = "0.0"
+        os.environ["HYBRID_LEX_VECTOR_WEIGHT"] = "0.0"
+
+        try:
+            # run_hybrid_search is synchronous, wrap in executor
+            results = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: run_hybrid_search(
+                    queries=[query],
+                    limit=limit,
+                    expand=False,
+                )
             )
-        )
-        
+        finally:
+            # Restore original weights
+            os.environ["HYBRID_DENSE_WEIGHT"] = old_dense
+            os.environ["HYBRID_LEXICAL_WEIGHT"] = old_lex
+            os.environ["HYBRID_LEX_VECTOR_WEIGHT"] = old_lex_vec
+
         paths = [r.get("path", "") for r in results]
         scores = [r.get("score", 0) for r in results]
-        
+
     except Exception as e:
         print(f"Dense search error: {e}")
         paths = []
         scores = []
-    
+
     latency = (time.time() - start) * 1000
     return SearchResult(query=query, method="dense", paths=paths, latency_ms=latency, scores=scores)
 
@@ -146,38 +161,42 @@ async def search_dense_only(query: str, limit: int = 10) -> SearchResult:
 async def search_lexical_only(query: str, limit: int = 10) -> SearchResult:
     """Execute lexical-only search."""
     start = time.time()
-    
+
     try:
         from scripts.hybrid_search import run_hybrid_search
-        from scripts.qdrant_client_manager import get_qdrant_client
-        from scripts.embedder import get_embedding_model
-        
-        collection = os.environ.get("COLLECTION_NAME", "Context-Engine")
-        client = get_qdrant_client()
-        model = get_embedding_model()
-        
-        # Lexical search with dense weight = 0
-        results = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: run_hybrid_search(
-                client=client,
-                collection_name=collection,
-                query=query,
-                model=model,
-                limit=limit,
-                dense_weight=0.0,
-                lexical_weight=1.0,
+
+        # Set weights for lexical-only via env vars (temporarily)
+        old_dense = os.environ.get("HYBRID_DENSE_WEIGHT", "1.5")
+        old_lex = os.environ.get("HYBRID_LEXICAL_WEIGHT", "0.20")
+        old_lex_vec = os.environ.get("HYBRID_LEX_VECTOR_WEIGHT", "0.20")
+
+        os.environ["HYBRID_DENSE_WEIGHT"] = "0.0"
+        os.environ["HYBRID_LEXICAL_WEIGHT"] = "1.0"
+        os.environ["HYBRID_LEX_VECTOR_WEIGHT"] = "1.0"
+
+        try:
+            results = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: run_hybrid_search(
+                    queries=[query],
+                    limit=limit,
+                    expand=False,
+                )
             )
-        )
-        
+        finally:
+            # Restore original weights
+            os.environ["HYBRID_DENSE_WEIGHT"] = old_dense
+            os.environ["HYBRID_LEXICAL_WEIGHT"] = old_lex
+            os.environ["HYBRID_LEX_VECTOR_WEIGHT"] = old_lex_vec
+
         paths = [r.get("path", "") for r in results]
         scores = [r.get("score", 0) for r in results]
-        
+
     except Exception as e:
         print(f"Lexical search error: {e}")
         paths = []
         scores = []
-    
+
     latency = (time.time() - start) * 1000
     return SearchResult(query=query, method="lexical", paths=paths, latency_ms=latency, scores=scores)
 
@@ -185,39 +204,29 @@ async def search_lexical_only(query: str, limit: int = 10) -> SearchResult:
 async def search_hybrid_rrf(query: str, limit: int = 10) -> SearchResult:
     """Execute hybrid RRF search (default settings)."""
     start = time.time()
-    
+
     try:
         from scripts.hybrid_search import run_hybrid_search
-        from scripts.qdrant_client_manager import get_qdrant_client
-        from scripts.embedder import get_embedding_model
-        
-        collection = os.environ.get("COLLECTION_NAME", "Context-Engine")
-        client = get_qdrant_client()
-        model = get_embedding_model()
-        
-        # Hybrid RRF with default weights
+
+        # Use default weights from environment (hybrid mode)
+        # Don't modify weights - let the default balanced config apply
         results = await asyncio.get_event_loop().run_in_executor(
             None,
             lambda: run_hybrid_search(
-                client=client,
-                collection_name=collection,
-                query=query,
-                model=model,
+                queries=[query],
                 limit=limit,
-                # Use default weights from env or balanced
-                dense_weight=float(os.environ.get("HYBRID_DENSE_WEIGHT", "0.5")),
-                lexical_weight=float(os.environ.get("HYBRID_LEXICAL_WEIGHT", "0.5")),
+                expand=False,
             )
         )
-        
+
         paths = [r.get("path", "") for r in results]
         scores = [r.get("score", 0) for r in results]
-        
+
     except Exception as e:
         print(f"Hybrid search error: {e}")
         paths = []
         scores = []
-    
+
     latency = (time.time() - start) * 1000
     return SearchResult(query=query, method="hybrid", paths=paths, latency_ms=latency, scores=scores)
 
