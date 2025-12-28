@@ -173,9 +173,14 @@ def _get_qdrant_client():
     if _qdrant_client is None:
         try:
             from qdrant_client import QdrantClient
-            host = os.environ.get("QDRANT_HOST", "localhost")
-            port = int(os.environ.get("QDRANT_PORT", "6333"))
-            _qdrant_client = QdrantClient(host=host, port=port)
+            # Support QDRANT_URL (docker/k8s) or QDRANT_HOST/PORT (local dev)
+            url = os.environ.get("QDRANT_URL")
+            if url:
+                _qdrant_client = QdrantClient(url=url)
+            else:
+                host = os.environ.get("QDRANT_HOST", "localhost")
+                port = int(os.environ.get("QDRANT_PORT", "6333"))
+                _qdrant_client = QdrantClient(host=host, port=port)
         except Exception as e:
             logger.warning(f"Failed to connect to Qdrant: {e}")
             return None
