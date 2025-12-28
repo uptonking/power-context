@@ -99,6 +99,76 @@ async def test_mcp_pattern_search_code_path_aroma_params(monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_mcp_pattern_search_auto_routes_nl_even_with_language(monkeypatch):
+    """NL queries should route to description even if language is provided."""
+    from scripts.mcp_impl import pattern_search as mcp
+
+    mcp._PATTERN_SEARCH_LOADED = True
+
+    called = {}
+
+    def fake_pattern_search(**kwargs):
+        called["code"] = kwargs
+        return {"ok": True, "results": [], "total": 0, "search_mode": "structural"}
+
+    def fake_search_by_pattern_description(**kwargs):
+        called["description"] = kwargs
+        return {"ok": True, "results": [], "total": 0, "search_mode": "natural_language"}
+
+    monkeypatch.setattr(mcp, "_pattern_search_fn", fake_pattern_search)
+    monkeypatch.setattr(mcp, "_search_by_pattern_description_fn", fake_search_by_pattern_description)
+
+    result = await mcp._pattern_search_impl(
+        query="retry with exponential backoff",
+        language="python",  # should not force code path
+    )
+
+    assert result["query_mode"] == "description"
+    assert "description" in called
+    assert "code" not in called
+
+
+@pytest.mark.anyio
+async def test_mcp_pattern_search_query_mode_override(monkeypatch):
+    """Explicit query_mode overrides auto detection."""
+    from scripts.mcp_impl import pattern_search as mcp
+
+    mcp._PATTERN_SEARCH_LOADED = True
+
+    called = {}
+
+    def fake_pattern_search(**kwargs):
+        called.setdefault("code", 0)
+        called["code"] += 1
+        return {"ok": True, "results": [], "total": 0, "search_mode": "structural"}
+
+    def fake_search_by_pattern_description(**kwargs):
+        called.setdefault("description", 0)
+        called["description"] += 1
+        return {"ok": True, "results": [], "total": 0, "search_mode": "natural_language"}
+
+    monkeypatch.setattr(mcp, "_pattern_search_fn", fake_pattern_search)
+    monkeypatch.setattr(mcp, "_search_by_pattern_description_fn", fake_search_by_pattern_description)
+
+    # Force code mode on NL text
+    result_code = await mcp._pattern_search_impl(
+        query="retry with exponential backoff",
+        query_mode="code",
+    )
+    assert result_code["query_mode"] == "code"
+
+    # Force description mode on code-ish text
+    result_desc = await mcp._pattern_search_impl(
+        query="for i in range(3): pass",
+        query_mode="description",
+    )
+    assert result_desc["query_mode"] == "description"
+
+    assert called["code"] == 1
+    assert called["description"] == 1
+
+
+@pytest.mark.anyio
 async def test_mcp_min_score_defaults_by_path(monkeypatch):
     """
     Regression test: MCP uses path-specific min_score defaults.

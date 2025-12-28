@@ -81,21 +81,22 @@ def _detect_query_mode(text: str, language: str | None) -> str:
     if not text:
         return "description"
 
-    # 1. Explicit language provided and supported → code
-    if language and language.lower() in _SUPPORTED_LANGUAGES:
-        return "code"
-
-    # 2. Fenced code block → code
+    # 1. Fenced code block → code
     if _FENCED_CODE.match(text):
         return "code"
 
-    # 3. Multi-line with braces/semicolons → code
+    # 2. Multi-line with braces/semicolons → code
     if '\n' in text and _MULTILINE_CODE.search(text):
         return "code"
 
-    # 4. Universal code syntax (brackets, operators, calls, definitions)
+    # 3. Universal code syntax (brackets, operators, calls, definitions)
     if _CODE_SYNTAX.search(text):
         return "code"
+
+    # 4. Language hint is advisory only; do NOT force code for NL text
+    if language and language.lower() in _SUPPORTED_LANGUAGES:
+        # If language is provided but we found no code markers, still treat as description
+        return "description"
 
     # 5. Default to natural language
     return "description"
