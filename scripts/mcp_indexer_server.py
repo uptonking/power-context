@@ -2081,68 +2081,58 @@ async def memory_find(
 
 
 # ---------------------------------------------------------------------------
-# Pattern Search - Structural code similarity across languages
+# Pattern Search - Structural code similarity (conditional on PATTERN_VECTORS=1)
 # ---------------------------------------------------------------------------
-@mcp.tool()
-async def pattern_search(
-    query: Any = None,
-    language: Any = None,
-    limit: Any = None,
-    min_score: Any = None,
-    include_snippet: Any = None,
-    context_lines: Any = None,
-    hybrid: Any = None,
-    semantic_weight: Any = None,
-    collection: Any = None,
-    target_languages: Any = None,
-    output_format: Any = None,
-    compact: Any = None,
-) -> Dict[str, Any]:
-    """Find structurally similar code patterns across all languages.
+_PATTERN_SEARCH_ENABLED = str(os.environ.get("PATTERN_VECTORS", "")).strip().lower() in {
+    "1", "true", "yes", "on"
+}
 
-    Accepts EITHER code examples OR natural language descriptions - auto-detects which.
+if _PATTERN_SEARCH_ENABLED:
+    @mcp.tool()
+    async def pattern_search(
+        query: Any = None,
+        language: Any = None,
+        limit: Any = None,
+        min_score: Any = None,
+        include_snippet: Any = None,
+        context_lines: Any = None,
+        target_languages: Any = None,
+        output_format: Any = None,
+        compact: Any = None,
+    ) -> Dict[str, Any]:
+        """Find structurally similar code patterns across languages.
 
-    When to use:
-    - Find code with similar control flow (retry loops, error handling, etc.)
-    - Cross-language pattern matching (Python pattern → Go/Rust/Java matches)
-    - Detect code duplication based on structure, not syntax
-    - Search by pattern description ("retry with backoff", "resource cleanup")
+        Accepts code examples OR natural language descriptions.
 
-    Key parameters:
-    - query: str. Code snippet OR natural language description of pattern.
-    - language: str (default "python"). Language hint for code examples.
-    - limit: int (default 10). Maximum results to return.
-    - min_score: float (default 0.3). Minimum similarity score threshold.
-    - include_snippet: bool (default false). Include code snippets in results.
-    - target_languages: list[str]. Filter to specific target languages.
-    - output_format: "json" (default) or "toon" for token-efficient format.
-    - compact: bool. If true with TOON, use minimal fields.
+        Parameters:
+        - query: Code snippet or pattern description
+        - language: Language hint (default "python")
+        - limit: Max results (default 10)
+        - min_score: Similarity threshold (default 0.3)
+        - include_snippet: Include code in results
+        - target_languages: Filter target languages
 
-    Returns:
-    - {ok, results: [{path, start_line, end_line, score, language, ...}], total, query_signature}
-
-    Examples:
-    - pattern_search(query="for i in range(3): try: ... except: time.sleep(2**i)")
-    - pattern_search(query="retry with exponential backoff")
-    - pattern_search(query="if err != nil { return err }", language="go")
-    """
-    return await _pattern_search_impl(
-        query=query,
-        language=language,
-        limit=limit,
-        min_score=min_score,
-        include_snippet=include_snippet,
-        context_lines=context_lines,
-        hybrid=hybrid,
-        semantic_weight=semantic_weight,
-        collection=collection,
-        target_languages=target_languages,
-        output_format=output_format,
-        compact=compact,
-        coerce_bool_fn=_coerce_bool,
-        coerce_int_fn=_coerce_int,
-        coerce_float_fn=lambda v, d: safe_float(v, default=d, logger=logger, context="pattern_search"),
-    )
+        Examples:
+        - pattern_search(query="for i in range(3): try: ... except: sleep(i)")
+        - pattern_search(query="retry with exponential backoff")
+        """
+        return await _pattern_search_impl(
+            query=query,
+            language=language,
+            limit=limit,
+            min_score=min_score,
+            include_snippet=include_snippet,
+            context_lines=context_lines,
+            hybrid=None,
+            semantic_weight=None,
+            collection=None,
+            target_languages=target_languages,
+            output_format=output_format,
+            compact=compact,
+            coerce_bool_fn=_coerce_bool,
+            coerce_int_fn=_coerce_int,
+            coerce_float_fn=lambda v, d: safe_float(v, default=d, logger=logger, context="pattern_search"),
+        )
 
 
 _relax_var_kwarg_defaults()
@@ -2183,6 +2173,7 @@ if __name__ == "__main__":
     logger.info(f"  Reranker Enabled: {os.environ.get('RERANKER_ENABLED', '0')}")
     logger.info(f"  Rerank Top N: {os.environ.get('RERANK_TOP_N', '20')}")
     logger.info(f"  Rerank Timeout MS: {os.environ.get('RERANK_TIMEOUT_MS', '500')}")
+    logger.info(f"  Pattern Search: {'enabled' if _PATTERN_SEARCH_ENABLED else 'disabled (set PATTERN_VECTORS=1)'}")
     logger.info("=" * 60)
 
     # Optional warmups: gated by env flags to avoid delaying readiness on fresh containers
