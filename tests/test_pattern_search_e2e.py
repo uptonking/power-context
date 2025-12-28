@@ -153,13 +153,14 @@ def test_pattern_search_qdrant(pattern_collection):
     """Test pattern search against real Qdrant."""
     from scripts.pattern_detection.search import pattern_search
 
-    collection_name, _ = pattern_collection
+    collection_name, client = pattern_collection
 
     results = pattern_search(
         example=RETRY_PATTERN_PYTHON,
         language="python",
         collection=collection_name,
         limit=5,
+        client=client,  # Pass client to avoid global cache pollution
     )
 
     assert results.total >= 1, "Should find at least one result"

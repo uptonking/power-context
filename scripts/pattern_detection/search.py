@@ -339,7 +339,9 @@ def pattern_search(
 
     extractor = _get_extractor()
     encoder = _get_encoder()
-    client = _get_qdrant_client()
+    # Use provided client or fall back to global
+    if client is None:
+        client = _get_qdrant_client()
 
     if client is None:
         response = PatternSearchResponse(
