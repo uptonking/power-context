@@ -6,10 +6,6 @@ Tests that:
 3. Natural language description search finds patterns
 """
 import os
-
-# Enable pattern vectors for these tests
-os.environ.setdefault("PATTERN_VECTORS", "1")
-
 import uuid
 import pytest
 from qdrant_client import QdrantClient
