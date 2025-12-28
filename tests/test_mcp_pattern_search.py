@@ -96,3 +96,61 @@ async def test_mcp_pattern_search_code_path_aroma_params(monkeypatch):
     assert result["ok"] is True
     assert captured["aroma_rerank"] is True
     assert captured["aroma_alpha"] == 0.7
+
+
+@pytest.mark.anyio
+async def test_mcp_min_score_defaults_by_path(monkeypatch):
+    """
+    Regression test: MCP uses path-specific min_score defaults.
+
+    - Code path: min_score defaults to 0.5 (vector scores are typically high)
+    - NL path: min_score defaults to 0.0 (keyword overlap scores are often low)
+
+    This prevents the NL path from silently returning empty results when
+    the uniform 0.5 default would filter out valid low-scoring matches.
+    """
+    from scripts.mcp_impl import pattern_search as mcp
+
+    mcp._PATTERN_SEARCH_LOADED = True
+
+    code_captured = {}
+    nl_captured = {}
+
+    def fake_pattern_search(**kwargs):
+        code_captured.update(kwargs)
+        return {"ok": True, "results": [], "total": 0, "search_mode": "structural"}
+
+    def fake_nl_search(**kwargs):
+        nl_captured.update(kwargs)
+        return {"ok": True, "results": [], "total": 0, "search_mode": "natural_language"}
+
+    monkeypatch.setattr(mcp, "_pattern_search_fn", fake_pattern_search)
+    monkeypatch.setattr(mcp, "_search_by_pattern_description_fn", fake_nl_search)
+
+    # Code path (no explicit min_score)
+    await mcp._pattern_search_impl(
+        query="for i in range(3): try: pass except: sleep(i)",
+    )
+    assert code_captured["min_score"] == 0.5, "Code path should default min_score=0.5"
+
+    # NL path (no explicit min_score)
+    await mcp._pattern_search_impl(
+        query="find retry with exponential backoff",
+    )
+    assert nl_captured["min_score"] == 0.0, "NL path should default min_score=0.0"
+
+    # Explicit min_score should override both paths
+    code_captured.clear()
+    nl_captured.clear()
+
+    await mcp._pattern_search_impl(
+        query="def foo(): pass",
+        min_score=0.8,
+    )
+    assert code_captured["min_score"] == 0.8, "Explicit min_score should override code default"
+
+    await mcp._pattern_search_impl(
+        query="database connection pooling pattern",
+        min_score=0.3,
+    )
+    assert nl_captured["min_score"] == 0.3, "Explicit min_score should override NL default"

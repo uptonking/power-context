@@ -144,6 +144,11 @@ async def _pattern_search_impl(
     # Auto-detect: code example vs natural language description
     is_code = _is_likely_code(query_text)
 
+    # Path-specific min_score defaults:
+    # - Code path: 0.5 (vector similarity scores are typically higher)
+    # - NL path: 0.0 (keyword overlap scores are often low, don't filter by default)
+    eff_min_score = _coerce_float(min_score, 0.5 if is_code else 0.0)
+
     try:
         if is_code:
             # Structural pattern search using code example

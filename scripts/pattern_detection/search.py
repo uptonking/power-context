@@ -89,9 +89,6 @@ def _format_pattern_results_as_toon(
             response["results"] = toon_results
         response["output_format"] = "toon"
         return response
-    except Exception:
-        logger.debug("TOON encoding failed, returning JSON format")
-        return response
     except Exception as e:
         logger.debug(f"TOON encoding failed: {e}")
         return response
@@ -655,6 +652,7 @@ def search_by_pattern_description(
                 limit=limit,
                 query_filter=search_filter,
                 with_payload=True,
+                with_vectors=False,  # Only need payload and scores
             )
             results = response.points
         else:
