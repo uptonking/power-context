@@ -101,9 +101,9 @@ def test_code_vs_nl_detection():
     assert _detect_query_mode("resource cleanup code", None) == "description"
     assert _detect_query_mode("decorator pattern wrapping function", None) == "description"
 
-    # Explicit language hint forces code mode
-    assert _detect_query_mode("some text", "python") == "code"
-    assert _detect_query_mode("some text", "go") == "code"
+    # Language hint is advisory only; without code markers it stays description
+    assert _detect_query_mode("some text", "python") == "description"
+    assert _detect_query_mode("some text", "go") == "description"
 
 
 # ============================================================================
@@ -122,13 +122,16 @@ def pattern_collection():
     qdrant_url = os.environ.get("QDRANT_URL", "http://localhost:6333")
     client = QdrantClient(url=qdrant_url, timeout=30)
 
-    client.create_collection(
-        collection_name=collection_name,
-        vectors_config={
-            "code": VectorParams(size=384, distance=Distance.COSINE),
-            "pattern_vector": VectorParams(size=64, distance=Distance.COSINE),
-        }
-    )
+    try:
+        client.create_collection(
+            collection_name=collection_name,
+            vectors_config={
+                "code": VectorParams(size=384, distance=Distance.COSINE),
+                "pattern_vector": VectorParams(size=64, distance=Distance.COSINE),
+            }
+        )
+    except Exception as e:
+        pytest.skip(f"Qdrant not reachable at {qdrant_url}: {e}")
 
     extractor = PatternExtractor()
     encoder = PatternEncoder()
