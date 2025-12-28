@@ -43,6 +43,7 @@ class GroundingResult:
     answer: str
     citations: List[Dict[str, Any]]
     citation_accuracy: float  # % of citations that are relevant
+    topic_coverage: float  # % of expected topics mentioned in answer
     is_grounded: bool  # Has sufficient context
     has_hedging: bool  # Contains uncertainty language
     code_references: int  # Number of code blocks/references
@@ -57,6 +58,7 @@ class GroundingReport:
     total_queries: int
     grounding_rate: float  # % with sufficient context
     avg_citation_accuracy: float
+    avg_topic_coverage: float  # % of expected topics covered on average
     avg_citations_per_answer: float
     hedging_rate: float  # % with uncertainty language
     avg_answer_length: int
@@ -147,6 +149,25 @@ def count_code_references(text: str) -> int:
     return code_blocks + inline_code
 
 
+def calculate_topic_coverage(answer: str, expected_topics: List[str]) -> float:
+    """Calculate what % of expected topics are mentioned in the answer."""
+    if not expected_topics:
+        return 1.0  # No expected topics = full coverage by default
+
+    if not answer:
+        return 0.0
+
+    answer_lower = answer.lower()
+    covered = 0
+
+    for topic in expected_topics:
+        # Check if topic (case-insensitive) appears in the answer
+        if topic.lower() in answer_lower:
+            covered += 1
+
+    return covered / len(expected_topics)
+
+
 def calculate_useful_ratio(answer: str, citations: List[Dict]) -> float:
     """
     Estimate the ratio of useful content.
@@ -218,6 +239,7 @@ async def evaluate_single_query(
             code_references=0,
             answer_length=0,
             useful_ratio=0,
+            topic_coverage=0,
         )
     except Exception as e:
         print(f"  Error: {e}")
@@ -226,25 +248,28 @@ async def evaluate_single_query(
             answer=f"Error: {e}",
             citations=[],
             citation_accuracy=0,
+            topic_coverage=0,
             is_grounded=False,
             has_hedging=True,
             code_references=0,
             answer_length=0,
             useful_ratio=0,
-            )
-    
+        )
+
     # Calculate metrics
     citation_accuracy = calculate_citation_accuracy(citations, expected_files)
+    topic_coverage = calculate_topic_coverage(answer, expected_topics)
     has_hedging = detect_hedging(answer)
     code_refs = count_code_references(answer)
     answer_length = estimate_tokens(answer)
     useful_ratio = calculate_useful_ratio(answer, citations)
-    
+
     return GroundingResult(
         query=query,
         answer=answer[:500] + "..." if len(answer) > 500 else answer,
         citations=citations,
         citation_accuracy=citation_accuracy,
+        topic_coverage=topic_coverage,
         is_grounded=is_grounded and not has_hedging,
         has_hedging=has_hedging,
         code_references=code_refs,
@@ -281,16 +306,18 @@ async def run_grounding_benchmark() -> GroundingReport:
     # Calculate aggregate metrics
     grounding_rate = sum(1 for r in results if r.is_grounded) / len(results)
     avg_citation_accuracy = sum(r.citation_accuracy for r in results) / len(results)
+    avg_topic_coverage = sum(r.topic_coverage for r in results) / len(results)
     avg_citations = sum(len(r.citations) for r in results) / len(results)
     hedging_rate = sum(1 for r in results if r.has_hedging) / len(results)
     avg_length = sum(r.answer_length for r in results) // len(results)
     avg_useful = sum(r.useful_ratio for r in results) / len(results)
-    
+
     report = GroundingReport(
         timestamp=datetime.now().isoformat(),
         total_queries=len(results),
         grounding_rate=grounding_rate,
         avg_citation_accuracy=avg_citation_accuracy,
+        avg_topic_coverage=avg_topic_coverage,
         avg_citations_per_answer=avg_citations,
         hedging_rate=hedging_rate,
         avg_answer_length=avg_length,

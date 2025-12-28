@@ -10,11 +10,10 @@ import asyncio
 import json
 import os
 import sys
-import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).parent.parent.parent
@@ -46,10 +45,13 @@ class ValidationResult:
     sample_after: int
 
 
-async def get_metric_baseline(metric_type: str = "latency", minutes: int = 30) -> Dict[str, float]:
+async def get_metric_baseline(minutes: int = 30) -> Dict[str, float]:
     """
     Get baseline metrics from recent traces.
-    
+
+    Args:
+        minutes: Time window for metric collection.
+
     Returns dict with p50, p90, p99, mean, count.
     """
     sql = f"""
@@ -159,8 +161,9 @@ async def validate_recommendation(
     
     # Step 2: Apply change
     print(f"\n[2/4] Applying change: {metric}={new_value}")
-    actual_old = await apply_config_change(metric, new_value)
-    
+    previous_value = await apply_config_change(metric, new_value)
+    print(f"  Previous value was: {previous_value}")
+
     # Step 3: Wait for traces
     print(f"\n[3/4] Waiting {wait_minutes} minutes for new traces...")
     for i in range(wait_minutes):
