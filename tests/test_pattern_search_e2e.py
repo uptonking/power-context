@@ -1,11 +1,16 @@
-"""Unit tests for pattern_search functionality.
+"""Tests for pattern_search functionality.
 
 Tests that:
 1. Pattern extraction produces consistent signatures
 2. Cross-language patterns have high similarity
 3. Code vs NL detection works correctly
+4. Integration with Qdrant (when available)
 """
+import os
+import uuid
+import time
 import pytest
+import numpy as np
 
 # Test fixtures
 RETRY_PATTERN_PYTHON = '''
@@ -33,41 +38,35 @@ with open(filename) as f:
 '''
 
 
+# ============================================================================
+# Unit tests (no Qdrant required)
+# ============================================================================
+
 def test_cross_language_pattern_similarity():
     """Prove that Python retry pattern is structurally similar to Go retry."""
     from scripts.pattern_detection import PatternExtractor, PatternEncoder
-    import numpy as np
 
     extractor = PatternExtractor()
     encoder = PatternEncoder()
 
-    # Extract signatures for both patterns
     py_sig = extractor.extract(RETRY_PATTERN_PYTHON, "python")
     go_sig = extractor.extract(RETRY_PATTERN_GO, "go")
     file_sig = extractor.extract(FILE_READ_PATTERN, "python")
 
-    # Encode to vectors
     py_vec = encoder.encode(py_sig)
     go_vec = encoder.encode(go_sig)
     file_vec = encoder.encode(file_sig)
 
-    # Compute cosine similarities
     def cosine_sim(a, b):
         return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-9)
 
     py_go_sim = cosine_sim(py_vec, go_vec)
     py_file_sim = cosine_sim(py_vec, file_vec)
 
-    print(f"\n  Python retry <-> Go retry similarity: {py_go_sim:.3f}")
-    print(f"  Python retry <-> File read similarity: {py_file_sim:.3f}")
-
-    # Retry patterns should be MORE similar to each other than to file read
     assert py_go_sim > py_file_sim, (
         f"Retry patterns should be more similar ({py_go_sim:.3f}) "
         f"than retry vs file ({py_file_sim:.3f})"
     )
-
-    # Retry patterns should have meaningful similarity (>0.3)
     assert py_go_sim > 0.3, f"Cross-language retry similarity too low: {py_go_sim:.3f}"
 
 
@@ -89,13 +88,81 @@ def test_code_vs_nl_detection():
     """Test auto-detection of code vs natural language queries."""
     from scripts.mcp_impl.pattern_search import _looks_like_code
 
-    # Code examples should be detected as code
     assert _looks_like_code("for i in range(3): try: pass except: pass")
     assert _looks_like_code("if err != nil { return err }")
     assert _looks_like_code("def foo(): return 42")
 
-    # NL descriptions should not be detected as code
     assert not _looks_like_code("retry with exponential backoff")
     assert not _looks_like_code("find error handling patterns")
     assert not _looks_like_code("resource cleanup code")
+
+
+# ============================================================================
+# Integration tests (require Qdrant service)
+# ============================================================================
+
+@pytest.fixture
+def pattern_collection():
+    """Create collection with pattern vectors and test data."""
+    from qdrant_client import QdrantClient
+    from qdrant_client.models import Distance, VectorParams, PointStruct
+    from scripts.pattern_detection import PatternExtractor, PatternEncoder
+
+    qdrant_url = os.environ.get("QDRANT_URL", "http://localhost:6333")
+    collection_name = f"test_pattern_{uuid.uuid4().hex[:8]}"
+    client = QdrantClient(url=qdrant_url, timeout=30)
+
+    client.create_collection(
+        collection_name=collection_name,
+        vectors_config={
+            "code": VectorParams(size=384, distance=Distance.COSINE),
+            "pattern_vector": VectorParams(size=64, distance=Distance.COSINE),
+        }
+    )
+
+    extractor = PatternExtractor()
+    encoder = PatternEncoder()
+
+    snippets = [
+        {"path": "retry_python.py", "code": RETRY_PATTERN_PYTHON, "lang": "python"},
+        {"path": "retry_go.go", "code": RETRY_PATTERN_GO, "lang": "go"},
+        {"path": "file_read.py", "code": FILE_READ_PATTERN, "lang": "python"},
+    ]
+
+    points = []
+    for i, s in enumerate(snippets):
+        sig = extractor.extract(s["code"], s["lang"])
+        points.append(PointStruct(
+            id=i + 1,
+            vector={"code": [0.1] * 384, "pattern_vector": encoder.encode(sig)},
+            payload={"path": s["path"], "language": s["lang"], "text": s["code"]},
+        ))
+
+    client.upsert(collection_name=collection_name, points=points)
+
+    yield collection_name, client
+
+    try:
+        client.delete_collection(collection_name)
+    except Exception:
+        pass
+
+
+@pytest.mark.service
+def test_pattern_search_qdrant(pattern_collection):
+    """Test pattern search against real Qdrant."""
+    from scripts.pattern_detection.search import pattern_search
+
+    collection_name, _ = pattern_collection
+
+    results = pattern_search(
+        example=RETRY_PATTERN_PYTHON,
+        language="python",
+        collection=collection_name,
+        limit=5,
+    )
+
+    assert results.total >= 1, "Should find at least one result"
+    paths = [r.path for r in results.results]
+    assert "retry_python.py" in paths, "Should find Python retry"
 
