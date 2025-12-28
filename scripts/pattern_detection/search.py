@@ -404,7 +404,9 @@ def pattern_search(
                 continue
 
             payload = hit.payload or {}
-            path = payload.get("path", payload.get("file_path", ""))
+            # Support both flat payload (path at top level) and nested (metadata.path)
+            meta = payload.get("metadata", {})
+            path = meta.get("path") or payload.get("path") or payload.get("file_path", "")
 
             # Deduplicate by path (keep highest score)
             if path in seen_paths:
@@ -413,10 +415,10 @@ def pattern_search(
 
             result = PatternSearchResult(
                 path=path,
-                start_line=payload.get("start_line", 1),
-                end_line=payload.get("end_line", 1),
+                start_line=meta.get("start_line") or payload.get("start_line", 1),
+                end_line=meta.get("end_line") or payload.get("end_line", 1),
                 score=hit.score,
-                language=payload.get("language", "unknown"),
+                language=meta.get("language") or payload.get("language", "unknown"),
                 control_flow_signature=payload.get("cf_signature", ""),
             )
 
