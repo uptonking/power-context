@@ -851,12 +851,8 @@ class PatternExtractor:
                 last_exit = self._build_cfg(child, cf_map, nodes, edges, last_exit, exit_id)
             return last_exit
 
-    # =========================================================================
-    # SimHash (Locality-Sensitive Hashing)
-    # =========================================================================
-
     def _compute_simhash(self, ngrams: Counter, wl_labels: Dict[int, List[str]]) -> int:
-        """Compute 64-bit SimHash for LSH-based approximate nearest neighbor."""
+        """64-bit SimHash for LSH."""
         v = [0] * 64
 
         for ngram, count in ngrams.items():
@@ -882,12 +878,8 @@ class PatternExtractor:
                 result |= (1 << i)
         return result
 
-    # =========================================================================
-    # Spectral Graph Features
-    # =========================================================================
-
     def _extract_spectral_features(self, root, cf_map: Dict[str, str], k: int = 8) -> List[float]:
-        """Approximate top-k eigenvalues of normalized graph Laplacian via power iteration."""
+        """Approximate eigenvalues of normalized graph Laplacian via power iteration."""
         nodes = []
         edges = []
         self._build_ast_graph(root, nodes, edges, cf_map)
@@ -905,7 +897,6 @@ class PatternExtractor:
             degree[dst] += 1
 
         def laplacian_multiply(x: List[float]) -> List[float]:
-            """Multiply vector by normalized Laplacian L = I - D^(-1/2) A D^(-1/2)."""
             result = [0.0] * n
             for i in range(n):
                 if degree[i] > 0:
@@ -931,12 +922,8 @@ class PatternExtractor:
 
         return eigenvalues[:k]
 
-    # =========================================================================
-    # Tree Edit Distance Approximation via Path Hashing
-    # =========================================================================
-
     def _extract_tree_paths(self, root, cf_map: Dict[str, str], max_paths: int = 32) -> List[int]:
-        """Extract root-to-leaf path hashes for tree edit distance approximation."""
+        """Root-to-leaf path hashes for tree edit distance approximation."""
         paths = []
         self._collect_root_to_leaf_paths(root, [], cf_map, paths)
 
@@ -949,7 +936,6 @@ class PatternExtractor:
         return sorted(path_hashes)
 
     def _collect_root_to_leaf_paths(self, node, current_path: List[str], cf_map: Dict, paths: List):
-        """Collect all root-to-leaf paths in the AST."""
         normalized = self._normalize_node_type(node.type, cf_map)
         current_path = current_path + [normalized]
 
