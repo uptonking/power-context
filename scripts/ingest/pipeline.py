@@ -60,7 +60,7 @@ from scripts.ingest.metadata import (
     _get_imports_calls,
     _compute_host_and_container_paths,
 )
-from scripts.ingest.vectors import project_mini
+from scripts.ingest.vectors import project_mini, extract_pattern_vector
 from scripts.ingest.qdrant import (
     ensure_collection,
     ensure_collection_and_indexes_once,
@@ -71,6 +71,7 @@ from scripts.ingest.qdrant import (
     upsert_points,
     hash_id,
     embed_batch,
+    PATTERN_VECTOR_NAME,
 )
 
 # Import utility functions
@@ -325,8 +326,12 @@ def _index_single_file_inner(
     batch_ids: List[int] = []
     batch_lex: List[list[float]] = []
     batch_lex_text: List[str] = []
+    batch_code: List[str] = []  # Raw code for pattern vectors
 
-    def make_point(pid, dense_vec, lex_vec, payload, lex_text: str = ""):
+    # Check if pattern vectors are enabled
+    pattern_vectors_on = os.environ.get("PATTERN_VECTORS", "").strip().lower() in {"1", "true", "yes", "on"}
+
+    def make_point(pid, dense_vec, lex_vec, payload, lex_text: str = "", code_text: str = ""):
         if vector_name:
             vecs = {vector_name: dense_vec, LEX_VECTOR_NAME: lex_vec}
             try:
@@ -334,6 +339,14 @@ def _index_single_file_inner(
                     vecs[MINI_VECTOR_NAME] = project_mini(list(dense_vec), MINI_VEC_DIM)
             except Exception:
                 pass
+            # Add pattern vector for structural similarity search
+            if pattern_vectors_on and code_text:
+                try:
+                    pv = extract_pattern_vector(code_text, language)
+                    if pv:
+                        vecs[PATTERN_VECTOR_NAME] = pv
+                except Exception:
+                    pass
             if LEX_SPARSE_MODE and lex_text:
                 sparse_vec = _lex_sparse_vector_text(lex_text)
                 if sparse_vec.get("indices"):
@@ -468,6 +481,7 @@ def _index_single_file_inner(
         aug_lex_text = (ch.get("text") or "") + (" " + pseudo if pseudo else "") + (" " + " ".join(tags) if tags else "")
         batch_lex.append(_lex_hash_vector_text(aug_lex_text))
         batch_lex_text.append(aug_lex_text)
+        batch_code.append(ch.get("text") or "")
 
     if batch_texts:
         vectors = embed_batch(model, batch_texts)
@@ -477,8 +491,8 @@ def _index_single_file_inner(
             except Exception:
                 pass
         points = [
-            make_point(i, v, lx, m, lt)
-            for i, v, lx, m, lt in zip(batch_ids, vectors, batch_lex, batch_meta, batch_lex_text)
+            make_point(i, v, lx, m, lt, ct)
+            for i, v, lx, m, lt, ct in zip(batch_ids, vectors, batch_lex, batch_meta, batch_lex_text, batch_code)
         ]
         upsert_points(client, collection, points)
         try:
@@ -798,6 +812,10 @@ def process_file_with_smart_reindexing(
     embed_ids: list[int] = []
     embed_lex: list[list[float]] = []
     embed_lex_text: list[str] = []
+    embed_code: list[str] = []  # Raw code for pattern vectors
+
+    # Check if pattern vectors are enabled
+    pattern_vectors_on = os.environ.get("PATTERN_VECTORS", "").strip().lower() in {"1", "true", "yes", "on"}
 
     imports, calls = _get_imports_calls(language, text)
     last_mod, churn_count, author_count = _git_metadata(file_path)
@@ -1013,11 +1031,12 @@ def process_file_with_smart_reindexing(
         aug_lex_text = (code_text or "") + (" " + pseudo if pseudo else "") + (" " + " ".join(tags) if tags else "")
         embed_lex.append(_lex_hash_vector_text(aug_lex_text))
         embed_lex_text.append(aug_lex_text)
+        embed_code.append(code_text or "")
 
     new_points: list[models.PointStruct] = []
     if embed_texts:
         vectors = _embed_batch(model, embed_texts)
-        for pid, v, lx, pl, lt in zip(embed_ids, vectors, embed_lex, embed_payloads, embed_lex_text):
+        for pid, v, lx, pl, lt, ct in zip(embed_ids, vectors, embed_lex, embed_payloads, embed_lex_text, embed_code):
             if vector_name:
                 vecs = {vector_name: v, LEX_VECTOR_NAME: lx}
                 try:
@@ -1025,6 +1044,14 @@ def process_file_with_smart_reindexing(
                         vecs[MINI_VECTOR_NAME] = project_mini(list(v), MINI_VEC_DIM)
                 except Exception:
                     pass
+                # Add pattern vector for structural similarity search
+                if pattern_vectors_on and ct:
+                    try:
+                        pv = extract_pattern_vector(ct, language)
+                        if pv:
+                            vecs[PATTERN_VECTOR_NAME] = pv
+                    except Exception:
+                        pass
                 if LEX_SPARSE_MODE and lt:
                     sparse_vec = _lex_sparse_vector_text(lt)
                     if sparse_vec.get("indices"):

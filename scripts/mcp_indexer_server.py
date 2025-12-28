@@ -186,6 +186,7 @@ from scripts.mcp_impl.symbol_graph import (
     _symbol_graph_impl,
     _format_symbol_graph_toon,
 )
+from scripts.mcp_impl.pattern_search import _pattern_search_impl
 
 # Global lock to guard temporary env toggles used during ReFRAG retrieval/decoding
 _ENV_LOCK = threading.Lock()
@@ -2076,6 +2077,71 @@ async def memory_find(
         top_k=top_k,
         default_collection_fn=_default_collection,
         get_embedding_model_fn=_get_embedding_model,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Pattern Search - Structural code similarity across languages
+# ---------------------------------------------------------------------------
+@mcp.tool()
+async def pattern_search(
+    query: Any = None,
+    language: Any = None,
+    limit: Any = None,
+    min_score: Any = None,
+    include_snippet: Any = None,
+    context_lines: Any = None,
+    hybrid: Any = None,
+    semantic_weight: Any = None,
+    collection: Any = None,
+    target_languages: Any = None,
+    output_format: Any = None,
+    compact: Any = None,
+) -> Dict[str, Any]:
+    """Find structurally similar code patterns across all languages.
+
+    Accepts EITHER code examples OR natural language descriptions - auto-detects which.
+
+    When to use:
+    - Find code with similar control flow (retry loops, error handling, etc.)
+    - Cross-language pattern matching (Python pattern → Go/Rust/Java matches)
+    - Detect code duplication based on structure, not syntax
+    - Search by pattern description ("retry with backoff", "resource cleanup")
+
+    Key parameters:
+    - query: str. Code snippet OR natural language description of pattern.
+    - language: str (default "python"). Language hint for code examples.
+    - limit: int (default 10). Maximum results to return.
+    - min_score: float (default 0.3). Minimum similarity score threshold.
+    - include_snippet: bool (default false). Include code snippets in results.
+    - target_languages: list[str]. Filter to specific target languages.
+    - output_format: "json" (default) or "toon" for token-efficient format.
+    - compact: bool. If true with TOON, use minimal fields.
+
+    Returns:
+    - {ok, results: [{path, start_line, end_line, score, language, ...}], total, query_signature}
+
+    Examples:
+    - pattern_search(query="for i in range(3): try: ... except: time.sleep(2**i)")
+    - pattern_search(query="retry with exponential backoff")
+    - pattern_search(query="if err != nil { return err }", language="go")
+    """
+    return await _pattern_search_impl(
+        query=query,
+        language=language,
+        limit=limit,
+        min_score=min_score,
+        include_snippet=include_snippet,
+        context_lines=context_lines,
+        hybrid=hybrid,
+        semantic_weight=semantic_weight,
+        collection=collection,
+        target_languages=target_languages,
+        output_format=output_format,
+        compact=compact,
+        coerce_bool_fn=_coerce_bool,
+        coerce_int_fn=_coerce_int,
+        coerce_float_fn=lambda v, d: safe_float(v, default=d, logger=logger, context="pattern_search"),
     )
 
 
