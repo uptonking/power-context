@@ -325,6 +325,8 @@ def pattern_search(
     output_format: Any = None,  # "json" (default) or "toon"
     compact: bool = False,
     client: Any = None,  # Optional QdrantClient override for testing
+    aroma_rerank: bool = False,  # Enable AROMA-style pruning + reranking
+    aroma_alpha: float = 0.6,  # Weight for pruned similarity (vs original score)
 ) -> Union[PatternSearchResponse, Dict[str, Any]]:
     """
     Find code structurally similar to the given example.
@@ -466,6 +468,12 @@ def pattern_search(
             if len(search_results) >= limit:
                 break
 
+        # AROMA-style reranking: prune each result w.r.t. query, rerank by pruned similarity
+        if aroma_rerank and search_results:
+            search_results = _apply_aroma_reranking(
+                search_results, signature, extractor, aroma_alpha
+            )
+
         # Hybrid mode: combine with semantic scores
         if hybrid and search_results:
             search_results = _apply_hybrid_scoring(
@@ -475,13 +483,19 @@ def pattern_search(
         # Discover patterns from results
         discovered = _discover_patterns_from_results(search_results, signature)
 
+        search_mode = "structural"
+        if aroma_rerank:
+            search_mode = "aroma" if not hybrid else "aroma_hybrid"
+        elif hybrid:
+            search_mode = "hybrid"
+
         response = PatternSearchResponse(
             results=search_results,
             total=len(search_results),
             query_signature=cf_sig,
             discovered_patterns=discovered,
             languages_searched=list(set(r.language for r in search_results)),
-            search_mode="hybrid" if hybrid else "structural",
+            search_mode=search_mode,
         )
         return response.format(output_format, compact) if use_toon else response
 
@@ -828,6 +842,57 @@ def _apply_hybrid_scoring(
         logger.debug(f"Hybrid scoring failed, using structural only: {e}")
 
     return results
+
+
+def _apply_aroma_reranking(
+    results: List[PatternSearchResult],
+    query_signature,
+    extractor,
+    alpha: float = 0.6,
+) -> List[PatternSearchResult]:
+    """
+    Apply AROMA-style pruning and reranking.
+
+    For each result:
+    1. Extract its pattern signature
+    2. Prune it w.r.t. query to find maximal similar subtree
+    3. Compute combined score: alpha * pruned_similarity + (1-alpha) * original_score
+    4. Re-sort by combined score
+    """
+    try:
+        from .prune import AromaPruner
+        pruner = AromaPruner(extractor)
+
+        reranked = []
+        for result in results:
+            # Extract signature from result's snippet if available
+            if result.snippet:
+                result_sig = extractor.extract(result.snippet, result.language)
+                prune_result = pruner.prune(query_signature, result_sig)
+
+                # Combined score
+                combined = alpha * prune_result.similarity_score + (1 - alpha) * result.score
+                result.combined_score = combined
+
+                # Store pruning info in matched_patterns for debugging
+                if prune_result.similarity_score > 0:
+                    result.matched_patterns.append(
+                        f"aroma_sim:{prune_result.similarity_score:.2f},"
+                        f"retained:{prune_result.pruned_feature_count}/{prune_result.original_feature_count}"
+                    )
+            else:
+                # No snippet - can't extract signature, use original score
+                result.combined_score = result.score
+
+            reranked.append(result)
+
+        # Re-sort by combined score
+        reranked.sort(key=lambda r: r.combined_score or r.score, reverse=True)
+        return reranked
+
+    except Exception as e:
+        logger.debug(f"AROMA reranking failed, using original order: {e}")
+        return results
 
 
 def _discover_patterns_from_results(
