@@ -543,7 +543,7 @@ def test_admin_staging_endpoints_exercise_http_layer(monkeypatch: pytest.MonkeyP
 
 
 def test_watcher_collection_resolution_prefers_serving_state_when_staging_enabled(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    from scripts import watch_index
+    from scripts.watch_index_core import utils as watch_utils
 
     repo_path = tmp_path / "repo1"
     repo_path.mkdir()
@@ -552,20 +552,20 @@ def test_watcher_collection_resolution_prefers_serving_state_when_staging_enable
     monkeypatch.setenv("WORKSPACE_PATH", str(tmp_path))
     monkeypatch.setenv("WATCH_ROOT", str(tmp_path))
 
-    monkeypatch.setattr(watch_index, "_extract_repo_name_from_path", lambda *_: "repo1")
-    monkeypatch.setattr(watch_index, "is_multi_repo_mode", lambda: True)
+    monkeypatch.setattr(watch_utils, "_extract_repo_name_from_path", lambda *_: "repo1")
+    monkeypatch.setattr(watch_utils, "is_multi_repo_mode", lambda: True)
     monkeypatch.setattr(
-        watch_index,
+        watch_utils,
         "get_workspace_state",
         lambda workspace_path, repo_name: {"serving_collection": "coll1_old"},
     )
 
-    coll = watch_index._get_collection_for_repo(repo_path)
+    coll = watch_utils._get_collection_for_repo(repo_path)
     assert coll == "coll1_old"
 
 
 def test_watcher_collection_resolution_falls_back_to_env_when_staging_disabled(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    from scripts import watch_index
+    from scripts.watch_index_core import utils as watch_utils
 
     repo_path = tmp_path / "repo1"
     repo_path.mkdir()
@@ -573,15 +573,15 @@ def test_watcher_collection_resolution_falls_back_to_env_when_staging_disabled(m
     monkeypatch.setenv("MULTI_REPO_MODE", "0")
     monkeypatch.setenv("COLLECTION_NAME", "env-coll")
 
-    monkeypatch.setattr(watch_index, "_extract_repo_name_from_path", lambda *_: "repo1")
-    monkeypatch.setattr(watch_index, "is_multi_repo_mode", lambda: False)
+    monkeypatch.setattr(watch_utils, "_extract_repo_name_from_path", lambda *_: "repo1")
+    monkeypatch.setattr(watch_utils, "is_multi_repo_mode", lambda: False)
 
     def _fail_get_collection(repo_name: str) -> str:
         raise RuntimeError("no mapping")
 
-    monkeypatch.setattr(watch_index, "get_collection_name", _fail_get_collection)
+    monkeypatch.setattr(watch_utils, "get_collection_name", _fail_get_collection)
 
-    coll = watch_index._get_collection_for_repo(repo_path)
+    coll = watch_utils._get_collection_for_repo(repo_path)
     assert coll == "env-coll"
 
 
@@ -764,37 +764,41 @@ def test_admin_abort_endpoint_falls_back_to_clear_when_abort_helper_missing(monk
 
 
 def test_watcher_collection_reuse_logical_repo(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    from scripts import watch_index
+    from scripts.watch_index_core import utils as watch_utils
 
     repo_path = tmp_path / "repoA"
     repo_path.mkdir()
 
     monkeypatch.setenv("MULTI_REPO_MODE", "1")
     monkeypatch.setenv("WORKSPACE_PATH", str(tmp_path))
-    monkeypatch.setattr(watch_index, "_extract_repo_name_from_path", lambda *_: "repoA")
-    monkeypatch.setattr(watch_index, "is_multi_repo_mode", lambda: True)
-    monkeypatch.setattr(watch_index, "logical_repo_reuse_enabled", lambda: True)
+    monkeypatch.setattr(watch_utils, "_extract_repo_name_from_path", lambda *_: "repoA")
+    monkeypatch.setattr(watch_utils, "is_multi_repo_mode", lambda: True)
+    monkeypatch.setattr(watch_utils, "logical_repo_reuse_enabled", lambda: True)
 
     def fake_get_state(ws_path, repo_name):
         return {}
 
-    monkeypatch.setattr(watch_index, "get_workspace_state", fake_get_state)
+    monkeypatch.setattr(watch_utils, "get_workspace_state", fake_get_state)
 
     def fake_ensure(state, ws_path):
         new_state = dict(state or {})
         new_state["logical_repo_id"] = "lrid"
         return new_state
 
-    monkeypatch.setattr(watch_index, "ensure_logical_repo_id", fake_ensure)
-    monkeypatch.setattr(watch_index, "find_collection_for_logical_repo", lambda lrid, search_root: "reuse-coll")
+    monkeypatch.setattr(watch_utils, "ensure_logical_repo_id", fake_ensure)
+    monkeypatch.setattr(
+        watch_utils,
+        "find_collection_for_logical_repo",
+        lambda lrid, search_root: "reuse-coll",
+    )
 
     updates = []
     monkeypatch.setattr(
-        watch_index,
+        watch_utils,
         "update_workspace_state",
         lambda **kwargs: updates.append(kwargs),
     )
 
-    coll = watch_index._get_collection_for_repo(repo_path)
+    coll = watch_utils._get_collection_for_repo(repo_path)
     assert coll == "reuse-coll"
     assert updates and updates[0]["updates"]["qdrant_collection"] == "reuse-coll"
