@@ -1,15 +1,13 @@
 """
 Pattern Encoder - Convert pattern signatures to dense vectors.
 
-Uses a combination of:
-1. MinHash LSH for structural n-grams → 32-dim sparse signature
-2. Control flow one-hot encoding → 16-dim 
-3. AST path hashing → 16-dim
-
-Total: 64-dim pattern vector suitable for Qdrant storage.
-
-The key property: structurally similar code produces similar vectors,
-regardless of variable names or specific API calls.
+Encoding dimensions (64 total):
+- MinHash n-grams: 16-dim
+- Weisfeiler-Lehman kernel: 8-dim
+- Control flow features: 16-dim
+- CFG fingerprint: 8-dim
+- SimHash bits: 8-dim
+- Spectral features: 8-dim
 """
 
 from typing import List, Dict, Tuple, Optional, Any
@@ -22,128 +20,202 @@ from .extractor import PatternSignature
 
 class PatternEncoder:
     """Encode pattern signatures as dense vectors for similarity search."""
-    
-    # Output dimensions
-    NGRAM_DIM = 32      # For structural n-grams (MinHash)
-    CONTROL_DIM = 16    # For control flow features
-    PATH_DIM = 16       # For AST paths
-    TOTAL_DIM = 64      # Total vector dimension
-    
-    # MinHash parameters
-    NUM_HASH_FUNCS = 32
-    HASH_PRIMES = [
-        2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53,
-        59, 61, 67, 71, 73, 79, 83, 89, 97, 101, 103, 107, 109, 113,
-        127, 131
-    ]
-    
+
+    TOTAL_DIM = 64
+    MINHASH_DIM = 16
+    WL_DIM = 8
+    CONTROL_DIM = 16
+    CFG_DIM = 8
+    SIMHASH_DIM = 8
+    SPECTRAL_DIM = 8
+
+    HASH_PRIMES = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53]
+
     def __init__(self, normalize: bool = True):
         self.normalize = normalize
-        
+
     def encode(self, signature: PatternSignature) -> List[float]:
-        """Encode a pattern signature as a 64-dim vector."""
+        """Encode pattern signature as 64-dim vector."""
         vector = []
-        
-        # 1. Encode structural n-grams via MinHash (32-dim)
-        ngram_vec = self._encode_ngrams(signature.structural_ngrams)
-        vector.extend(ngram_vec)
-        
-        # 2. Encode control flow features (16-dim)
-        cf_vec = self._encode_control_flow(signature.control_flow)
-        vector.extend(cf_vec)
-        
-        # 3. Encode AST paths (16-dim)
-        path_vec = self._encode_paths(signature.ast_paths)
-        vector.extend(path_vec)
-        
+
+        vector.extend(self._encode_minhash(signature.structural_ngrams))
+        vector.extend(self._encode_wl_kernel(signature.wl_labels))
+        vector.extend(self._encode_control_flow(signature.control_flow))
+        vector.extend(self._encode_cfg(signature.cfg_nodes, signature.cfg_edges))
+        vector.extend(self._encode_simhash(signature.simhash))
+        vector.extend(self._encode_spectral(signature.spectral_features))
+
         if self.normalize:
             vector = self._l2_normalize(vector)
-            
+
         return vector
-    
-    def _encode_ngrams(self, ngrams: Counter) -> List[float]:
-        """Encode n-grams using MinHash for Jaccard similarity preservation."""
+
+    # =========================================================================
+    # MinHash for structural n-grams (Jaccard similarity)
+    # =========================================================================
+
+    def _encode_minhash(self, ngrams: Counter) -> List[float]:
+        """MinHash encoding for Jaccard similarity preservation."""
         if not ngrams:
-            return [0.0] * self.NGRAM_DIM
-            
-        # Get set of n-grams (ignore counts for Jaccard)
+            return [0.0] * self.MINHASH_DIM
+
         ngram_set = set(ngrams.keys())
-        
-        # MinHash: for each hash function, find min hash of any element
         minhash = []
-        for i, prime in enumerate(self.HASH_PRIMES[:self.NUM_HASH_FUNCS]):
+
+        for i, prime in enumerate(self.HASH_PRIMES[:self.MINHASH_DIM]):
             min_h = float('inf')
             for ngram in ngram_set:
-                h = self._hash_ngram(ngram, prime, i)
+                h = self._hash_item(str(ngram), prime, i)
                 min_h = min(min_h, h)
-            # Normalize to [0, 1] range
             minhash.append((min_h % 1000) / 1000.0 if min_h != float('inf') else 0.0)
-            
+
         return minhash
-    
-    def _hash_ngram(self, ngram: Tuple, prime: int, seed: int) -> int:
-        """Hash an n-gram tuple deterministically."""
-        s = str(ngram).encode()
-        h = hashlib.md5(s).digest()
+
+    def _hash_item(self, item: str, prime: int, seed: int) -> int:
+        h = hashlib.md5(item.encode()).digest()
         return (int.from_bytes(h[:4], 'big') * prime + seed) % (2**31)
-        
-    def _encode_control_flow(self, cf: Dict[str, Any]) -> List[float]:
-        """Encode control flow features as a 16-dim vector."""
-        vec = [0.0] * self.CONTROL_DIM
-        
-        # Bin 0-3: Loop depth (one-hot for 0, 1, 2, 3+)
-        depth = min(cf.get("max_loop_depth", 0), 3)
-        vec[depth] = 1.0
-        
-        # Bin 4-7: Loop count (one-hot for 0, 1, 2, 3+)
-        loops = min(cf.get("loop_count", 0), 3)
-        vec[4 + loops] = 1.0
-        
-        # Bin 8-11: Branch count (one-hot for 0, 1, 2, 3+)
-        branches = min(cf.get("branch_count", 0), 3)
-        vec[8 + branches] = 1.0
-        
-        # Bin 12: Has try block
-        vec[12] = 1.0 if cf.get("try_count", 0) > 0 else 0.0
-        
-        # Bin 13: Has except
-        vec[13] = 1.0 if cf.get("has_except", False) else 0.0
-        
-        # Bin 14: Has finally
-        vec[14] = 1.0 if cf.get("has_finally", False) else 0.0
-        
-        # Bin 15: Has nested try
-        vec[15] = 1.0 if cf.get("try_count", 0) > 1 else 0.0
-        
-        return vec
-    
-    def _encode_paths(self, paths: List[Tuple[str, str, str, int]]) -> List[float]:
-        """Encode AST paths as a 16-dim vector via feature hashing."""
-        vec = [0.0] * self.PATH_DIM
-        
-        if not paths:
+
+    # =========================================================================
+    # Weisfeiler-Lehman Graph Kernel encoding
+    # =========================================================================
+
+    def _encode_wl_kernel(self, wl_labels: Dict[int, List[str]]) -> List[float]:
+        """Encode WL labels into fixed-size vector via feature hashing."""
+        vec = [0.0] * self.WL_DIM
+
+        if not wl_labels:
             return vec
-            
-        total_count = sum(p[3] for p in paths)
-        
-        for start, path, end, count in paths:
-            # Hash path to bucket
-            path_str = f"{start}|{path}|{end}"
-            bucket = int(hashlib.md5(path_str.encode()).hexdigest()[:4], 16) % self.PATH_DIM
-            # Weighted by frequency
-            vec[bucket] += count / total_count
-            
+
+        label_counts = Counter()
+        for node_id, labels in wl_labels.items():
+            for label in labels:
+                label_counts[label] += 1
+
+        total = sum(label_counts.values())
+        if total == 0:
+            return vec
+
+        for label, count in label_counts.items():
+            bucket = int(hashlib.md5(label.encode()).hexdigest()[:4], 16) % self.WL_DIM
+            vec[bucket] += count / total
+
         return vec
-    
+
+    # =========================================================================
+    # Control Flow encoding
+    # =========================================================================
+
+    def _encode_control_flow(self, cf: Dict[str, Any]) -> List[float]:
+        """Encode control flow features (16-dim)."""
+        vec = [0.0] * self.CONTROL_DIM
+
+        vec[0] = self._log_scale(cf.get("max_loop_depth", 0), 5)
+        vec[1] = self._log_scale(cf.get("loop_count", 0), 10)
+        vec[2] = 1.0 if cf.get("loop_count", 0) >= 1 else 0.0
+        vec[3] = 1.0 if cf.get("try_in_loop", False) else 0.0  # retry pattern
+
+        vec[4] = self._log_scale(cf.get("branch_count", 0), 20)
+        vec[5] = 1.0 if cf.get("branch_count", 0) >= 1 else 0.0
+        vec[6] = self._log_scale(cf.get("match_count", 0), 5)
+        vec[7] = 1.0 if cf.get("branch_in_loop", False) else 0.0  # filter pattern
+
+        vec[8] = self._log_scale(cf.get("try_count", 0), 5)
+        vec[9] = 1.0 if cf.get("try_count", 0) >= 1 else 0.0
+        vec[10] = 1.0 if cf.get("has_catch", False) or cf.get("has_except", False) else 0.0
+        vec[11] = 1.0 if cf.get("has_finally", False) else 0.0
+
+        vec[12] = 1.0 if cf.get("has_resource_guard", False) else 0.0
+        vec[13] = self._log_scale(cf.get("max_nesting_depth", 0), 8)
+        vec[14] = self._log_scale(cf.get("func_count", 0), 10)
+        vec[15] = self._log_scale(cf.get("class_count", 0), 5)
+
+        return vec
+
+    def _log_scale(self, count: int, max_val: float = 10.0) -> float:
+        if count <= 0:
+            return 0.0
+        return min(1.0, math.log1p(count) / math.log1p(max_val))
+
+    # =========================================================================
+    # CFG Fingerprint encoding
+    # =========================================================================
+
+    def _encode_cfg(self, cfg_nodes: Dict[int, str], cfg_edges: List[Tuple[int, int, str]]) -> List[float]:
+        """Encode CFG structure via edge type distribution and graph properties."""
+        vec = [0.0] * self.CFG_DIM
+
+        if not cfg_edges:
+            return vec
+
+        edge_types = Counter(e[2] for e in cfg_edges)
+        total_edges = len(cfg_edges)
+
+        vec[0] = edge_types.get("sequential", 0) / total_edges
+        vec[1] = edge_types.get("branch_true", 0) / total_edges
+        vec[2] = edge_types.get("branch_false", 0) / total_edges
+        vec[3] = edge_types.get("loop_back", 0) / total_edges
+        vec[4] = edge_types.get("exception", 0) / total_edges
+
+        # Graph density
+        n_nodes = len(cfg_nodes)
+        if n_nodes > 1:
+            vec[5] = min(1.0, total_edges / (n_nodes * 2))
+
+        # Cyclomatic complexity approximation: E - N + 2P
+        vec[6] = self._log_scale(total_edges - n_nodes + 2, 20)
+
+        # Node type entropy
+        if cfg_nodes:
+            node_types = Counter(cfg_nodes.values())
+            total_nodes = len(cfg_nodes)
+            entropy = -sum((c/total_nodes) * math.log2(c/total_nodes + 1e-10)
+                          for c in node_types.values())
+            vec[7] = min(1.0, entropy / 4.0)
+
+        return vec
+
+    # =========================================================================
+    # SimHash encoding (LSH bits)
+    # =========================================================================
+
+    def _encode_simhash(self, simhash: int) -> List[float]:
+        """Extract 8 representative bits from 64-bit SimHash."""
+        vec = [0.0] * self.SIMHASH_DIM
+
+        # Sample bits at regular intervals
+        for i in range(self.SIMHASH_DIM):
+            bit_pos = i * 8
+            vec[i] = 1.0 if (simhash >> bit_pos) & 1 else 0.0
+
+        return vec
+
+    # =========================================================================
+    # Spectral Features encoding
+    # =========================================================================
+
+    def _encode_spectral(self, spectral_features: List[float]) -> List[float]:
+        """Encode spectral features (eigenvalues)."""
+        if not spectral_features:
+            return [0.0] * self.SPECTRAL_DIM
+
+        result = spectral_features[:self.SPECTRAL_DIM]
+        while len(result) < self.SPECTRAL_DIM:
+            result.append(0.0)
+
+        return result
+
+    # =========================================================================
+    # Utilities
+    # =========================================================================
+
     def _l2_normalize(self, vec: List[float]) -> List[float]:
-        """L2 normalize a vector."""
         norm = math.sqrt(sum(x*x for x in vec))
         if norm < 1e-10:
             return vec
         return [x / norm for x in vec]
-        
+
     def similarity(self, vec_a: List[float], vec_b: List[float]) -> float:
-        """Compute cosine similarity between two pattern vectors."""
+        """Cosine similarity."""
         dot = sum(a * b for a, b in zip(vec_a, vec_b))
         norm_a = math.sqrt(sum(a*a for a in vec_a))
         norm_b = math.sqrt(sum(b*b for b in vec_b))
@@ -151,3 +223,16 @@ class PatternEncoder:
             return 0.0
         return dot / (norm_a * norm_b)
 
+    def hamming_distance(self, simhash_a: int, simhash_b: int) -> int:
+        """Hamming distance between two SimHash values."""
+        return bin(simhash_a ^ simhash_b).count('1')
+
+    def tree_edit_distance_approx(self, paths_a: List[int], paths_b: List[int]) -> float:
+        """Approximate tree edit distance via Jaccard of path hashes."""
+        if not paths_a or not paths_b:
+            return 1.0
+        set_a = set(paths_a)
+        set_b = set(paths_b)
+        intersection = len(set_a & set_b)
+        union = len(set_a | set_b)
+        return 1.0 - (intersection / union) if union > 0 else 1.0

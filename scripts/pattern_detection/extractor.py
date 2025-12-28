@@ -2,8 +2,8 @@
 Pattern Extractor - Language-agnostic AST-based structural feature extraction.
 
 Extracts three types of features from code in ANY language:
-1. AST Paths (code2vec style) - paths between terminals in AST
-2. Structural Features (AROMA style) - node type sequences, depth patterns
+1. AST Paths - paths between terminals in AST
+2. Structural Features - node type sequences, depth patterns
 3. Control Flow Features - loop/branch structure fingerprints
 
 The key innovation: features are CONTENT-AGNOSTIC and LANGUAGE-NORMALIZED.
@@ -24,41 +24,33 @@ import re
 
 @dataclass
 class PatternSignature:
-    """Structural signature of a code snippet - language-independent."""
+    """Language-independent structural signature of code."""
 
-    # AST path features (code2vec style)
-    # Each path: (start_type, path_nodes, end_type, count)
-    # Types are NORMALIZED across languages
     ast_paths: List[Tuple[str, str, str, int]] = field(default_factory=list)
-
-    # Structural features (AROMA style)
-    # Normalized node type n-grams and their frequencies
     structural_ngrams: Counter = field(default_factory=Counter)
-
-    # Control flow features - universal across all languages
-    # Encoded as: (loop_depth, branch_count, try_depth, has_finally, ...)
     control_flow: Dict[str, Any] = field(default_factory=dict)
-
-    # Original language (for reference, not used in matching)
     language: str = "unknown"
-
-    # Hash for quick equality check
     _hash: Optional[str] = None
 
+    wl_labels: Dict[int, List[str]] = field(default_factory=dict)
+    cfg_edges: List[Tuple[int, int, str]] = field(default_factory=list)
+    cfg_nodes: Dict[int, str] = field(default_factory=dict)
+    simhash: int = 0
+    spectral_features: List[float] = field(default_factory=list)
+    tree_paths: List[int] = field(default_factory=list)
+
     def fingerprint(self) -> str:
-        """Generate a compact fingerprint for this signature."""
         if self._hash:
             return self._hash
 
-        # Combine top features into stable string
         top_paths = sorted(self.ast_paths, key=lambda x: -x[3])[:20]
         top_ngrams = self.structural_ngrams.most_common(20)
 
         parts = [
-            # NOTE: Language NOT included - we want cross-language matching
             f"P:{','.join(f'{p[0]}>{p[1]}>{p[2]}' for p in top_paths)}",
             f"N:{','.join(f'{n}:{c}' for n, c in top_ngrams)}",
             f"C:{self.control_flow.get('signature', '')}",
+            f"S:{self.simhash:016x}",
         ]
 
         combined = "|".join(parts)
@@ -426,10 +418,16 @@ class PatternExtractor:
         except Exception:
             return self._extract_regex_fallback(code, lang_key)
 
-        # Extract features with language-aware normalization
+        cf_map = self._get_cf_map(lang_key)
         sig.ast_paths = self._extract_ast_paths(root, code, lang_key)
         sig.structural_ngrams = self._extract_ngrams(root, lang_key)
         sig.control_flow = self._extract_control_flow(root, lang_key)
+
+        sig.wl_labels = self._extract_wl_labels(root, cf_map, k=3)
+        sig.cfg_nodes, sig.cfg_edges = self._extract_cfg(root, cf_map)
+        sig.simhash = self._compute_simhash(sig.structural_ngrams, sig.wl_labels)
+        sig.spectral_features = self._extract_spectral_features(root, cf_map)
+        sig.tree_paths = self._extract_tree_paths(root, cf_map)
 
         return sig
 
@@ -561,16 +559,38 @@ class PatternExtractor:
             "try_count": 0,
             "has_finally": False,
             "has_catch": False,  # Renamed from has_except for universality
+            "has_except": False,  # Keep for backward compat
             "has_resource_guard": False,  # with/using/defer/try-with-resources
             "func_count": 0,
             "class_count": 0,
             "lambda_count": 0,
             "match_count": 0,  # switch/match expressions
+            # NEW: Nesting pattern detection
+            "loop_types": [],  # Track specific loop types seen
+            "nesting_patterns": [],  # Track nesting sequences
+            "try_in_loop": False,  # Try block nested in loop (retry pattern!)
+            "loop_in_try": False,  # Loop nested in try block
+            "branch_in_loop": False,  # Branch nested in loop (filter pattern)
+            "max_nesting_depth": 0,  # Overall nesting depth
         }
 
-        self._analyze_control_flow(root, cf, cf_map, loop_depth=0)
+        # Track context during traversal
+        context = {
+            "loop_depth": 0,
+            "try_depth": 0,
+            "branch_depth": 0,
+            "in_loop": False,
+            "in_try": False,
+            "nesting_sequence": [],  # Track sequence of control flow
+        }
+
+        self._analyze_control_flow_v2(root, cf, cf_map, context)
+
+        # Backward compat
+        cf["has_except"] = cf["has_catch"]
 
         # Generate compact signature - universal across all languages
+        # V2: More detailed signature
         cf["signature"] = (
             f"L{cf['max_loop_depth']}_{cf['loop_count']}_"
             f"B{cf['branch_count']}_T{cf['try_count']}_"
@@ -578,49 +598,122 @@ class PatternExtractor:
             f"{'F' if cf['has_finally'] else '_'}"
             f"{'C' if cf['has_catch'] else '_'}"
             f"{'R' if cf['has_resource_guard'] else '_'}"
+            f"{'TL' if cf['try_in_loop'] else ''}"  # Retry pattern marker!
+            f"{'LT' if cf['loop_in_try'] else ''}"
+            f"{'BL' if cf['branch_in_loop'] else ''}"
         )
 
         return cf
 
-    def _analyze_control_flow(self, node, cf: Dict, cf_map: Dict[str, str], loop_depth: int):
-        """Recursively analyze control flow - uses normalized types."""
+    def _analyze_control_flow_v2(self, node, cf: Dict, cf_map: Dict[str, str], ctx: Dict):
+        """Recursively analyze control flow with nesting detection."""
         normalized = self._normalize_node_type(node.type, cf_map)
+
+        # Track previous context
+        was_in_loop = ctx["in_loop"]
+        was_in_try = ctx["in_try"]
+        entered_loop = False
+        entered_try = False
+        entered_branch = False
 
         # Loop detection (LOOP_FOR, LOOP_WHILE, LOOP_DO, LOOP_INFINITE, LOOP_RANGE)
         if normalized.startswith("LOOP_"):
             cf["loop_count"] += 1
-            loop_depth += 1
-            cf["max_loop_depth"] = max(cf["max_loop_depth"], loop_depth)
+            cf["loop_types"].append(normalized)
+            ctx["loop_depth"] += 1
+            ctx["in_loop"] = True
+            cf["max_loop_depth"] = max(cf["max_loop_depth"], ctx["loop_depth"])
+            entered_loop = True
+            ctx["nesting_sequence"].append("LOOP")
+
+            # Detect loop in try
+            if was_in_try:
+                cf["loop_in_try"] = True
+                if "loop_in_try" not in cf["nesting_patterns"]:
+                    cf["nesting_patterns"].append("loop_in_try")
+
         # Branch detection
         elif normalized == "BRANCH_IF":
             cf["branch_count"] += 1
+            ctx["branch_depth"] += 1
+            entered_branch = True
+            ctx["nesting_sequence"].append("BRANCH")
+
+            # Detect branch in loop (filter pattern)
+            if was_in_loop:
+                cf["branch_in_loop"] = True
+                if "branch_in_loop" not in cf["nesting_patterns"]:
+                    cf["nesting_patterns"].append("branch_in_loop")
+
         # Try block detection
         elif normalized == "TRY":
             cf["try_count"] += 1
+            ctx["try_depth"] += 1
+            ctx["in_try"] = True
+            entered_try = True
+            ctx["nesting_sequence"].append("TRY")
+
+            # Detect try in loop (RETRY PATTERN!)
+            if was_in_loop:
+                cf["try_in_loop"] = True
+                if "try_in_loop" not in cf["nesting_patterns"]:
+                    cf["nesting_patterns"].append("try_in_loop")
+
         # Catch/except detection
         elif normalized == "CATCH":
             cf["has_catch"] = True
+            ctx["nesting_sequence"].append("CATCH")
+
         # Finally detection
         elif normalized == "FINALLY":
             cf["has_finally"] = True
+            ctx["nesting_sequence"].append("FINALLY")
+
         # Resource guard (with/using/defer)
         elif normalized in ("RESOURCE_GUARD", "DEFER"):
             cf["has_resource_guard"] = True
+            ctx["nesting_sequence"].append("RESOURCE")
+
         # Function definition
         elif normalized in ("FUNC_DEF", "METHOD_DEF"):
             cf["func_count"] += 1
+
         # Class/struct definition
         elif normalized in ("CLASS_DEF", "STRUCT_DEF", "INTERFACE_DEF"):
             cf["class_count"] += 1
+
         # Lambda/closure
         elif normalized == "LAMBDA":
             cf["lambda_count"] += 1
+
         # Match/switch
         elif normalized == "MATCH":
             cf["match_count"] += 1
+            ctx["nesting_sequence"].append("MATCH")
 
+        # Track max nesting
+        total_depth = ctx["loop_depth"] + ctx["try_depth"] + ctx["branch_depth"]
+        cf["max_nesting_depth"] = max(cf["max_nesting_depth"], total_depth)
+
+        # Recurse to children
         for child in node.children:
-            self._analyze_control_flow(child, cf, cf_map, loop_depth)
+            self._analyze_control_flow_v2(child, cf, cf_map, ctx)
+
+        # Restore context when leaving scope
+        if entered_loop:
+            ctx["loop_depth"] -= 1
+            ctx["in_loop"] = ctx["loop_depth"] > 0
+        if entered_try:
+            ctx["try_depth"] -= 1
+            ctx["in_try"] = ctx["try_depth"] > 0
+        if entered_branch:
+            ctx["branch_depth"] -= 1
+
+    def _analyze_control_flow(self, node, cf: Dict, cf_map: Dict[str, str], loop_depth: int):
+        """Legacy method - kept for compatibility, delegates to v2."""
+        ctx = {"loop_depth": 0, "try_depth": 0, "branch_depth": 0,
+               "in_loop": False, "in_try": False, "nesting_sequence": []}
+        self._analyze_control_flow_v2(node, cf, cf_map, ctx)
 
     def _extract_regex_fallback(self, code: str, language: str) -> PatternSignature:
         """Fallback pattern extraction using regex - multi-language aware."""
@@ -662,7 +755,6 @@ class PatternExtractor:
             "signature": "FALLBACK",
         }
 
-        # Simple structural tokens - abstracted
         tokens = re.findall(r'\b\w+\b', code)
         for n in self.NGRAM_SIZES:
             for i in range(len(tokens) - n + 1):
@@ -670,3 +762,199 @@ class PatternExtractor:
 
         return sig
 
+    def _extract_wl_labels(self, root, cf_map: Dict[str, str], k: int = 3) -> Dict[int, List[str]]:
+        """Weisfeiler-Lehman graph kernel."""
+        nodes = []
+        edges = []
+        self._build_ast_graph(root, nodes, edges, cf_map)
+
+        if not nodes:
+            return {}
+
+        labels = {i: [self._normalize_node_type(n.type, cf_map)] for i, n in enumerate(nodes)}
+        adj = {i: [] for i in range(len(nodes))}
+        for src, dst in edges:
+            adj[src].append(dst)
+            adj[dst].append(src)
+
+        for iteration in range(k):
+            new_labels = {}
+            for node_id in range(len(nodes)):
+                neighbor_labels = sorted(labels[n][-1] for n in adj[node_id])
+                combined = labels[node_id][-1] + "|" + ",".join(neighbor_labels)
+                new_label = hashlib.md5(combined.encode()).hexdigest()[:8]
+                new_labels[node_id] = labels[node_id] + [new_label]
+            labels = new_labels
+
+        return labels
+
+    def _build_ast_graph(self, node, nodes: List, edges: List[Tuple[int, int]], cf_map: Dict):
+        node_id = len(nodes)
+        nodes.append(node)
+        for child in node.children:
+            child_id = len(nodes)
+            edges.append((node_id, child_id))
+            self._build_ast_graph(child, nodes, edges, cf_map)
+
+    def _extract_cfg(self, root, cf_map: Dict[str, str]) -> Tuple[Dict[int, str], List[Tuple[int, int, str]]]:
+        """Extract control flow graph."""
+        cfg_nodes = {}
+        cfg_edges = []
+        self._build_cfg(root, cf_map, cfg_nodes, cfg_edges, entry_id=0, exit_id=-1)
+        return cfg_nodes, cfg_edges
+
+    def _build_cfg(self, node, cf_map: Dict, nodes: Dict, edges: List, entry_id: int, exit_id: int) -> int:
+        normalized = self._normalize_node_type(node.type, cf_map)
+        node_id = len(nodes)
+        nodes[node_id] = normalized
+
+        if entry_id >= 0 and entry_id != node_id:
+            edges.append((entry_id, node_id, "sequential"))
+
+        if normalized == "BRANCH_IF":
+            then_exit = node_id
+            else_exit = node_id
+            for i, child in enumerate(node.children):
+                child_norm = self._normalize_node_type(child.type, cf_map)
+                if child_norm in ("BRANCH_ELSE", "BRANCH_ELIF"):
+                    else_exit = self._build_cfg(child, cf_map, nodes, edges, node_id, exit_id)
+                    if else_exit != node_id:
+                        edges.append((node_id, else_exit, "branch_false"))
+                elif child.child_count > 0:
+                    then_exit = self._build_cfg(child, cf_map, nodes, edges, node_id, exit_id)
+                    if then_exit != node_id:
+                        edges.append((node_id, then_exit, "branch_true"))
+            return max(then_exit, else_exit)
+
+        elif normalized.startswith("LOOP_"):
+            loop_body_exit = node_id
+            for child in node.children:
+                loop_body_exit = self._build_cfg(child, cf_map, nodes, edges, node_id, exit_id)
+            if loop_body_exit != node_id:
+                edges.append((loop_body_exit, node_id, "loop_back"))
+            return node_id
+
+        elif normalized == "TRY":
+            try_exit = node_id
+            for child in node.children:
+                child_norm = self._normalize_node_type(child.type, cf_map)
+                if child_norm == "CATCH":
+                    catch_exit = self._build_cfg(child, cf_map, nodes, edges, node_id, exit_id)
+                    edges.append((node_id, catch_exit, "exception"))
+                else:
+                    try_exit = self._build_cfg(child, cf_map, nodes, edges, try_exit, exit_id)
+            return try_exit
+
+        else:
+            last_exit = node_id
+            for child in node.children:
+                last_exit = self._build_cfg(child, cf_map, nodes, edges, last_exit, exit_id)
+            return last_exit
+
+    # =========================================================================
+    # SimHash (Locality-Sensitive Hashing)
+    # =========================================================================
+
+    def _compute_simhash(self, ngrams: Counter, wl_labels: Dict[int, List[str]]) -> int:
+        """Compute 64-bit SimHash for LSH-based approximate nearest neighbor."""
+        v = [0] * 64
+
+        for ngram, count in ngrams.items():
+            h = int(hashlib.md5(str(ngram).encode()).hexdigest()[:16], 16)
+            for i in range(64):
+                if (h >> i) & 1:
+                    v[i] += count
+                else:
+                    v[i] -= count
+
+        for node_id, labels in wl_labels.items():
+            for label in labels:
+                h = int(hashlib.md5(label.encode()).hexdigest()[:16], 16)
+                for i in range(64):
+                    if (h >> i) & 1:
+                        v[i] += 1
+                    else:
+                        v[i] -= 1
+
+        result = 0
+        for i in range(64):
+            if v[i] > 0:
+                result |= (1 << i)
+        return result
+
+    # =========================================================================
+    # Spectral Graph Features
+    # =========================================================================
+
+    def _extract_spectral_features(self, root, cf_map: Dict[str, str], k: int = 8) -> List[float]:
+        """Approximate top-k eigenvalues of normalized graph Laplacian via power iteration."""
+        nodes = []
+        edges = []
+        self._build_ast_graph(root, nodes, edges, cf_map)
+
+        n = len(nodes)
+        if n < 2:
+            return [0.0] * k
+
+        degree = [0] * n
+        adj = {i: [] for i in range(n)}
+        for src, dst in edges:
+            adj[src].append(dst)
+            adj[dst].append(src)
+            degree[src] += 1
+            degree[dst] += 1
+
+        def laplacian_multiply(x: List[float]) -> List[float]:
+            """Multiply vector by normalized Laplacian L = I - D^(-1/2) A D^(-1/2)."""
+            result = [0.0] * n
+            for i in range(n):
+                if degree[i] > 0:
+                    result[i] = x[i]
+                    for j in adj[i]:
+                        if degree[j] > 0:
+                            result[i] -= x[j] / (degree[i] * degree[j]) ** 0.5
+            return result
+
+        eigenvalues = []
+        for _ in range(min(k, n - 1)):
+            v = [1.0 / n**0.5] * n
+            for _ in range(20):
+                v = laplacian_multiply(v)
+                norm = sum(x*x for x in v) ** 0.5
+                if norm > 1e-10:
+                    v = [x / norm for x in v]
+            eigenvalue = sum(a * b for a, b in zip(v, laplacian_multiply(v)))
+            eigenvalues.append(round(eigenvalue, 4))
+
+        while len(eigenvalues) < k:
+            eigenvalues.append(0.0)
+
+        return eigenvalues[:k]
+
+    # =========================================================================
+    # Tree Edit Distance Approximation via Path Hashing
+    # =========================================================================
+
+    def _extract_tree_paths(self, root, cf_map: Dict[str, str], max_paths: int = 32) -> List[int]:
+        """Extract root-to-leaf path hashes for tree edit distance approximation."""
+        paths = []
+        self._collect_root_to_leaf_paths(root, [], cf_map, paths)
+
+        path_hashes = []
+        for path in paths[:max_paths]:
+            path_str = ">".join(path)
+            h = int(hashlib.md5(path_str.encode()).hexdigest()[:8], 16)
+            path_hashes.append(h)
+
+        return sorted(path_hashes)
+
+    def _collect_root_to_leaf_paths(self, node, current_path: List[str], cf_map: Dict, paths: List):
+        """Collect all root-to-leaf paths in the AST."""
+        normalized = self._normalize_node_type(node.type, cf_map)
+        current_path = current_path + [normalized]
+
+        if not node.children:
+            paths.append(current_path)
+        else:
+            for child in node.children:
+                self._collect_root_to_leaf_paths(child, current_path, cf_map, paths)
