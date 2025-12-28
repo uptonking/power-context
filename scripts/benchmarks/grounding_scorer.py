@@ -347,7 +347,11 @@ def print_grounding_report(report: GroundingReport):
     # Citation accuracy
     emoji = "✅" if report.avg_citation_accuracy >= 0.8 else "⚠️" if report.avg_citation_accuracy >= 0.5 else "❌"
     print(f"  {emoji} Citation Accuracy:   {report.avg_citation_accuracy:.0%}")
-    
+
+    # Topic coverage
+    emoji = "✅" if report.avg_topic_coverage >= 0.7 else "⚠️" if report.avg_topic_coverage >= 0.4 else "❌"
+    print(f"  {emoji} Topic Coverage:      {report.avg_topic_coverage:.0%}")
+
     # Hedging rate (lower is better)
     emoji = "✅" if report.hedging_rate <= 0.2 else "⚠️" if report.hedging_rate <= 0.4 else "❌"
     print(f"  {emoji} Hedging Rate:        {report.hedging_rate:.0%} (lower is better)")
