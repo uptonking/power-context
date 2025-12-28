@@ -86,15 +86,15 @@ def test_pattern_vector_dimensions():
 
 def test_code_vs_nl_detection():
     """Test auto-detection of code vs natural language queries."""
-    from scripts.mcp_impl.pattern_search import _looks_like_code
+    from scripts.mcp_impl.pattern_search import _is_likely_code
 
-    assert _looks_like_code("for i in range(3): try: pass except: pass")
-    assert _looks_like_code("if err != nil { return err }")
-    assert _looks_like_code("def foo(): return 42")
+    assert _is_likely_code("for i in range(3): try: pass except: pass")
+    assert _is_likely_code("if err != nil { return err }")
+    assert _is_likely_code("def foo(): return 42")
 
-    assert not _looks_like_code("retry with exponential backoff")
-    assert not _looks_like_code("find error handling patterns")
-    assert not _looks_like_code("resource cleanup code")
+    assert not _is_likely_code("retry with exponential backoff")
+    assert not _is_likely_code("find error handling patterns")
+    assert not _is_likely_code("resource cleanup code")
 
 
 # ============================================================================

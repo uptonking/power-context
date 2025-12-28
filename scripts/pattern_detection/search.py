@@ -299,6 +299,7 @@ def pattern_search(
     semantic_weight: float = 0.3,
     output_format: Any = None,  # "json" (default) or "toon"
     compact: bool = False,
+    client: Any = None,  # Optional QdrantClient override for testing
 ) -> Union[PatternSearchResponse, Dict[str, Any]]:
     """
     Find code structurally similar to the given example.
