@@ -325,7 +325,7 @@ def pattern_search(
     output_format: Any = None,  # "json" (default) or "toon"
     compact: bool = False,
     client: Any = None,  # Optional QdrantClient override for testing
-    aroma_rerank: bool = False,  # Enable AROMA-style pruning + reranking
+    aroma_rerank: bool = True,  # Enable AROMA-style pruning + reranking (default ON)
     aroma_alpha: float = 0.6,  # Weight for pruned similarity (vs original score)
 ) -> Union[PatternSearchResponse, Dict[str, Any]]:
     """
@@ -347,6 +347,8 @@ def pattern_search(
         semantic_weight: Weight for semantic score in hybrid mode (0-1)
         output_format: "json" (default) or "toon" for token-efficient format
         compact: If True with TOON, use minimal fields only
+        aroma_rerank: Enable AROMA-style pruning + reranking (default True)
+        aroma_alpha: Weight for pruned similarity vs original score (0-1, default 0.6)
 
     Returns:
         PatternSearchResponse or Dict (TOON format) with matching code and patterns
@@ -363,6 +365,10 @@ def pattern_search(
     """
     # Determine if TOON output is requested
     use_toon = _should_use_toon(output_format)
+
+    # AROMA reranking requires snippets to extract signatures
+    if aroma_rerank and not include_snippet:
+        include_snippet = True
 
     extractor = _get_extractor()
     encoder = _get_encoder()
@@ -411,13 +417,17 @@ def pattern_search(
             isinstance(vectors_config, dict) and "pattern_vector" in vectors_config
         )
 
+        # Fetch size: over-fetch only when reranking is enabled
+        needs_reranking = aroma_rerank or hybrid
+        fetch_limit = limit * 3 if needs_reranking else limit
+
         if has_pattern_vector:
             # Use dedicated pattern vector
             response = client.query_points(
                 collection_name=collection,
                 query=query_vector,
                 using="pattern_vector",
-                limit=limit * 2,  # Over-fetch for filtering
+                limit=fetch_limit,
                 query_filter=search_filter,
                 with_payload=True,
             )
@@ -426,17 +436,14 @@ def pattern_search(
             # Fallback: search using semantic vector with pattern-based reranking
             results = _fallback_pattern_search(
                 client, collection, query_vector, signature,
-                limit * 2, search_filter
+                fetch_limit, search_filter
             )
 
-        # Process results
+        # Process candidates - collect full pool when reranking, early-stop otherwise
         search_results = []
         seen_paths = set()
 
         for hit in results:
-            if hit.score < min_score:
-                continue
-
             payload = hit.payload or {}
             # Support both flat payload (path at top level) and nested (metadata.path)
             meta = payload.get("metadata", {})
@@ -457,7 +464,7 @@ def pattern_search(
                 control_flow_signature=payload.get("cf_signature", ""),
             )
 
-            # Include snippet if requested
+            # Include snippet if requested (always true when aroma_rerank is on)
             if include_snippet:
                 result.snippet = _get_snippet(
                     path, result.start_line, result.end_line, context_lines
@@ -465,7 +472,8 @@ def pattern_search(
 
             search_results.append(result)
 
-            if len(search_results) >= limit:
+            # Early stop when not reranking - no point collecting more
+            if not needs_reranking and len(search_results) >= limit:
                 break
 
         # AROMA-style reranking: prune each result w.r.t. query, rerank by pruned similarity
@@ -474,11 +482,21 @@ def pattern_search(
                 search_results, signature, extractor, aroma_alpha
             )
 
-        # Hybrid mode: combine with semantic scores
+        # Hybrid mode: blend AROMA score (if present) with semantic score
         if hybrid and search_results:
             search_results = _apply_hybrid_scoring(
                 search_results, example, language, semantic_weight
             )
+
+        # Apply min_score filter AFTER reranking (on combined_score if available)
+        if min_score > 0:
+            search_results = [
+                r for r in search_results
+                if (r.combined_score if r.combined_score is not None else r.score) >= min_score
+            ]
+
+        # Final slice to requested limit
+        search_results = search_results[:limit]
 
         # Discover patterns from results
         discovered = _discover_patterns_from_results(search_results, signature)
@@ -552,6 +570,7 @@ def search_by_pattern_description(
     description: str,
     *,
     limit: int = 10,
+    min_score: float = 0.0,
     collection: Optional[str] = None,
     target_languages: Optional[List[str]] = None,
     output_format: Any = None,
@@ -568,6 +587,7 @@ def search_by_pattern_description(
     Args:
         description: Natural language description of the pattern
         limit: Maximum results
+        min_score: Minimum similarity score (0-1), applied before TOON encoding
         collection: Qdrant collection
         target_languages: Filter to specific languages
         output_format: "json" (default) or "toon" for token-efficient format
@@ -588,6 +608,7 @@ def search_by_pattern_description(
             example=description,
             language="python",
             limit=limit,
+            min_score=min_score,
             collection=collection,
             target_languages=target_languages,
             output_format=output_format,
@@ -686,6 +707,10 @@ def search_by_pattern_description(
                 language=meta.get("language") or payload.get("language", "unknown"),
                 matched_patterns=[best_pattern.auto_description],
             ))
+
+        # Apply min_score filtering BEFORE TOON encoding (so it works regardless of output format)
+        if min_score > 0:
+            search_results = [r for r in search_results if r.score >= min_score]
 
         response = PatternSearchResponse(
             results=search_results,

@@ -86,6 +86,8 @@ async def _pattern_search_impl(
     target_languages: Optional[List[str]] = None,
     output_format: Optional[str] = None,
     compact: Optional[bool] = None,
+    aroma_rerank: Optional[bool] = None,
+    aroma_alpha: Optional[float] = None,
     coerce_bool_fn=None,
     coerce_int_fn=None,
     coerce_float_fn=None,
@@ -109,9 +111,25 @@ async def _pattern_search_impl(
             return v.strip().lower() in ("1", "true", "yes", "on")
         return bool(v)
 
+    def _safe_coerce_int(v, d):
+        if v is None:
+            return d
+        try:
+            return int(v)
+        except (ValueError, TypeError):
+            return d
+
+    def _safe_coerce_float(v, d):
+        if v is None:
+            return d
+        try:
+            return float(v)
+        except (ValueError, TypeError):
+            return d
+
     _coerce_bool = coerce_bool_fn or _default_coerce_bool
-    _coerce_int = coerce_int_fn or (lambda v, d: int(v) if v is not None else d)
-    _coerce_float = coerce_float_fn or (lambda v, d: float(v) if v is not None else d)
+    _coerce_int = coerce_int_fn or _safe_coerce_int
+    _coerce_float = coerce_float_fn or _safe_coerce_float
 
     # Defaults aligned with core pattern_search API for consistent behavior
     eff_limit = _coerce_int(limit, 10)
@@ -121,6 +139,8 @@ async def _pattern_search_impl(
     eff_hybrid = _coerce_bool(hybrid, False)
     eff_semantic_weight = _coerce_float(semantic_weight, 0.3)
     eff_compact = _coerce_bool(compact, False)
+    eff_aroma_rerank = _coerce_bool(aroma_rerank, True)  # AROMA enabled by default
+    eff_aroma_alpha = _coerce_float(aroma_alpha, 0.6)
 
     # Auto-detect: code example vs natural language description
     is_code = _is_likely_code(query_text)
@@ -141,14 +161,15 @@ async def _pattern_search_impl(
                 target_languages=target_languages,
                 output_format=output_format,
                 compact=eff_compact,
+                aroma_rerank=eff_aroma_rerank,
+                aroma_alpha=eff_aroma_alpha,
             )
         else:
             # Natural language pattern description search
-            # Note: NL search doesn't support min_score filtering at the API level
-            # but we filter results client-side for consistency
             result = _search_by_pattern_description_fn(
                 description=query_text,
                 limit=eff_limit,
+                min_score=eff_min_score,
                 collection=collection,
                 target_languages=target_languages,
                 output_format=output_format,
@@ -162,19 +183,6 @@ async def _pattern_search_impl(
         # Preserve upstream ok flag (derived from search_mode) instead of overriding
         # This ensures errors from core search propagate to MCP clients
         result["query_mode"] = "code" if is_code else "description"
-
-        # Apply min_score filtering for NL results (not supported natively).
-        # TOON returns a string for results; only filter when we actually have a list.
-        if (
-            not is_code
-            and eff_min_score > 0
-            and isinstance(result.get("results"), list)
-        ):
-            result["results"] = [
-                r for r in result["results"]
-                if r.get("score", 0) >= eff_min_score
-            ]
-            result["total"] = len(result["results"])
 
         return result
     except Exception as e:

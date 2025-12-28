@@ -2099,22 +2099,38 @@ if _PATTERN_SEARCH_ENABLED:
         target_languages: Any = None,
         output_format: Any = None,
         compact: Any = None,
+        aroma_rerank: Any = None,
+        aroma_alpha: Any = None,
     ) -> Dict[str, Any]:
-        """Find structurally similar code patterns across languages.
+        """Find structurally similar code patterns across all languages.
 
-        Accepts code examples OR natural language descriptions.
+        Accepts EITHER code examples OR natural language descriptions - auto-detects which.
 
-        Parameters:
-        - query: Code snippet or pattern description
-        - language: Language hint (default "python")
-        - limit: Max results (default 10)
-        - min_score: Similarity threshold (default 0.3)
-        - include_snippet: Include code in results
-        - target_languages: Filter target languages
+        When to use:
+        - Find code with similar control flow (retry loops, error handling, etc.)
+        - Cross-language pattern matching (Python pattern → Go/Rust/Java matches)
+        - Detect code duplication based on structure, not syntax
+        - Search by pattern description ("retry with backoff", "resource cleanup")
+
+        Key parameters:
+        - query: str. Code snippet OR natural language description of pattern.
+        - language: str (default "python"). Language hint for code examples.
+        - limit: int (default 10). Maximum results to return.
+        - min_score: float (default 0.3). Minimum similarity score threshold.
+        - include_snippet: bool (default false). Include code snippets in results.
+        - target_languages: list[str]. Filter to specific target languages.
+        - output_format: "json" (default) or "toon" for token-efficient format.
+        - compact: bool. If true with TOON, use minimal fields.
+        - aroma_rerank: bool (default true). Enable AROMA-style pruning and reranking.
+        - aroma_alpha: float (default 0.6). Weight for pruned similarity vs original score.
+
+        Returns:
+        - {ok, results: [{path, start_line, end_line, score, language, ...}], total, query_signature}
 
         Examples:
-        - pattern_search(query="for i in range(3): try: ... except: sleep(i)")
+        - pattern_search(query="for i in range(3): try: ... except: time.sleep(2**i)")
         - pattern_search(query="retry with exponential backoff")
+        - pattern_search(query="if err != nil { return err }", language="go")
         """
         return await _pattern_search_impl(
             query=query,
@@ -2129,6 +2145,8 @@ if _PATTERN_SEARCH_ENABLED:
             target_languages=target_languages,
             output_format=output_format,
             compact=compact,
+            aroma_rerank=aroma_rerank,
+            aroma_alpha=aroma_alpha,
             coerce_bool_fn=_coerce_bool,
             coerce_int_fn=_coerce_int,
             coerce_float_fn=lambda v, d: safe_float(v, default=d, logger=logger, context="pattern_search"),
