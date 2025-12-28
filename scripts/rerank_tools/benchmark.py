@@ -64,7 +64,7 @@ def get_real_candidates(query: str, limit: int = 30) -> List[Dict[str, Any]]:
         from scripts.hybrid_search import run_hybrid_search
         from scripts.embedder import get_embedding_model
 
-        model_name = os.environ.get("EMBEDDING_MODEL", "Alibaba-NLP/gte-base-en-v1.5")
+        model_name = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
         model = get_embedding_model(model_name)
 
         # Run real hybrid search (dense + lexical fusion)

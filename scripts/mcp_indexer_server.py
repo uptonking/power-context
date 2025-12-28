@@ -764,6 +764,22 @@ async def memory_store(
 
 
 @mcp.tool()
+async def store(
+    information: str,
+    metadata: Optional[Dict[str, Any]] = None,
+    collection: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Store a memory entry (alias for memory_store)."""
+    return await _memory_store_impl(
+        information=information,
+        metadata=metadata,
+        collection=collection,
+        default_collection_fn=_default_collection,
+        get_embedding_model_fn=_get_embedding_model,
+    )
+
+
+@mcp.tool()
 async def qdrant_status(
     collection: Optional[str] = None,
     max_points: Optional[int] = None,
@@ -2069,6 +2085,24 @@ async def memory_find(
     Returns:
     - {ok: true, results: [{id, score, information, metadata}, ...], count: N}
     """
+    return await _memory_find_impl(
+        query=query,
+        limit=limit,
+        collection=collection,
+        top_k=top_k,
+        default_collection_fn=_default_collection,
+        get_embedding_model_fn=_get_embedding_model,
+    )
+
+
+@mcp.tool()
+async def find(
+    query: str,
+    limit: Optional[int] = None,
+    collection: Optional[str] = None,
+    top_k: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Find memory entries (alias for memory_find)."""
     return await _memory_find_impl(
         query=query,
         limit=limit,
