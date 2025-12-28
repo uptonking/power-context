@@ -114,12 +114,12 @@ def encode_pattern_results(
 
     # Determine fields based on compact mode
     if compact:
-        fields = ["path", "start_line", "end_line", "score", "language"]
+        fields = ["path", "start_line", "end_line", "score", "language", "matched_lines"]
     else:
         # Full fields for pattern results
         fields = [
             "path", "start_line", "end_line", "score", "language",
-            "control_flow_signature", "matched_patterns", "snippet",
+            "control_flow_signature", "matched_patterns", "matched_lines", "snippet",
             "semantic_score", "combined_score"
         ]
 
@@ -246,13 +246,16 @@ class PatternSearchResult:
     matched_patterns: List[str] = field(default_factory=list)
     control_flow_signature: str = ""
 
+    # Line numbers within snippet that match query pattern (absolute, 1-indexed)
+    matched_lines: List[int] = field(default_factory=list)
+
     # Combined scoring (if hybrid search)
     semantic_score: Optional[float] = None
     combined_score: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
-        return {
+        d = {
             "path": self.path,
             "start_line": self.start_line,
             "end_line": self.end_line,
@@ -264,6 +267,9 @@ class PatternSearchResult:
             "semantic_score": round(self.semantic_score, 4) if self.semantic_score is not None else None,
             "combined_score": round(self.combined_score, 4) if self.combined_score is not None else None,
         }
+        if self.matched_lines:
+            d["matched_lines"] = self.matched_lines
+        return d
 
 
 @dataclass
@@ -361,8 +367,9 @@ def pattern_search(
     # Determine if TOON output is requested
     use_toon = _should_use_toon(output_format)
 
-    # AROMA reranking requires snippets to extract signatures
+    # AROMA reranking requires snippets to extract signatures for pruning
     if aroma_rerank and not include_snippet:
+        logger.debug("Forcing include_snippet=True (required for AROMA reranking)")
         include_snippet = True
 
     extractor = _get_extractor()
@@ -459,16 +466,26 @@ def pattern_search(
                 control_flow_signature=payload.get("cf_signature", ""),
             )
 
-            # Include snippet if requested (always true when aroma_rerank is on)
+            # Include snippet if requested (forced True when aroma_rerank - see line ~366)
             if include_snippet:
                 result.snippet = _get_snippet(
                     path, result.start_line, result.end_line, context_lines
                 )
+                # Highlight lines matching query pattern (AST-based)
+                if result.snippet and signature.control_flow:
+                    result.matched_lines = extractor.find_matching_lines(
+                        result.snippet,
+                        result.language,
+                        signature.control_flow,
+                        line_offset=result.start_line - 1,
+                    )
 
             search_results.append(result)
 
-            # Early stop when not reranking - no point collecting more
-            if not needs_reranking and len(search_results) >= limit:
+            # Early stop only when:
+            # 1. Not reranking (reranking needs full pool to reorder)
+            # 2. No min_score filter (filtering may discard results, need extras)
+            if not needs_reranking and min_score <= 0 and len(search_results) >= limit:
                 break
 
         # AROMA-style reranking: prune each result w.r.t. query, rerank by pruned similarity

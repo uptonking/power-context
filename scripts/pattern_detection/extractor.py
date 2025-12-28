@@ -987,3 +987,98 @@ class PatternExtractor:
         else:
             for child in node.children:
                 self._collect_root_to_leaf_paths(child, current_path, cf_map, paths)
+
+    # =========================================================================
+    # Line-level pattern matching for highlighting
+    # =========================================================================
+
+    # Map control_flow dict keys → normalized AST types to look for
+    _CF_KEY_TO_TYPES: Dict[str, List[str]] = {
+        "has_for": ["LOOP_FOR", "LOOP_RANGE"],
+        "has_while": ["LOOP_WHILE"],
+        "loop_count": ["LOOP", "LOOP_FOR", "LOOP_WHILE", "LOOP_RANGE", "LOOP_DO"],
+        "has_if": ["BRANCH_IF"],
+        "branch_count": ["BRANCH_IF", "BRANCH_ELSE", "BRANCH_ELIF"],
+        "has_try": ["TRY"],
+        "try_count": ["TRY"],
+        "has_catch": ["CATCH", "EXCEPT"],
+        "has_except": ["CATCH", "EXCEPT"],
+        "has_finally": ["FINALLY"],
+        "has_with": ["WITH"],
+        "has_resource_guard": ["WITH", "DEFER", "USING"],
+        "has_return": ["RETURN"],
+        "has_raise": ["RAISE", "THROW"],
+        "has_throw": ["RAISE", "THROW"],
+        "has_yield": ["YIELD"],
+        "has_async": ["ASYNC"],
+        "has_await": ["AWAIT"],
+        "has_defer": ["DEFER"],
+        "has_goroutine": ["GOROUTINE"],
+        "has_select": ["SELECT"],
+        "has_recover": ["RECOVER"],
+        "match_count": ["MATCH", "MATCH_CASE"],
+    }
+
+    def find_matching_lines(
+        self,
+        code: str,
+        language: str,
+        query_cf: Dict[str, Any],
+        line_offset: int = 0,
+    ) -> List[int]:
+        """
+        Find lines in code that contain control flow patterns from query.
+
+        Uses Tree-sitter AST analysis - NOT keyword matching.
+
+        Args:
+            code: Source code to analyze
+            language: Programming language
+            query_cf: Control flow dict from query's PatternSignature
+            line_offset: Added to line numbers (for snippet within larger file)
+
+        Returns:
+            Sorted list of 1-indexed line numbers containing matching patterns
+        """
+        if not code or not query_cf:
+            return []
+
+        # Build set of normalized types to look for based on query_cf
+        target_types: Set[str] = set()
+        for cf_key, norm_types in self._CF_KEY_TO_TYPES.items():
+            val = query_cf.get(cf_key)
+            # Include if truthy (True, or count > 0)
+            if val:
+                target_types.update(norm_types)
+
+        if not target_types:
+            return []
+
+        # Parse code
+        lang_key = self._normalize_language(language)
+        parser = self._get_parser(lang_key)
+        if not parser:
+            return []
+
+        try:
+            tree = parser.parse(code.encode('utf-8'))
+            if not tree or not tree.root_node:
+                return []
+        except Exception:
+            return []
+
+        # Walk AST and collect line numbers of matching nodes
+        cf_map = self._get_cf_map(lang_key)
+        matched_lines: Set[int] = set()
+
+        def walk(node):
+            normalized = self._normalize_node_type(node.type, cf_map)
+            if normalized in target_types:
+                # Tree-sitter lines are 0-indexed, we want 1-indexed
+                matched_lines.add(node.start_point[0] + 1 + line_offset)
+            for child in node.children:
+                walk(child)
+
+        walk(tree.root_node)
+
+        return sorted(matched_lines)
