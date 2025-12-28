@@ -109,6 +109,7 @@ No complicated path setup - Context-Engine automatically handles the mapping bet
 | Codex | RMCP |
 | Copilot | RMCP |
 | AmpCode | RMCP |
+| Antigravity | RMCP |
 | Zed | SSE (via mcp-remote) |
 
 ---
