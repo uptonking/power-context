@@ -367,9 +367,9 @@ def pattern_search(
     # Determine if TOON output is requested
     use_toon = _should_use_toon(output_format)
 
-    # AROMA reranking requires snippets to extract signatures for pruning
-    if aroma_rerank and not include_snippet:
-        logger.debug("Forcing include_snippet=True (required for AROMA reranking)")
+    # AROMA/hybrid reranking requires snippets for pruning/semantic scoring
+    if (aroma_rerank or hybrid) and not include_snippet:
+        logger.debug("Forcing include_snippet=True (required for AROMA/hybrid scoring)")
         include_snippet = True
 
     extractor = _get_extractor()

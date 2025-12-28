@@ -86,15 +86,24 @@ def test_pattern_vector_dimensions():
 
 def test_code_vs_nl_detection():
     """Test auto-detection of code vs natural language queries."""
-    from scripts.mcp_impl.pattern_search import _is_likely_code
+    from scripts.mcp_impl.pattern_search import _detect_query_mode
 
-    assert _is_likely_code("for i in range(3): try: pass except: pass")
-    assert _is_likely_code("if err != nil { return err }")
-    assert _is_likely_code("def foo(): return 42")
+    # Code examples (no language hint, should detect from syntax)
+    assert _detect_query_mode("for i in range(3): try: pass except: pass", None) == "code"
+    assert _detect_query_mode("if err != nil { return err }", None) == "code"
+    assert _detect_query_mode("def foo(): return 42", None) == "code"
+    assert _detect_query_mode("func main() {}", None) == "code"
+    assert _detect_query_mode("fn main() -> Result<()>", None) == "code"
 
-    assert not _is_likely_code("retry with exponential backoff")
-    assert not _is_likely_code("find error handling patterns")
-    assert not _is_likely_code("resource cleanup code")
+    # Natural language descriptions
+    assert _detect_query_mode("retry with exponential backoff", None) == "description"
+    assert _detect_query_mode("find error handling patterns", None) == "description"
+    assert _detect_query_mode("resource cleanup code", None) == "description"
+    assert _detect_query_mode("decorator pattern wrapping function", None) == "description"
+
+    # Explicit language hint forces code mode
+    assert _detect_query_mode("some text", "python") == "code"
+    assert _detect_query_mode("some text", "go") == "code"
 
 
 # ============================================================================

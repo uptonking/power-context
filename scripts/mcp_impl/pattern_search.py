@@ -42,35 +42,63 @@ def _ensure_pattern_search():
         return False
 
 
-# Heuristics to detect if query is code vs natural language
-_CODE_INDICATORS = re.compile(
-    r'[{}\[\]();=<>]|'           # Brackets, semicolons, operators
-    r'\b(def|func|fn|function|class|if|for|while|try|catch|except|return|import|from)\b|'
-    r'::|->|=>|\.\w+\(|'         # C++/Rust/JS syntax
-    r'^\s*(for|if|while|def|class)\s',  # Python/common keywords at line start
-    re.IGNORECASE | re.MULTILINE
+# Supported languages for tree-sitter parsing
+_SUPPORTED_LANGUAGES = {
+    "python", "javascript", "typescript", "go", "rust", "java", "c", "cpp",
+    "ruby", "php", "csharp", "kotlin", "swift", "scala", "bash", "lua",
+}
+
+# Fenced code block pattern
+_FENCED_CODE = re.compile(r'^```\w*\n.*\n```$', re.DOTALL)
+
+# Universal code syntax patterns (work across all languages)
+_CODE_SYNTAX = re.compile(
+    r'[{}\[\]();]|'                          # Brackets, braces, parens, semicolons
+    r'::|->|=>|:=|'                          # C++/Rust/Go/JS operators
+    r'\.\w+\(|'                              # Method call: .foo(
+    r'\w+\s*\([^)]*\)|'                      # Function call: foo() or foo(args)
+    r'^\s*(def|func|fn|function|class|struct|enum|impl|trait|interface)\s+\w',  # Definitions
+    re.MULTILINE
 )
 
-_NL_INDICATORS = re.compile(
-    r'^(find|search|show|get|list|what|where|how|why|implement|pattern|code that|files with)\b',
-    re.IGNORECASE
+# Multi-line code indicators (braces/semicolons at line boundaries)
+_MULTILINE_CODE = re.compile(
+    r'[{}]\s*$|'                 # Brace at line end
+    r'^\s*[{}]|'                 # Brace at line start
+    r';\s*$',                    # Semicolon at line end
+    re.MULTILINE
 )
 
 
-def _is_likely_code(text: str) -> bool:
-    """Heuristically detect if text is code vs natural language."""
+def _detect_query_mode(text: str, language: str | None) -> str:
+    """
+    Auto-detect if text is code or natural language description.
+
+    Works across all 16+ supported languages using universal syntax patterns.
+    Returns: "code" or "description"
+    """
     text = text.strip()
-    # Short queries without code chars are likely NL
-    if len(text) < 30 and not _CODE_INDICATORS.search(text):
-        return False
-    # Check for NL question patterns
-    if _NL_INDICATORS.match(text):
-        return False
-    # Check for code indicators
-    if _CODE_INDICATORS.search(text):
-        return True
-    # Default: treat as NL if short, code if long
-    return len(text) > 50
+    if not text:
+        return "description"
+
+    # 1. Explicit language provided and supported → code
+    if language and language.lower() in _SUPPORTED_LANGUAGES:
+        return "code"
+
+    # 2. Fenced code block → code
+    if _FENCED_CODE.match(text):
+        return "code"
+
+    # 3. Multi-line with braces/semicolons → code
+    if '\n' in text and _MULTILINE_CODE.search(text):
+        return "code"
+
+    # 4. Universal code syntax (brackets, operators, calls, definitions)
+    if _CODE_SYNTAX.search(text):
+        return "code"
+
+    # 5. Default to natural language
+    return "description"
 
 
 async def _pattern_search_impl(
@@ -88,6 +116,7 @@ async def _pattern_search_impl(
     compact: Optional[bool] = None,
     aroma_rerank: Optional[bool] = None,
     aroma_alpha: Optional[float] = None,
+    query_mode: Optional[str] = None,  # "code", "description", or "auto" (default)
     coerce_bool_fn=None,
     coerce_int_fn=None,
     coerce_float_fn=None,
@@ -141,8 +170,17 @@ async def _pattern_search_impl(
     eff_aroma_rerank = _coerce_bool(aroma_rerank, True)  # AROMA enabled by default
     eff_aroma_alpha = _coerce_float(aroma_alpha, 0.6)
 
-    # Auto-detect: code example vs natural language description
-    is_code = _is_likely_code(query_text)
+    # Determine query mode: explicit override or auto-detect
+    eff_language = str(language).strip() if language else None
+    eff_query_mode = str(query_mode).strip().lower() if query_mode else "auto"
+
+    if eff_query_mode == "code":
+        is_code = True
+    elif eff_query_mode == "description":
+        is_code = False
+    else:  # auto
+        detected = _detect_query_mode(query_text, eff_language)
+        is_code = (detected == "code")
 
     # Path-specific min_score defaults:
     # - Code path: 0.5 (vector similarity scores are typically higher)
@@ -154,7 +192,7 @@ async def _pattern_search_impl(
             # Structural pattern search using code example
             result = _pattern_search_fn(
                 example=query_text,
-                language=str(language).strip() if language else "python",
+                language=eff_language or "python",
                 limit=eff_limit,
                 min_score=eff_min_score,
                 include_snippet=eff_include_snippet,

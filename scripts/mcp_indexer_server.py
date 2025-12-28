@@ -2101,6 +2101,7 @@ if _PATTERN_SEARCH_ENABLED:
         compact: Any = None,
         aroma_rerank: Any = None,
         aroma_alpha: Any = None,
+        query_mode: Any = None,
     ) -> Dict[str, Any]:
         """Find structurally similar code patterns across all languages.
 
@@ -2114,7 +2115,8 @@ if _PATTERN_SEARCH_ENABLED:
 
         Key parameters:
         - query: str. Code snippet OR natural language description of pattern.
-        - language: str (default "python"). Language hint for code examples.
+        - query_mode: str. "code", "description", or "auto" (default). Explicit override for detection.
+        - language: str. Language hint for code examples (also triggers code mode in auto).
         - limit: int (default 10). Maximum results to return.
         - min_score: float (default 0.3). Minimum similarity score threshold.
         - include_snippet: bool (default false). Include code snippets in results.
@@ -2129,7 +2131,7 @@ if _PATTERN_SEARCH_ENABLED:
 
         Examples:
         - pattern_search(query="for i in range(3): try: ... except: time.sleep(2**i)")
-        - pattern_search(query="retry with exponential backoff")
+        - pattern_search(query="retry with exponential backoff", query_mode="description")
         - pattern_search(query="if err != nil { return err }", language="go")
         """
         return await _pattern_search_impl(
@@ -2147,6 +2149,7 @@ if _PATTERN_SEARCH_ENABLED:
             compact=compact,
             aroma_rerank=aroma_rerank,
             aroma_alpha=aroma_alpha,
+            query_mode=query_mode,
             coerce_bool_fn=_coerce_bool,
             coerce_int_fn=_coerce_int,
             coerce_float_fn=lambda v, d: safe_float(v, default=d, logger=logger, context="pattern_search"),
