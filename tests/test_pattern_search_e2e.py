@@ -108,9 +108,9 @@ def pattern_collection():
     from qdrant_client.models import Distance, VectorParams, PointStruct
     from scripts.pattern_detection import PatternExtractor, PatternEncoder
 
-    qdrant_url = os.environ.get("QDRANT_URL", "http://localhost:6333")
+    # Use CI's Qdrant service directly (not env var which may be polluted by testcontainers)
     collection_name = f"test_pattern_{uuid.uuid4().hex[:8]}"
-    client = QdrantClient(url=qdrant_url, timeout=30)
+    client = QdrantClient(url="http://localhost:6333", timeout=30)
 
     client.create_collection(
         collection_name=collection_name,
