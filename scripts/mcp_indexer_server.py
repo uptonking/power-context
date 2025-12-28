@@ -186,6 +186,7 @@ from scripts.mcp_impl.symbol_graph import (
     _symbol_graph_impl,
     _format_symbol_graph_toon,
 )
+from scripts.mcp_impl.pattern_search import _pattern_search_impl
 
 # Global lock to guard temporary env toggles used during ReFRAG retrieval/decoding
 _ENV_LOCK = threading.Lock()
@@ -2079,6 +2080,61 @@ async def memory_find(
     )
 
 
+# ---------------------------------------------------------------------------
+# Pattern Search - Structural code similarity (conditional on PATTERN_VECTORS=1)
+# ---------------------------------------------------------------------------
+_PATTERN_SEARCH_ENABLED = str(os.environ.get("PATTERN_VECTORS", "")).strip().lower() in {
+    "1", "true", "yes", "on"
+}
+
+if _PATTERN_SEARCH_ENABLED:
+    @mcp.tool()
+    async def pattern_search(
+        query: Any = None,
+        language: Any = None,
+        limit: Any = None,
+        min_score: Any = None,
+        include_snippet: Any = None,
+        context_lines: Any = None,
+        target_languages: Any = None,
+        output_format: Any = None,
+        compact: Any = None,
+    ) -> Dict[str, Any]:
+        """Find structurally similar code patterns across languages.
+
+        Accepts code examples OR natural language descriptions.
+
+        Parameters:
+        - query: Code snippet or pattern description
+        - language: Language hint (default "python")
+        - limit: Max results (default 10)
+        - min_score: Similarity threshold (default 0.3)
+        - include_snippet: Include code in results
+        - target_languages: Filter target languages
+
+        Examples:
+        - pattern_search(query="for i in range(3): try: ... except: sleep(i)")
+        - pattern_search(query="retry with exponential backoff")
+        """
+        return await _pattern_search_impl(
+            query=query,
+            language=language,
+            limit=limit,
+            min_score=min_score,
+            include_snippet=include_snippet,
+            context_lines=context_lines,
+            hybrid=None,
+            semantic_weight=None,
+            collection=None,
+            target_languages=target_languages,
+            output_format=output_format,
+            compact=compact,
+            coerce_bool_fn=_coerce_bool,
+            coerce_int_fn=_coerce_int,
+            coerce_float_fn=lambda v, d: safe_float(v, default=d, logger=logger, context="pattern_search"),
+        )
+
+
 _relax_var_kwarg_defaults()
 
 if __name__ == "__main__":
@@ -2117,6 +2173,7 @@ if __name__ == "__main__":
     logger.info(f"  Reranker Enabled: {os.environ.get('RERANKER_ENABLED', '0')}")
     logger.info(f"  Rerank Top N: {os.environ.get('RERANK_TOP_N', '20')}")
     logger.info(f"  Rerank Timeout MS: {os.environ.get('RERANK_TIMEOUT_MS', '500')}")
+    logger.info(f"  Pattern Search: {'enabled' if _PATTERN_SEARCH_ENABLED else 'disabled (set PATTERN_VECTORS=1)'}")
     logger.info("=" * 60)
 
     # Optional warmups: gated by env flags to avoid delaying readiness on fresh containers

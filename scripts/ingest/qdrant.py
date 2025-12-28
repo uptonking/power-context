@@ -38,11 +38,16 @@ class CollectionNeedsRecreateError(Exception):
     pass
 
 
+PATTERN_VECTOR_NAME = "pattern_vector"
+PATTERN_VECTOR_DIM = 64  # Structural pattern embedding dimension
+
+
 def ensure_collection(client: QdrantClient, name: str, dim: int, vector_name: str):
     """Ensure collection exists with named vectors.
-    
+
     Always includes dense (vector_name) and lexical (LEX_VECTOR_NAME).
     When REFRAG_MODE=1, also includes a compact mini vector (MINI_VECTOR_NAME).
+    When PATTERN_VECTORS=1, also includes pattern_vector for structural similarity.
     """
     backup_file = None
     try:
@@ -84,6 +89,22 @@ def ensure_collection(client: QdrantClient, name: str, dim: int, vector_name: st
                         distance=models.Distance.COSINE,
                     )
 
+                # Check for pattern vector
+                try:
+                    pattern_on = os.environ.get("PATTERN_VECTORS", "").strip().lower() in {
+                        "1", "true", "yes", "on",
+                    }
+                    has_pattern = PATTERN_VECTOR_NAME in cfg
+                except Exception:
+                    pattern_on = False
+                    has_pattern = False
+
+                if pattern_on and not has_pattern:
+                    missing[PATTERN_VECTOR_NAME] = models.VectorParams(
+                        size=PATTERN_VECTOR_DIM,
+                        distance=models.Distance.COSINE,
+                    )
+
                 if missing:
                     try:
                         client.update_collection(
@@ -120,6 +141,14 @@ def ensure_collection(client: QdrantClient, name: str, dim: int, vector_name: st
         if os.environ.get("REFRAG_MODE", "").strip().lower() in {"1", "true", "yes", "on"}:
             vectors_cfg[MINI_VECTOR_NAME] = models.VectorParams(
                 size=int(os.environ.get("MINI_VEC_DIM", MINI_VEC_DIM) or MINI_VEC_DIM),
+                distance=models.Distance.COSINE,
+            )
+    except Exception:
+        pass
+    try:
+        if os.environ.get("PATTERN_VECTORS", "").strip().lower() in {"1", "true", "yes", "on"}:
+            vectors_cfg[PATTERN_VECTOR_NAME] = models.VectorParams(
+                size=PATTERN_VECTOR_DIM,
                 distance=models.Distance.COSINE,
             )
     except Exception:
@@ -243,6 +272,14 @@ def recreate_collection(client: QdrantClient, name: str, dim: int, vector_name: 
         if os.environ.get("REFRAG_MODE", "").strip().lower() in {"1", "true", "yes", "on"}:
             vectors_cfg[MINI_VECTOR_NAME] = models.VectorParams(
                 size=int(os.environ.get("MINI_VEC_DIM", MINI_VEC_DIM) or MINI_VEC_DIM),
+                distance=models.Distance.COSINE,
+            )
+    except Exception:
+        pass
+    try:
+        if os.environ.get("PATTERN_VECTORS", "").strip().lower() in {"1", "true", "yes", "on"}:
+            vectors_cfg[PATTERN_VECTOR_NAME] = models.VectorParams(
+                size=PATTERN_VECTOR_DIM,
                 distance=models.Distance.COSINE,
             )
     except Exception:
