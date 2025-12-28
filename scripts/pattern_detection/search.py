@@ -29,6 +29,29 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
+# Helper Classes
+# =============================================================================
+
+class ScoredPoint:
+    """Wrapper to add a score attribute to scroll results for uniform handling."""
+    __slots__ = ('id', 'payload', 'score')
+
+    def __init__(self, point, score: float):
+        self.id = point.id
+        self.payload = point.payload
+        self.score = score
+
+
+def _get_line_value(primary: Optional[int], fallback: Optional[int], default: int = 1) -> int:
+    """Get line number with proper None handling (0 is valid, None falls back)."""
+    if primary is not None:
+        return primary
+    if fallback is not None:
+        return fallback
+    return default
+
+
+# =============================================================================
 # TOON Support
 # =============================================================================
 
@@ -243,8 +266,8 @@ class PatternSearchResult:
             "snippet": self.snippet,
             "matched_patterns": self.matched_patterns,
             "control_flow_signature": self.control_flow_signature,
-            "semantic_score": round(self.semantic_score, 4) if self.semantic_score else None,
-            "combined_score": round(self.combined_score, 4) if self.combined_score else None,
+            "semantic_score": round(self.semantic_score, 4) if self.semantic_score is not None else None,
+            "combined_score": round(self.combined_score, 4) if self.combined_score is not None else None,
         }
 
 
@@ -261,8 +284,10 @@ class PatternSearchResponse:
 
     def to_dict(self, compact: bool = False) -> Dict[str, Any]:
         """Convert to dictionary for JSON/TOON serialization."""
+        # ok=False when search_mode is "error" to signal failure to callers
+        is_ok = self.search_mode != "error"
         return {
-            "ok": True,
+            "ok": is_ok,
             "results": [r.to_dict() for r in self.results],
             "total": self.total,
             "query_signature": self.query_signature,
@@ -378,19 +403,23 @@ def pattern_search(
         # Search for similar patterns
         # First check if collection has pattern_vector field
         collection_info = client.get_collection(collection)
-        has_pattern_vector = "pattern_vector" in (
-            collection_info.config.params.vectors or {}
+        vectors_config = collection_info.config.params.vectors
+        # vectors can be a dict (named) or VectorParams (single unnamed vector)
+        has_pattern_vector = (
+            isinstance(vectors_config, dict) and "pattern_vector" in vectors_config
         )
 
         if has_pattern_vector:
             # Use dedicated pattern vector
-            results = client.search(
+            response = client.query_points(
                 collection_name=collection,
-                query_vector=("pattern_vector", query_vector),
+                query=query_vector,
+                using="pattern_vector",
                 limit=limit * 2,  # Over-fetch for filtering
                 query_filter=search_filter,
                 with_payload=True,
             )
+            results = response.points
         else:
             # Fallback: search using semantic vector with pattern-based reranking
             results = _fallback_pattern_search(
@@ -411,15 +440,16 @@ def pattern_search(
             meta = payload.get("metadata", {})
             path = meta.get("path") or payload.get("path") or payload.get("file_path", "")
 
-            # Deduplicate by path (keep highest score)
-            if path in seen_paths:
+            # Deduplicate: prefer path, fall back to point id when path is empty
+            dedup_key = path if path else str(getattr(hit, 'id', id(hit)))
+            if dedup_key in seen_paths:
                 continue
-            seen_paths.add(path)
+            seen_paths.add(dedup_key)
 
             result = PatternSearchResult(
                 path=path,
-                start_line=meta.get("start_line") or payload.get("start_line", 1),
-                end_line=meta.get("end_line") or payload.get("end_line", 1),
+                start_line=_get_line_value(meta.get("start_line"), payload.get("start_line"), 1),
+                end_line=_get_line_value(meta.get("end_line"), payload.get("end_line"), 1),
                 score=hit.score,
                 language=meta.get("language") or payload.get("language", "unknown"),
                 control_flow_signature=payload.get("cf_signature", ""),
@@ -555,11 +585,13 @@ def search_by_pattern_description(
 
     client = _get_qdrant_client()
     if client is None or not best_pattern.centroid:
+        # Mark as error so ok=False propagates to callers
         response = PatternSearchResponse(
             results=[],
             total=0,
             query_signature="NL:" + description[:30],
             discovered_patterns=[p.auto_description for p in matched_patterns],
+            search_mode="error",
         )
         return response.format(output_format, compact) if use_toon else response
 
@@ -575,23 +607,69 @@ def search_by_pattern_description(
         )
 
     try:
-        results = client.search(
-            collection_name=collection,
-            query_vector=best_pattern.centroid,
-            limit=limit,
-            query_filter=search_filter,
-            with_payload=True,
+        # Check if collection has pattern_vector field
+        collection_info = client.get_collection(collection)
+        vectors_config = collection_info.config.params.vectors
+        has_pattern_vector = (
+            isinstance(vectors_config, dict) and "pattern_vector" in vectors_config
         )
+
+        if has_pattern_vector:
+            response = client.query_points(
+                collection_name=collection,
+                query=best_pattern.centroid,
+                using="pattern_vector",
+                limit=limit,
+                query_filter=search_filter,
+                with_payload=True,
+            )
+            results = response.points
+        else:
+            # No pattern_vector in collection - use scroll + in-memory reranking
+            # Cannot use vector search: pattern centroid (64-dim) != semantic vector (384-dim)
+            logger.debug("No pattern_vector field, using scroll + rerank for NL search")
+            scroll_results, _ = client.scroll(
+                collection_name=collection,
+                scroll_filter=search_filter,
+                limit=limit * 3,
+                with_payload=True,
+                with_vectors=False,
+            )
+            # Rerank by pattern description match (simple keyword overlap)
+            description_words = set(description.lower().split())
+            scored_results = []
+            for point in scroll_results:
+                payload = point.payload or {}
+                meta = payload.get("metadata", {})
+                # Check common text field names used in code collections
+                text = (
+                    payload.get("text", "") or
+                    payload.get("content", "") or
+                    payload.get("code", "") or
+                    meta.get("text", "") or
+                    meta.get("code", "")
+                )
+                text_words = set(text.lower().split())
+                overlap = len(description_words & text_words) / max(len(description_words), 1)
+                # Wrap in ScoredPoint to preserve the overlap score
+                scored_results.append(ScoredPoint(point, overlap))
+            scored_results.sort(key=lambda x: x.score, reverse=True)
+            results = scored_results[:limit]
 
         search_results = []
         for hit in results:
             payload = hit.payload or {}
+            # Support both flat payload and nested metadata (consistent with pattern_search)
+            meta = payload.get("metadata", {})
+            path = meta.get("path") or payload.get("path") or payload.get("file_path", "")
+            # Use .score attribute (works for both search results and ScoredPoint)
+            score = getattr(hit, 'score', 0.5)
             search_results.append(PatternSearchResult(
-                path=payload.get("path", ""),
-                start_line=payload.get("start_line", 1),
-                end_line=payload.get("end_line", 1),
-                score=hit.score,
-                language=payload.get("language", "unknown"),
+                path=path,
+                start_line=_get_line_value(meta.get("start_line"), payload.get("start_line"), 1),
+                end_line=_get_line_value(meta.get("end_line"), payload.get("end_line"), 1),
+                score=score,
+                language=meta.get("language") or payload.get("language", "unknown"),
                 matched_patterns=[best_pattern.auto_description],
             ))
 
@@ -632,57 +710,54 @@ def _fallback_pattern_search(
     """
     Fallback search when collection doesn't have pattern_vector field.
 
-    Uses semantic search + in-memory pattern reranking.
+    Uses scroll with in-memory pattern reranking since we can't do
+    vector search with mismatched dimensions.
     """
-    from qdrant_client.models import Filter, FieldCondition, MatchValue
-
-    # Do a broader semantic search
+    # Can't use pattern_vector (64-dim) against semantic vectors (384-dim)
+    # Instead, scroll through relevant documents and rerank by pattern similarity
     try:
-        semantic_results = client.search(
+        # Scroll with filter to get candidate documents
+        semantic_results, _ = client.scroll(
             collection_name=collection,
-            query_vector=pattern_vector,  # Use as dense vector
+            scroll_filter=search_filter,
             limit=limit * 3,
-            query_filter=search_filter,
             with_payload=True,
+            with_vectors=False,
         )
-    except Exception:
-        # Try with explicit vector name
-        try:
-            semantic_results = client.search(
-                collection_name=collection,
-                query_vector=("dense", pattern_vector[:384] if len(pattern_vector) > 384 else pattern_vector),
-                limit=limit * 3,
-                query_filter=search_filter,
-                with_payload=True,
-            )
-        except Exception:
-            return []
+    except Exception as e:
+        logger.debug(f"Fallback scroll failed: {e}")
+        return []
 
-    # Rerank by structural similarity if we have cf_signature in payload
-    extractor = _get_extractor()
-    encoder = _get_encoder()
+    # Rerank by structural similarity using cf_signature in payload
     query_cf = signature.control_flow.get("normalized_sequence", [])
 
-    reranked = []
-    for hit in semantic_results:
-        payload = hit.payload or {}
+    # Baseline score for documents without cf_sequence or when query has no CF nodes:
+    # - Set BELOW default min_score (0.5) so unverified matches don't pass by default
+    # - This prioritizes precision: only items with actual pattern similarity surface
+    # - Callers can lower min_score (e.g., 0.3) to include these fallback results
+    BASELINE_SCORE_NO_CF = 0.4
 
-        # If we have stored pattern info, use it
+    reranked = []
+    for point in semantic_results:
+        payload = point.payload or {}
+
+        # Calculate similarity from stored pattern info
         stored_cf = payload.get("cf_sequence", [])
         if stored_cf and query_cf:
-            # Calculate Jaccard similarity of control flow
+            # Jaccard similarity of control flow sequences
             set_query = set(query_cf)
             set_stored = set(stored_cf)
             intersection = len(set_query & set_stored)
             union = len(set_query | set_stored)
-            cf_similarity = intersection / union if union > 0 else 0
+            cf_similarity = intersection / union if union > 0 else 0.0
+        elif not stored_cf or not query_cf:
+            # No cf_sequence in payload OR query has no control-flow nodes
+            # Assign baseline score - filtered by default min_score unless caller lowers it
+            cf_similarity = BASELINE_SCORE_NO_CF
 
-            # Combine scores
-            hit.score = 0.5 * hit.score + 0.5 * cf_similarity
+        reranked.append(ScoredPoint(point, cf_similarity))
 
-        reranked.append(hit)
-
-    # Sort by combined score
+    # Sort by score and return top results
     reranked.sort(key=lambda x: x.score, reverse=True)
     return reranked[:limit]
 

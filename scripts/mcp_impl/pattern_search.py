@@ -99,15 +99,23 @@ async def _pattern_search_impl(
 
     query_text = str(query).strip()
 
-    # Coerce parameters
-    _coerce_bool = coerce_bool_fn or (lambda v, d: bool(v) if v is not None else d)
-    _coerce_int = coerce_int_fn or (lambda v, d: int(v) if v is not None else d)
-    _coerce_float = coerce_float_fn or (lambda v, d: float(v) if v is not None else d)
-
-    eff_limit = _coerce_int(limit, 10)
-    eff_min_score = _coerce_float(min_score, 0.3)
-    eff_include_snippet = _coerce_bool(include_snippet, False)
-    eff_context_lines = _coerce_int(context_lines, 2)
+    # Coerce parameters - handle string "false"/"0" correctly
+    def _default_coerce_bool(v, d):
+        if v is None:
+            return d
+        if isinstance(v, bool):
+        # Apply min_score filtering for NL results (not supported natively).
+        # TOON returns a string for results; only filter when we actually have a list.
+        if (
+            not is_code
+            and eff_min_score > 0
+            and isinstance(result.get("results"), list)
+        ):
+            result["results"] = [
+                r for r in result["results"]
+                if r.get("score", 0) >= eff_min_score
+            ]
+            result["total"] = len(result["results"])
     eff_hybrid = _coerce_bool(hybrid, False)
     eff_semantic_weight = _coerce_float(semantic_weight, 0.3)
     eff_compact = _coerce_bool(compact, False)
@@ -134,6 +142,8 @@ async def _pattern_search_impl(
             )
         else:
             # Natural language pattern description search
+            # Note: NL search doesn't support min_score filtering at the API level
+            # but we filter results client-side for consistency
             result = _search_by_pattern_description_fn(
                 description=query_text,
                 limit=eff_limit,
@@ -143,14 +153,28 @@ async def _pattern_search_impl(
                 compact=eff_compact,
             )
 
-        # Return result
-        if isinstance(result, dict):
-            result["ok"] = True
-            result["query_mode"] = "code" if is_code else "description"
-            return result
-        # Convert response object to dict
-        out = {"ok": True, "query_mode": "code" if is_code else "description", **result.to_dict()}
-        return out
+        # Convert response object to dict if needed
+        if not isinstance(result, dict):
+            result = result.to_dict()
+
+        # Preserve upstream ok flag (derived from search_mode) instead of overriding
+        # This ensures errors from core search propagate to MCP clients
+        result["query_mode"] = "code" if is_code else "description"
+
+        # Apply min_score filtering for NL results (not supported natively).
+        # TOON returns a string for results; only filter when we actually have a list.
+        if (
+            not is_code
+            and eff_min_score > 0
+            and isinstance(result.get("results"), list)
+        ):
+            result["results"] = [
+                r for r in result["results"]
+                if r.get("score", 0) >= eff_min_score
+            ]
+            result["total"] = len(result["results"])
+
+        return result
     except Exception as e:
         logger.error(f"Pattern search failed: {e}")
         return {"ok": False, "error": str(e)}

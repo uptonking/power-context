@@ -83,7 +83,8 @@ class PatternMiner:
 
     def __init__(self):
         self._patterns: Dict[str, DiscoveredPattern] = {}
-        self._signature_index: Dict[str, List[Tuple[str, str]]] = defaultdict(list)  # lsh_hash -> [(path, lang)]
+        # lsh_hash -> [(path, language, vector, signature)]
+        self._signature_index: Dict[str, List[Tuple[str, str, List[float], Any]]] = defaultdict(list)
         self._extractor = None
         self._encoder = None
 
@@ -156,11 +157,14 @@ class PatternMiner:
             if len(items) < min_support:
                 continue
 
-            # Get cluster members
-            paths = frozenset(item[0] for item in items)
-            if paths in processed_clusters:
+            # Get cluster members - use (path, signature_fingerprint) to allow multiple spans per file
+            members = frozenset((item[0], item[3].fingerprint()) for item in items)
+            if members in processed_clusters:
                 continue
-            processed_clusters.add(paths)
+            processed_clusters.add(members)
+
+            # Extract unique paths for pattern ID and exemplars
+            paths = list(set(item[0] for item in items))
 
             # Compute cluster coherence (avg pairwise similarity)
             vecs = [item[2] for item in items]
@@ -182,7 +186,7 @@ class PatternMiner:
                 common_ngrams=common['ngrams'],
                 common_cf=common['cf'],
                 centroid=self._compute_centroid(vecs),
-                exemplars=list(paths)[:10],
+                exemplars=paths[:10],
                 languages=set(item[1] for item in items),
                 cluster_size=len(items),
                 coherence_score=coherence,
@@ -335,15 +339,17 @@ class PatternMiner:
         lsh_hashes = self._compute_lsh_hashes(vec)
 
         # Gather candidates from all matching LSH buckets
+        # Key by (path, signature_fingerprint) to allow multiple spans per file
         candidates = {}
         for h in lsh_hashes:
             for path, lang, cvec, csig in self._signature_index.get(h, []):
-                if path not in candidates:
+                key = (path, csig.fingerprint())
+                if key not in candidates:
                     sim = self._cosine_similarity(vec, cvec)
-                    candidates[path] = (sim, lang)
+                    candidates[key] = (sim, lang, path)
 
         # Sort by similarity
-        results = [(path, sim) for path, (sim, lang) in candidates.items()]
+        results = [(path, sim) for key, (sim, lang, path) in candidates.items()]
         results.sort(key=lambda x: -x[1])
 
         return results[:top_k]

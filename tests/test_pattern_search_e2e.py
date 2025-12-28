@@ -108,9 +108,10 @@ def pattern_collection():
     from qdrant_client.models import Distance, VectorParams, PointStruct
     from scripts.pattern_detection import PatternExtractor, PatternEncoder
 
-    # Use CI's Qdrant service directly (not env var which may be polluted by testcontainers)
+    # Default to localhost for CI; allow override for local/dev containers.
     collection_name = f"test_pattern_{uuid.uuid4().hex[:8]}"
-    client = QdrantClient(url="http://localhost:6333", timeout=30)
+    qdrant_url = os.environ.get("QDRANT_URL", "http://localhost:6333")
+    client = QdrantClient(url=qdrant_url, timeout=30)
 
     client.create_collection(
         collection_name=collection_name,
@@ -166,4 +167,3 @@ def test_pattern_search_qdrant(pattern_collection):
     assert results.total >= 1, "Should find at least one result"
     paths = [r.path for r in results.results]
     assert "retry_python.py" in paths, "Should find Python retry"
-

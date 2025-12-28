@@ -148,15 +148,20 @@ class PatternEncoder:
             return vec
 
         edge_types = Counter(e[2] for e in cfg_edges)
+        # Exclude loop_entry from ratio calculation - it's structural, not semantic
+        # This keeps vector meaning stable after adding loop_entry edges
+        ratio_edges = len(cfg_edges) - edge_types.get("loop_entry", 0)
+        if ratio_edges <= 0:
+            ratio_edges = 1  # Avoid division by zero
+
+        vec[0] = edge_types.get("sequential", 0) / ratio_edges
+        vec[1] = edge_types.get("branch_true", 0) / ratio_edges
+        vec[2] = edge_types.get("branch_false", 0) / ratio_edges
+        vec[3] = edge_types.get("loop_back", 0) / ratio_edges
+        vec[4] = edge_types.get("exception", 0) / ratio_edges
+
+        # Graph density (use total_edges including loop_entry for topology)
         total_edges = len(cfg_edges)
-
-        vec[0] = edge_types.get("sequential", 0) / total_edges
-        vec[1] = edge_types.get("branch_true", 0) / total_edges
-        vec[2] = edge_types.get("branch_false", 0) / total_edges
-        vec[3] = edge_types.get("loop_back", 0) / total_edges
-        vec[4] = edge_types.get("exception", 0) / total_edges
-
-        # Graph density
         n_nodes = len(cfg_nodes)
         if n_nodes > 1:
             vec[5] = min(1.0, total_edges / (n_nodes * 2))
