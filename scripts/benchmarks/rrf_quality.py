@@ -417,7 +417,8 @@ async def run_rrf_benchmark() -> RRFReport:
     
     # Calculate RRF lift
     best_single = max(dense_metrics.mrr, lexical_metrics.mrr)
-    best_method = "dense" if dense_metrics.mrr > lexical_metrics.mrr else "lexical"
+    # Use >= to prefer dense in tie cases (consistent labeling)
+    best_method = "dense" if dense_metrics.mrr >= lexical_metrics.mrr else "lexical"
     
     rrf_lift_dense = (hybrid_metrics.mrr - dense_metrics.mrr) / dense_metrics.mrr * 100 if dense_metrics.mrr > 0 else 0
     rrf_lift_lexical = (hybrid_metrics.mrr - lexical_metrics.mrr) / lexical_metrics.mrr * 100 if lexical_metrics.mrr > 0 else 0

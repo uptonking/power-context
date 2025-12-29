@@ -134,9 +134,10 @@ def calculate_percentiles(values: List[float]) -> Dict[str, float]:
 
 async def get_tool_usage_stats() -> Dict[str, Any]:
     """Get comprehensive MCP tool usage statistics."""
+    # Note: JSON-RPC payload structure uses params.name for tool name, not params.args[1]
     sql = f"""
     SELECT 
-        JSONExtractString(SpanAttributes['mcp.request.payload'], 'params', 'args', 1) as tool_name,
+        JSONExtractString(SpanAttributes['mcp.request.payload'], 'params', 'name') as tool_name,
         count() as call_count,
         avg(Duration / 1e6) as avg_latency_ms,
         quantile(0.9)(Duration / 1e6) as p90_latency_ms
@@ -285,7 +286,7 @@ async def analyze_context_token_usage() -> Dict[str, Any]:
         avg(toFloat64OrZero(SpanAttributes['gen_ai.usage.input_tokens'])) as avg_input,
         avg(toFloat64OrZero(SpanAttributes['gen_ai.usage.output_tokens'])) as avg_output
     FROM openlit.otel_traces 
-    WHERE SpanName LIKE '%glm%' OR SpanName LIKE '%chat%'
+    WHERE (SpanName LIKE '%glm%' OR SpanName LIKE '%chat%')
       AND Timestamp > now() - {get_interval_clause()}
     """
     
@@ -474,18 +475,21 @@ async def analyze_query_patterns() -> Optional[TraceInsight]:
         return None
     
     # Parse payload JSON to extract queries
+    # Note: JSON-RPC uses params.arguments, not params.args
     queries = []
     for r in results:
         try:
             payload = json.loads(r.get("payload", "{}"))
             params = payload.get("params", {})
-            args = params.get("args", [])
-            if len(args) >= 2 and isinstance(args[1], dict):
-                query = args[1].get("query", "")
-                if isinstance(query, list):
-                    query = " ".join(str(q) for q in query)
-                if query and len(query.strip()) > 0:
-                    queries.append(query.strip())
+            # Try params.arguments first (standard JSON-RPC), fallback to params.args
+            arguments = params.get("arguments") or {}
+            if not arguments and isinstance(params.get("args"), list) and len(params["args"]) >= 2:
+                arguments = params["args"][1] if isinstance(params["args"][1], dict) else {}
+            query = arguments.get("query", "")
+            if isinstance(query, list):
+                query = " ".join(str(q) for q in query)
+            if query and len(query.strip()) > 0:
+                queries.append(query.strip())
         except (json.JSONDecodeError, KeyError, IndexError, TypeError):
             continue
     
@@ -781,9 +785,9 @@ async def analyze_latency_breakdown() -> Dict[str, Dict[str, float]]:
     """
     components = {
         "embed": "SpanName LIKE '%embed%'",
-        "qdrant_search": "SpanName LIKE '%qdrant%' OR SpanName LIKE '%GET Context%'",
+        "qdrant_search": "(SpanName LIKE '%qdrant%' OR SpanName LIKE '%GET Context%')",
         "rerank": "SpanName LIKE '%rerank%'",
-        "llm": "SpanName LIKE '%glm%' OR SpanName LIKE '%chat%'",
+        "llm": "(SpanName LIKE '%glm%' OR SpanName LIKE '%chat%')",
         "mcp_tool": "SpanName = 'mcp tools/call'",
     }
     

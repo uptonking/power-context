@@ -306,7 +306,8 @@ def generate_recommendations(
     recall_5 = eval_metrics.get("recall@5", 0)
     recall_10 = eval_metrics.get("recall@10", 0)
     precision_5 = eval_metrics.get("precision@5", 0)
-    p90_latency = eval_latency.get("p90", 0) or trm_metrics.get("p90_latency_ms", 0)
+    # Note: eval harness emits p90_ms, not p90
+    p90_latency = eval_latency.get("p90_ms", 0) or trm_metrics.get("p90_latency_ms", 0)
     grounding = refrag_metrics.get("grounding_rate", 1.0)
     citations = refrag_metrics.get("avg_citations", 0)
     kendall_tau = trm_metrics.get("kendall_tau", 0)

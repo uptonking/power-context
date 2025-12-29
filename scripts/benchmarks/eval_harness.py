@@ -116,17 +116,25 @@ class EvalReport:
 
 
 def compute_mrr(expected: List[str], retrieved: List[str]) -> float:
-    """Mean Reciprocal Rank."""
+    """Mean Reciprocal Rank.
+    
+    Uses endswith matching to avoid false positives (e.g., test_embedder.py matching embedder.py).
+    """
     for i, path in enumerate(retrieved):
-        if any(exp in path for exp in expected):
+        # Use endswith to avoid substring false positives
+        if any(path.endswith(exp) or path.endswith("/" + exp) for exp in expected):
             return 1.0 / (i + 1)
     return 0.0
 
 
 def compute_recall(expected: List[str], retrieved: List[str], k: int) -> float:
-    """Recall at k."""
+    """Recall at k.
+    
+    Uses endswith matching to avoid false positives.
+    """
     top_k = retrieved[:k]
-    hits = sum(1 for exp in expected if any(exp in r for r in top_k))
+    # Use endswith to avoid substring false positives
+    hits = sum(1 for exp in expected if any(r.endswith(exp) or r.endswith("/" + exp) for r in top_k))
     return hits / max(1, len(expected))
 
 
