@@ -116,14 +116,44 @@ class EvalReport:
         return base
 
 
+def _matches_expected(path: str, exp: str) -> bool:
+    """Check if a retrieved path matches an expected pattern.
+    
+    Supports:
+    - File matching: path.endswith(exp) or path.endswith("/exp") for files
+    - Directory matching: "/exp/" in path for directory expectations
+    """
+    p = str(path or "").replace("\\", "/")
+    e = str(exp or "").strip().replace("\\", "/").strip("/")
+    if not p or not e:
+        return False
+
+    # Decide expectation type:
+    # - If it has a suffix (".py", ".js", etc.) treat it as a file expectation.
+    # - Otherwise treat it as a directory/module token expectation.
+    try:
+        from pathlib import Path as _P
+        is_file = bool(_P(e).suffix)
+    except Exception:
+        is_file = "." in e
+
+    if is_file:
+        return p.endswith("/" + e) or p.endswith(e)
+    return (f"/{e}/" in p) or p.endswith("/" + e) or p.endswith(e)
+
+
+def compute_mrr_at_k(expected: List[str], retrieved: List[str], k: int) -> float:
+    """MRR@k (MRR computed over top-k)."""
+    return compute_mrr(expected, retrieved[:k])
+
+
 def compute_mrr(expected: List[str], retrieved: List[str]) -> float:
     """Mean Reciprocal Rank.
     
-    Uses endswith matching to avoid false positives (e.g., test_embedder.py matching embedder.py).
+    Supports both file and directory expectations.
     """
     for i, path in enumerate(retrieved):
-        # Use endswith to avoid substring false positives
-        if any(path.endswith(exp) or path.endswith("/" + exp) for exp in expected):
+        if any(_matches_expected(path, exp) for exp in expected):
             return 1.0 / (i + 1)
     return 0.0
 
@@ -131,18 +161,20 @@ def compute_mrr(expected: List[str], retrieved: List[str]) -> float:
 def compute_recall(expected: List[str], retrieved: List[str], k: int) -> float:
     """Recall at k.
     
-    Uses endswith matching to avoid false positives.
+    Supports both file and directory expectations.
     """
     top_k = retrieved[:k]
-    # Use endswith to avoid substring false positives
-    hits = sum(1 for exp in expected if any(r.endswith(exp) or r.endswith("/" + exp) for r in top_k))
+    hits = sum(1 for exp in expected if any(_matches_expected(r, exp) for r in top_k))
     return hits / max(1, len(expected))
 
 
 def compute_precision(expected: List[str], retrieved: List[str], k: int) -> float:
-    """Precision at k."""
+    """Precision at k.
+    
+    Uses same matching logic as MRR/recall for consistency.
+    """
     top_k = retrieved[:k]
-    hits = sum(1 for r in top_k if any(exp in r for exp in expected))
+    hits = sum(1 for r in top_k if any(_matches_expected(r, exp) for exp in expected))
     # If fewer than k results returned, precision should be over the retrieved count.
     return hits / max(1, len(top_k))
 
@@ -219,6 +251,31 @@ async def run_evaluation(
             recall_at_10=compute_recall(expected, retrieved, 10),
             precision_at_5=compute_precision(expected, retrieved, 5),
         )
+
+        # --- Consistency checks (single expected file only) ---
+        try:
+            from pathlib import Path as _P
+            is_single_file = (
+                isinstance(expected, list)
+                and len(expected) == 1
+                and bool(_P(str(expected[0])).suffix)  # file-like expectation
+            )
+        except Exception:
+            is_single_file = isinstance(expected, list) and len(expected) == 1 and "." in str(expected[0])
+
+        if is_single_file:
+            mrr5 = compute_mrr_at_k(expected, retrieved, 5)
+            # If there's a hit in top-5, precision@5 must be > 0.
+            if mrr5 > 0 and qr.precision_at_5 <= 0:
+                raise AssertionError(
+                    f"Invariant violated for query='{query_text}': mrr@5={mrr5} but precision@5={qr.precision_at_5}"
+                )
+            # If any hit exists in top-5, recall@5 must be > 0.
+            if qr.precision_at_5 > 0 and qr.recall_at_5 <= 0:
+                raise AssertionError(
+                    f"Invariant violated for query='{query_text}': precision@5={qr.precision_at_5} but recall@5={qr.recall_at_5}"
+                )
+
         results.append(qr)
         print(f"  {query_text[:40]:40} MRR={qr.mrr:.3f} R@5={qr.recall_at_5:.2f}")
     

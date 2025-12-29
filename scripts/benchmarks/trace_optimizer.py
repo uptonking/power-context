@@ -485,11 +485,25 @@ async def analyze_query_patterns() -> Optional[TraceInsight]:
             arguments = params.get("arguments") or {}
             if not arguments and isinstance(params.get("args"), list) and len(params["args"]) >= 2:
                 arguments = params["args"][1] if isinstance(params["args"][1], dict) else {}
-            query = arguments.get("query", "")
+            
+            # Try multiple query field patterns
+            query = None
+            # 1. Direct query field
+            if arguments.get("query"):
+                query = arguments.get("query")
+            # 2. Multi-query (queries field for fusion/expansion)
+            elif arguments.get("queries"):
+                q = arguments.get("queries")
+                query = q if isinstance(q, str) else " ".join(str(x) for x in q) if isinstance(q, list) else None
+            # 3. Nested kwargs.query
+            elif isinstance(arguments.get("kwargs"), dict) and arguments["kwargs"].get("query"):
+                query = arguments["kwargs"].get("query")
+            
+            # Handle list of queries
             if isinstance(query, list):
                 query = " ".join(str(q) for q in query)
-            if query and len(query.strip()) > 0:
-                queries.append(query.strip())
+            if query and len(str(query).strip()) > 0:
+                queries.append(str(query).strip())
         except (json.JSONDecodeError, KeyError, IndexError, TypeError):
             continue
     
