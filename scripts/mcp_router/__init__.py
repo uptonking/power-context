@@ -92,7 +92,7 @@ from .validation import (
 )
 
 # Planning exports
-from .planning import build_plan
+from .planning import build_plan, route_query
 
 # ---------------------------------------------------------------------------
 # Private function imports for backward compatibility
@@ -197,6 +197,7 @@ __all__ = [
     "material_drop",
     # Planning
     "build_plan",
+    "route_query",
     # CLI
     "main",
 ]
