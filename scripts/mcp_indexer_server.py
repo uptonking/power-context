@@ -740,22 +740,6 @@ async def collection_map(
 
 
 @mcp.tool()
-async def store(
-    information: str,
-    metadata: Optional[Dict[str, Any]] = None,
-    collection: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Store a memory entry (alias for memory_store)."""
-    return await _memory_store_impl(
-        information=information,
-        metadata=metadata,
-        collection=collection,
-        default_collection_fn=_default_collection,
-        get_embedding_model_fn=_get_embedding_model,
-    )
-
-
-@mcp.tool()
 async def qdrant_status(
     collection: Optional[str] = None,
     max_points: Optional[int] = None,
