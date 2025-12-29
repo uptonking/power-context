@@ -94,37 +94,44 @@ def main() -> None:
         f"Watch mode: root={ROOT} qdrant={QDRANT_URL} collection={default_collection} model={MODEL}"
     )
 
-    # Health check: detect and auto-heal cache/collection sync issues
-    try:
-        from scripts.collection_health import auto_heal_if_needed, auto_heal_multi_repo
+    # Health check: detect and auto-heal cache/collection sync issues.
+    # In multi-repo mode this can be expensive and may duplicate external init checks,
+    # so default it OFF unless explicitly enabled.
+    run_health_check = get_boolean_env(
+        "WATCH_COLLECTION_HEALTHCHECK",
+        default=(False if multi_repo_enabled else True),
+    )
+    if run_health_check:
+        try:
+            from scripts.collection_health import auto_heal_if_needed, auto_heal_multi_repo
 
-        print("[health_check] Checking collection health...")
-        if multi_repo_enabled:
-            # Multi-repo: check each repo's collection
-            heal_result = auto_heal_multi_repo(str(ROOT), QDRANT_URL, dry_run=False)
-            if heal_result.get("repos_healed", 0) > 0:
-                print(
-                    f"[health_check] Cleared cache for {heal_result['repos_healed']} repos with empty collections"
-                )
-            elif heal_result.get("repos_checked", 0) > 0:
-                print(f"[health_check] Checked {heal_result['repos_checked']} repos - all OK")
+            print("[health_check] Checking collection health...")
+            if multi_repo_enabled:
+                # Multi-repo: check each repo's collection
+                heal_result = auto_heal_multi_repo(str(ROOT), QDRANT_URL, dry_run=False)
+                if heal_result.get("repos_healed", 0) > 0:
+                    print(
+                        f"[health_check] Cleared cache for {heal_result['repos_healed']} repos with empty collections"
+                    )
+                elif heal_result.get("repos_checked", 0) > 0:
+                    print(f"[health_check] Checked {heal_result['repos_checked']} repos - all OK")
+                else:
+                    print("[health_check] No repos with cached state to check")
             else:
-                print("[health_check] No repos with cached state to check")
-        else:
-            # Single-repo mode
-            heal_result = auto_heal_if_needed(
-                str(ROOT), default_collection, QDRANT_URL, dry_run=False
-            )
-            if heal_result.get("action_taken") == "cleared_cache":
-                print("[health_check] Cache cleared due to sync issue - files will be reindexed")
-            elif not heal_result.get("health_check", {}).get("healthy", True):
-                print(
-                    f"[health_check] Issue detected: {heal_result['health_check'].get('issue', 'unknown')}"
+                # Single-repo mode
+                heal_result = auto_heal_if_needed(
+                    str(ROOT), default_collection, QDRANT_URL, dry_run=False
                 )
-            else:
-                print("[health_check] Collection health OK")
-    except Exception as e:
-        print(f"[health_check] Warning: health check failed: {e}")
+                if heal_result.get("action_taken") == "cleared_cache":
+                    print("[health_check] Cache cleared due to sync issue - files will be reindexed")
+                elif not heal_result.get("health_check", {}).get("healthy", True):
+                    print(
+                        f"[health_check] Issue detected: {heal_result['health_check'].get('issue', 'unknown')}"
+                    )
+                else:
+                    print("[health_check] Collection health OK")
+        except Exception as e:
+            print(f"[health_check] Warning: health check failed: {e}")
 
     client = QdrantClient(
         url=QDRANT_URL, timeout=int(os.environ.get("QDRANT_TIMEOUT", "20") or 20)
@@ -145,14 +152,21 @@ def main() -> None:
 
     vector_name = resolve_vector_name_config(client, default_collection, model_dim, MODEL)
 
-    try:
-        idx.ensure_collection_and_indexes_once(
-            client, default_collection, model_dim, vector_name
-        )
-    except Exception:
-        pass
+    # In multi-repo mode we index into per-repo collections; don't eagerly touch/create
+    # the default collection unless explicitly enabled.
+    ensure_default_collection = get_boolean_env(
+        "WATCH_ENSURE_DEFAULT_COLLECTION",
+        default=(False if multi_repo_enabled else True),
+    )
+    if ensure_default_collection:
+        try:
+            idx.ensure_collection_and_indexes_once(
+                client, default_collection, model_dim, vector_name
+            )
+        except Exception:
+            pass
 
-    _start_pseudo_backfill_worker(client, default_collection, model_dim, vector_name)
+        _start_pseudo_backfill_worker(client, default_collection, model_dim, vector_name)
 
     try:
         initialize_watcher_state(str(ROOT), multi_repo_enabled, default_collection)

@@ -1347,7 +1347,7 @@ def get_collection_name(repo_name: Optional[str] = None) -> str:
 
     # COLLECTION_NAME always wins when explicitly set to a real value.
     env_coll = os.environ.get("COLLECTION_NAME", "").strip()
-    if env_coll and env_coll not in PLACEHOLDER_COLLECTION_NAMES:
+    if env_coll and env_coll not in PLACEHOLDER_COLLECTION_NAMES and not (is_multi_repo_mode() and repo_name):
         try:
             if isinstance(repo_name, str) and repo_name.endswith("_old") and not env_coll.endswith("_old"):
                 return f"{env_coll}_old"
