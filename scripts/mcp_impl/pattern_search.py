@@ -42,35 +42,64 @@ def _ensure_pattern_search():
         return False
 
 
-# Heuristics to detect if query is code vs natural language
-_CODE_INDICATORS = re.compile(
-    r'[{}\[\]();=<>]|'           # Brackets, semicolons, operators
-    r'\b(def|func|fn|function|class|if|for|while|try|catch|except|return|import|from)\b|'
-    r'::|->|=>|\.\w+\(|'         # C++/Rust/JS syntax
-    r'^\s*(for|if|while|def|class)\s',  # Python/common keywords at line start
-    re.IGNORECASE | re.MULTILINE
+# Supported languages for tree-sitter parsing
+_SUPPORTED_LANGUAGES = {
+    "python", "javascript", "typescript", "go", "rust", "java", "c", "cpp",
+    "ruby", "php", "csharp", "kotlin", "swift", "scala", "bash", "lua",
+}
+
+# Fenced code block pattern
+_FENCED_CODE = re.compile(r'^```\w*\n.*\n```$', re.DOTALL)
+
+# Universal code syntax patterns (work across all languages)
+_CODE_SYNTAX = re.compile(
+    r'[{}\[\]();]|'                          # Brackets, braces, parens, semicolons
+    r'::|->|=>|:=|'                          # C++/Rust/Go/JS operators
+    r'\.\w+\(|'                              # Method call: .foo(
+    r'\w+\s*\([^)]*\)|'                      # Function call: foo() or foo(args)
+    r'^\s*(def|func|fn|function|class|struct|enum|impl|trait|interface)\s+\w',  # Definitions
+    re.MULTILINE
 )
 
-_NL_INDICATORS = re.compile(
-    r'^(find|search|show|get|list|what|where|how|why|implement|pattern|code that|files with)\b',
-    re.IGNORECASE
+# Multi-line code indicators (braces/semicolons at line boundaries)
+_MULTILINE_CODE = re.compile(
+    r'[{}]\s*$|'                 # Brace at line end
+    r'^\s*[{}]|'                 # Brace at line start
+    r';\s*$',                    # Semicolon at line end
+    re.MULTILINE
 )
 
 
-def _is_likely_code(text: str) -> bool:
-    """Heuristically detect if text is code vs natural language."""
+def _detect_query_mode(text: str, language: str | None) -> str:
+    """
+    Auto-detect if text is code or natural language description.
+
+    Works across all 16+ supported languages using universal syntax patterns.
+    Returns: "code" or "description"
+    """
     text = text.strip()
-    # Short queries without code chars are likely NL
-    if len(text) < 30 and not _CODE_INDICATORS.search(text):
-        return False
-    # Check for NL question patterns
-    if _NL_INDICATORS.match(text):
-        return False
-    # Check for code indicators
-    if _CODE_INDICATORS.search(text):
-        return True
-    # Default: treat as NL if short, code if long
-    return len(text) > 50
+    if not text:
+        return "description"
+
+    # 1. Fenced code block → code
+    if _FENCED_CODE.match(text):
+        return "code"
+
+    # 2. Multi-line with braces/semicolons → code
+    if '\n' in text and _MULTILINE_CODE.search(text):
+        return "code"
+
+    # 3. Universal code syntax (brackets, operators, calls, definitions)
+    if _CODE_SYNTAX.search(text):
+        return "code"
+
+    # 4. Language hint is advisory only; do NOT force code for NL text
+    if language and language.lower() in _SUPPORTED_LANGUAGES:
+        # If language is provided but we found no code markers, still treat as description
+        return "description"
+
+    # 5. Default to natural language
+    return "description"
 
 
 async def _pattern_search_impl(
@@ -86,6 +115,9 @@ async def _pattern_search_impl(
     target_languages: Optional[List[str]] = None,
     output_format: Optional[str] = None,
     compact: Optional[bool] = None,
+    aroma_rerank: Optional[bool] = None,
+    aroma_alpha: Optional[float] = None,
+    query_mode: Optional[str] = None,  # "code", "description", or "auto" (default)
     coerce_bool_fn=None,
     coerce_int_fn=None,
     coerce_float_fn=None,
@@ -99,28 +131,69 @@ async def _pattern_search_impl(
 
     query_text = str(query).strip()
 
-    # Coerce parameters
-    _coerce_bool = coerce_bool_fn or (lambda v, d: bool(v) if v is not None else d)
-    _coerce_int = coerce_int_fn or (lambda v, d: int(v) if v is not None else d)
-    _coerce_float = coerce_float_fn or (lambda v, d: float(v) if v is not None else d)
+    # Coerce parameters - handle string "false"/"0" correctly
+    def _default_coerce_bool(v, d):
+        if v is None:
+            return d
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            return v.strip().lower() in ("1", "true", "yes", "on")
+        return bool(v)
 
+    def _safe_coerce_int(v, d):
+        if v is None:
+            return d
+        try:
+            return int(v)
+        except (ValueError, TypeError):
+            return d
+
+    def _safe_coerce_float(v, d):
+        if v is None:
+            return d
+        try:
+            return float(v)
+        except (ValueError, TypeError):
+            return d
+
+    _coerce_bool = coerce_bool_fn or _default_coerce_bool
+    _coerce_int = coerce_int_fn or _safe_coerce_int
+    _coerce_float = coerce_float_fn or _safe_coerce_float
+
+    # Defaults aligned with core pattern_search API for consistent behavior
     eff_limit = _coerce_int(limit, 10)
-    eff_min_score = _coerce_float(min_score, 0.3)
-    eff_include_snippet = _coerce_bool(include_snippet, False)
-    eff_context_lines = _coerce_int(context_lines, 2)
+    eff_include_snippet = _coerce_bool(include_snippet, True)
+    eff_context_lines = _coerce_int(context_lines, 3)
     eff_hybrid = _coerce_bool(hybrid, False)
     eff_semantic_weight = _coerce_float(semantic_weight, 0.3)
     eff_compact = _coerce_bool(compact, False)
+    eff_aroma_rerank = _coerce_bool(aroma_rerank, True)  # AROMA enabled by default
+    eff_aroma_alpha = _coerce_float(aroma_alpha, 0.6)
 
-    # Auto-detect: code example vs natural language description
-    is_code = _is_likely_code(query_text)
+    # Determine query mode: explicit override or auto-detect
+    eff_language = str(language).strip() if language else None
+    eff_query_mode = str(query_mode).strip().lower() if query_mode else "auto"
+
+    if eff_query_mode == "code":
+        is_code = True
+    elif eff_query_mode == "description":
+        is_code = False
+    else:  # auto
+        detected = _detect_query_mode(query_text, eff_language)
+        is_code = (detected == "code")
+
+    # Path-specific min_score defaults:
+    # - Code path: 0.5 (vector similarity scores are typically higher)
+    # - NL path: 0.0 (keyword overlap scores are often low, don't filter by default)
+    eff_min_score = _coerce_float(min_score, 0.5 if is_code else 0.0)
 
     try:
         if is_code:
             # Structural pattern search using code example
             result = _pattern_search_fn(
                 example=query_text,
-                language=str(language).strip() if language else "python",
+                language=eff_language or "python",
                 limit=eff_limit,
                 min_score=eff_min_score,
                 include_snippet=eff_include_snippet,
@@ -131,26 +204,30 @@ async def _pattern_search_impl(
                 target_languages=target_languages,
                 output_format=output_format,
                 compact=eff_compact,
+                aroma_rerank=eff_aroma_rerank,
+                aroma_alpha=eff_aroma_alpha,
             )
         else:
             # Natural language pattern description search
             result = _search_by_pattern_description_fn(
                 description=query_text,
                 limit=eff_limit,
+                min_score=eff_min_score,
                 collection=collection,
                 target_languages=target_languages,
                 output_format=output_format,
                 compact=eff_compact,
             )
 
-        # Return result
-        if isinstance(result, dict):
-            result["ok"] = True
-            result["query_mode"] = "code" if is_code else "description"
-            return result
-        # Convert response object to dict
-        out = {"ok": True, "query_mode": "code" if is_code else "description", **result.to_dict()}
-        return out
+        # Convert response object to dict if needed
+        if not isinstance(result, dict):
+            result = result.to_dict()
+
+        # Preserve upstream ok flag (derived from search_mode) instead of overriding
+        # This ensures errors from core search propagate to MCP clients
+        result["query_mode"] = "code" if is_code else "description"
+
+        return result
     except Exception as e:
         logger.error(f"Pattern search failed: {e}")
         return {"ok": False, "error": str(e)}

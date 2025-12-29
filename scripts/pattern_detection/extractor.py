@@ -19,7 +19,10 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Set, Tuple, Optional, Any
 from collections import Counter
 import hashlib
+import logging
 import re
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -115,7 +118,8 @@ CONTROL_FLOW_NORMALIZATION: Dict[str, Dict[str, str]] = {
         "arrow_function": "LAMBDA", "class_declaration": "CLASS_DEF",
         "method_definition": "METHOD_DEF",
     },
-    "typescript": {},  # Inherits from javascript
+    # TypeScript inherits all JavaScript mappings (handled in _get_cf_map)
+    "typescript": None,  # Marker for inheritance - will fall back to javascript
     # Go
     "go": {
         "for_statement": "LOOP_FOR", "range_clause": "LOOP_RANGE",
@@ -236,9 +240,11 @@ CONTROL_FLOW_NORMALIZATION: Dict[str, Dict[str, str]] = {
 }
 
 # Build a unified lookup by flattening all language mappings
+# Skip None values (used as inheritance markers, e.g., typescript -> javascript)
 _UNIFIED_CF_MAP: Dict[str, str] = {}
 for lang_map in CONTROL_FLOW_NORMALIZATION.values():
-    _UNIFIED_CF_MAP.update(lang_map)
+    if lang_map is not None:
+        _UNIFIED_CF_MAP.update(lang_map)
 
 # =============================================================================
 # Dynamic fallback patterns - work for ANY language even without explicit mapping
@@ -393,12 +399,13 @@ class PatternExtractor:
         """
         lang_key = self._normalize_language(language)
 
-        # TypeScript inherits from JavaScript
-        if lang_key == "typescript" and lang_key not in CONTROL_FLOW_NORMALIZATION:
-            lang_key = "javascript"
+        # TypeScript inherits from JavaScript (None marker or missing key)
+        cf_map = CONTROL_FLOW_NORMALIZATION.get(lang_key)
+        if cf_map is None and lang_key == "typescript":
+            cf_map = CONTROL_FLOW_NORMALIZATION.get("javascript", {})
 
         # Return the map or empty dict - _UNIVERSAL_PATTERNS will catch unknowns
-        return CONTROL_FLOW_NORMALIZATION.get(lang_key, {})
+        return cf_map if cf_map is not None else {}
 
     def extract(self, code: str, language: str = "python") -> PatternSignature:
         """Extract pattern signature from code - works for any supported language."""
@@ -413,9 +420,19 @@ class PatternExtractor:
         try:
             tree = parser.parse(code.encode("utf-8"))
             if tree is None:
+                code_preview = code[:100].replace('\n', '\\n') if code else '<empty>'
+                logger.debug(
+                    f"Tree-sitter returned None for {lang_key}, using regex fallback. "
+                    f"Code preview: {code_preview!r}"
+                )
                 return self._extract_regex_fallback(code, lang_key)
             root = tree.root_node
-        except Exception:
+        except Exception as e:
+            code_preview = code[:100].replace('\n', '\\n') if code else '<empty>'
+            logger.debug(
+                f"Tree-sitter parse failed for {lang_key}: {e}, using regex fallback. "
+                f"Code preview: {code_preview!r}"
+            )
             return self._extract_regex_fallback(code, lang_key)
 
         cf_map = self._get_cf_map(lang_key)
@@ -585,6 +602,10 @@ class PatternExtractor:
         }
 
         self._analyze_control_flow_v2(root, cf, cf_map, context)
+
+        # Store the nesting sequence for search reranking
+        # This is used by _fallback_pattern_search to compute Jaccard similarity
+        cf["normalized_sequence"] = context["nesting_sequence"]
 
         # Backward compat
         cf["has_except"] = cf["has_catch"]
@@ -808,40 +829,62 @@ class PatternExtractor:
         node_id = len(nodes)
         nodes[node_id] = normalized
 
-        if entry_id >= 0 and entry_id != node_id:
+        # For control flow nodes (branches, loops, try), we use specialized edges
+        # and skip the generic sequential edge to avoid double-counting
+        is_control_flow = (
+            normalized == "BRANCH_IF" or
+            normalized.startswith("LOOP_") or
+            normalized == "TRY"
+        )
+
+        # Add sequential edge only for non-control-flow nodes
+        if entry_id >= 0 and entry_id != node_id and not is_control_flow:
             edges.append((entry_id, node_id, "sequential"))
 
         if normalized == "BRANCH_IF":
+            # For branches, use branch_true/branch_false edges instead of sequential
             then_exit = node_id
             else_exit = node_id
-            for i, child in enumerate(node.children):
+            for child in node.children:
                 child_norm = self._normalize_node_type(child.type, cf_map)
                 if child_norm in ("BRANCH_ELSE", "BRANCH_ELIF"):
-                    else_exit = self._build_cfg(child, cf_map, nodes, edges, node_id, exit_id)
+                    # Pass -1 as entry_id to skip sequential edge in child
+                    else_exit = self._build_cfg(child, cf_map, nodes, edges, -1, exit_id)
                     if else_exit != node_id:
                         edges.append((node_id, else_exit, "branch_false"))
                 elif child.child_count > 0:
-                    then_exit = self._build_cfg(child, cf_map, nodes, edges, node_id, exit_id)
+                    # Pass -1 as entry_id to skip sequential edge in child
+                    then_exit = self._build_cfg(child, cf_map, nodes, edges, -1, exit_id)
                     if then_exit != node_id:
                         edges.append((node_id, then_exit, "branch_true"))
             return max(then_exit, else_exit)
 
         elif normalized.startswith("LOOP_"):
+            # For loops, the entry flows into the loop body, then back
             loop_body_exit = node_id
             for child in node.children:
-                loop_body_exit = self._build_cfg(child, cf_map, nodes, edges, node_id, exit_id)
+                # Pass -1 as entry_id to skip sequential edge; loop structure is explicit
+                loop_body_exit = self._build_cfg(child, cf_map, nodes, edges, -1, exit_id)
             if loop_body_exit != node_id:
                 edges.append((loop_body_exit, node_id, "loop_back"))
+            # Add explicit entry edge to first child
+            if node.child_count > 0:
+                first_child_id = node_id + 1  # Next node after this one
+                if first_child_id in nodes:
+                    edges.append((node_id, first_child_id, "loop_entry"))
             return node_id
 
         elif normalized == "TRY":
+            # For try, normal flow goes through try body; exception edge goes to catch
             try_exit = node_id
             for child in node.children:
                 child_norm = self._normalize_node_type(child.type, cf_map)
                 if child_norm == "CATCH":
-                    catch_exit = self._build_cfg(child, cf_map, nodes, edges, node_id, exit_id)
+                    # Exception edge, not sequential
+                    catch_exit = self._build_cfg(child, cf_map, nodes, edges, -1, exit_id)
                     edges.append((node_id, catch_exit, "exception"))
                 else:
+                    # Normal flow through try body
                     try_exit = self._build_cfg(child, cf_map, nodes, edges, try_exit, exit_id)
             return try_exit
 
@@ -944,3 +987,98 @@ class PatternExtractor:
         else:
             for child in node.children:
                 self._collect_root_to_leaf_paths(child, current_path, cf_map, paths)
+
+    # =========================================================================
+    # Line-level pattern matching for highlighting
+    # =========================================================================
+
+    # Map control_flow dict keys → normalized AST types to look for
+    _CF_KEY_TO_TYPES: Dict[str, List[str]] = {
+        "has_for": ["LOOP_FOR", "LOOP_RANGE"],
+        "has_while": ["LOOP_WHILE"],
+        "loop_count": ["LOOP", "LOOP_FOR", "LOOP_WHILE", "LOOP_RANGE", "LOOP_DO"],
+        "has_if": ["BRANCH_IF"],
+        "branch_count": ["BRANCH_IF", "BRANCH_ELSE", "BRANCH_ELIF"],
+        "has_try": ["TRY"],
+        "try_count": ["TRY"],
+        "has_catch": ["CATCH", "EXCEPT"],
+        "has_except": ["CATCH", "EXCEPT"],
+        "has_finally": ["FINALLY"],
+        "has_with": ["WITH"],
+        "has_resource_guard": ["WITH", "DEFER", "USING"],
+        "has_return": ["RETURN"],
+        "has_raise": ["RAISE", "THROW"],
+        "has_throw": ["RAISE", "THROW"],
+        "has_yield": ["YIELD"],
+        "has_async": ["ASYNC"],
+        "has_await": ["AWAIT"],
+        "has_defer": ["DEFER"],
+        "has_goroutine": ["GOROUTINE"],
+        "has_select": ["SELECT"],
+        "has_recover": ["RECOVER"],
+        "match_count": ["MATCH", "MATCH_CASE"],
+    }
+
+    def find_matching_lines(
+        self,
+        code: str,
+        language: str,
+        query_cf: Dict[str, Any],
+        line_offset: int = 0,
+    ) -> List[int]:
+        """
+        Find lines in code that contain control flow patterns from query.
+
+        Uses Tree-sitter AST analysis - NOT keyword matching.
+
+        Args:
+            code: Source code to analyze
+            language: Programming language
+            query_cf: Control flow dict from query's PatternSignature
+            line_offset: Added to line numbers (for snippet within larger file)
+
+        Returns:
+            Sorted list of 1-indexed line numbers containing matching patterns
+        """
+        if not code or not query_cf:
+            return []
+
+        # Build set of normalized types to look for based on query_cf
+        target_types: Set[str] = set()
+        for cf_key, norm_types in self._CF_KEY_TO_TYPES.items():
+            val = query_cf.get(cf_key)
+            # Include if truthy (True, or count > 0)
+            if val:
+                target_types.update(norm_types)
+
+        if not target_types:
+            return []
+
+        # Parse code
+        lang_key = self._normalize_language(language)
+        parser = self._get_parser(lang_key)
+        if not parser:
+            return []
+
+        try:
+            tree = parser.parse(code.encode('utf-8'))
+            if not tree or not tree.root_node:
+                return []
+        except Exception:
+            return []
+
+        # Walk AST and collect line numbers of matching nodes
+        cf_map = self._get_cf_map(lang_key)
+        matched_lines: Set[int] = set()
+
+        def walk(node):
+            normalized = self._normalize_node_type(node.type, cf_map)
+            if normalized in target_types:
+                # Tree-sitter lines are 0-indexed, we want 1-indexed
+                matched_lines.add(node.start_point[0] + 1 + line_offset)
+            for child in node.children:
+                walk(child)
+
+        walk(tree.root_node)
+
+        return sorted(matched_lines)

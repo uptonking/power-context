@@ -86,15 +86,24 @@ def test_pattern_vector_dimensions():
 
 def test_code_vs_nl_detection():
     """Test auto-detection of code vs natural language queries."""
-    from scripts.mcp_impl.pattern_search import _is_likely_code
+    from scripts.mcp_impl.pattern_search import _detect_query_mode
 
-    assert _is_likely_code("for i in range(3): try: pass except: pass")
-    assert _is_likely_code("if err != nil { return err }")
-    assert _is_likely_code("def foo(): return 42")
+    # Code examples (no language hint, should detect from syntax)
+    assert _detect_query_mode("for i in range(3): try: pass except: pass", None) == "code"
+    assert _detect_query_mode("if err != nil { return err }", None) == "code"
+    assert _detect_query_mode("def foo(): return 42", None) == "code"
+    assert _detect_query_mode("func main() {}", None) == "code"
+    assert _detect_query_mode("fn main() -> Result<()>", None) == "code"
 
-    assert not _is_likely_code("retry with exponential backoff")
-    assert not _is_likely_code("find error handling patterns")
-    assert not _is_likely_code("resource cleanup code")
+    # Natural language descriptions
+    assert _detect_query_mode("retry with exponential backoff", None) == "description"
+    assert _detect_query_mode("find error handling patterns", None) == "description"
+    assert _detect_query_mode("resource cleanup code", None) == "description"
+    assert _detect_query_mode("decorator pattern wrapping function", None) == "description"
+
+    # Language hint is advisory only; without code markers it stays description
+    assert _detect_query_mode("some text", "python") == "description"
+    assert _detect_query_mode("some text", "go") == "description"
 
 
 # ============================================================================
@@ -108,17 +117,21 @@ def pattern_collection():
     from qdrant_client.models import Distance, VectorParams, PointStruct
     from scripts.pattern_detection import PatternExtractor, PatternEncoder
 
-    # Use CI's Qdrant service directly (not env var which may be polluted by testcontainers)
+    # Default to localhost for CI; allow override for local/dev containers.
     collection_name = f"test_pattern_{uuid.uuid4().hex[:8]}"
-    client = QdrantClient(url="http://localhost:6333", timeout=30)
+    qdrant_url = os.environ.get("QDRANT_URL", "http://localhost:6333")
+    client = QdrantClient(url=qdrant_url, timeout=30)
 
-    client.create_collection(
-        collection_name=collection_name,
-        vectors_config={
-            "code": VectorParams(size=384, distance=Distance.COSINE),
-            "pattern_vector": VectorParams(size=64, distance=Distance.COSINE),
-        }
-    )
+    try:
+        client.create_collection(
+            collection_name=collection_name,
+            vectors_config={
+                "code": VectorParams(size=384, distance=Distance.COSINE),
+                "pattern_vector": VectorParams(size=64, distance=Distance.COSINE),
+            }
+        )
+    except Exception as e:
+        pytest.skip(f"Qdrant not reachable at {qdrant_url}: {e}")
 
     extractor = PatternExtractor()
     encoder = PatternEncoder()
@@ -166,4 +179,3 @@ def test_pattern_search_qdrant(pattern_collection):
     assert results.total >= 1, "Should find at least one result"
     paths = [r.path for r in results.results]
     assert "retry_python.py" in paths, "Should find Python retry"
-

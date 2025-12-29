@@ -41,6 +41,7 @@
 from .extractor import PatternExtractor, PatternSignature
 from .encoder import PatternEncoder
 from .catalog import PatternMiner, OnlinePatternLearner, get_pattern_learner, DiscoveredPattern
+from .prune import AromaPruner, PrunedResult
 from .search import (
     pattern_search,
     find_similar_patterns,
@@ -61,6 +62,9 @@ __all__ = [
     "PatternExtractor",
     "PatternSignature",
     "PatternEncoder",
+    # AROMA pruning (Phase II & III)
+    "AromaPruner",
+    "PrunedResult",
     # Dynamic discovery
     "PatternMiner",
     "OnlinePatternLearner",
