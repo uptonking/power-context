@@ -18,9 +18,10 @@ try:
 except ImportError:
     pass  # OpenLit not available
 
-from typing import Any, Dict, Optional, List
 import json
 import threading
+from datetime import datetime
+from typing import Any, Dict, Optional, List, Union
 from weakref import WeakKeyDictionary
 
 
@@ -463,21 +464,38 @@ def memory_store(
     coll = _resolve_collection(collection, session=session, ctx=ctx)
     _require_collection_access((sess or {}).get("user_id"), coll, "write")
     _ensure_once(coll)
+
+    # Prepare metadata with defaults and timestamp as documented
+    md = metadata.copy() if metadata else {}
+    if "created_at" not in md:
+        md["created_at"] = datetime.utcnow().isoformat() + "Z"
+    if "kind" not in md:
+        md["kind"] = "memory"
+    if "source" not in md:
+        md["source"] = "memory"
+
     model = _get_embedding_model()
     dense = next(model.embed([str(information)])).tolist()
     lex = _lex_hash_vector_text(str(information), LEX_VECTOR_DIM)
+
     # Use UUID to avoid point ID collisions under concurrent load
     import uuid
     pid = uuid.uuid4().hex
     payload = {
         "information": str(information),
-        "metadata": metadata or {"kind": "memory", "source": "memory"},
+        "metadata": md,
     }
     point = models.PointStruct(
         id=pid, vector={VECTOR_NAME: dense, LEX_VECTOR_NAME: lex}, payload=payload
     )
     client.upsert(collection_name=coll, points=[point], wait=True)
-    return {"ok": True, "id": pid, "collection": coll, "vector": VECTOR_NAME}
+    return {
+        "ok": True,
+        "id": pid,
+        "message": "Successfully stored information",
+        "collection": coll,
+        "vector": VECTOR_NAME
+    }
 
 
 @mcp.tool()
@@ -488,6 +506,11 @@ def memory_find(
     top_k: Optional[int] = None,
     session: Optional[str] = None,
     q: Optional[str] = None,
+    kind: Optional[str] = None,
+    language: Optional[str] = None,
+    topic: Optional[str] = None,
+    tags: Optional[Union[str, List[str]]] = None,
+    priority_min: Optional[int] = None,
     ctx: Context = None,
 ) -> Dict[str, Any]:
     """Find memory-like entries by vector similarity (dense + lexical fusion).
@@ -517,6 +540,26 @@ def memory_find(
     # Harmonize alias: top_k -> limit
     lim = int(limit if limit is not None else (top_k if top_k is not None else 5))
 
+    # Build Qdrant filter
+    must = []
+    if kind:
+        must.append(models.FieldCondition(key="metadata.kind", match=models.MatchValue(value=kind)))
+    if language:
+        must.append(models.FieldCondition(key="metadata.language", match=models.MatchValue(value=language)))
+    if topic:
+        must.append(models.FieldCondition(key="metadata.topic", match=models.MatchValue(value=topic)))
+    if priority_min is not None:
+        must.append(models.FieldCondition(key="metadata.priority", range=models.Range(gte=float(priority_min))))
+    if tags:
+        if isinstance(tags, str):
+            tag_list = [t.strip() for t in tags.split(",") if t.strip()]
+        else:
+            tag_list = tags
+        if tag_list:
+            must.append(models.FieldCondition(key="metadata.tags", match=models.MatchAny(any=tag_list)))
+
+    flt = models.Filter(must=must) if must else None
+
     # Two searches (prefer query_points) then simple RRF-like merge
     if use_dense:
         try:
@@ -524,6 +567,7 @@ def memory_find(
                 collection_name=coll,
                 query=dense,
                 using=VECTOR_NAME,
+                query_filter=flt,
                 limit=max(10, lim),
                 with_payload=True,
             )
@@ -532,6 +576,7 @@ def memory_find(
             res_dense = client.search(
                 collection_name=coll,
                 query_vector=(VECTOR_NAME, dense),
+                query_filter=flt,
                 limit=max(10, lim),
                 with_payload=True,
             )
@@ -543,6 +588,7 @@ def memory_find(
             collection_name=coll,
             query=lex,
             using=LEX_VECTOR_NAME,
+            query_filter=flt,
             limit=max(10, lim),
             with_payload=True,
         )
@@ -551,6 +597,7 @@ def memory_find(
         res_lex = client.search(
             collection_name=coll,
             query_vector=(LEX_VECTOR_NAME, lex),
+            query_filter=flt,
             limit=max(10, lim),
             with_payload=True,
         )
@@ -558,13 +605,36 @@ def memory_find(
     def is_memory_like(payload: Dict[str, Any]) -> bool:
         md = (payload or {}).get("metadata") or {}
         path = md.get("path")
-        kind = (md.get("kind") or "").lower()
+        m_kind = (md.get("kind") or "").lower()
         source = (md.get("source") or "").lower()
         return (
             (not path)
-            or (kind in {"memory", "preference", "note", "policy", "chat"})
+            or (m_kind in {"memory", "preference", "note", "policy", "chat"})
             or (source in {"memory", "chat"})
         )
+
+    def get_highlights(text: str, q_text: str) -> List[str]:
+        if not text or not q_text:
+            return []
+        import re
+        # Take interesting tokens from query
+        tokens = [t for t in re.split(r'[^A-Za-z0-9]+', q_text) if len(t) > 2]
+        if not tokens:
+            return []
+        
+        results = []
+        for t in tokens[:3]: # Max 3 types of highlights
+            pattern = re.compile(re.escape(t), re.IGNORECASE)
+            match = pattern.search(text)
+            if match:
+                # Get small context
+                start = max(0, match.start() - 30)
+                end = min(len(text), match.end() + 30)
+                snip = text[start:end]
+                # Wrap all occurrences of this token in this snip
+                highlighted = pattern.sub(lambda m: f"<<{m.group(0)}>>", snip)
+                results.append(f"...{highlighted}...")
+        return results
 
     scores: Dict[str, float] = {}
     items: Dict[str, Dict[str, Any]] = {}
@@ -580,13 +650,13 @@ def memory_find(
             scores[pid] = scores.get(pid, 0.0) + weight / (
                 1.0 + getattr(r, "score", 0.0)
             )
+            inf = pl.get("information") or pl.get("content") or pl.get("text") or ""
             items[pid] = {
                 "id": getattr(r, "id", None),
-                "score": getattr(r, "score", None),
-                "information": pl.get("information")
-                or pl.get("content")
-                or pl.get("text"),
+                "information": inf,
                 "metadata": pl.get("metadata") or {},
+                "score": getattr(r, "score", None),
+                "highlights": get_highlights(inf, query)
             }
 
     add_hits(res_dense, 1.0)
@@ -595,7 +665,13 @@ def memory_find(
     ordered = sorted(
         items.values(), key=lambda x: scores.get(str(x["id"]), 0.0), reverse=True
     )[:lim]
-    return {"ok": True, "results": ordered, "count": len(ordered)}
+    return {
+        "ok": True, 
+        "results": ordered, 
+        "total": len(ordered), 
+        "count": len(ordered),
+        "query": query
+    }
 
 
 def _resolve_collection(
