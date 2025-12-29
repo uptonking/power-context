@@ -131,10 +131,15 @@ async def run_all_benchmarks(components: List[str]) -> Dict[str, Any]:
 
     if "efficiency" in components or "all" in components:
         try:
-            from scripts.benchmarks.efficiency_benchmark import run_benchmark as run_efficiency_benchmark
+            from scripts.benchmarks.efficiency_benchmark import run_benchmark as run_efficiency_benchmark, SCENARIOS
             print("\n▶ Running Efficiency Benchmark...")
-            report = await run_efficiency_benchmark()
-            results["components"]["efficiency"] = report
+            optimize = os.environ.get("EFFICIENCY_OPTIMIZE", "fusion+cache+dedup")
+            report = await run_efficiency_benchmark(
+                scenarios=list(SCENARIOS.keys()),
+                baseline=False,
+                optimize=optimize,
+            )
+            results["components"]["efficiency"] = report.to_full_dict()
         except Exception as e:
             print(f"  Efficiency benchmark failed: {e}")
     
@@ -205,10 +210,20 @@ def print_summary(results: Dict[str, Any]):
     print("-" * 70)
     
     for name, data in results.get("components", {}).items():
-        metrics = data.get("metrics", {})
+        # Most components have {"metrics": {...}}.
+        # Efficiency uses {"summary": {...}, "details": {...}}.
+        metrics: Any = {}
+        if isinstance(data, dict):
+            if isinstance(data.get("metrics"), dict):
+                metrics = data.get("metrics") or {}
+            elif isinstance(data.get("summary"), dict):
+                metrics = data.get("summary") or {}
         print(f"\n{name.upper()}:")
-        for k, v in metrics.items():
-            print(f"  {k}: {v}")
+        if isinstance(metrics, dict):
+            for k, v in metrics.items():
+                print(f"  {k}: {v}")
+        else:
+            print(f"  {metrics}")
     
     recs = results.get("recommendations", [])
     if recs:

@@ -20,8 +20,11 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 # Load environment variables from .env
-from dotenv import load_dotenv
-load_dotenv(PROJECT_ROOT / ".env")
+try:
+    from dotenv import load_dotenv  # type: ignore
+    load_dotenv(PROJECT_ROOT / ".env")
+except Exception:
+    pass
 
 # Fix Qdrant URL for running outside Docker
 qdrant_url = os.environ.get("QDRANT_URL", "http://localhost:6333")

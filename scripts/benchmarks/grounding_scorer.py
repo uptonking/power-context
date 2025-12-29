@@ -85,6 +85,22 @@ class GroundingReport:
     avg_useful_ratio: float
     results: List[GroundingResult] = field(default_factory=list)
 
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "timestamp": self.timestamp,
+            "total_queries": self.total_queries,
+            "metrics": {
+                "grounding_rate": self.grounding_rate,
+                "avg_citation_accuracy": self.avg_citation_accuracy,
+                "avg_topic_coverage": self.avg_topic_coverage,
+                "avg_citations_per_answer": self.avg_citations_per_answer,
+                "hedging_rate": self.hedging_rate,
+                "avg_answer_length": self.avg_answer_length,
+                "avg_useful_ratio": self.avg_useful_ratio,
+            },
+            "results": [r.__dict__ for r in self.results],
+        }
+
 
 # Test queries for grounding evaluation
 GROUNDING_TEST_QUERIES = [
@@ -245,7 +261,9 @@ async def evaluate_single_query(
         
         answer = result.get("answer", "")
         citations = result.get("citations", [])
-        is_grounded = result.get("grounded", not ("insufficient" in answer.lower()))
+        # context_answer doesn't return an explicit "grounded" field,
+        # so we detect it heuristically from the answer text
+        is_grounded = "insufficient" not in answer.lower()
         
     except asyncio.TimeoutError:
         print(f"  ⏱️ Timeout after {QUERY_TIMEOUT}s")

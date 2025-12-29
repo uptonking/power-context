@@ -12,7 +12,7 @@ import json
 import os
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 import statistics
@@ -92,6 +92,7 @@ class EvalReport:
                 "p90_ms": round(self.p90_latency_ms, 2),
                 "p99_ms": round(self.p99_latency_ms, 2),
             },
+            "results": [asdict(r) for r in self.results],
         }
         # Also emit a unified BenchmarkReport payload for downstream tools.
         rep = create_report("eval_harness", config={"name": self.name})

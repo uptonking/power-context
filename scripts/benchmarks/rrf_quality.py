@@ -18,7 +18,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).parent.parent.parent
@@ -73,6 +73,16 @@ class QualityMetrics:
     avg_latency_ms: float
     query_count: int
 
+    def to_dict(self) -> Dict[str, float]:
+        return {
+            "mrr": float(self.mrr),
+            "recall_at_5": float(self.recall_at_5),
+            "recall_at_10": float(self.recall_at_10),
+            "precision_at_5": float(self.precision_at_5),
+            "avg_latency_ms": float(self.avg_latency_ms),
+            "query_count": int(self.query_count),
+        }
+
 
 @dataclass
 class RRFReport:
@@ -85,6 +95,22 @@ class RRFReport:
     rrf_lift_over_lexical: float
     rrf_lift_over_best: float  # % improvement over max(dense, lexical)
     best_single_method: str
+    per_query: List[Dict[str, object]] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "timestamp": self.timestamp,
+            "metrics": {
+                "dense": self.dense_metrics.to_dict(),
+                "lexical": self.lexical_metrics.to_dict(),
+                "hybrid": self.hybrid_metrics.to_dict(),
+                "rrf_lift_over_dense_pct": float(self.rrf_lift_over_dense),
+                "rrf_lift_over_lexical_pct": float(self.rrf_lift_over_lexical),
+                "rrf_lift_over_best_pct": float(self.rrf_lift_over_best),
+                "best_single_method": self.best_single_method,
+            },
+            "per_query": self.per_query,
+        }
 
 
 def _match_expected_file(path: str, expected_files: Iterable[str]) -> Optional[str]:
@@ -363,6 +389,7 @@ async def run_rrf_benchmark() -> RRFReport:
     dense_results = []
     lexical_results = []
     hybrid_results = []
+    per_query: List[Dict[str, Any]] = []
     
     print(f"\nRunning {len(GROUND_TRUTH_QUERIES)} queries x 3 methods...\n")
     
@@ -378,6 +405,28 @@ async def run_rrf_benchmark() -> RRFReport:
         dense_results.append(dense)
         lexical_results.append(lexical)
         hybrid_results.append(hybrid)
+
+        per_query.append(
+            {
+                "query": query,
+                "expected_files": list(gt.get("expected_files", [])),
+                "dense": {
+                    "latency_ms": dense.latency_ms,
+                    "paths": list(dense.paths),
+                    "scores": list(dense.scores),
+                },
+                "lexical": {
+                    "latency_ms": lexical.latency_ms,
+                    "paths": list(lexical.paths),
+                    "scores": list(lexical.scores),
+                },
+                "hybrid": {
+                    "latency_ms": hybrid.latency_ms,
+                    "paths": list(hybrid.paths),
+                    "scores": list(hybrid.scores),
+                },
+            }
+        )
         
         print(f"✓ (D:{dense.latency_ms:.0f}ms L:{lexical.latency_ms:.0f}ms H:{hybrid.latency_ms:.0f}ms)")
     
@@ -433,6 +482,7 @@ async def run_rrf_benchmark() -> RRFReport:
         rrf_lift_over_lexical=rrf_lift_lexical,
         rrf_lift_over_best=rrf_lift_best,
         best_single_method=best_method,
+        per_query=per_query,
     )
     
     return report

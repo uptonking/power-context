@@ -13,7 +13,7 @@ import os
 import sys
 import time
 import hashlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -138,6 +138,13 @@ class BenchmarkReport:
                 }
                 for s in self.scenarios
             ],
+        }
+
+    def to_full_dict(self) -> Dict[str, Any]:
+        """Full, JSON-serializable report including per-tool-call details."""
+        return {
+            "summary": self.to_dict(),
+            "details": asdict(self),
         }
 
 

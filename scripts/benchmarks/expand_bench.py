@@ -11,7 +11,7 @@ import json
 import os
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 import statistics
@@ -84,6 +84,7 @@ class ExpansionReport:
                 "avg_improvement": round(self.avg_improvement, 4),
                 "avg_latency_ms": round(self.avg_latency_ms, 2),
             },
+            "results": [asdict(r) for r in self.results],
         }
         rep = create_report("expand_bench", config={"name": self.name, "source": "eval_harness.EVAL_QUERIES"})
         for r in self.results:

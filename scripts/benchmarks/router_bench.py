@@ -11,7 +11,7 @@ import json
 import os
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 import statistics
@@ -86,6 +86,7 @@ class RouterReport:
                 "avg_latency_ms": round(self.avg_latency_ms, 2),
                 "p90_latency_ms": round(self.p90_latency_ms, 2),
             },
+            "results": [asdict(r) for r in self.results],
         }
         # Also emit the unified BenchmarkReport shape for downstream tooling.
         rep = create_report("router_bench", config={"name": self.name})

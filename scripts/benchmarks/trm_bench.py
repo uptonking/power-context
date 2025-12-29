@@ -11,7 +11,7 @@ import json
 import os
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 import statistics
@@ -72,6 +72,7 @@ class TRMReport:
                 "p90_latency_ms": round(self.p90_latency_ms, 2),
             },
             "embedding_dim": self.embedding_dim,
+            "results": [asdict(r) for r in self.results],
         }
 
 
