@@ -24,13 +24,28 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 # Load environment variables from .env
-from dotenv import load_dotenv
-load_dotenv(PROJECT_ROOT / ".env")
+try:
+    from dotenv import load_dotenv  # type: ignore
+    load_dotenv(PROJECT_ROOT / ".env")
+except Exception:
+    pass
 
 # Fix Qdrant URL for running outside Docker
 qdrant_url = os.environ.get("QDRANT_URL", "http://localhost:6333")
 if "qdrant:" in qdrant_url:
     os.environ["QDRANT_URL"] = "http://localhost:6333"
+
+# Ensure correct collection is used (read from workspace state or env)
+try:
+    from scripts.benchmarks.common import resolve_nonempty_collection
+    if not os.environ.get("COLLECTION_NAME"):
+        from scripts.workspace_state import get_collection_name
+        os.environ["COLLECTION_NAME"] = get_collection_name() or "codebase"
+    else:
+        os.environ["COLLECTION_NAME"] = resolve_nonempty_collection(os.environ.get("COLLECTION_NAME"))
+except Exception:
+    # Best-effort; grounding scorer can still run with whatever collection is configured.
+    pass
 
 # Timeout for each query (seconds)
 QUERY_TIMEOUT = 60

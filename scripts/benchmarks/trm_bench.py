@@ -18,7 +18,21 @@ import statistics
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from scripts.benchmarks.common import percentile
+from scripts.benchmarks.common import percentile, extract_result_paths, resolve_nonempty_collection
+
+# Ensure correct collection is used (read from workspace state or env)
+if not os.environ.get("COLLECTION_NAME"):
+    try:
+        from scripts.workspace_state import get_collection_name
+        os.environ["COLLECTION_NAME"] = get_collection_name() or "codebase"
+    except Exception:
+        os.environ["COLLECTION_NAME"] = "codebase"
+else:
+    # If COLLECTION_NAME is set but empty/unindexed, pick a non-empty collection for benchmarks.
+    try:
+        os.environ["COLLECTION_NAME"] = resolve_nonempty_collection(os.environ.get("COLLECTION_NAME"))
+    except Exception:
+        pass
 
 
 @dataclass
@@ -126,7 +140,7 @@ async def run_trm_benchmark(name: str = "default") -> TRMReport:
         # Get baseline results
         try:
             baseline_result = await repo_search(query=query, limit=10, rerank_enabled=False)
-            baseline_paths = extract_paths(baseline_result)
+            baseline_paths = extract_result_paths(baseline_result)
         except Exception:
             baseline_paths = []
         
@@ -134,7 +148,7 @@ async def run_trm_benchmark(name: str = "default") -> TRMReport:
         start = time.perf_counter()
         try:
             reranked_result = await repo_search(query=query, limit=10, rerank_enabled=True)
-            reranked_paths = extract_paths(reranked_result)
+            reranked_paths = extract_result_paths(reranked_result)
         except Exception:
             reranked_paths = []
         elapsed_ms = (time.perf_counter() - start) * 1000
@@ -161,25 +175,6 @@ async def run_trm_benchmark(name: str = "default") -> TRMReport:
         embedding_dim=embedding_dim,
         results=results,
     )
-
-
-def extract_paths(result: Any) -> List[str]:
-    """Extract paths from search result."""
-    paths = []
-    if isinstance(result, dict):
-        results_data = result.get("results", [])
-        if isinstance(results_data, list):
-            for r in results_data:
-                if isinstance(r, dict) and "path" in r:
-                    paths.append(r["path"])
-        elif isinstance(results_data, str):
-            for line in results_data.split("\n"):
-                if "/" in line:
-                    parts = line.split(",")
-                    if parts:
-                        paths.append(parts[0].strip())
-    return paths
-
 
 def print_report(report: TRMReport):
     print("\n" + "=" * 60)

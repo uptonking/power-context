@@ -14,13 +14,33 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 import statistics
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 # Shared stats helpers
-from scripts.benchmarks.common import percentile
+from scripts.benchmarks.common import (
+    percentile,
+    extract_result_paths,
+    create_report,
+    QueryResult as CommonQueryResult,
+    resolve_nonempty_collection,
+)
+
+# Ensure correct collection is used (read from workspace state or env)
+if not os.environ.get("COLLECTION_NAME"):
+    try:
+        from scripts.workspace_state import get_collection_name
+        os.environ["COLLECTION_NAME"] = get_collection_name() or "codebase"
+    except Exception:
+        os.environ["COLLECTION_NAME"] = "codebase"
+else:
+    # Benchmarks frequently run with COLLECTION_NAME pointing at an empty placeholder.
+    try:
+        os.environ["COLLECTION_NAME"] = resolve_nonempty_collection(os.environ.get("COLLECTION_NAME"))
+    except Exception:
+        pass
 
 # ---------------------------------------------------------------------------
 # Metrics
@@ -53,7 +73,7 @@ class EvalReport:
     results: List[QueryResult] = field(default_factory=list)
     
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        base = {
             "name": self.name,
             "total_queries": self.total_queries,
             "metrics": {
@@ -68,6 +88,26 @@ class EvalReport:
                 "p99_ms": round(self.p99_latency_ms, 2),
             },
         }
+        # Also emit a unified BenchmarkReport payload for downstream tools.
+        rep = create_report("eval_harness", config={"name": self.name})
+        for r in self.results:
+            rep.per_query.append(
+                CommonQueryResult(
+                    query=r.query,
+                    latency_ms=r.latency_ms,
+                    metrics={
+                        "mrr": float(r.mrr),
+                        "recall@5": float(r.recall_at_5),
+                        "recall@10": float(r.recall_at_10),
+                        "precision@5": float(r.precision_at_5),
+                    },
+                    retrieved_paths=list(r.retrieved_paths),
+                    metadata={"expected_paths": list(r.expected_paths)},
+                )
+            )
+        rep.compute_aggregates()
+        base["unified"] = rep.to_dict()
+        return base
 
 
 def compute_mrr(expected: List[str], retrieved: List[str]) -> float:
@@ -153,20 +193,7 @@ async def run_evaluation(
         elapsed_ms = (time.perf_counter() - start) * 1000
         latencies.append(elapsed_ms)
         
-        # Extract paths
-        retrieved = []
-        if isinstance(result, dict):
-            results_data = result.get("results", [])
-            if isinstance(results_data, list):
-                for r in results_data:
-                    if isinstance(r, dict) and "path" in r:
-                        retrieved.append(r["path"])
-            elif isinstance(results_data, str):
-                for line in results_data.split("\n"):
-                    if "/" in line:
-                        parts = line.split(",")
-                        if parts:
-                            retrieved.append(parts[0].strip())
+        retrieved = extract_result_paths(result)
         
         qr = QueryResult(
             query=query_text,

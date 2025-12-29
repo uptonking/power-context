@@ -18,20 +18,34 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, Iterable, List, Optional
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 # Load environment variables from .env
-from dotenv import load_dotenv
-load_dotenv(PROJECT_ROOT / ".env")
+try:
+    from dotenv import load_dotenv  # type: ignore
+    load_dotenv(PROJECT_ROOT / ".env")
+except Exception:
+    pass
 
 # Fix Qdrant URL for running outside Docker
 qdrant_url = os.environ.get("QDRANT_URL", "http://localhost:6333")
 if "qdrant:" in qdrant_url:
     os.environ["QDRANT_URL"] = "http://localhost:6333"
+
+# Ensure correct collection is used (read from workspace state or env)
+try:
+    from scripts.benchmarks.common import resolve_nonempty_collection
+    if not os.environ.get("COLLECTION_NAME"):
+        from scripts.workspace_state import get_collection_name
+        os.environ["COLLECTION_NAME"] = get_collection_name() or "codebase"
+    else:
+        os.environ["COLLECTION_NAME"] = resolve_nonempty_collection(os.environ.get("COLLECTION_NAME"))
+except Exception:
+    pass
 
 @dataclass
 class SearchResult:
@@ -66,6 +80,21 @@ class RRFReport:
     rrf_lift_over_lexical: float
     rrf_lift_over_best: float  # % improvement over max(dense, lexical)
     best_single_method: str
+
+
+def _match_expected_file(path: str, expected_files: Iterable[str]) -> Optional[str]:
+    """
+    Return the expected_file that matches this path, or None if no match.
+
+    Matching is done on normalized POSIX paths using suffix matching to handle
+    different roots (e.g. 'scripts/hybrid/ranking.py' vs 'hybrid/ranking.py').
+    """
+    norm_path = Path(path).as_posix().lower()
+    for expected in expected_files:
+        expected_norm = expected.replace("\\", "/").lower()
+        if norm_path.endswith(expected_norm):
+            return expected
+    return None
 
 
 # Ground truth queries with expected files
@@ -115,42 +144,55 @@ GROUND_TRUTH_QUERIES = [
 
 
 async def search_dense_only(query: str, limit: int = 10) -> SearchResult:
-    """Execute dense-only vector search."""
+    """Execute dense-only vector search using low-level dense_query."""
     start = time.time()
 
     try:
-        from scripts.hybrid_search import run_hybrid_search
-
-        # Set weights for dense-only via env vars (temporarily)
-        old_dense = os.environ.get("HYBRID_DENSE_WEIGHT", "1.5")
-        old_lex = os.environ.get("HYBRID_LEXICAL_WEIGHT", "0.20")
-        old_lex_vec = os.environ.get("HYBRID_LEX_VECTOR_WEIGHT", "0.20")
-
-        os.environ["HYBRID_DENSE_WEIGHT"] = "1.0"
-        os.environ["HYBRID_LEXICAL_WEIGHT"] = "0.0"
-        os.environ["HYBRID_LEX_VECTOR_WEIGHT"] = "0.0"
-
-        try:
-            # run_hybrid_search is synchronous, wrap in executor
-            results = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: run_hybrid_search(
-                    queries=[query],
-                    limit=limit,
-                    expand=False,
-                )
+        from scripts.hybrid.qdrant import dense_query, get_qdrant_client
+        from scripts.hybrid.embed import get_embedding_model
+        from scripts.utils import sanitize_vector_name
+        
+        # Get client and model
+        client = get_qdrant_client()
+        model = get_embedding_model()
+        model_name = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
+        vec_name = sanitize_vector_name(model_name)
+        
+        loop = asyncio.get_running_loop()
+        
+        # Embed query in executor (CPU-bound)
+        embeddings = await loop.run_in_executor(None, lambda: list(model.embed([query])))
+        if not embeddings:
+            raise ValueError("Failed to compute embedding")
+        vec = list(embeddings[0])
+        
+        # Execute direct dense query
+        raw_results = await loop.run_in_executor(
+            None,
+            lambda: dense_query(
+                client=client,
+                vec_name=vec_name,
+                v=vec,
+                flt=None,
+                per_query=limit,
+                collection_name=None,
+                query_text=query,
             )
-        finally:
-            # Restore original weights
-            os.environ["HYBRID_DENSE_WEIGHT"] = old_dense
-            os.environ["HYBRID_LEXICAL_WEIGHT"] = old_lex
-            os.environ["HYBRID_LEX_VECTOR_WEIGHT"] = old_lex_vec
-
-        paths = [r.get("path", "") for r in results]
-        scores = [r.get("score", 0) for r in results]
+        )
+        
+        # Extract paths and scores
+        paths = []
+        scores = []
+        for pt in raw_results[:limit]:
+            payload = getattr(pt, "payload", {}) or {}
+            path = payload.get("metadata", {}).get("path", "") or payload.get("path", "")
+            score = getattr(pt, "score", 0) or 0
+            if path:
+                paths.append(path)
+                scores.append(score)
 
     except Exception as e:
-        print(f"Dense search error: {e}")
+        print(f"Dense search error: {type(e).__name__}: {e}", file=sys.stderr)
         paths = []
         scores = []
 
@@ -159,41 +201,45 @@ async def search_dense_only(query: str, limit: int = 10) -> SearchResult:
 
 
 async def search_lexical_only(query: str, limit: int = 10) -> SearchResult:
-    """Execute lexical-only search."""
+    """Execute lexical-only search using low-level lex_query."""
     start = time.time()
 
     try:
-        from scripts.hybrid_search import run_hybrid_search
-
-        # Set weights for lexical-only via env vars (temporarily)
-        old_dense = os.environ.get("HYBRID_DENSE_WEIGHT", "1.5")
-        old_lex = os.environ.get("HYBRID_LEXICAL_WEIGHT", "0.20")
-        old_lex_vec = os.environ.get("HYBRID_LEX_VECTOR_WEIGHT", "0.20")
-
-        os.environ["HYBRID_DENSE_WEIGHT"] = "0.0"
-        os.environ["HYBRID_LEXICAL_WEIGHT"] = "1.0"
-        os.environ["HYBRID_LEX_VECTOR_WEIGHT"] = "1.0"
-
-        try:
-            results = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: run_hybrid_search(
-                    queries=[query],
-                    limit=limit,
-                    expand=False,
-                )
+        from scripts.hybrid.qdrant import lex_query, get_qdrant_client, lex_hash_vector
+        
+        # Get client
+        client = get_qdrant_client()
+        
+        # Build lexical hash vector from query
+        lex_vec = lex_hash_vector([query])
+        
+        loop = asyncio.get_running_loop()
+        
+        # Execute direct lexical query
+        raw_results = await loop.run_in_executor(
+            None,
+            lambda: lex_query(
+                client=client,
+                v=lex_vec,
+                flt=None,
+                per_query=limit,
+                collection_name=None,
             )
-        finally:
-            # Restore original weights
-            os.environ["HYBRID_DENSE_WEIGHT"] = old_dense
-            os.environ["HYBRID_LEXICAL_WEIGHT"] = old_lex
-            os.environ["HYBRID_LEX_VECTOR_WEIGHT"] = old_lex_vec
-
-        paths = [r.get("path", "") for r in results]
-        scores = [r.get("score", 0) for r in results]
+        )
+        
+        # Extract paths and scores
+        paths = []
+        scores = []
+        for pt in raw_results[:limit]:
+            payload = getattr(pt, "payload", {}) or {}
+            path = payload.get("metadata", {}).get("path", "") or payload.get("path", "")
+            score = getattr(pt, "score", 0) or 0
+            if path:
+                paths.append(path)
+                scores.append(score)
 
     except Exception as e:
-        print(f"Lexical search error: {e}")
+        print(f"Lexical search error: {type(e).__name__}: {e}", file=sys.stderr)
         paths = []
         scores = []
 
@@ -202,15 +248,16 @@ async def search_lexical_only(query: str, limit: int = 10) -> SearchResult:
 
 
 async def search_hybrid_rrf(query: str, limit: int = 10) -> SearchResult:
-    """Execute hybrid RRF search (default settings)."""
+    """Execute hybrid RRF search (uses run_hybrid_search with RRF fusion)."""
     start = time.time()
 
     try:
         from scripts.hybrid_search import run_hybrid_search
 
-        # Use default weights from environment (hybrid mode)
-        # Don't modify weights - let the default balanced config apply
-        results = await asyncio.get_event_loop().run_in_executor(
+        loop = asyncio.get_running_loop()
+        
+        # Use standard hybrid search with RRF fusion
+        results = await loop.run_in_executor(
             None,
             lambda: run_hybrid_search(
                 queries=[query],
@@ -223,7 +270,7 @@ async def search_hybrid_rrf(query: str, limit: int = 10) -> SearchResult:
         scores = [r.get("score", 0) for r in results]
 
     except Exception as e:
-        print(f"Hybrid search error: {e}")
+        print(f"Hybrid search error: {type(e).__name__}: {e}", file=sys.stderr)
         paths = []
         scores = []
 
@@ -233,67 +280,73 @@ async def search_hybrid_rrf(query: str, limit: int = 10) -> SearchResult:
 
 def calculate_mrr(results: List[SearchResult], ground_truth: List[Dict]) -> float:
     """Calculate Mean Reciprocal Rank."""
-    reciprocal_ranks = []
+    if len(results) != len(ground_truth):
+        raise ValueError(
+            f"Results and ground_truth length mismatch: {len(results)} vs {len(ground_truth)}"
+        )
+    
+    reciprocal_ranks: List[float] = []
     
     for result, gt in zip(results, ground_truth):
-        expected = set(gt["expected_files"])
+        expected_files = gt["expected_files"]
+        rank = 0
         
         # Find first relevant result
-        for i, path in enumerate(result.paths):
-            # Normalize path for comparison
-            path_parts = path.split("/")
-            # Check if any expected file is in the path
-            for expected_file in expected:
-                if expected_file in path or any(expected_file in part for part in path_parts[-3:]):
-                    reciprocal_ranks.append(1.0 / (i + 1))
-                    break
-            else:
-                continue
-            break
-        else:
-            reciprocal_ranks.append(0)  # Not found
+        for i, path in enumerate(result.paths, start=1):
+            if _match_expected_file(path, expected_files):
+                rank = i
+                break
+        
+        reciprocal_ranks.append(1.0 / rank if rank else 0.0)
     
-    return sum(reciprocal_ranks) / len(reciprocal_ranks) if reciprocal_ranks else 0
+    return sum(reciprocal_ranks) / len(reciprocal_ranks) if reciprocal_ranks else 0.0
 
 
 def calculate_recall(results: List[SearchResult], ground_truth: List[Dict], k: int) -> float:
     """Calculate Recall@k."""
-    recalls = []
+    if len(results) != len(ground_truth):
+        raise ValueError(
+            f"Results and ground_truth length mismatch: {len(results)} vs {len(ground_truth)}"
+        )
+    
+    recalls: List[float] = []
     
     for result, gt in zip(results, ground_truth):
         expected = set(gt["expected_files"])
         retrieved = set()
         
         for path in result.paths[:k]:
-            # Normalize and check
-            for expected_file in expected:
-                if expected_file in path:
-                    retrieved.add(expected_file)
+            matched = _match_expected_file(path, expected)
+            if matched:
+                retrieved.add(matched)
         
-        recall = len(retrieved) / len(expected) if expected else 0
+        recall = len(retrieved) / len(expected) if expected else 0.0
         recalls.append(recall)
     
-    return sum(recalls) / len(recalls) if recalls else 0
+    return sum(recalls) / len(recalls) if recalls else 0.0
 
 
 def calculate_precision(results: List[SearchResult], ground_truth: List[Dict], k: int) -> float:
     """Calculate Precision@k."""
-    precisions = []
+    if len(results) != len(ground_truth):
+        raise ValueError(
+            f"Results and ground_truth length mismatch: {len(results)} vs {len(ground_truth)}"
+        )
+    
+    precisions: List[float] = []
     
     for result, gt in zip(results, ground_truth):
         expected = set(gt["expected_files"])
         relevant = 0
         
         for path in result.paths[:k]:
-            for expected_file in expected:
-                if expected_file in path:
-                    relevant += 1
-                    break
+            if _match_expected_file(path, expected):
+                relevant += 1
         
-        precision = relevant / k if k > 0 else 0
+        precision = relevant / k if k > 0 else 0.0
         precisions.append(precision)
     
-    return sum(precisions) / len(precisions) if precisions else 0
+    return sum(precisions) / len(precisions) if precisions else 0.0
 
 
 async def run_rrf_benchmark() -> RRFReport:

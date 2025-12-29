@@ -18,7 +18,35 @@ import statistics
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from scripts.benchmarks.common import percentile
+# Load environment (optional) and fix Docker hostname
+try:
+    from dotenv import load_dotenv  # type: ignore
+    load_dotenv()
+except Exception:
+    pass
+if "qdrant:" in os.environ.get("QDRANT_URL", ""):
+    os.environ["QDRANT_URL"] = "http://localhost:6333"
+
+from scripts.benchmarks.common import (
+    percentile,
+    create_report,
+    QueryResult as CommonQueryResult,
+    resolve_nonempty_collection,
+)
+
+# Ensure correct collection is used (read from workspace state or env)
+if not os.environ.get("COLLECTION_NAME"):
+    try:
+        from scripts.workspace_state import get_collection_name
+        os.environ["COLLECTION_NAME"] = get_collection_name() or "codebase"
+    except Exception:
+        os.environ["COLLECTION_NAME"] = "codebase"
+else:
+    # If COLLECTION_NAME is set but empty/unindexed, pick a non-empty collection for benchmarks.
+    try:
+        os.environ["COLLECTION_NAME"] = resolve_nonempty_collection(os.environ.get("COLLECTION_NAME"))
+    except Exception:
+        pass
 
 
 @dataclass
@@ -44,7 +72,7 @@ class RouterReport:
     results: List[RouterResult] = field(default_factory=list)
     
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        base = {
             "name": self.name,
             "total_queries": self.total_queries,
             "metrics": {
@@ -54,6 +82,27 @@ class RouterReport:
                 "p90_latency_ms": round(self.p90_latency_ms, 2),
             },
         }
+        # Also emit the unified BenchmarkReport shape for downstream tooling.
+        rep = create_report("router_bench", config={"name": self.name})
+        for r in self.results:
+            rep.per_query.append(
+                CommonQueryResult(
+                    query=r.query,
+                    latency_ms=r.latency_ms,
+                    metrics={
+                        "correct": 1.0 if r.correct else 0.0,
+                        "confidence": float(r.confidence or 0.0),
+                    },
+                    retrieved_paths=[],
+                    metadata={
+                        "expected_tool": r.expected_tool,
+                        "selected_tool": r.selected_tool,
+                    },
+                )
+            )
+        rep.compute_aggregates()
+        base["unified"] = rep.to_dict()
+        return base
 
 
 ROUTER_TEST_CASES = [
@@ -66,6 +115,26 @@ ROUTER_TEST_CASES = [
     {"query": "store a note about this finding", "expected": "memory_store"},
     {"query": "recall notes about authentication", "expected": "memory_find"},
 ]
+
+TOOL_ALIASES: Dict[str, str] = {
+    # Search
+    "code_search": "repo_search",
+    "repo_search_compat": "repo_search",
+    # Answer
+    "context_answer_compat": "context_answer",
+    # Memory
+    "find": "memory_find",
+    "store": "memory_store",
+}
+
+
+def _canonical_tool_name(name: Any) -> str:
+    if not name:
+        return "unknown"
+    s = str(name).strip()
+    if not s:
+        return "unknown"
+    return TOOL_ALIASES.get(s, s)
 
 
 async def run_router_benchmark(name: str = "default") -> RouterReport:
@@ -103,17 +172,19 @@ async def run_router_benchmark(name: str = "default") -> RouterReport:
         elapsed_ms = (time.perf_counter() - start) * 1000
         latencies.append(elapsed_ms)
         
-        correct = selected == expected
+        selected_c = _canonical_tool_name(selected)
+        expected_c = _canonical_tool_name(expected)
+        correct = selected_c == expected_c
         results.append(RouterResult(
             query=query,
             expected_tool=expected,
-            selected_tool=selected,
+            selected_tool=selected_c,
             confidence=confidence,
             latency_ms=elapsed_ms,
             correct=correct,
         ))
         status = "✓" if correct else "✗"
-        print(f"  {status} {query[:35]:35} → {selected} (exp: {expected})")
+        print(f"  {status} {query[:35]:35} → {selected_c} (exp: {expected_c})")
     
     correct_count = sum(1 for r in results if r.correct)
     

@@ -13,10 +13,41 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 import statistics
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+# Load environment (optional) and fix Docker hostname
+try:
+    from dotenv import load_dotenv  # type: ignore
+    load_dotenv()
+except Exception:
+    pass
+if "qdrant:" in os.environ.get("QDRANT_URL", ""):
+    os.environ["QDRANT_URL"] = "http://localhost:6333"
+
+# Ensure correct collection is used (read from workspace state or env)
+if not os.environ.get("COLLECTION_NAME"):
+    try:
+        from scripts.workspace_state import get_collection_name
+        os.environ["COLLECTION_NAME"] = get_collection_name() or "codebase"
+    except Exception:
+        os.environ["COLLECTION_NAME"] = "codebase"
+else:
+    # If COLLECTION_NAME is set but empty/unindexed, pick a non-empty collection for benchmarks.
+    try:
+        from scripts.benchmarks.common import resolve_nonempty_collection
+        os.environ["COLLECTION_NAME"] = resolve_nonempty_collection(os.environ.get("COLLECTION_NAME"))
+    except Exception:
+        pass
+
+from scripts.benchmarks.common import (
+    create_report,
+    QueryResult as CommonQueryResult,
+    extract_result_paths,
+)
+from scripts.benchmarks.eval_harness import EVAL_QUERIES, compute_mrr
 
 
 @dataclass
@@ -40,7 +71,7 @@ class ExpansionReport:
     results: List[ExpansionResult] = field(default_factory=list)
     
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        base = {
             "name": self.name,
             "total_queries": self.total_queries,
             "metrics": {
@@ -49,15 +80,28 @@ class ExpansionReport:
                 "avg_latency_ms": round(self.avg_latency_ms, 2),
             },
         }
+        rep = create_report("expand_bench", config={"name": self.name, "source": "eval_harness.EVAL_QUERIES"})
+        for r in self.results:
+            rep.per_query.append(
+                CommonQueryResult(
+                    query=r.original_query,
+                    latency_ms=r.latency_ms,
+                    metrics={
+                        "expansion_count": float(r.expansion_count),
+                        "mrr_delta": float(r.retrieval_improvement),
+                    },
+                    retrieved_paths=[],
+                    metadata={"expanded_queries": list(r.expanded_queries)},
+                )
+            )
+        rep.compute_aggregates()
+        base["unified"] = rep.to_dict()
+        return base
 
 
-EXPANSION_QUERIES = [
-    "database connection",
-    "error handling",
-    "caching strategy",
-    "authentication",
-    "logging system",
-]
+def _get_eval_cases(limit: Optional[int] = None) -> List[Dict[str, Any]]:
+    cases = list(EVAL_QUERIES)
+    return cases[:limit] if limit else cases
 
 
 async def run_expansion_benchmark(name: str = "default") -> ExpansionReport:
@@ -71,7 +115,9 @@ async def run_expansion_benchmark(name: str = "default") -> ExpansionReport:
     
     results: List[ExpansionResult] = []
     
-    for query in EXPANSION_QUERIES:
+    for case in _get_eval_cases():
+        query = case["query"]
+        expected = case["expected"]
         print(f"  Expanding: {query}...")
         
         # Expand query
@@ -84,20 +130,22 @@ async def run_expansion_benchmark(name: str = "default") -> ExpansionReport:
             alternates = []
         expand_ms = (time.perf_counter() - start) * 1000
         
-        # Measure retrieval improvement (simplified)
+        # Measure retrieval improvement (MRR delta vs expected paths from eval harness)
         improvement = 0.0
+        try:
+            orig_result = await repo_search(query=query, limit=10)
+            orig_paths = extract_result_paths(orig_result)
+            orig_mrr = compute_mrr(expected, orig_paths)
+        except Exception:
+            orig_mrr = 0.0
         if alternates:
-            # Compare MRR with and without expansion
             try:
-                orig_result = await repo_search(query=query, limit=5)
-                exp_result = await repo_search(queries=[query] + alternates[:2], limit=5)
-                # Simplified improvement metric
-                orig_count = len(orig_result.get("results", []) if isinstance(orig_result, dict) else [])
-                exp_count = len(exp_result.get("results", []) if isinstance(exp_result, dict) else [])
-                if orig_count > 0:
-                    improvement = (exp_count - orig_count) / orig_count
+                exp_result = await repo_search(queries=[query] + alternates[:2], limit=10)
+                exp_paths = extract_result_paths(exp_result)
+                exp_mrr = compute_mrr(expected, exp_paths)
             except Exception:
-                pass
+                exp_mrr = orig_mrr
+            improvement = exp_mrr - orig_mrr
         
         results.append(ExpansionResult(
             original_query=query,
@@ -106,7 +154,7 @@ async def run_expansion_benchmark(name: str = "default") -> ExpansionReport:
             latency_ms=expand_ms,
             retrieval_improvement=improvement,
         ))
-        print(f"    expansions={len(alternates)}, improvement={improvement:.1%}")
+        print(f"    expansions={len(alternates)}, ΔMRR={improvement:+.3f}")
     
     return ExpansionReport(
         name=name,

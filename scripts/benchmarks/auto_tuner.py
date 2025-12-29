@@ -246,10 +246,10 @@ async def run_eval_n_times(
     
     finally:
         for key, value in original_env.items():
-            if value is not None:
+            if value is None:
+                os.environ.pop(key, None)
+            else:
                 os.environ[key] = value
-            elif key in os.environ:
-                del os.environ[key]
     
     return results
 
@@ -436,6 +436,21 @@ async def run_intelligent_tuner(
     print(f"\n[1/3] Gathering baseline ({baseline_runs} runs)...")
     baseline_results = await run_eval_n_times(n_runs=baseline_runs)
     
+    # Fail early if baseline collection failed
+    if len(baseline_results) < max(2, baseline_runs // 2):
+        print(f"\n⚠️ Not enough successful baseline runs ({len(baseline_results)}/{baseline_runs})")
+        print("  Check for timeouts or errors in eval_harness. Aborting tuning.")
+        return TuningReport(
+            timestamp=datetime.now().isoformat(),
+            baseline_runs=len(baseline_results),
+            test_runs_per_knob=0,
+            knobs_tested=0,
+            validations=[],
+            recommended_changes={},
+            conflicts=[],
+            total_expected_improvement={},
+        )
+    
     for metric in ["mrr", "recall_5", "recall_10", "p90_latency"]:
         values = [r.get(metric, 0) for r in baseline_results]
         m, lo, hi = mean_with_ci(values)
@@ -475,19 +490,25 @@ async def run_intelligent_tuner(
     validations = detect_conflicts(validations)
     
     # Build recommendations (only statistically significant improvements)
-    recommended = {}
+    # Track best ValidationResult per knob by effect size
+    best_by_knob: Dict[str, ValidationResult] = {}
     conflicts = []
-    expected_improvement = {}
     
     for v in validations:
         if v.recommendation == "apply":
-            # Only take the best value for each knob
-            if v.knob not in recommended or v.effect_size > validations[list(recommended.keys()).index(v.knob) if v.knob in recommended else -1].effect_size:
-                recommended[v.knob] = v.test_value
-                expected_improvement[v.knob] = v.test_mean[v.primary_metric][0] - v.baseline_mean[v.primary_metric][0]
+            current = best_by_knob.get(v.knob)
+            if current is None or v.effect_size > current.effect_size:
+                best_by_knob[v.knob] = v
             
             if v.conflicts_with:
                 conflicts.extend([f"{v.knob} ↔ {c}" for c in v.conflicts_with])
+    
+    recommended = {}
+    expected_improvement = {}
+    for knob, v in best_by_knob.items():
+        recommended[knob] = v.test_value
+        primary = v.primary_metric
+        expected_improvement[knob] = v.test_mean[primary][0] - v.baseline_mean[primary][0]
     
     return TuningReport(
         timestamp=datetime.now().isoformat(),

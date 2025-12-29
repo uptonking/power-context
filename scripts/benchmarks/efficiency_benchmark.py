@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 # Shared stats helpers
-from scripts.benchmarks.common import percentile
+from scripts.benchmarks.common import percentile, extract_result_paths, resolve_nonempty_collection
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -30,6 +30,12 @@ if not os.environ.get("COLLECTION_NAME"):
         os.environ["COLLECTION_NAME"] = get_collection_name() or "codebase"
     except Exception:
         os.environ["COLLECTION_NAME"] = "codebase"
+else:
+    # If COLLECTION_NAME is set but empty/unindexed, pick a non-empty collection for benchmarks.
+    try:
+        os.environ["COLLECTION_NAME"] = resolve_nonempty_collection(os.environ.get("COLLECTION_NAME"))
+    except Exception:
+        pass
 
 # ---------------------------------------------------------------------------
 # Token Estimation (using tiktoken if available, else heuristic)
@@ -292,18 +298,7 @@ async def run_scenario(
                 queries=repo_search_queries,
                 limit=10,
             )
-            if isinstance(fused_result, dict):
-                results_data = fused_result.get("results", [])
-                if isinstance(results_data, list):
-                    for r in results_data:
-                        if isinstance(r, dict) and "path" in r:
-                            all_result_paths.append(r["path"])
-                elif isinstance(results_data, str):
-                    for line in results_data.split("\n"):
-                        if "/" in line:
-                            parts = line.split(",")
-                            if parts:
-                                all_result_paths.append(parts[0].strip())
+            all_result_paths.extend(extract_result_paths(fused_result))
         
         # Execute remaining queries
         queries_list = other_queries
@@ -318,20 +313,7 @@ async def run_scenario(
         
         result, _ = await tracker.call(tool_fn, tool_name, **q_copy)
         
-        # Extract paths from result
-        if isinstance(result, dict):
-            results_data = result.get("results", [])
-            if isinstance(results_data, list):
-                for r in results_data:
-                    if isinstance(r, dict) and "path" in r:
-                        all_result_paths.append(r["path"])
-            elif isinstance(results_data, str):
-                # TOON format - extract paths
-                for line in results_data.split("\n"):
-                    if "/" in line:
-                        parts = line.split(",")
-                        if parts:
-                            all_result_paths.append(parts[0].strip())
+        all_result_paths.extend(extract_result_paths(result))
     
     totals = tracker.get_totals()
     quality = compute_mrr(scenario["expected_paths"], all_result_paths)
@@ -389,7 +371,7 @@ def _normalize_for_dedup(tool_name: str, kwargs: Dict[str, Any]) -> Dict[str, An
         "kind",
         "symbol",
         "ext",
-        "not",
+        "not_",
         "case",
         "path_regex",
         "path_glob",
@@ -412,6 +394,16 @@ def _normalize_for_dedup(tool_name: str, kwargs: Dict[str, Any]) -> Dict[str, An
                 norm[k] = {str(kk).strip().lower(): str(vv).strip().lower() for kk, vv in sorted(v.items())}
             else:
                 norm[k] = v
+
+    # Alias: some callers use "not" instead of "not_"
+    if "not_" not in norm and kwargs.get("not") is not None:
+        v = kwargs.get("not")
+        if isinstance(v, str):
+            norm["not_"] = v.strip().lower()
+        elif isinstance(v, (list, tuple)):
+            norm["not_"] = [str(x).strip().lower() for x in v]
+        else:
+            norm["not_"] = v
 
     return norm
 

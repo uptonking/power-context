@@ -4,6 +4,8 @@ Trace-Based Auto-Tuner for Context-Engine.
 
 Uses OpenLit traces from ClickHouse to learn optimal parameters from production usage.
 No synthetic benchmarks - learns from real query patterns and outcomes.
+
+Supports multiple time windows: 24h (default), 7d, 30d
 """
 
 import asyncio
@@ -16,6 +18,38 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+# ---------------------------------------------------------------------------
+# Time Window Configuration
+# ---------------------------------------------------------------------------
+# Supported windows: "24h", "7d", "30d"
+TRACE_WINDOW = os.environ.get("TRACE_WINDOW", "24h")
+
+def get_interval_clause(window: str = None) -> str:
+    """Convert window string to ClickHouse INTERVAL clause."""
+    w = window or TRACE_WINDOW
+    intervals = {
+        "1h": "INTERVAL 1 HOUR",
+        "6h": "INTERVAL 6 HOUR", 
+        "12h": "INTERVAL 12 HOUR",
+        "24h": "INTERVAL 24 HOUR",
+        "7d": "INTERVAL 7 DAY",
+        "30d": "INTERVAL 30 DAY",
+    }
+    return intervals.get(w, "INTERVAL 24 HOUR")
+
+def get_window_label(window: str = None) -> str:
+    """Get human-readable label for the window."""
+    w = window or TRACE_WINDOW
+    labels = {
+        "1h": "1 hour",
+        "6h": "6 hours",
+        "12h": "12 hours", 
+        "24h": "24 hours",
+        "7d": "7 days",
+        "30d": "30 days",
+    }
+    return labels.get(w, "24 hours")
 
 
 # ---------------------------------------------------------------------------
@@ -34,7 +68,7 @@ async def query_clickhouse(sql: str) -> List[Dict[str, Any]]:
         
         url = f"http://{host}:{port}"
         
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=5.0, read=55.0)) as client:
             response = await client.post(
                 url,
                 content=sql + " FORMAT JSON",
@@ -90,6 +124,7 @@ def calculate_percentiles(values: List[float]) -> Dict[str, float]:
     return {
         "p50": percentile(0.5),
         "p90": percentile(0.9),
+        "p95": percentile(0.95),
         "p99": percentile(0.99),
         "min": sorted_vals[0],
         "max": sorted_vals[-1],
@@ -99,7 +134,7 @@ def calculate_percentiles(values: List[float]) -> Dict[str, float]:
 
 async def get_tool_usage_stats() -> Dict[str, Any]:
     """Get comprehensive MCP tool usage statistics."""
-    sql = """
+    sql = f"""
     SELECT 
         JSONExtractString(SpanAttributes['mcp.request.payload'], 'params', 'args', 1) as tool_name,
         count() as call_count,
@@ -107,7 +142,7 @@ async def get_tool_usage_stats() -> Dict[str, Any]:
         quantile(0.9)(Duration / 1e6) as p90_latency_ms
     FROM openlit.otel_traces 
     WHERE SpanName = 'mcp tools/call'
-      AND Timestamp > now() - INTERVAL 24 HOUR
+      AND Timestamp > now() - {get_interval_clause()}
     GROUP BY tool_name
     ORDER BY call_count DESC
     LIMIT 20
@@ -133,7 +168,7 @@ async def get_hourly_trends(metric_sql: str, hours: int = 24) -> List[Tuple[str,
     sql = f"""
     SELECT 
         toStartOfHour(Timestamp) as hour,
-        {metric_sql}
+        {metric_sql} AS value
     FROM openlit.otel_traces 
     WHERE Timestamp > now() - INTERVAL {hours} HOUR
     GROUP BY hour
@@ -166,7 +201,7 @@ async def analyze_llm_token_usage() -> Optional[TraceInsight]:
     """
     Analyze GLM token usage patterns to optimize DECODER_MAX_TOKENS.
     """
-    sql = """
+    sql = f"""
     SELECT 
         toFloat64OrZero(SpanAttributes['gen_ai.usage.output_tokens']) as output_tokens,
         toFloat64OrZero(SpanAttributes['gen_ai.usage.input_tokens']) as input_tokens,
@@ -176,7 +211,7 @@ async def analyze_llm_token_usage() -> Optional[TraceInsight]:
     FROM openlit.otel_traces 
     WHERE SpanName LIKE '%glm%'
       AND StatusCode = 'Ok'
-      AND Timestamp > now() - INTERVAL 24 HOUR
+      AND Timestamp > now() - {get_interval_clause()}
     ORDER BY Timestamp DESC
     LIMIT 200
     """
@@ -241,7 +276,7 @@ async def analyze_context_token_usage() -> Dict[str, Any]:
     - Cost estimation
     """
     # Get LLM token usage
-    llm_sql = """
+    llm_sql = f"""
     SELECT 
         sum(toFloat64OrZero(SpanAttributes['gen_ai.usage.input_tokens'])) as total_input,
         sum(toFloat64OrZero(SpanAttributes['gen_ai.usage.output_tokens'])) as total_output,
@@ -251,13 +286,13 @@ async def analyze_context_token_usage() -> Dict[str, Any]:
         avg(toFloat64OrZero(SpanAttributes['gen_ai.usage.output_tokens'])) as avg_output
     FROM openlit.otel_traces 
     WHERE SpanName LIKE '%glm%' OR SpanName LIKE '%chat%'
-      AND Timestamp > now() - INTERVAL 24 HOUR
+      AND Timestamp > now() - {get_interval_clause()}
     """
     
     llm_result = await query_clickhouse(llm_sql)
     
     # Get MCP tool call payload sizes (simpler query without extractJSONPathRaw)
-    mcp_sql = """
+    mcp_sql = f"""
     SELECT 
         count() as call_count,
         sum(length(SpanAttributes['mcp.request.payload'])) as total_payload_size,
@@ -266,7 +301,7 @@ async def analyze_context_token_usage() -> Dict[str, Any]:
         avg(length(SpanAttributes['mcp.response.payload'])) as avg_response_size
     FROM openlit.otel_traces 
     WHERE SpanName = 'mcp tools/call'
-      AND Timestamp > now() - INTERVAL 24 HOUR
+      AND Timestamp > now() - {get_interval_clause()}
     """
     
     mcp_results = await query_clickhouse(mcp_sql)
@@ -323,14 +358,14 @@ async def analyze_search_latency() -> Optional[TraceInsight]:
     - Sample size weighting
     - Outlier handling
     """
-    sql = """
+    sql = f"""
     SELECT 
         SpanAttributes['mcp.request.payload'] as payload,
         Duration / 1e6 as duration_ms
     FROM openlit.otel_traces 
     WHERE SpanName = 'mcp tools/call'
       AND SpanAttributes['mcp.request.payload'] LIKE '%repo_search%'
-      AND Timestamp > now() - INTERVAL 24 HOUR
+      AND Timestamp > now() - {get_interval_clause()}
     ORDER BY Timestamp DESC
     LIMIT 500
     """
@@ -421,13 +456,13 @@ async def analyze_query_patterns() -> Optional[TraceInsight]:
     - Single-word queries
     - Semantic vs lookup query classification
     """
-    sql = """
+    sql = f"""
     SELECT 
         SpanAttributes['mcp.request.payload'] as payload
     FROM openlit.otel_traces 
     WHERE SpanName = 'mcp tools/call'
       AND SpanAttributes['mcp.request.payload'] LIKE '%repo_search%'
-      AND Timestamp > now() - INTERVAL 24 HOUR
+      AND Timestamp > now() - {get_interval_clause()}
     ORDER BY Timestamp DESC
     LIMIT 500
     """
@@ -545,7 +580,7 @@ async def analyze_grounding_rate() -> Optional[TraceInsight]:
     """
     Analyze context_answer grounding to optimize MICRO_BUDGET_TOKENS.
     """
-    sql = """
+    sql = f"""
     SELECT 
         SpanAttributes['gen_ai.response.grounded'] as grounded,
         SpanAttributes['gen_ai.response.citation_count'] as citations,
@@ -553,7 +588,7 @@ async def analyze_grounding_rate() -> Optional[TraceInsight]:
     FROM openlit.otel_traces 
     WHERE SpanName LIKE '%context_answer%'
       AND StatusCode = 'Ok'
-      AND Timestamp > now() - INTERVAL 24 HOUR
+      AND Timestamp > now() - {get_interval_clause()}
     ORDER BY Timestamp DESC
     LIMIT 100
     """
@@ -599,7 +634,7 @@ async def analyze_rerank_effectiveness() -> Optional[TraceInsight]:
     """
     Analyze if reranking actually improves results.
     """
-    sql = """
+    sql = f"""
     SELECT 
         SpanAttributes['rerank.position_changes'] as changes,
         SpanAttributes['rerank.top1_changed'] as top1_changed,
@@ -607,7 +642,7 @@ async def analyze_rerank_effectiveness() -> Optional[TraceInsight]:
     FROM openlit.otel_traces 
     WHERE SpanName LIKE '%rerank%'
       AND StatusCode = 'Ok'
-      AND Timestamp > now() - INTERVAL 24 HOUR
+      AND Timestamp > now() - {get_interval_clause()}
     ORDER BY Timestamp DESC
     LIMIT 100
     """
@@ -656,7 +691,7 @@ async def analyze_error_patterns() -> Optional[TraceInsight]:
     
     Maps common error types to actionable tuning parameters.
     """
-    sql = """
+    sql = f"""
     SELECT 
         SpanName,
         SpanAttributes['error.message'] as error_msg,
@@ -664,7 +699,7 @@ async def analyze_error_patterns() -> Optional[TraceInsight]:
         count() as cnt
     FROM openlit.otel_traces 
     WHERE StatusCode = 'Error'
-      AND Timestamp > now() - INTERVAL 24 HOUR
+      AND Timestamp > now() - {get_interval_clause()}
     GROUP BY SpanName, error_msg, error_type
     ORDER BY cnt DESC
     LIMIT 20
@@ -681,12 +716,15 @@ async def analyze_error_patterns() -> Optional[TraceInsight]:
         return None
     
     # Get total requests for error rate calculation
-    total_sql = """
+    total_sql = f"""
     SELECT count() as total FROM openlit.otel_traces 
-    WHERE Timestamp > now() - INTERVAL 24 HOUR
+    WHERE Timestamp > now() - {get_interval_clause()}
     """
     total_result = await query_clickhouse(total_sql)
-    total_requests = int(total_result[0]["total"]) if total_result else 1
+    if not total_result or "total" not in total_result[0]:
+        print("Failed to get total request count; skipping error pattern analysis.")
+        return None
+    total_requests = max(1, int(total_result[0]["total"]))
     
     error_rate = total_errors / total_requests
     
@@ -760,7 +798,7 @@ async def analyze_latency_breakdown() -> Dict[str, Dict[str, float]]:
             count() as cnt
         FROM openlit.otel_traces 
         WHERE {condition}
-          AND Timestamp > now() - INTERVAL 24 HOUR
+          AND Timestamp > now() - {get_interval_clause()}
         """
         results = await query_clickhouse(sql)
         
@@ -791,7 +829,7 @@ async def analyze_time_patterns() -> Optional[TraceInsight]:
     
     Useful for detecting if dynamic scaling or time-based params are needed.
     """
-    sql = """
+    sql = f"""
     SELECT 
         toHour(Timestamp) as hour,
         avg(Duration / 1e6) as avg_latency,
@@ -946,13 +984,13 @@ async def analyze_traces(verbose: bool = False) -> TraceAnalysisReport:
     print("Analyzing production traces from ClickHouse...")
     
     # Get total trace count
-    count_sql = """
+    count_sql = f"""
     SELECT count() as cnt FROM openlit.otel_traces 
-    WHERE Timestamp > now() - INTERVAL 24 HOUR
+    WHERE Timestamp > now() - {get_interval_clause()}
     """
     count_result = await query_clickhouse(count_sql)
     total_traces = int(count_result[0]["cnt"]) if count_result else 0
-    print(f"  Total traces (24h): {total_traces:,}")
+    print(f"  Total traces ({get_window_label()}): {total_traces:,}")
     
     # Get tool usage stats
     print("\n[1/3] Analyzing tool usage patterns...")
@@ -1004,7 +1042,7 @@ async def analyze_traces(verbose: bool = False) -> TraceAnalysisReport:
     
     return TraceAnalysisReport(
         timestamp=datetime.now().isoformat(),
-        trace_window="24h",
+        trace_window=TRACE_WINDOW,
         insights=insights,
         recommended_changes=recommended,
         tool_stats=tool_stats,
@@ -1108,11 +1146,22 @@ def print_trace_report(report: TraceAnalysisReport) -> None:
 # CLI
 # ---------------------------------------------------------------------------
 async def main():
+    global TRACE_WINDOW
     import argparse
     
     parser = argparse.ArgumentParser(description="Trace-Based Auto-Tuner")
     parser.add_argument("--output", type=str, help="Output JSON file")
+    parser.add_argument(
+        "--window", "-w", 
+        type=str, 
+        default="24h",
+        choices=["1h", "6h", "12h", "24h", "7d", "30d"],
+        help="Time window for trace analysis (default: 24h)"
+    )
     args = parser.parse_args()
+    
+    # Set the global window
+    TRACE_WINDOW = args.window
     
     report = await analyze_traces()
     print_trace_report(report)

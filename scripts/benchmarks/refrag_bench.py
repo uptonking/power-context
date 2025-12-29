@@ -18,7 +18,30 @@ import statistics
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from scripts.benchmarks.common import percentile
+# Load environment (optional) and fix Docker hostname
+try:
+    from dotenv import load_dotenv  # type: ignore
+    load_dotenv()
+except Exception:
+    pass
+if "qdrant:" in os.environ.get("QDRANT_URL", ""):
+    os.environ["QDRANT_URL"] = "http://localhost:6333"
+
+from scripts.benchmarks.common import percentile, resolve_nonempty_collection
+
+# Ensure correct collection is used (read from workspace state or env)
+if not os.environ.get("COLLECTION_NAME"):
+    try:
+        from scripts.workspace_state import get_collection_name
+        os.environ["COLLECTION_NAME"] = get_collection_name() or "codebase"
+    except Exception:
+        os.environ["COLLECTION_NAME"] = "codebase"
+else:
+    # If COLLECTION_NAME is set but empty/unindexed, pick a non-empty collection for benchmarks.
+    try:
+        os.environ["COLLECTION_NAME"] = resolve_nonempty_collection(os.environ.get("COLLECTION_NAME"))
+    except Exception:
+        pass
 
 
 @dataclass

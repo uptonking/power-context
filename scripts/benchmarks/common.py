@@ -8,7 +8,7 @@ import json
 import statistics
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 
 # ---------------------------------------------------------------------------
@@ -50,6 +50,111 @@ def compute_percentiles(values: List[float]) -> Dict[str, float]:
         "max": round(max(values), 2) if values else 0.0,
         "mean": round(statistics.mean(values), 2) if values else 0.0,
     }
+
+
+# ---------------------------------------------------------------------------
+# Result Parsing Helpers
+# ---------------------------------------------------------------------------
+def extract_result_paths(result: Any, limit: Optional[int] = None) -> List[str]:
+    """
+    Extract file paths from MCP tool results.
+
+    Supports:
+    - JSON: {"results": [{"path": "..."} , ...]}
+    - TOON-ish text: {"results": "<path>, ...\\n<path>, ..."} or {"text": "..."}
+    - Mixed shapes; returns [] on unknown/empty.
+    """
+    paths: List[str] = []
+
+    def _add(p: Any) -> None:
+        if not isinstance(p, str):
+            return
+        s = p.strip()
+        if not s:
+            return
+        paths.append(s)
+
+    def _parse_text(blob: str) -> None:
+        if not blob:
+            return
+        for raw in blob.splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            # Most TOON lines start with "<path>,..." – take the first CSV column.
+            head = line.split(",", 1)[0].strip()
+            # Heuristic: require something path-like.
+            if "/" in head or "." in head:
+                _add(head)
+
+    if isinstance(result, dict):
+        results_data = result.get("results")
+        if isinstance(results_data, list):
+            for r in results_data:
+                if isinstance(r, dict) and "path" in r:
+                    _add(r.get("path"))
+        elif isinstance(results_data, str):
+            _parse_text(results_data)
+
+        # Some tools return a separate "text" field (e.g., TOON format).
+        if not paths:
+            text_data = result.get("text")
+            if isinstance(text_data, str):
+                _parse_text(text_data)
+
+    if limit is not None and limit >= 0:
+        return paths[:limit]
+    return paths
+
+
+def resolve_nonempty_collection(
+    preferred: Optional[str] = None,
+    qdrant_url: Optional[str] = None,
+    min_points: int = 1,
+) -> str:
+    """
+    Resolve a Qdrant collection name that is likely to contain indexed data.
+
+    Benchmarks often run in environments where COLLECTION_NAME is set to a placeholder
+    or an empty collection. If the preferred collection has <min_points> points, we
+    pick the collection with the largest point count instead (best-effort).
+    """
+    pref = (preferred or "").strip()
+    url = (qdrant_url or "").strip() or __import__("os").environ.get("QDRANT_URL", "http://localhost:6333")
+
+    try:
+        from qdrant_client import QdrantClient  # type: ignore
+    except Exception:
+        return pref or "codebase"
+
+    try:
+        client = QdrantClient(url=url)
+        cols = client.get_collections().collections
+    except Exception:
+        return pref or "codebase"
+
+    counts: Dict[str, int] = {}
+    for c in cols:
+        name = getattr(c, "name", "") or ""
+        if not name:
+            continue
+        try:
+            cnt = int(client.count(collection_name=name, exact=True).count or 0)
+        except Exception:
+            cnt = 0
+        counts[name] = cnt
+
+    # Prefer preferred if it has enough points
+    if pref and counts.get(pref, 0) >= int(min_points):
+        return pref
+
+    # Else pick the largest non-empty collection
+    if counts:
+        best = max(counts.items(), key=lambda kv: kv[1])
+        if best[1] >= int(min_points):
+            return best[0]
+
+    return pref or "codebase"
 
 
 # ---------------------------------------------------------------------------

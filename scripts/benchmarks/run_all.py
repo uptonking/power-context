@@ -11,26 +11,26 @@ import asyncio
 import json
 import os
 import sys
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-# Import unified reporting utilities
-from scripts.benchmarks.common import (
-    BenchmarkReport,
-    BenchmarkMetadata,
-    QueryResult as CommonQueryResult,
-    compute_percentiles,
-    percentile,
-)
+# Import unified metadata utilities
+from scripts.benchmarks.common import BenchmarkMetadata
+from scripts.benchmarks.common import resolve_nonempty_collection
 
 # Ensure collection is set
 if not os.environ.get("COLLECTION_NAME"):
     try:
         from scripts.workspace_state import get_collection_name
         os.environ["COLLECTION_NAME"] = get_collection_name() or "codebase"
+    except Exception:
+        pass
+else:
+    # If a collection is set but empty (common in multi-collection setups), pick a non-empty one.
+    try:
+        os.environ["COLLECTION_NAME"] = resolve_nonempty_collection(os.environ.get("COLLECTION_NAME"))
     except Exception:
         pass
 
@@ -55,6 +55,8 @@ async def run_all_benchmarks(components: List[str]) -> Dict[str, Any]:
             "config": metadata.config,
             "environment": metadata.environment,
         },
+        # Back-compat convenience for callers that expect a top-level timestamp.
+        "timestamp": metadata.timestamp,
         "components": {},
         "aggregates": {},
     }
@@ -166,7 +168,8 @@ def print_summary(results: Dict[str, Any]):
     print("\n" + "=" * 70)
     print("COMPREHENSIVE BENCHMARK REPORT")
     print("=" * 70)
-    print(f"Timestamp: {results['timestamp']}")
+    ts = (results.get("metadata") or {}).get("timestamp") or results.get("timestamp", "")
+    print(f"Timestamp: {ts}")
     print("-" * 70)
     
     for name, data in results.get("components", {}).items():

@@ -17,6 +17,7 @@ from .intent import (
     INTENT_SEARCH_IMPORTERS,
     INTENT_MEMORY_STORE,
     INTENT_MEMORY_FIND,
+    INTENT_SYMBOL_GRAPH,
     INTENT_INDEX,
     INTENT_PRUNE,
     INTENT_STATUS,
@@ -174,6 +175,18 @@ def build_plan(q: str) -> List[Tuple[str, Dict[str, Any]]]:
             args["limit"] = max(5, search_limit)
         return [("find", args)]
 
+    if intent == INTENT_SYMBOL_GRAPH:
+        hints = parse_repo_hints(q)
+        clean_q, dsl_filters = clean_query_and_dsl(q)
+        args = {"symbol": clean_q, "query_type": "callers"}
+        if search_limit:
+            args["limit"] = search_limit
+        for k in ("language", "under"):
+            v = dsl_filters.get(k) or hints.get(k)
+            if v not in (None, ""):
+                args[k] = v
+        return [("symbol_graph", args)]
+
     if intent == INTENT_SEARCH_CALLERS:
         hints = parse_repo_hints(q)
         clean_q, dsl_filters = clean_query_and_dsl(q)
@@ -248,3 +261,52 @@ def build_plan(q: str) -> List[Tuple[str, Dict[str, Any]]]:
 
     # Fallback
     return [("repo_search", {"query": q, "limit": search_limit})]
+
+
+async def route_query(query: str) -> Dict[str, Any]:
+    """
+    Route a query to the appropriate tool.
+    
+    Returns dict with:
+    - tool: Selected tool name
+    - confidence: Routing confidence (0.0-1.0)
+    - intent: Classified intent
+    - args: Tool arguments
+    """
+    intent = classify_intent(query)
+    plan = build_plan(query)
+    
+    if not plan:
+        return {
+            "tool": "repo_search",
+            "confidence": 0.3,
+            "intent": "fallback",
+            "args": {"query": query},
+        }
+    
+    # First tool in plan is the primary selection
+    tool_name, tool_args = plan[0]
+    
+    # Map intent to confidence (higher for more specific intents)
+    intent_confidence = {
+        INTENT_ANSWER: 0.9,
+        INTENT_SEARCH: 0.7,
+        INTENT_SEARCH_TESTS: 0.85,
+        INTENT_SEARCH_CONFIG: 0.85,
+        INTENT_SEARCH_CALLERS: 0.85,
+        INTENT_SEARCH_IMPORTERS: 0.85,
+        INTENT_SYMBOL_GRAPH: 0.9,
+        INTENT_MEMORY_STORE: 0.9,
+        INTENT_MEMORY_FIND: 0.9,
+        INTENT_INDEX: 0.95,
+        INTENT_PRUNE: 0.95,
+        INTENT_STATUS: 0.95,
+        INTENT_LIST: 0.95,
+    }
+    
+    return {
+        "tool": tool_name,
+        "confidence": intent_confidence.get(intent, 0.5),
+        "intent": intent,
+        "args": tool_args,
+    }

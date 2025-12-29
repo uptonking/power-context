@@ -18,6 +18,7 @@ INTENT_SEARCH_CALLERS = "search_callers"
 INTENT_SEARCH_IMPORTERS = "search_importers"
 INTENT_MEMORY_STORE = "memory_store"
 INTENT_MEMORY_FIND = "memory_find"
+INTENT_SYMBOL_GRAPH = "symbol_graph"
 INTENT_INDEX = "index"
 INTENT_PRUNE = "prune"
 INTENT_STATUS = "status"
@@ -44,25 +45,46 @@ def _classify_intent_rules(q: str) -> str | None:
     if any(w in s for w in ["list collections", "collections", "list qdrant"]):
         return INTENT_LIST
 
+    # Search importers - check BEFORE tests to avoid "import" in test queries
+    if any(w in s for w in ["import", "imports", "importers", "who imports", "imports this", "importing modules", "files that import"]):
+        # Make sure it's not about "important" or similar
+        if not any(w in s for w in ["important", "importance"]):
+            return INTENT_SEARCH_IMPORTERS
+
     # Intent wrappers
     if any(w in s for w in ["tests", "pytest", "unit test", "test file", "where are tests"]):
         return INTENT_SEARCH_TESTS
-    # Memory intents
+    
+    # Memory intents - be more specific to avoid false positives on "memory store implementation"
+    # Check for actual user-intent memory storage, not code references
+    memory_store_triggers = [
+        "remember this", "save memory", "store memory", "remember that", 
+        "save preference", "remember preference", "store a note", "save a note", "remember note"
+    ]
+    # IMPORTANT: "memory store" as a phrase often refers to code, not user intent
+    if any(w in s for w in memory_store_triggers):
+        # Exclude if it looks like a code search (has "implementation", "code", "function", etc)
+        if not any(exc in s for exc in ["implementation", "code", "function", "class", "module", "file", "search for"]):
+            return INTENT_MEMORY_STORE
     if any(w in s for w in [
-        "remember this", "save memory", "store memory", "remember that", "save preference", "remember preference"
-    ]):
-        return INTENT_MEMORY_STORE
-    if any(w in s for w in [
-        "find memory", "recall", "retrieve memory", "memory search", "what did we save"
+        "find memory", "recall", "retrieve memory", "memory search", "what did we save",
+        "recall notes", "find notes", "retrieve notes"
     ]):
         return INTENT_MEMORY_FIND
 
+    # Symbol graph for callers - check BEFORE config to avoid false positives
+    if any(w in s for w in ["who calls", "callers of", "call sites", "function calls"]):
+        return INTENT_SYMBOL_GRAPH
+    if re.search(r"calls?\s+(the\s+)?\w+\s*(function|method)?", s):
+        return INTENT_SYMBOL_GRAPH
+
+    # Config search - after callers check
     if any(w in s for w in ["config", "yaml", "toml", "ini", "settings file", "configuration"]):
         return INTENT_SEARCH_CONFIG
-    if any(w in s for w in ["who calls", "callers", "used by", "usage sites", "references this function"]):
+    
+    # Fallback callers intent (used by search_callers_for)
+    if any(w in s for w in ["used by", "usage sites", "references this function"]):
         return INTENT_SEARCH_CALLERS
-    if any(w in s for w in ["importers", "who imports", "imports this", "importing modules"]):
-        return INTENT_SEARCH_IMPORTERS
 
     # Q&A-like prompts
     if re.match(r"^(what|how|why|explain|describe|summarize)(\b|\s)", s):
@@ -79,26 +101,33 @@ def _intent_prototypes() -> Dict[str, List[str]]:
             "summarize design decisions and architecture rationale",
         ],
         INTENT_SEARCH: [
-            "find code references, search repository, locate files",
-            "code search in repo, general lookup",
+            "find code references, search repository, locate files, find implementation",
+            "code search in repo, general lookup, search for implementation",
+            "find module, search function, locate class definition",
+            "search for memory store implementation",  # Explicit example
         ],
         INTENT_MEMORY_STORE: [
-            "remember this, save preference, store memory",
+            "remember this preference, save this note for later, store this memory",
+            "save my preference, remember that for next time",
+            # NOT: search for, find, implementation, code
         ],
         INTENT_MEMORY_FIND: [
-            "what did we save, recall saved notes, retrieve memory",
+            "what did we save, recall saved notes, retrieve memory, find my saved notes",
         ],
         INTENT_SEARCH_TESTS: [
-            "find unit tests, test files, pytest",
+            "find unit tests, test files, pytest, testing modules",
         ],
         INTENT_SEARCH_CONFIG: [
             "config files, configuration changes, yaml toml ini settings",
         ],
         INTENT_SEARCH_CALLERS: [
-            "who calls this function, callers, usage sites",
+            "who calls this function, callers, usage sites, where is it used",
         ],
         INTENT_SEARCH_IMPORTERS: [
-            "who imports this module, importers, importing modules",
+            "who imports this module, importers, importing modules, files that import",
+        ],
+        INTENT_SYMBOL_GRAPH: [
+            "who calls this function, callers of, call graph, symbol callers",
         ],
     }
 

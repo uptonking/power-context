@@ -39,7 +39,7 @@ class ValidationResult:
     before_p90: float
     after_p90: float
     improvement_pct: float
-    verdict: str  # "CONFIRMED", "DEGRADED", "INCONCLUSIVE"
+    verdict: str  # "CONFIRMED", "DEGRADED", "INCONCLUSIVE", "NEUTRAL"
     confidence: float
     sample_before: int
     sample_after: int
@@ -162,6 +162,22 @@ async def validate_recommendation(
     # Step 2: Apply change
     print(f"\n[2/4] Applying change: {metric}={new_value}")
     previous_value = await apply_config_change(metric, new_value)
+    
+    # Handle unsupported metrics
+    if previous_value == "unknown":
+        print(f"  ⚠️ Metric {metric} is not supported by validation loop; skipping.")
+        return ValidationResult(
+            metric=metric,
+            change=f"{old_value} → {new_value}",
+            before_p90=baseline["p90"],
+            after_p90=baseline["p90"],
+            improvement_pct=0.0,
+            verdict="INCONCLUSIVE",
+            confidence=0.0,
+            sample_before=baseline["count"],
+            sample_after=baseline["count"],
+        )
+    
     print(f"  Previous value was: {previous_value}")
 
     # Step 3: Wait for traces
