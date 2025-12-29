@@ -38,12 +38,12 @@ if "qdrant:" in qdrant_url:
 
 # Ensure correct collection is used (read from workspace state or env)
 try:
-    from scripts.benchmarks.common import resolve_nonempty_collection
+    from scripts.benchmarks.common import resolve_collection_auto
     if not os.environ.get("COLLECTION_NAME"):
         from scripts.workspace_state import get_collection_name
         os.environ["COLLECTION_NAME"] = get_collection_name() or "codebase"
     else:
-        os.environ["COLLECTION_NAME"] = resolve_nonempty_collection(os.environ.get("COLLECTION_NAME"))
+        os.environ["COLLECTION_NAME"] = resolve_collection_auto(os.environ.get("COLLECTION_NAME"))
 except Exception:
     pass
 

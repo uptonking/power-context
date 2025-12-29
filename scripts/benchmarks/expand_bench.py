@@ -37,8 +37,8 @@ if not os.environ.get("COLLECTION_NAME"):
 else:
     # If COLLECTION_NAME is set but empty/unindexed, pick a non-empty collection for benchmarks.
     try:
-        from scripts.benchmarks.common import resolve_nonempty_collection
-        os.environ["COLLECTION_NAME"] = resolve_nonempty_collection(os.environ.get("COLLECTION_NAME"))
+        from scripts.benchmarks.common import resolve_collection_auto
+        os.environ["COLLECTION_NAME"] = resolve_collection_auto(os.environ.get("COLLECTION_NAME"))
     except Exception:
         pass
 

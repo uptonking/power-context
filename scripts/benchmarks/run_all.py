@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 # Import unified metadata utilities
 from scripts.benchmarks.common import BenchmarkMetadata
-from scripts.benchmarks.common import resolve_nonempty_collection
+from scripts.benchmarks.common import resolve_collection_auto
 
 # Ensure collection is set
 if not os.environ.get("COLLECTION_NAME"):
@@ -30,7 +30,7 @@ if not os.environ.get("COLLECTION_NAME"):
 else:
     # If a collection is set but empty (common in multi-collection setups), pick a non-empty one.
     try:
-        os.environ["COLLECTION_NAME"] = resolve_nonempty_collection(os.environ.get("COLLECTION_NAME"))
+        os.environ["COLLECTION_NAME"] = resolve_collection_auto(os.environ.get("COLLECTION_NAME"))
     except Exception:
         pass
 
@@ -143,6 +143,35 @@ async def run_all_benchmarks(components: List[str]) -> Dict[str, Any]:
         except Exception as e:
             print(f"  Efficiency benchmark failed: {e}")
     
+    # Embedding model comparison (requires pre-built bench-* collections)
+    if "embedding" in components:
+        try:
+            import subprocess
+            import json as _json
+            print("\n▶ Running Embedding Model Comparison...")
+            # Get targets from env or use defaults
+            targets = os.environ.get("EMBED_BENCH_TARGETS", "bench-bge:BAAI/bge-base-en-v1.5,bench-minilm:sentence-transformers/all-MiniLM-L6-v2")
+            target_pairs = [t.split(":") for t in targets.split(",") if ":" in t]
+            if len(target_pairs) < 2:
+                raise ValueError("EMBED_BENCH_TARGETS needs at least 2 targets (coll:model pairs)")
+            
+            cmd = [sys.executable, str(PROJECT_ROOT / "bench" / "eval.py")]
+            for coll, model in target_pairs:
+                cmd.extend(["--target", coll.strip(), model.strip()])
+            cmd.extend(["--repeats", os.environ.get("EMBED_BENCH_REPEATS", "5"), "--warmup", "1"])
+            
+            proc = subprocess.run(cmd, capture_output=True, text=True, env=os.environ.copy())
+            if proc.returncode == 0:
+                # Parse JSON output from last line
+                for line in reversed(proc.stdout.strip().splitlines()):
+                    if line.startswith("{"):
+                        results["components"]["embedding"] = _json.loads(line)
+                        break
+            else:
+                print(f"  Embedding bench stderr: {proc.stderr[:200]}")
+        except Exception as e:
+            print(f"  Embedding benchmark failed: {e}")
+    
     # Generate recommendations
     results["recommendations"] = generate_recommendations(results["components"])
     
@@ -241,11 +270,17 @@ def main():
         "--components",
         nargs="+",
         default=["all"],
-        choices=["all", "eval", "trm", "refrag", "expand", "router", "rrf", "grounding", "efficiency"],
+        choices=["all", "eval", "trm", "refrag", "expand", "router", "rrf", "grounding", "efficiency", "embedding"],
         help="Components to benchmark",
     )
     parser.add_argument("--output", type=str, help="Output JSON file")
+    parser.add_argument("--collection", type=str, help="Override COLLECTION_NAME for this run")
     args = parser.parse_args()
+    
+    # Apply collection override before running benchmarks
+    if args.collection:
+        os.environ["COLLECTION_NAME"] = args.collection
+        print(f"[bench] Collection override: {args.collection}")
     
     print("Starting comprehensive benchmark suite...")
     results = asyncio.run(run_all_benchmarks(args.components))

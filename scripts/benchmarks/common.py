@@ -157,6 +157,69 @@ def resolve_nonempty_collection(
     return pref or "codebase"
 
 
+def require_collection(
+    collection: str,
+    qdrant_url: Optional[str] = None,
+    min_points: int = 1,
+) -> int:
+    """
+    FAIL-FAST: Require a specific collection to exist with at least min_points.
+    
+    Use this for deterministic benchmarks where we don't want silent fallback.
+    Raises ValueError if collection is empty/missing.
+    
+    Returns: point count of the collection
+    """
+    import os
+    coll = (collection or "").strip()
+    if not coll:
+        raise ValueError("require_collection: collection name is required")
+    
+    url = (qdrant_url or "").strip() or os.environ.get("QDRANT_URL", "http://localhost:6333")
+    
+    try:
+        from qdrant_client import QdrantClient  # type: ignore
+        client = QdrantClient(url=url)
+        info = client.get_collection(coll)
+        count = int(info.points_count or 0)
+    except Exception as e:
+        raise ValueError(f"require_collection: collection '{coll}' not accessible: {e}")
+    
+    if count < min_points:
+        raise ValueError(
+            f"require_collection: collection '{coll}' has {count} points, "
+            f"but {min_points} required. Run indexing first or specify a valid collection."
+        )
+    
+    return count
+
+
+def resolve_collection_auto(
+    preferred: Optional[str] = None,
+    qdrant_url: Optional[str] = None,
+    min_points: int = 1,
+) -> str:
+    """
+    Unified collection resolver that respects BENCH_STRICT mode.
+    
+    - BENCH_STRICT=1: Fail fast if preferred collection is empty/missing
+    - BENCH_STRICT=0 (default): Auto-select largest non-empty collection
+    
+    Use this in benchmark scripts for consistent behavior.
+    """
+    import os
+    strict = os.environ.get("BENCH_STRICT", "").strip().lower() in ("1", "true", "yes")
+    pref = (preferred or "").strip() or os.environ.get("COLLECTION_NAME", "")
+    
+    if strict:
+        # Fail-fast mode - require the exact collection
+        require_collection(pref, qdrant_url, min_points)
+        return pref
+    else:
+        # Auto-select mode (legacy behavior)
+        return resolve_nonempty_collection(pref, qdrant_url, min_points)
+
+
 # ---------------------------------------------------------------------------
 # Unified Reporting Format
 # ---------------------------------------------------------------------------
