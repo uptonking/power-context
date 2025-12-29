@@ -85,6 +85,8 @@ def test_multi_repo_ignores_placeholder_collection_in_state(monkeypatch, tmp_pat
 
     utils = importlib.import_module("scripts.watch_index_core.utils")
     utils = importlib.reload(utils)
+    monkeypatch.setattr(utils, "ROOT", tmp_path, raising=False)
+    monkeypatch.setattr(utils, "is_multi_repo_mode", lambda: True, raising=True)
 
     repo_slug = "Pirate Survivors-2b23a7e45f2c4b9f"
     repo_path = tmp_path / repo_slug
