@@ -448,7 +448,7 @@ def set_session_defaults(
 
 
 @mcp.tool()
-def store(
+def memory_store(
     information: str,
     metadata: Optional[Dict[str, Any]] = None,
     collection: Optional[str] = None,
@@ -481,7 +481,7 @@ def store(
 
 
 @mcp.tool()
-def find(
+def memory_find(
     query: str,
     limit: Optional[int] = None,
     collection: Optional[str] = None,
@@ -596,58 +596,6 @@ def find(
         items.values(), key=lambda x: scores.get(str(x["id"]), 0.0), reverse=True
     )[:lim]
     return {"ok": True, "results": ordered, "count": len(ordered)}
-
-
-# =============================================================================
-# Aliases: memory_store and memory_find
-# These aliases ensure proper routing through the MCP bridge (which routes
-# tool names containing "memory" to the memory server). They wrap the original
-# store/find functions for backward compatibility.
-# =============================================================================
-
-@mcp.tool()
-def memory_store(
-    information: str,
-    metadata: Optional[Dict[str, Any]] = None,
-    collection: Optional[str] = None,
-    session: Optional[str] = None,
-    ctx: Context = None,
-) -> Dict[str, Any]:
-    """Store a memory entry into Qdrant (alias for 'store').
-
-    First call may be slower because the embedding model loads lazily.
-    """
-    return store(
-        information=information,
-        metadata=metadata,
-        collection=collection,
-        session=session,
-        ctx=ctx,
-    )
-
-
-@mcp.tool()
-def memory_find(
-    query: str,
-    limit: Optional[int] = None,
-    collection: Optional[str] = None,
-    top_k: Optional[int] = None,
-    session: Optional[str] = None,
-    ctx: Context = None,
-) -> Dict[str, Any]:
-    """Find memory entries by vector similarity (alias for 'find').
-
-    Cold-start option: set MEMORY_COLD_SKIP_DENSE=1 to skip dense embedding until the
-    model is cached (useful on slow storage).
-    """
-    return find(
-        query=query,
-        limit=limit,
-        collection=collection,
-        top_k=top_k,
-        session=session,
-        ctx=ctx,
-    )
 
 
 def _resolve_collection(

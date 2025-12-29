@@ -57,7 +57,7 @@ Memory entries are stored as points in Qdrant with a consistent payload:
 
 ### Store Memory
 
-Via MCP Memory server tool `store`:
+Via MCP Memory server tool `memory_store`:
 
 ```json
 {
@@ -73,7 +73,7 @@ Via MCP Memory server tool `store`:
 
 ### Find Memories
 
-Via MCP Memory server tool `find`:
+Via MCP Memory server tool `memory_find`:
 
 ```json
 {

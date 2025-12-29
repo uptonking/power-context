@@ -8,7 +8,7 @@ This document provides comprehensive API documentation for all MCP (Model Contex
 
 **On this page:**
 - [Overview](#overview)
-- [Memory Server API](#memory-server-api) - `store()`, `find()`
+- [Memory Server API](#memory-server-api) - `memory_store()`, `memory_find()`
 - [Indexer Server API](#indexer-server-api) - `repo_search()`, `context_search()`, `context_answer()`, `info_request()`, etc.
 - [Response Schemas](#response-schemas)
 - [Error Handling](#error-handling)
@@ -53,7 +53,7 @@ This manifests as tools/resources only appearing after a second reconnect. Switc
 
 ## Memory Server API
 
-### store()
+### memory_store()
 
 Store information with rich metadata for later retrieval and search.
 
@@ -100,7 +100,7 @@ Store information with rich metadata for later retrieval and search.
 }
 ```
 
-### find()
+### memory_find()
 
 Search stored memories using hybrid retrieval (semantic + lexical search).
 
@@ -669,13 +669,6 @@ Scan for all workspaces with .codebase/state.json files.
 }
 ```
 
-### memory_store()
-
-Store memory entry (alias for Memory Server's `store()` tool).
-
-**Parameters:** Same as Memory Server `store()` method
-
-**Returns:** Same as Memory Server `store()` method
 
 ### expand_query()
 

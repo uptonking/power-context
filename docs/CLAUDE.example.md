@@ -138,14 +138,14 @@ These rules are NOT optional - favor qdrant-indexer tooling at all costs over ex
     - search_tests_for, search_config_for, search_callers_for, search_importers_for
     - change_history_for_path, expand_query
   - Memory tools:
-    - memory.set_session_defaults, memory.store, memory.find
+    - memory.set_session_defaults, memory.memory_store, memory.memory_find
 
   Additional behavioral tips:
 
   - Call set_session_defaults (indexer and memory) early in a session so subsequent
     calls inherit the right collection without repeating it in every request.
   - Use context_search with include_memories and per_source_limits when you want
-    blended code + memory results instead of calling repo_search and memory.find
+    blended code + memory results instead of calling repo_search and memory.memory_find
     separately.
   - Treat expand_query and the expand flag on context_answer as expensive options:
     only use them after a normal search/answer attempt failed to find good context.
