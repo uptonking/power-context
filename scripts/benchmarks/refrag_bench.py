@@ -27,7 +27,7 @@ except Exception:
 if "qdrant:" in os.environ.get("QDRANT_URL", ""):
     os.environ["QDRANT_URL"] = "http://localhost:6333"
 
-from scripts.benchmarks.common import percentile, resolve_nonempty_collection
+from scripts.benchmarks.common import percentile, resolve_collection_auto
 
 # Ensure correct collection is used (read from workspace state or env)
 if not os.environ.get("COLLECTION_NAME"):
@@ -39,7 +39,7 @@ if not os.environ.get("COLLECTION_NAME"):
 else:
     # If COLLECTION_NAME is set but empty/unindexed, pick a non-empty collection for benchmarks.
     try:
-        os.environ["COLLECTION_NAME"] = resolve_nonempty_collection(os.environ.get("COLLECTION_NAME"))
+        os.environ["COLLECTION_NAME"] = resolve_collection_auto(os.environ.get("COLLECTION_NAME"))
     except Exception:
         pass
 

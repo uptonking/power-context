@@ -25,7 +25,7 @@ from scripts.benchmarks.common import (
     extract_result_paths,
     create_report,
     QueryResult as CommonQueryResult,
-    resolve_nonempty_collection,
+    resolve_collection_auto,
 )
 
 # Ensure correct collection is used (read from workspace state or env)
@@ -38,7 +38,7 @@ if not os.environ.get("COLLECTION_NAME"):
 else:
     # Benchmarks frequently run with COLLECTION_NAME pointing at an empty placeholder.
     try:
-        os.environ["COLLECTION_NAME"] = resolve_nonempty_collection(os.environ.get("COLLECTION_NAME"))
+        os.environ["COLLECTION_NAME"] = resolve_collection_auto(os.environ.get("COLLECTION_NAME"))
     except Exception:
         pass
 

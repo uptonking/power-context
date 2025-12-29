@@ -18,7 +18,7 @@ import statistics
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from scripts.benchmarks.common import percentile, extract_result_paths, resolve_nonempty_collection
+from scripts.benchmarks.common import percentile, extract_result_paths, resolve_collection_auto
 
 # Ensure correct collection is used (read from workspace state or env)
 if not os.environ.get("COLLECTION_NAME"):
@@ -30,7 +30,7 @@ if not os.environ.get("COLLECTION_NAME"):
 else:
     # If COLLECTION_NAME is set but empty/unindexed, pick a non-empty collection for benchmarks.
     try:
-        os.environ["COLLECTION_NAME"] = resolve_nonempty_collection(os.environ.get("COLLECTION_NAME"))
+        os.environ["COLLECTION_NAME"] = resolve_collection_auto(os.environ.get("COLLECTION_NAME"))
     except Exception:
         pass
 
