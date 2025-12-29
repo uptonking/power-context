@@ -137,7 +137,7 @@ def build_variant_collections(
     for model in models:
         # Generate collection name from model
         safe_name = sanitize_vector_name(model)
-        coll_name = f"bench-{safe_name[:20]}"  # Truncate for sanity
+        coll_name = f"bench-{safe_name[:30]}"  # Truncate for sanity
         
         # Check if already exists
         try:
