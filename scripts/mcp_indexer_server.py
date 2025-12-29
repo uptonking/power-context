@@ -2095,24 +2095,6 @@ async def memory_find(
     )
 
 
-@mcp.tool()
-async def find(
-    query: str,
-    limit: Optional[int] = None,
-    collection: Optional[str] = None,
-    top_k: Optional[int] = None,
-) -> Dict[str, Any]:
-    """Find memory entries (alias for memory_find)."""
-    return await _memory_find_impl(
-        query=query,
-        limit=limit,
-        collection=collection,
-        top_k=top_k,
-        default_collection_fn=_default_collection,
-        get_embedding_model_fn=_get_embedding_model,
-    )
-
-
 _relax_var_kwarg_defaults()
 
 if __name__ == "__main__":
