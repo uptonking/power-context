@@ -50,6 +50,7 @@ def ensure_collection(client: QdrantClient, name: str, dim: int, vector_name: st
     When PATTERN_VECTORS=1, also includes pattern_vector for structural similarity.
     """
     if not name:
+        print("[BUG] ensure_collection called with name=None! Fix the caller - collection name is required.", flush=True)
         return
     backup_file = None
     try:
@@ -261,6 +262,7 @@ def _restore_memories_after_recreate(name: str, backup_file: Optional[str]):
 def recreate_collection(client: QdrantClient, name: str, dim: int, vector_name: str):
     """Drop and recreate collection with named vectors."""
     if not name:
+        print("[BUG] recreate_collection called with name=None! Fix the caller - collection name is required.", flush=True)
         return
     try:
         client.delete_collection(name)
@@ -387,6 +389,7 @@ def get_indexed_file_hash(
 ) -> str:
     """Return previously indexed file hash for this logical path, or empty string."""
     if not collection:
+        print("[BUG] get_indexed_file_hash called with collection=None! Fix the caller.", flush=True)
         return ""
     if logical_repo_reuse_enabled() and repo_id and repo_rel_path:
         try:
@@ -442,6 +445,7 @@ def get_indexed_file_hash(
 def delete_points_by_path(client: QdrantClient, collection: str, file_path: str):
     """Delete all points for a given file path."""
     if not collection:
+        print("[BUG] delete_points_by_path called with collection=None! Fix the caller.", flush=True)
         return
     try:
         filt = models.Filter(
@@ -467,6 +471,7 @@ def upsert_points(
     if not points:
         return
     if not collection:
+        print("[BUG] upsert_points called with collection=None! Fix the caller.", flush=True)
         return
     try:
         bsz = int(os.environ.get("INDEX_UPSERT_BATCH", "256") or 256)
