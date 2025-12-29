@@ -612,15 +612,25 @@ def index_repo(
         else None
     )
 
+    files = list(iter_files(root))
+    total_files = len(files)
+    iterator = files
+    use_tqdm = False
     try:
-        from tqdm import tqdm
-        files = list(iter_files(root))
-        iterator = tqdm(files, desc="Indexing files")
-    except ImportError:
-        files = list(iter_files(root))
-        iterator = files
+        from tqdm import tqdm  # type: ignore
 
+        if sys.stdout.isatty() or sys.stderr.isatty():
+            iterator = tqdm(files, desc="Indexing files", unit="file")
+            use_tqdm = True
+    except ImportError:
+        pass
+
+    if not use_tqdm:
+        print(f"[index] Found {total_files} files to process under {root}")
+
+    files_processed = 0
     for file_path in iterator:
+        files_processed += 1
         per_file_repo_for_cache = (
             root_repo_for_cache
             if root_repo_for_cache is not None
@@ -639,6 +649,9 @@ def index_repo(
             )
         except Exception as e:
             print(f"Error indexing {file_path}: {e}")
+
+        if not use_tqdm and (files_processed % 25 == 0 or files_processed == total_files):
+            print(f"[index] {files_processed}/{total_files} files processed")
 
 
 def process_file_with_smart_reindexing(
