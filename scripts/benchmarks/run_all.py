@@ -274,7 +274,13 @@ def main():
         help="Components to benchmark",
     )
     parser.add_argument("--output", type=str, help="Output JSON file")
+    parser.add_argument("--collection", type=str, help="Override COLLECTION_NAME for this run")
     args = parser.parse_args()
+    
+    # Apply collection override before running benchmarks
+    if args.collection:
+        os.environ["COLLECTION_NAME"] = args.collection
+        print(f"[bench] Collection override: {args.collection}")
     
     print("Starting comprehensive benchmark suite...")
     results = asyncio.run(run_all_benchmarks(args.components))
