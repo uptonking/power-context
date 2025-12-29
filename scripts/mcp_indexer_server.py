@@ -171,7 +171,6 @@ from scripts.mcp_impl.info_request import (
     _calculate_confidence,
 )
 from scripts.mcp_impl.admin_tools import _collection_map_impl
-from scripts.mcp_impl.memory import _memory_store_impl, _memory_find_impl
 from scripts.mcp_impl.search_specialized import (
     _search_tests_for_impl,
     _search_config_for_impl,
@@ -186,6 +185,7 @@ from scripts.mcp_impl.symbol_graph import (
     _symbol_graph_impl,
     _format_symbol_graph_toon,
 )
+from scripts.mcp_impl.pattern_search import _pattern_search_impl
 
 # Global lock to guard temporary env toggles used during ReFRAG retrieval/decoding
 _ENV_LOCK = threading.Lock()
@@ -736,30 +736,6 @@ async def collection_map(
         include_samples=include_samples,
         limit=limit,
         coerce_bool_fn=_coerce_bool,
-    )
-
-
-# ---------------------------------------------------------------------------
-# memory_store - thin wrapper delegating to _memory_store_impl
-# ---------------------------------------------------------------------------
-@mcp.tool()
-async def memory_store(
-    information: str,
-    metadata: Optional[Dict[str, Any]] = None,
-    collection: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Store a free-form memory entry in Qdrant using the active collection.
-
-    - Embeds the text and writes both dense and lexical vectors (plus mini vector in ReFRAG mode).
-    - Honors explicit collection overrides; otherwise falls back to workspace/env defaults.
-    - Returns a payload compatible with context-aware tools.
-    """
-    return await _memory_store_impl(
-        information=information,
-        metadata=metadata,
-        collection=collection,
-        default_collection_fn=_default_collection,
-        get_embedding_model_fn=_get_embedding_model,
     )
 
 
@@ -2061,38 +2037,79 @@ async def expand_query(
 
 
 # ---------------------------------------------------------------------------
-# memory_find - thin wrapper delegating to _memory_find_impl
+# Pattern Search - Structural code similarity (conditional on PATTERN_VECTORS=1)
 # ---------------------------------------------------------------------------
-@mcp.tool()
-async def memory_find(
-    query: str,
-    limit: Optional[int] = None,
-    collection: Optional[str] = None,
-    top_k: Optional[int] = None,
-) -> Dict[str, Any]:
-    """Find memory entries by vector similarity (dense + lexical fusion).
+_PATTERN_SEARCH_ENABLED = str(os.environ.get("PATTERN_VECTORS", "")).strip().lower() in {
+    "1", "true", "yes", "on"
+}
 
-    When to use:
-    - Search for previously stored memories/notes
-    - Retrieve context from the memory collection
+if _PATTERN_SEARCH_ENABLED:
+    @mcp.tool()
+    async def pattern_search(
+        query: Any = None,
+        language: Any = None,
+        limit: Any = None,
+        min_score: Any = None,
+        include_snippet: Any = None,
+        context_lines: Any = None,
+        target_languages: Any = None,
+        output_format: Any = None,
+        compact: Any = None,
+        aroma_rerank: Any = None,
+        aroma_alpha: Any = None,
+        query_mode: Any = None,
+    ) -> Dict[str, Any]:
+        """Find structurally similar code patterns across all languages.
 
-    Parameters:
-    - query: str. Search query text.
-    - limit: int (default 5). Maximum results to return.
-    - collection: str (optional). Target collection override.
-    - top_k: int (optional). Alias for limit.
+        Accepts EITHER code examples OR natural language descriptions - auto-detects which.
 
-    Returns:
-    - {ok: true, results: [{id, score, information, metadata}, ...], count: N}
-    """
-    return await _memory_find_impl(
-        query=query,
-        limit=limit,
-        collection=collection,
-        top_k=top_k,
-        default_collection_fn=_default_collection,
-        get_embedding_model_fn=_get_embedding_model,
-    )
+        When to use:
+        - Find code with similar control flow (retry loops, error handling, etc.)
+        - Cross-language pattern matching (Python pattern → Go/Rust/Java matches)
+        - Detect code duplication based on structure, not syntax
+        - Search by pattern description ("retry with backoff", "resource cleanup")
+
+        Key parameters:
+        - query: str. Code snippet OR natural language description of pattern.
+        - query_mode: str. "code", "description", or "auto" (default). Explicit override for detection.
+        - language: str. Language hint for code examples (also triggers code mode in auto).
+        - limit: int (default 10). Maximum results to return.
+        - min_score: float (default 0.3). Minimum similarity score threshold.
+        - include_snippet: bool (default false). Include code snippets in results.
+        - target_languages: list[str]. Filter to specific target languages.
+        - output_format: "json" (default) or "toon" for token-efficient format.
+        - compact: bool. If true with TOON, use minimal fields.
+        - aroma_rerank: bool (default true). Enable AROMA-style pruning and reranking.
+        - aroma_alpha: float (default 0.6). Weight for pruned similarity vs original score.
+
+        Returns:
+        - {ok, results: [{path, start_line, end_line, score, language, ...}], total, query_signature}
+
+        Examples:
+        - pattern_search(query="for i in range(3): try: ... except: time.sleep(2**i)")
+        - pattern_search(query="retry with exponential backoff", query_mode="description")
+        - pattern_search(query="if err != nil { return err }", language="go")
+        """
+        return await _pattern_search_impl(
+            query=query,
+            language=language,
+            limit=limit,
+            min_score=min_score,
+            include_snippet=include_snippet,
+            context_lines=context_lines,
+            hybrid=None,
+            semantic_weight=None,
+            collection=None,
+            target_languages=target_languages,
+            output_format=output_format,
+            compact=compact,
+            aroma_rerank=aroma_rerank,
+            aroma_alpha=aroma_alpha,
+            query_mode=query_mode,
+            coerce_bool_fn=_coerce_bool,
+            coerce_int_fn=_coerce_int,
+            coerce_float_fn=lambda v, d: safe_float(v, default=d, logger=logger, context="pattern_search"),
+        )
 
 
 _relax_var_kwarg_defaults()
@@ -2133,6 +2150,7 @@ if __name__ == "__main__":
     logger.info(f"  Reranker Enabled: {os.environ.get('RERANKER_ENABLED', '0')}")
     logger.info(f"  Rerank Top N: {os.environ.get('RERANK_TOP_N', '20')}")
     logger.info(f"  Rerank Timeout MS: {os.environ.get('RERANK_TIMEOUT_MS', '500')}")
+    logger.info(f"  Pattern Search: {'enabled' if _PATTERN_SEARCH_ENABLED else 'disabled (set PATTERN_VECTORS=1)'}")
     logger.info("=" * 60)
 
     # Optional warmups: gated by env flags to avoid delaying readiness on fresh containers

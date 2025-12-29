@@ -123,6 +123,12 @@ Production-ready MCP (Model Context Protocol) retrieval stack unifying code inde
 - **Local LLM Integration**: llama.cpp for offline expansion
 - **Caching**: Expanded query results cached for reuse
 
+#### Pattern Detection (`scripts/pattern_detection/`)
+- **Structural Search**: Find similar code patterns across languages via AST analysis
+- **64-dim Pattern Vector**: WL graph kernel, CFG fingerprint, SimHash, spectral features
+- **Auto-Detection**: Identifies retry patterns, resource cleanup, filter loops
+- **Requires**: `PATTERN_VECTORS=1` to enable
+
 ### 5. Learning Reranker System (Optional)
 
 The Learning Reranker is an **optional** self-improving ranking system that learns from search patterns to provide increasingly relevant results over time. It is enabled by default but can be disabled via `RERANK_LEARNING=0` and `RERANK_EVENTS_ENABLED=0` environment variables. See [Configuration](CONFIGURATION.md#learning-reranker) for all options.

@@ -144,6 +144,8 @@ services:
       - LEX_BIGRAM_WEIGHT
       - LEX_SPARSE_MODE
       - LEX_SPARSE_NAME
+      # Pattern vectors for structural code similarity
+      - PATTERN_VECTORS=${PATTERN_VECTORS:-0}
       # Learning reranker configuration
       - RERANK_LEARNING=${RERANK_LEARNING:-1}
       - RERANKER_WEIGHTS_DIR=/tmp/rerank_weights
@@ -407,6 +409,8 @@ services:
       - LEX_BIGRAM_WEIGHT
       - LEX_SPARSE_MODE
       - LEX_SPARSE_NAME
+      # Pattern vectors for structural code similarity
+      - PATTERN_VECTORS=${PATTERN_VECTORS:-0}
     volumes:
       - workspace_pvc:/work:rw
       - codebase_pvc:/work/.codebase:rw
@@ -462,6 +466,8 @@ services:
       - LEX_BIGRAM_WEIGHT
       - LEX_SPARSE_MODE
       - LEX_SPARSE_NAME
+      # Pattern vectors for structural code similarity
+      - PATTERN_VECTORS=${PATTERN_VECTORS:-0}
     volumes:
       - workspace_pvc:/work:rw
       - codebase_pvc:/work/.codebase:rw

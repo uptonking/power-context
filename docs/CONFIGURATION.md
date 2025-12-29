@@ -16,6 +16,7 @@ Complete environment variable reference for Context Engine.
 - [Learning Reranker](#learning-reranker)
 - [Decoder (llama.cpp / GLM / MiniMax)](#decoder-llamacpp--glm--minimax)
 - [ReFRAG](#refrag)
+- [Pattern Search](#pattern-search)
 - [Ports](#ports)
 - [Search & Expansion](#search--expansion)
 - [Memory Blending](#memory-blending)
@@ -219,6 +220,24 @@ RERANK_EVENTS_ENABLED=0
 | MICRO_CHUNK_STRIDE | Stride between windows | 8 |
 | MICRO_MERGE_LINES | Lines to merge adjacent spans | 4 |
 | MICRO_TOKENS_PER_LINE | Estimated tokens per line | 32 |
+
+## Pattern Search
+
+Structural code pattern matching across languages. Disabled by default.
+
+| Name | Description | Default |
+|------|-------------|---------|
+| PATTERN_VECTORS | Enable pattern_search tool and pattern vector indexing | 0 (disabled) |
+
+**Enable:**
+```bash
+# In .env or docker-compose
+PATTERN_VECTORS=1
+```
+
+When enabled, the indexer extracts control-flow signatures (loops, branches, try/except, etc.) and stores them as pattern vectors. The `pattern_search` MCP tool allows finding structurally similar code across languages—e.g., a Python retry loop can match Go/Rust equivalents.
+
+**Note:** Enabling requires reindexing to generate pattern vectors for existing files.
 
 ## Lexical Vector Settings
 

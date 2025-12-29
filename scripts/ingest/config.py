@@ -239,7 +239,7 @@ except ImportError:
 
 # Import watcher's repo detection for surgical fix
 try:
-    from scripts.watch_index import _detect_repo_for_file, _get_collection_for_file
+    from scripts.watch_index_core.routing import _detect_repo_for_file, _get_collection_for_file
 except ImportError:
     _detect_repo_for_file = None  # type: ignore
     _get_collection_for_file = None  # type: ignore

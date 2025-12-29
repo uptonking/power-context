@@ -90,6 +90,12 @@ These rules are NOT optional - favor qdrant-indexer tooling at all costs over ex
   - context_answer:
     - Use for: short natural-language summaries/explanations of specific modules or tools, grounded in code/docs with citations.
     - Good for: "What does scripts/standalone_upload_client.py do at a high level?", "Summarize the remote upload client pipeline.".
+  - pattern_search (optional, may not be enabled):
+    - Use for: finding structurally similar code patterns across files and languages.
+    - Accepts EITHER code examples OR natural language pattern descriptions.
+    - Good for: "find retry loops with exponential backoff", "try: ... except: logger.error()", "error handling patterns".
+    - Cross-language: Python pattern can match Go/Rust/Java with similar control flow.
+    - Note: Returns error if pattern detection module is not available.
 
   Advanced lineage workflow (code + history):
 
@@ -128,17 +134,18 @@ These rules are NOT optional - favor qdrant-indexer tooling at all costs over ex
     - set_session_defaults
   - Search / QA tools:
     - repo_search, code_search, context_search, context_answer
+    - pattern_search (optional; structural code pattern matching, cross-language)
     - search_tests_for, search_config_for, search_callers_for, search_importers_for
     - change_history_for_path, expand_query
   - Memory tools:
-    - memory.set_session_defaults, memory.store, memory.find
+    - memory.set_session_defaults, memory.memory_store, memory.memory_find
 
   Additional behavioral tips:
 
   - Call set_session_defaults (indexer and memory) early in a session so subsequent
     calls inherit the right collection without repeating it in every request.
   - Use context_search with include_memories and per_source_limits when you want
-    blended code + memory results instead of calling repo_search and memory.find
+    blended code + memory results instead of calling repo_search and memory.memory_find
     separately.
   - Treat expand_query and the expand flag on context_answer as expensive options:
     only use them after a normal search/answer attempt failed to find good context.

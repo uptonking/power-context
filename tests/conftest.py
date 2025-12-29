@@ -9,6 +9,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+# Enable pattern vectors for pattern search tests
+os.environ.setdefault("PATTERN_VECTORS", "1")
+
 
 @pytest.fixture(scope="session", autouse=True)
 def _ensure_mcp_imported():

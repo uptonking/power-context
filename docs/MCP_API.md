@@ -8,7 +8,7 @@ This document provides comprehensive API documentation for all MCP (Model Contex
 
 **On this page:**
 - [Overview](#overview)
-- [Memory Server API](#memory-server-api) - `store()`, `find()`
+- [Memory Server API](#memory-server-api) - `memory_store()`, `memory_find()`
 - [Indexer Server API](#indexer-server-api) - `repo_search()`, `context_search()`, `context_answer()`, `info_request()`, etc.
 - [Response Schemas](#response-schemas)
 - [Error Handling](#error-handling)
@@ -53,7 +53,7 @@ This manifests as tools/resources only appearing after a second reconnect. Switc
 
 ## Memory Server API
 
-### store()
+### memory_store()
 
 Store information with rich metadata for later retrieval and search.
 
@@ -100,7 +100,7 @@ Store information with rich metadata for later retrieval and search.
 }
 ```
 
-### find()
+### memory_find()
 
 Search stored memories using hybrid retrieval (semantic + lexical search).
 
@@ -669,13 +669,6 @@ Scan for all workspaces with .codebase/state.json files.
 }
 ```
 
-### memory_store()
-
-Store memory entry (alias for Memory Server's `store()` tool).
-
-**Parameters:** Same as Memory Server `store()` method
-
-**Returns:** Same as Memory Server `store()` method
 
 ### expand_query()
 
@@ -759,6 +752,36 @@ Find files likely importing or referencing a module/symbol.
 **Parameters:** Same as `search_callers_for()`.
 
 **Returns:** Same shape as `repo_search()`.
+
+### pattern_search()
+
+Find structurally similar code patterns across languages. Requires `PATTERN_VECTORS=1`.
+
+**Parameters:**
+- `query` (str, required): Code snippet OR natural language pattern description
+- `language` (str, default "python"): Language hint for code queries
+- `limit` (int, default 10): Maximum results
+- `min_score` (float, default 0.3): Similarity threshold
+- `include_snippet` (bool): Include code in results
+- `target_languages` (list[str]): Filter target languages
+
+**Response:**
+```json
+{
+  "ok": true,
+  "results": [{"path": "...", "start_line": 45, "score": 0.94, "control_flow_signature": "L2_2_B0_T2_M0__C_TL"}],
+  "total": 5,
+  "query_signature": "L2_2_B0_T2_M0__C_TL",
+  "query_mode": "code"
+}
+```
+
+**Signature format:** `L{loop_depth}_{count}_B{branches}_T{try}_M{match}_{flags}` where flags include `TL` (retry pattern), `BL` (filter pattern).
+
+**Example:**
+```json
+{"query": "for i in range(3): try: fetch() except: sleep(i)", "include_snippet": true}
+```
 
 ### symbol_graph()
 
