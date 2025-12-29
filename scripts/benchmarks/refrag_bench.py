@@ -43,6 +43,11 @@ else:
     except Exception:
         pass
 
+print(
+    f"[bench] Using QDRANT_URL={os.environ.get('QDRANT_URL', '')} "
+    f"COLLECTION_NAME={os.environ.get('COLLECTION_NAME', '')}"
+)
+
 
 @dataclass
 class RefragResult:

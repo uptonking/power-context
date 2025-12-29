@@ -37,6 +37,11 @@ else:
     except Exception:
         pass
 
+print(
+    f"[bench] Using QDRANT_URL={os.environ.get('QDRANT_URL', '')} "
+    f"COLLECTION_NAME={os.environ.get('COLLECTION_NAME', '')}"
+)
+
 # ---------------------------------------------------------------------------
 # Token Estimation (using tiktoken if available, else heuristic)
 # ---------------------------------------------------------------------------

@@ -42,6 +42,11 @@ else:
     except Exception:
         pass
 
+print(
+    f"[bench] Using QDRANT_URL={os.environ.get('QDRANT_URL', '')} "
+    f"COLLECTION_NAME={os.environ.get('COLLECTION_NAME', '')}"
+)
+
 from scripts.benchmarks.common import (
     create_report,
     QueryResult as CommonQueryResult,

@@ -47,6 +47,11 @@ except Exception:
     # Best-effort; grounding scorer can still run with whatever collection is configured.
     pass
 
+print(
+    f"[bench] Using QDRANT_URL={os.environ.get('QDRANT_URL', '')} "
+    f"COLLECTION_NAME={os.environ.get('COLLECTION_NAME', '')}"
+)
+
 # Timeout for each query (seconds)
 QUERY_TIMEOUT = 60
 

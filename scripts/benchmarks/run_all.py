@@ -34,6 +34,11 @@ else:
     except Exception:
         pass
 
+print(
+    f"[bench] Using QDRANT_URL={os.environ.get('QDRANT_URL', '')} "
+    f"COLLECTION_NAME={os.environ.get('COLLECTION_NAME', '')}"
+)
+
 
 async def run_all_benchmarks(components: List[str]) -> Dict[str, Any]:
     """Run selected component benchmarks."""
@@ -105,6 +110,33 @@ async def run_all_benchmarks(components: List[str]) -> Dict[str, Any]:
             results["components"]["router"] = report.to_dict()
         except Exception as e:
             print(f"  Router benchmark failed: {e}")
+
+    if "rrf" in components or "all" in components:
+        try:
+            from scripts.benchmarks.rrf_quality import run_rrf_benchmark
+            print("\n▶ Running RRF Quality Benchmark...")
+            report = await run_rrf_benchmark()
+            results["components"]["rrf_quality"] = report.to_dict()
+        except Exception as e:
+            print(f"  RRF quality benchmark failed: {e}")
+
+    if "grounding" in components or "all" in components:
+        try:
+            from scripts.benchmarks.grounding_scorer import run_grounding_benchmark
+            print("\n▶ Running Grounding Scorer Benchmark...")
+            report = await run_grounding_benchmark()
+            results["components"]["grounding"] = report.to_dict()
+        except Exception as e:
+            print(f"  Grounding benchmark failed: {e}")
+
+    if "efficiency" in components or "all" in components:
+        try:
+            from scripts.benchmarks.efficiency_benchmark import run_benchmark as run_efficiency_benchmark
+            print("\n▶ Running Efficiency Benchmark...")
+            report = await run_efficiency_benchmark()
+            results["components"]["efficiency"] = report
+        except Exception as e:
+            print(f"  Efficiency benchmark failed: {e}")
     
     # Generate recommendations
     results["recommendations"] = generate_recommendations(results["components"])
@@ -194,7 +226,7 @@ def main():
         "--components",
         nargs="+",
         default=["all"],
-        choices=["all", "eval", "trm", "refrag", "expand", "router"],
+        choices=["all", "eval", "trm", "refrag", "expand", "router", "rrf", "grounding", "efficiency"],
         help="Components to benchmark",
     )
     parser.add_argument("--output", type=str, help="Output JSON file")
