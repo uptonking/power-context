@@ -619,13 +619,18 @@ def index_repo(
     try:
         from tqdm import tqdm  # type: ignore
 
-        if sys.stdout.isatty() or sys.stderr.isatty():
-            iterator = tqdm(files, desc="Indexing files", unit="file")
-            use_tqdm = True
+        iterator = tqdm(files, desc="Indexing files", unit="file")
+        use_tqdm = True
     except ImportError:
         pass
 
-    if not use_tqdm:
+    log_progress = os.environ.get("INDEX_PROGRESS_LOG", "1").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if log_progress:
         print(f"[index] Found {total_files} files to process under {root}")
 
     files_processed = 0
@@ -650,7 +655,7 @@ def index_repo(
         except Exception as e:
             print(f"Error indexing {file_path}: {e}")
 
-        if not use_tqdm and (files_processed % 25 == 0 or files_processed == total_files):
+        if log_progress and (files_processed % 25 == 0 or files_processed == total_files):
             print(f"[index] {files_processed}/{total_files} files processed")
 
 
