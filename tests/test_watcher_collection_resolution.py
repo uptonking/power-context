@@ -75,3 +75,38 @@ def test_main_resolves_collection_from_state(monkeypatch, tmp_path):
     # Postcondition: global COLLECTION remains the env-provided name
     assert wi.COLLECTION == "my-collection"
 
+
+def test_multi_repo_ignores_placeholder_collection_in_state(monkeypatch, tmp_path):
+    # Multi-repo mode should not route per-repo events into a workspace-level default
+    # collection (e.g. "codebase") even if stale state.json claims that.
+    monkeypatch.setenv("MULTI_REPO_MODE", "1")
+    monkeypatch.setenv("WATCH_ROOT", str(tmp_path))
+    monkeypatch.setenv("COLLECTION_NAME", "codebase")
+
+    utils = importlib.import_module("scripts.watch_index_core.utils")
+    utils = importlib.reload(utils)
+
+    repo_slug = "Pirate Survivors-2b23a7e45f2c4b9f"
+    repo_path = tmp_path / repo_slug
+    repo_path.mkdir(parents=True, exist_ok=True)
+    # Provide a file under the repo so repo detection works
+    target = repo_path / ".gitignore"
+    target.write_text("# test\n")
+
+    # Force state to claim it should use the placeholder collection.
+    def _fake_get_workspace_state(ws_path: str, repo_name: str | None = None):
+        return {"qdrant_collection": "codebase", "serving_collection": "codebase"}
+
+    monkeypatch.setattr(utils, "get_workspace_state", _fake_get_workspace_state, raising=True)
+
+    # Derivation should win over stale placeholder mapping.
+    monkeypatch.setattr(utils, "get_collection_name", lambda rn: f"derived-{rn}", raising=True)
+    # Avoid touching real state persistence in unit test
+    monkeypatch.setattr(utils, "update_workspace_state", lambda *a, **k: None, raising=True)
+
+    # Sanity: still consider codebase a placeholder/default
+    assert utils.default_collection_name() == "codebase"
+
+    resolved = utils._get_collection_for_file(target)
+    assert resolved == f"derived-{repo_slug}"
+

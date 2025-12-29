@@ -1477,8 +1477,24 @@ def _ensure_repo_slug_defaults(state: WorkspaceState, repo_name: Optional[str]) 
         state["serving_repo_slug"] = active_slug or repo_name
         modified = True
     if not state.get("serving_collection") and state.get("qdrant_collection"):
-        state["serving_collection"] = state.get("qdrant_collection")
-        modified = True
+        # serving_collection is primarily used for staging/migration workflows.
+        # Avoid persisting a workspace-level placeholder collection (e.g. "codebase") into
+        # per-repo state in multi-repo mode when staging is not enabled.
+        allow = True
+        try:
+            if is_multi_repo_mode() and not is_staging_enabled():
+                allow = False
+        except Exception:
+            pass
+
+        if allow:
+            try:
+                qc = str(state.get("qdrant_collection") or "").strip()
+            except Exception:
+                qc = ""
+            if qc and qc not in PLACEHOLDER_COLLECTION_NAMES:
+                state["serving_collection"] = qc
+                modified = True
     return modified
 
 def _get_cache_path(workspace_path: str) -> Path:
