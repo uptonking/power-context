@@ -11,6 +11,7 @@ import scripts.ingest_code as idx
 from .config import LOGGER, ROOT, default_collection_name
 from scripts.workspace_state import (
     _extract_repo_name_from_path,
+    PLACEHOLDER_COLLECTION_NAMES,
     ensure_logical_repo_id,
     find_collection_for_logical_repo,
     get_collection_name,
@@ -145,7 +146,18 @@ def _get_collection_for_repo(repo_path: Path) -> str:
         if isinstance(state, dict):
             serving_coll = state.get("serving_collection") or state.get("qdrant_collection")
             if isinstance(serving_coll, str) and serving_coll:
-                return serving_coll
+                # In multi-repo mode the watcher must not route per-repo events into
+                # a workspace-level placeholder collection (e.g. "codebase").
+                # Older refactors could persist this into state.json; treat it as invalid
+                # so we re-derive a deterministic per-repo collection.
+                invalid = {default_coll}
+                try:
+                    invalid.update(set(PLACEHOLDER_COLLECTION_NAMES or []))
+                except Exception:
+                    pass
+
+                if serving_coll not in invalid:
+                    return serving_coll
 
         # Multi-repo: try to reuse a canonical collection based on logical_repo_id
         if logical_repo_reuse_enabled():
@@ -176,7 +188,18 @@ def _get_collection_for_repo(repo_path: Path) -> str:
 
         # Legacy behaviour: derive per-repo collection name
         try:
-            return get_collection_name(repo_name)
+            derived = get_collection_name(repo_name)
+            # Best-effort: if state was previously pointing at a placeholder collection,
+            # persist the corrected mapping so future runs don't regress.
+            try:
+                update_workspace_state(
+                    workspace_path=ws_path,
+                    updates={"qdrant_collection": derived, "serving_collection": derived},
+                    repo_name=repo_name,
+                )
+            except Exception:
+                pass
+            return derived
         except Exception:
             return default_coll
 

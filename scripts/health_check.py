@@ -24,12 +24,19 @@ from scripts.utils import sanitize_vector_name
 from scripts.auth_backend import ensure_collections, AuthDisabledError
 
 
-def assert_true(cond: bool, msg: str):
-    if not cond:
-        print(f"[FAIL] {msg}")
-        sys.exit(1)
-    else:
+class HealthCheckFailure(Exception):
+    pass
+
+
+def assert_true(cond: bool, msg: str, *, critical: bool = False, failures: list[str] | None = None):
+    if cond:
         print(f"[OK] {msg}")
+        return
+    print(f"[FAIL] {msg}")
+    if critical:
+        raise HealthCheckFailure(msg)
+    if failures is not None:
+        failures.append(msg)
 
 
 def main():
@@ -50,6 +57,7 @@ def main():
     vec_name_expect = sanitize_vector_name(model_name)
 
     client = QdrantClient(url=qdrant_url, api_key=api_key or None)
+    failures: list[str] = []
 
     # Get all collections and check each one
     try:
@@ -93,7 +101,7 @@ def main():
             present_names = ["<unnamed>"]
             got_dim = cfg.size
         assert_true(
-            got_dim == dim, f"Vector dimension matches embedding ({got_dim} == {dim})"
+            got_dim == dim, f"Vector dimension matches embedding ({got_dim} == {dim})", failures=failures
         )
 
         # 2) HNSW tuned params (best effort; allow >= thresholds)
@@ -101,8 +109,8 @@ def main():
         try:
             m = getattr(hcfg, "m", None)
             efc = getattr(hcfg, "ef_construct", None)
-            assert_true(m is None or m >= 16, f"HNSW m>=16 (got {m})")
-            assert_true(efc is None or efc >= 256, f"HNSW ef_construct>=256 (got {efc})")
+            assert_true(m is None or m >= 16, f"HNSW m>=16 (got {m})", failures=failures)
+            assert_true(efc is None or efc >= 256, f"HNSW ef_construct>=256 (got {efc})", failures=failures)
         except Exception:
             print("[WARN] Could not read HNSW config; continuing")
 
@@ -120,7 +128,7 @@ def main():
             search_params=models.SearchParams(hnsw_ef=128),
         )
         res_points = getattr(qp, "points", qp)
-        assert_true(isinstance(res_points, list), "query_points returns a list of points")
+        assert_true(isinstance(res_points, list), "query_points returns a list of points", critical=True)
 
         # Filtered by language + kind (should not error; may return 0 results if dataset sparse)
         flt = models.Filter(
@@ -148,13 +156,19 @@ def main():
             assert_true(
                 "kind" in md and "symbol" in md,
                 "payload includes metadata.kind and metadata.symbol",
+                failures=failures,
             )
         else:
             print("[OK] Filtered query ran (no results is acceptable depending on data)")
 
-        print(f"[OK] Collection {collection_name} health check passed")
+        print(f"[OK] Collection {collection_name} health check completed")
 
-    print(f"[OK] All {len(collections)} collections passed health check")
+    if failures:
+        print(f"[WARN] Health check completed with {len(failures)} issue(s):")
+        for f in failures:
+            print(f" - {f}")
+    else:
+        print(f"[OK] All {len(collections)} collections passed health check")
 
 
 if __name__ == "__main__":

@@ -177,8 +177,55 @@ def main():
     # Resolve collection name based on multi-repo mode
     multi_repo = bool(is_multi_repo_mode and is_multi_repo_mode())
     if multi_repo:
-        collection = None
         print("[multi_repo] Multi-repo mode enabled - will create separate collections per repository")
+
+        root_path = Path(args.root).resolve()
+        repos = []
+        try:
+            if root_path.is_dir():
+                for child in sorted(root_path.iterdir()):
+                    try:
+                        if not child.is_dir():
+                            continue
+                        if child.name.startswith("."):
+                            continue
+                        if child.name in {".codebase", "__pycache__"}:
+                            continue
+                        repos.append(child)
+                    except Exception:
+                        continue
+        except Exception:
+            repos = []
+
+        if not repos:
+            print(f"[multi_repo] No repo directories found under: {root_path}")
+            return
+
+        for repo_root in repos:
+            repo_name = repo_root.name
+            repo_collection = collection
+            if get_collection_name:
+                try:
+                    resolved = get_collection_name(repo_name)
+                    if resolved:
+                        repo_collection = resolved
+                except Exception:
+                    pass
+            if not repo_collection:
+                repo_collection = "codebase"
+
+            index_repo(
+                repo_root,
+                qdrant_url,
+                api_key,
+                repo_collection,
+                model_name,
+                args.recreate,
+                dedupe=(not args.no_dedupe),
+                skip_unchanged=(not args.no_skip_unchanged),
+                pseudo_mode="off" if (os.environ.get("PSEUDO_BACKFILL_ENABLED") or "").strip().lower() in {"1", "true", "yes", "on"} else "full",
+            )
+        return
     else:
         if get_collection_name:
             try:

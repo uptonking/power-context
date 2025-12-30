@@ -110,6 +110,40 @@ class TestCollectionNameGeneration:
 
 
 # ============================================================================
+# Tests: Collection Name Resolution
+# ============================================================================
+class TestCollectionNameResolution:
+    """Tests for get_collection_name() precedence rules."""
+
+    def test_multi_repo_does_not_hard_override_with_env(self, ws_module, monkeypatch):
+        """In multi-repo mode, COLLECTION_NAME must not override per-repo naming."""
+        monkeypatch.setenv("MULTI_REPO_MODE", "1")
+        monkeypatch.setenv("COLLECTION_NAME", "codebase")
+        ws = importlib.reload(ws_module)
+
+        coll = ws.get_collection_name("my-repo_old")
+        assert coll != "codebase_old"
+        assert coll != "codebase"
+        assert coll.endswith("_old")
+
+    def test_single_repo_env_override_preserved(self, ws_module, monkeypatch):
+        """In single-repo mode, COLLECTION_NAME remains a master override."""
+        monkeypatch.delenv("MULTI_REPO_MODE", raising=False)
+        monkeypatch.setenv("COLLECTION_NAME", "codebase")
+        ws = importlib.reload(ws_module)
+
+        assert ws.get_collection_name("my-repo_old") == "codebase_old"
+
+    def test_multi_repo_workspace_level_env_override_still_applies(self, ws_module, monkeypatch):
+        """When repo_name is None, env override should still apply even in multi-repo mode."""
+        monkeypatch.setenv("MULTI_REPO_MODE", "1")
+        monkeypatch.setenv("COLLECTION_NAME", "codebase")
+        ws = importlib.reload(ws_module)
+
+        assert ws.get_collection_name(None) == "codebase"
+
+
+# ============================================================================
 # Tests: Environment Variable Helpers
 # ============================================================================
 class TestEnvHelpers:
