@@ -491,14 +491,8 @@ def generate_pseudo_tags_batch(
     # Run batch
     client = GLMRefragClient()
 
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
-    results = loop.run_until_complete(
-        client.generate_batch_async(
+    async def _run_batch() -> list[str]:
+        return await client.generate_batch_async(
             prompts,
             max_tokens=int(os.environ.get("PSEUDO_MAX_TOKENS", "96") or 96),
             concurrency=concurrency,
@@ -507,7 +501,16 @@ def generate_pseudo_tags_batch(
             stop=["\n\n"],
             force_json=True,
         )
-    )
+
+    # Handle both sync and async contexts safely
+    try:
+        asyncio.get_running_loop()
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            results = pool.submit(asyncio.run, _run_batch()).result()
+    except RuntimeError:
+        results = asyncio.run(_run_batch())
+
 
     # Parse JSON responses
     parsed: list[tuple[str, list[str]]] = []
