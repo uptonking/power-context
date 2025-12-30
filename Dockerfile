@@ -14,6 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies for all services
+# Pin mcp/fastmcp versions to match requirements.txt for consistency across services
 RUN pip install --no-cache-dir --upgrade \
     qdrant-client \
     fastembed \
@@ -22,8 +23,8 @@ RUN pip install --no-cache-dir --upgrade \
     tokenizers \
     tree_sitter \
     tree_sitter_languages \
-    mcp \
-    fastmcp
+    'mcp==1.17.0' \
+    'fastmcp==2.12.4'
 
 # Copy scripts for all services
 COPY scripts /app/scripts
