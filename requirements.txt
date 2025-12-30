@@ -30,7 +30,7 @@ fastapi
 uvicorn[standard]
 python-multipart
 jinja2
-openai>=1.0
+openai>=2.11.0
 openlit>=1.0.0  # LLM observability SDK
 
 # Test-only

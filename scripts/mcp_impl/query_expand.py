@@ -94,7 +94,13 @@ async def _expand_query_impl(query: Any = None, max_new: Any = None, session: Op
         extra_kwargs = {}
         use_force_json = False
         stop_tokens = ["\n\n"]
-        if runtime_kind == "minimax":
+        if runtime_kind == "openai":
+            from scripts.refrag_openai import OpenAIRefragClient  # type: ignore
+            client = OpenAIRefragClient()
+            extra_kwargs["system"] = f"You rewrite code search queries. Output a JSON array with exactly {cap} alternative queries. Use different terminology - do NOT repeat any words from the original."
+            use_force_json = True
+            prompt = f'Rewrite "{original_q}" using completely different technical terms:'
+        elif runtime_kind == "minimax":
             from scripts.refrag_minimax import MiniMaxRefragClient  # type: ignore
             client = MiniMaxRefragClient()
             extra_kwargs["system"] = f"You rewrite code search queries. Output a JSON array with exactly {cap} alternative queries. Use different terminology - do NOT repeat any words from the original."
