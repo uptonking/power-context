@@ -214,9 +214,14 @@ except Exception:
 
 try:
     from mcp.server.fastmcp import FastMCP, Context  # type: ignore
-    from mcp.server.transport_security import TransportSecuritySettings  # type: ignore
 except Exception as e:  # pragma: no cover
     raise SystemExit("mcp package is required inside the container: pip install mcp")
+
+# TransportSecuritySettings only exists in mcp >= 1.x with transport_security module
+try:
+    from mcp.server.transport_security import TransportSecuritySettings  # type: ignore
+except ImportError:
+    TransportSecuritySettings = None  # type: ignore
 
 APP_NAME = os.environ.get("FASTMCP_SERVER_NAME", "qdrant-indexer-mcp")
 HOST = os.environ.get("FASTMCP_HOST", "0.0.0.0")
@@ -287,10 +292,12 @@ from scripts.mcp_workspace import (
 )
 
 # Disable DNS rebinding protection - breaks Docker internal networking (Host: mcp:8000)
-mcp = FastMCP(
-    APP_NAME,
-    transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
+_security_settings = (
+    TransportSecuritySettings(enable_dns_rebinding_protection=False)
+    if TransportSecuritySettings
+    else None
 )
+mcp = FastMCP(APP_NAME, transport_security=_security_settings)
 
 
 # Capture tool registry automatically by wrapping the decorator once
