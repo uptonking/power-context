@@ -129,21 +129,21 @@ services:
       - QWEN3_QUERY_INSTRUCTION=${QWEN3_QUERY_INSTRUCTION:-1}
       - QWEN3_INSTRUCTION_TEXT=${QWEN3_INSTRUCTION_TEXT}
       - QDRANT_TIMEOUT=${QDRANT_TIMEOUT:-60}
-      # Chunking config - values come from .env (no defaults here to respect .env)
-      - INDEX_SEMANTIC_CHUNKS
-      - INDEX_MICRO_CHUNKS
-      - MICRO_CHUNK_TOKENS
-      - MICRO_CHUNK_STRIDE
+      # Chunking config - use ${VAR:-} to properly inherit from .env (not host shell)
+      - INDEX_SEMANTIC_CHUNKS=${INDEX_SEMANTIC_CHUNKS:-}
+      - INDEX_MICRO_CHUNKS=${INDEX_MICRO_CHUNKS:-}
+      - MICRO_CHUNK_TOKENS=${MICRO_CHUNK_TOKENS:-}
+      - MICRO_CHUNK_STRIDE=${MICRO_CHUNK_STRIDE:-}
       - INDEX_UPSERT_BATCH=${INDEX_UPSERT_BATCH:-512}
       - INDEX_UPSERT_RETRIES=${INDEX_UPSERT_RETRIES:-5}
       - MAX_MICRO_CHUNKS_PER_FILE=${MAX_MICRO_CHUNKS_PER_FILE:-200}
-      # Lexical vector config - values from .env (code defaults to legacy-safe)
-      - LEX_VECTOR_DIM
-      - LEX_MULTI_HASH
-      - LEX_BIGRAMS
-      - LEX_BIGRAM_WEIGHT
-      - LEX_SPARSE_MODE
-      - LEX_SPARSE_NAME
+      # Lexical vector config - use ${VAR:-} to properly inherit from .env (not host shell)
+      - LEX_VECTOR_DIM=${LEX_VECTOR_DIM:-}
+      - LEX_MULTI_HASH=${LEX_MULTI_HASH:-}
+      - LEX_BIGRAMS=${LEX_BIGRAMS:-}
+      - LEX_BIGRAM_WEIGHT=${LEX_BIGRAM_WEIGHT:-}
+      - LEX_SPARSE_MODE=${LEX_SPARSE_MODE:-}
+      - LEX_SPARSE_NAME=${LEX_SPARSE_NAME:-}
       # Pattern vectors for structural code similarity
       - PATTERN_VECTORS=${PATTERN_VECTORS:-0}
       # Learning reranker configuration
@@ -316,21 +316,21 @@ services:
       - QWEN3_QUERY_INSTRUCTION=${QWEN3_QUERY_INSTRUCTION:-1}
       - QWEN3_INSTRUCTION_TEXT=${QWEN3_INSTRUCTION_TEXT}
       - QDRANT_TIMEOUT=${QDRANT_TIMEOUT:-60}
-      # Chunking config - values come from .env
-      - INDEX_SEMANTIC_CHUNKS
-      - INDEX_MICRO_CHUNKS
-      - MICRO_CHUNK_TOKENS
-      - MICRO_CHUNK_STRIDE
+      # Chunking config - use ${VAR:-} to properly inherit from .env (not host shell)
+      - INDEX_SEMANTIC_CHUNKS=${INDEX_SEMANTIC_CHUNKS:-}
+      - INDEX_MICRO_CHUNKS=${INDEX_MICRO_CHUNKS:-}
+      - MICRO_CHUNK_TOKENS=${MICRO_CHUNK_TOKENS:-}
+      - MICRO_CHUNK_STRIDE=${MICRO_CHUNK_STRIDE:-}
       - INDEX_UPSERT_BATCH=${INDEX_UPSERT_BATCH:-512}
       - INDEX_UPSERT_RETRIES=${INDEX_UPSERT_RETRIES:-5}
       - MAX_MICRO_CHUNKS_PER_FILE=${MAX_MICRO_CHUNKS_PER_FILE:-200}
-      # Lexical vector config - values from .env (code defaults to legacy-safe)
-      - LEX_VECTOR_DIM
-      - LEX_MULTI_HASH
-      - LEX_BIGRAMS
-      - LEX_BIGRAM_WEIGHT
-      - LEX_SPARSE_MODE
-      - LEX_SPARSE_NAME
+      # Lexical vector config - use ${VAR:-} to properly inherit from .env (not host shell)
+      - LEX_VECTOR_DIM=${LEX_VECTOR_DIM:-}
+      - LEX_MULTI_HASH=${LEX_MULTI_HASH:-}
+      - LEX_BIGRAMS=${LEX_BIGRAMS:-}
+      - LEX_BIGRAM_WEIGHT=${LEX_BIGRAM_WEIGHT:-}
+      - LEX_SPARSE_MODE=${LEX_SPARSE_MODE:-}
+      - LEX_SPARSE_NAME=${LEX_SPARSE_NAME:-}
       # Learning reranker configuration
       - RERANK_LEARNING=${RERANK_LEARNING:-1}
       - RERANKER_WEIGHTS_DIR=/tmp/rerank_weights
@@ -394,21 +394,21 @@ services:
       - QWEN3_INSTRUCTION_TEXT=${QWEN3_INSTRUCTION_TEXT}
       - HOST_INDEX_PATH=/work
       - QDRANT_TIMEOUT=${QDRANT_TIMEOUT:-60}
-      # Chunking config - values come from .env
-      - INDEX_SEMANTIC_CHUNKS
-      - INDEX_MICRO_CHUNKS
-      - MICRO_CHUNK_TOKENS
-      - MICRO_CHUNK_STRIDE
+      # Chunking config - use ${VAR:-} to properly inherit from .env (not host shell)
+      - INDEX_SEMANTIC_CHUNKS=${INDEX_SEMANTIC_CHUNKS:-}
+      - INDEX_MICRO_CHUNKS=${INDEX_MICRO_CHUNKS:-}
+      - MICRO_CHUNK_TOKENS=${MICRO_CHUNK_TOKENS:-}
+      - MICRO_CHUNK_STRIDE=${MICRO_CHUNK_STRIDE:-}
       - INDEX_UPSERT_BATCH=${INDEX_UPSERT_BATCH:-512}
       - INDEX_UPSERT_RETRIES=${INDEX_UPSERT_RETRIES:-5}
       - MAX_MICRO_CHUNKS_PER_FILE=${MAX_MICRO_CHUNKS_PER_FILE:-200}
-      # Lexical vector config - values from .env (code defaults to legacy-safe)
-      - LEX_VECTOR_DIM
-      - LEX_MULTI_HASH
-      - LEX_BIGRAMS
-      - LEX_BIGRAM_WEIGHT
-      - LEX_SPARSE_MODE
-      - LEX_SPARSE_NAME
+      # Lexical vector config - use ${VAR:-} to properly inherit from .env (not host shell)
+      - LEX_VECTOR_DIM=${LEX_VECTOR_DIM:-}
+      - LEX_MULTI_HASH=${LEX_MULTI_HASH:-}
+      - LEX_BIGRAMS=${LEX_BIGRAMS:-}
+      - LEX_BIGRAM_WEIGHT=${LEX_BIGRAM_WEIGHT:-}
+      - LEX_SPARSE_MODE=${LEX_SPARSE_MODE:-}
+      - LEX_SPARSE_NAME=${LEX_SPARSE_NAME:-}
       # Pattern vectors for structural code similarity
       - PATTERN_VECTORS=${PATTERN_VECTORS:-0}
     volumes:
@@ -449,23 +449,23 @@ services:
       - WATCH_ROOT=${WATCH_ROOT:-/work}
       - HOST_INDEX_PATH=/work
       - QDRANT_TIMEOUT=${QDRANT_TIMEOUT:-60}
-      # Chunking config - values come from .env
-      - INDEX_SEMANTIC_CHUNKS
-      - INDEX_MICRO_CHUNKS
-      - MICRO_CHUNK_TOKENS
-      - MICRO_CHUNK_STRIDE
+      # Chunking config - use ${VAR:-} to properly inherit from .env (not host shell)
+      - INDEX_SEMANTIC_CHUNKS=${INDEX_SEMANTIC_CHUNKS:-}
+      - INDEX_MICRO_CHUNKS=${INDEX_MICRO_CHUNKS:-}
+      - MICRO_CHUNK_TOKENS=${MICRO_CHUNK_TOKENS:-}
+      - MICRO_CHUNK_STRIDE=${MICRO_CHUNK_STRIDE:-}
       - INDEX_UPSERT_BATCH=${INDEX_UPSERT_BATCH:-512}
       - INDEX_UPSERT_RETRIES=${INDEX_UPSERT_RETRIES:-5}
       - MAX_MICRO_CHUNKS_PER_FILE=${MAX_MICRO_CHUNKS_PER_FILE:-200}
       - WATCH_DEBOUNCE_SECS=${WATCH_DEBOUNCE_SECS:-1.5}
       - REMOTE_UPLOAD_ENABLED=${REMOTE_UPLOAD_ENABLED:-0}
-      # Lexical vector config - values from .env (code defaults to legacy-safe)
-      - LEX_VECTOR_DIM
-      - LEX_MULTI_HASH
-      - LEX_BIGRAMS
-      - LEX_BIGRAM_WEIGHT
-      - LEX_SPARSE_MODE
-      - LEX_SPARSE_NAME
+      # Lexical vector config - use ${VAR:-} to properly inherit from .env (not host shell)
+      - LEX_VECTOR_DIM=${LEX_VECTOR_DIM:-}
+      - LEX_MULTI_HASH=${LEX_MULTI_HASH:-}
+      - LEX_BIGRAMS=${LEX_BIGRAMS:-}
+      - LEX_BIGRAM_WEIGHT=${LEX_BIGRAM_WEIGHT:-}
+      - LEX_SPARSE_MODE=${LEX_SPARSE_MODE:-}
+      - LEX_SPARSE_NAME=${LEX_SPARSE_NAME:-}
       # Pattern vectors for structural code similarity
       - PATTERN_VECTORS=${PATTERN_VECTORS:-0}
     volumes:
@@ -574,13 +574,13 @@ services:
       - MAX_MICRO_CHUNKS_PER_FILE=${MAX_MICRO_CHUNKS_PER_FILE}
       - INDEX_UPSERT_BATCH=${INDEX_UPSERT_BATCH}
       - INDEX_UPSERT_RETRIES=${INDEX_UPSERT_RETRIES}
-      # Lexical vector config - values from .env (code defaults to legacy-safe)
-      - LEX_VECTOR_DIM
-      - LEX_MULTI_HASH
-      - LEX_BIGRAMS
-      - LEX_BIGRAM_WEIGHT
-      - LEX_SPARSE_MODE
-      - LEX_SPARSE_NAME
+      # Lexical vector config - use ${VAR:-} to properly inherit from .env (not host shell)
+      - LEX_VECTOR_DIM=${LEX_VECTOR_DIM:-}
+      - LEX_MULTI_HASH=${LEX_MULTI_HASH:-}
+      - LEX_BIGRAMS=${LEX_BIGRAMS:-}
+      - LEX_BIGRAM_WEIGHT=${LEX_BIGRAM_WEIGHT:-}
+      - LEX_SPARSE_MODE=${LEX_SPARSE_MODE:-}
+      - LEX_SPARSE_NAME=${LEX_SPARSE_NAME:-}
     ports:
       - "8004:8002"  # Map to different host port to avoid conflicts
       - "18004:18000"  # Health check port
