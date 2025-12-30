@@ -398,14 +398,8 @@ def generate_pseudo_tags_batch(
 
     client = OpenAIRefragClient()
 
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
-    results = loop.run_until_complete(
-        client.generate_batch_async(
+    async def _run_batch() -> list[str]:
+        return await client.generate_batch_async(
             prompts,
             max_tokens=int(os.environ.get("PSEUDO_MAX_TOKENS", "96") or 96),
             concurrency=concurrency,
@@ -414,7 +408,18 @@ def generate_pseudo_tags_batch(
             stop=["\n\n"],
             force_json=True,
         )
-    )
+
+    # Handle both sync and async contexts safely
+    try:
+        # Check if we're already in a running event loop
+        loop = asyncio.get_running_loop()
+        # We're in an async context - create a task and use asyncio.run in a thread
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            results = pool.submit(asyncio.run, _run_batch()).result()
+    except RuntimeError:
+        # No running loop - safe to use asyncio.run directly
+        results = asyncio.run(_run_batch())
 
     # Parse JSON responses
     parsed: list[tuple[str, list[str]]] = []
@@ -435,3 +440,64 @@ def generate_pseudo_tags_batch(
 
     return parsed
 
+
+async def generate_pseudo_tags_batch_async(
+    texts: list[str],
+    concurrency: int = 4,
+) -> list[tuple[str, list[str]]]:
+    """Async variant of generate_pseudo_tags_batch for use in async contexts.
+
+    Args:
+        texts: List of code snippets to process
+        concurrency: Number of concurrent OpenAI calls (default 4)
+
+    Returns:
+        List of (pseudo, tags) tuples in same order as input texts
+    """
+    import json as _json
+    from scripts.llm_utils import strip_markdown_fences as _strip_markdown_fences
+
+    if not texts:
+        return []
+
+    # Build prompts
+    prompts = []
+    for text in texts:
+        prompt = (
+            "You are a JSON-only function that labels code spans for search enrichment.\n"
+            "Respond with a single JSON object and nothing else (no prose, no markdown).\n"
+            "Exact format: {\"pseudo\": string (<=20 tokens), \"tags\": [3-6 short strings]}.\n"
+            "Code:\n" + text[:2000]
+        )
+        prompts.append(prompt)
+
+    client = OpenAIRefragClient()
+
+    results = await client.generate_batch_async(
+        prompts,
+        max_tokens=int(os.environ.get("PSEUDO_MAX_TOKENS", "96") or 96),
+        concurrency=concurrency,
+        temperature=float(os.environ.get("PSEUDO_TEMPERATURE", "0.10") or 0.10),
+        top_p=float(os.environ.get("PSEUDO_TOP_P", "0.9") or 0.9),
+        stop=["\n\n"],
+        force_json=True,
+    )
+
+    # Parse JSON responses
+    parsed: list[tuple[str, list[str]]] = []
+    for out in results:
+        pseudo, tags = "", []
+        try:
+            obj = _json.loads(_strip_markdown_fences(out))
+            if isinstance(obj, dict):
+                p = obj.get("pseudo")
+                t = obj.get("tags")
+                if isinstance(p, str):
+                    pseudo = p.strip()[:256]
+                if isinstance(t, list):
+                    tags = [str(x).strip() for x in t if str(x).strip()][:6]
+        except Exception:
+            pass
+        parsed.append((pseudo, tags))
+
+    return parsed

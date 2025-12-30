@@ -97,9 +97,10 @@ async def _expand_query_impl(query: Any = None, max_new: Any = None, session: Op
         if runtime_kind == "openai":
             from scripts.refrag_openai import OpenAIRefragClient  # type: ignore
             client = OpenAIRefragClient()
-            extra_kwargs["system"] = f"You rewrite code search queries. Output a JSON array with exactly {cap} alternative queries. Use different terminology - do NOT repeat any words from the original."
+            # Use object schema {"queries": [...]} for OpenAI's response_format: json_object
+            extra_kwargs["system"] = f'You rewrite code search queries. Output a JSON object with a "queries" key containing exactly {cap} alternative queries. Use different terminology - do NOT repeat any words from the original.'
             use_force_json = True
-            prompt = f'Rewrite "{original_q}" using completely different technical terms:'
+            prompt = f'Rewrite "{original_q}" using completely different technical terms. Return {{"queries": [...]}}:'
         elif runtime_kind == "minimax":
             from scripts.refrag_minimax import MiniMaxRefragClient  # type: ignore
             client = MiniMaxRefragClient()
@@ -111,14 +112,14 @@ async def _expand_query_impl(query: Any = None, max_new: Any = None, session: Op
             # no_thinking=True: use configured GLM_MODEL but skip thinking for fast response
             # All GLM models (4.5, 4.6, 4.7) support thinking: {type: "disabled"}
             extra_kwargs["no_thinking"] = True
-            use_force_json = True  # GLM works best with response_format: json_object
-            # Focus on IMPLEMENTATIONS not concepts - gets more diverse results
+            # Use object schema {"queries": [...]} for GLM's response_format: json_object
+            use_force_json = True
             prompt = (
                 f'For code search "{original_q}", suggest {cap} alternative queries focusing on:\n'
                 f'- Library/package names (e.g., "nltk wordnet", "gensim vectors")\n'
                 f'- Specific algorithms/techniques used internally\n'
                 f'- Data structures or patterns\n\n'
-                f'Output JSON array with {cap} implementation-focused queries:'
+                f'Output JSON object {{"queries": [...]}} with {cap} implementation-focused queries:'
             )
         else:
             from scripts.refrag_llamacpp import LlamaCppRefragClient  # type: ignore
