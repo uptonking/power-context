@@ -145,7 +145,7 @@ services:
       - LEX_SPARSE_MODE=${LEX_SPARSE_MODE:-}
       - LEX_SPARSE_NAME=${LEX_SPARSE_NAME:-}
       # Pattern vectors for structural code similarity
-      - PATTERN_VECTORS=${PATTERN_VECTORS:-0}
+      - PATTERN_VECTORS=${PATTERN_VECTORS:-}
       # Learning reranker configuration
       - RERANK_LEARNING=${RERANK_LEARNING:-1}
       - RERANKER_WEIGHTS_DIR=/tmp/rerank_weights
@@ -331,6 +331,8 @@ services:
       - LEX_BIGRAM_WEIGHT=${LEX_BIGRAM_WEIGHT:-}
       - LEX_SPARSE_MODE=${LEX_SPARSE_MODE:-}
       - LEX_SPARSE_NAME=${LEX_SPARSE_NAME:-}
+      # Pattern vectors for structural code similarity
+      - PATTERN_VECTORS=${PATTERN_VECTORS:-}
       # Learning reranker configuration
       - RERANK_LEARNING=${RERANK_LEARNING:-1}
       - RERANKER_WEIGHTS_DIR=/tmp/rerank_weights
@@ -410,7 +412,7 @@ services:
       - LEX_SPARSE_MODE=${LEX_SPARSE_MODE:-}
       - LEX_SPARSE_NAME=${LEX_SPARSE_NAME:-}
       # Pattern vectors for structural code similarity
-      - PATTERN_VECTORS=${PATTERN_VECTORS:-0}
+      - PATTERN_VECTORS=${PATTERN_VECTORS:-}
     volumes:
       - workspace_pvc:/work:rw
       - codebase_pvc:/work/.codebase:rw
@@ -467,7 +469,7 @@ services:
       - LEX_SPARSE_MODE=${LEX_SPARSE_MODE:-}
       - LEX_SPARSE_NAME=${LEX_SPARSE_NAME:-}
       # Pattern vectors for structural code similarity
-      - PATTERN_VECTORS=${PATTERN_VECTORS:-0}
+      - PATTERN_VECTORS=${PATTERN_VECTORS:-}
     volumes:
       - workspace_pvc:/work:rw
       - codebase_pvc:/work/.codebase:rw
@@ -556,11 +558,11 @@ services:
       - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER}
       - QWEN3_EMBEDDING_ENABLED=${QWEN3_EMBEDDING_ENABLED:-0}
       - QWEN3_QUERY_INSTRUCTION=${QWEN3_QUERY_INSTRUCTION:-1}
-      - QWEN3_INSTRUCTION_TEXT=${QWEN3_INSTRUCTION_TEXT}
-      - USE_TREE_SITTER=${USE_TREE_SITTER}
-      - INDEX_SEMANTIC_CHUNKS=${INDEX_SEMANTIC_CHUNKS}
-      - INDEX_MICRO_CHUNKS=${INDEX_MICRO_CHUNKS}
-      
+      - QWEN3_INSTRUCTION_TEXT=${QWEN3_INSTRUCTION_TEXT:-}
+      - USE_TREE_SITTER=${USE_TREE_SITTER:-}
+      - INDEX_SEMANTIC_CHUNKS=${INDEX_SEMANTIC_CHUNKS:-}
+      - INDEX_MICRO_CHUNKS=${INDEX_MICRO_CHUNKS:-}
+
       # Remote upload mode configuration
       - REMOTE_UPLOAD_ENABLED=1
       - REMOTE_UPLOAD_MODE=development
@@ -568,13 +570,13 @@ services:
       - REMOTE_UPLOAD_TIMEOUT=300
       - REMOTE_UPLOAD_MAX_RETRIES=5
       - MAX_BUNDLE_SIZE_MB=256
-      
-      # Qdrant configuration
-      - QDRANT_TIMEOUT=${QDRANT_TIMEOUT}
-      - MAX_MICRO_CHUNKS_PER_FILE=${MAX_MICRO_CHUNKS_PER_FILE}
-      - INDEX_UPSERT_BATCH=${INDEX_UPSERT_BATCH}
-      - INDEX_UPSERT_RETRIES=${INDEX_UPSERT_RETRIES}
-      # Lexical vector config - use ${VAR:-} to properly inherit from .env (not host shell)
+
+      # Qdrant configuration - use ${VAR:-} to properly inherit from .env
+      - QDRANT_TIMEOUT=${QDRANT_TIMEOUT:-}
+      - MAX_MICRO_CHUNKS_PER_FILE=${MAX_MICRO_CHUNKS_PER_FILE:-}
+      - INDEX_UPSERT_BATCH=${INDEX_UPSERT_BATCH:-}
+      - INDEX_UPSERT_RETRIES=${INDEX_UPSERT_RETRIES:-}
+      # Lexical vector config - use ${VAR:-} to properly inherit from .env
       - LEX_VECTOR_DIM=${LEX_VECTOR_DIM:-}
       - LEX_MULTI_HASH=${LEX_MULTI_HASH:-}
       - LEX_BIGRAMS=${LEX_BIGRAMS:-}
