@@ -28,10 +28,11 @@ from weakref import WeakKeyDictionary
 # FastMCP server and request Context (ctx) for per-connection state
 try:
     from mcp.server.fastmcp import FastMCP, Context  # type: ignore
+    from mcp.server.transport_security import TransportSecuritySettings  # type: ignore
 except Exception:
-    # Fallback: keep FastMCP import; treat Context as Any for type hints
     from mcp.server.fastmcp import FastMCP  # type: ignore
     Context = Any  # type: ignore
+    TransportSecuritySettings = None  # type: ignore
 
 from scripts.mcp_auth import (
     require_auth_session as _require_auth_session,
@@ -122,7 +123,13 @@ def _ensure_once(name: str) -> bool:
     except Exception:
         return False
 
-mcp = FastMCP(name="memory-server")
+# Disable DNS rebinding protection - breaks Docker internal networking (Host: mcp:8000)
+_security_settings = (
+    TransportSecuritySettings(enable_dns_rebinding_protection=False)
+    if TransportSecuritySettings
+    else None
+)
+mcp = FastMCP(name="memory-server", transport_security=_security_settings)
 
 # Capture tool registry automatically by wrapping the decorator once
 _TOOLS_REGISTRY: list[dict] = []
