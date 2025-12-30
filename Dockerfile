@@ -13,17 +13,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies for all services
-RUN pip install --no-cache-dir --upgrade \
-    qdrant-client \
-    fastembed \
-    watchdog \
-    onnxruntime \
-    tokenizers \
-    tree_sitter \
-    tree_sitter_languages \
-    mcp \
-    fastmcp
+# Python deps: reuse shared requirements file for consistency across services
+COPY requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir --upgrade -r /tmp/requirements.txt
 
 # Copy scripts for all services
 COPY scripts /app/scripts

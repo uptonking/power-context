@@ -7,9 +7,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     HF_HOME=/tmp/cache \
     TRANSFORMERS_CACHE=/tmp/cache
 
-# Install deps + create cache/rerank directories in single layer
-# Pin qdrant-client to 1.15.x - version 1.16+ removed .search() which breaks OpenLit instrumentation
-RUN pip install --no-cache-dir --upgrade mcp fastmcp 'qdrant-client>=1.15.0,<1.16.0' fastembed openlit \
+# Python deps: reuse shared requirements file for consistency across services
+# Create cache/rerank directories in same layer
+COPY requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir --upgrade -r /tmp/requirements.txt \
     && mkdir -p /tmp/cache && chmod 755 /tmp/cache \
     && mkdir -p /tmp/rerank_events /tmp/rerank_weights \
     && chmod 777 /tmp/rerank_events /tmp/rerank_weights
