@@ -2126,23 +2126,8 @@ def _ca_decode(
     stops: list[str],
     timeout: float | None = None,
 ) -> str:
-    # Select decoder runtime: explicit REFRAG_RUNTIME takes priority.
-    # Auto-detect is opt-in via REFRAG_RUNTIME_AUTODETECT=1 to avoid surprise API calls.
-    runtime_kind = str(os.environ.get("REFRAG_RUNTIME", "")).strip().lower()
-    autodetect_enabled = str(os.environ.get("REFRAG_RUNTIME_AUTODETECT", "")).strip().lower() in ("1", "true", "yes")
-    if not runtime_kind:
-        if autodetect_enabled:
-            # Auto-detect based on available API keys (opt-in only)
-            if os.environ.get("OPENAI_API_KEY", "").strip():
-                runtime_kind = "openai"
-            elif os.environ.get("MINIMAX_API_KEY", "").strip():
-                runtime_kind = "minimax"
-            elif os.environ.get("GLM_API_KEY", "").strip():
-                runtime_kind = "glm"
-            else:
-                runtime_kind = "llamacpp"
-        else:
-            runtime_kind = "llamacpp"
+    # Select decoder runtime: explicit REFRAG_RUNTIME required, defaults to llamacpp
+    runtime_kind = str(os.environ.get("REFRAG_RUNTIME", "")).strip().lower() or "llamacpp"
     if runtime_kind == "openai":
         from scripts.refrag_openai import OpenAIRefragClient  # type: ignore
 
@@ -2947,26 +2932,8 @@ async def _context_answer_impl(
     # Check decoder availability based on REFRAG_RUNTIME
     # For external runtimes (openai, glm, minimax), decoder is always "enabled" if API key present
     # For llamacpp, check REFRAG_DECODER=1 and server availability
-    # NOTE: Auto-detect is opt-in via REFRAG_RUNTIME_AUTODETECT=1 to avoid surprise API calls
-    _runtime_kind = str(os.environ.get("REFRAG_RUNTIME", "")).strip().lower()
-    _autodetect_enabled = str(os.environ.get("REFRAG_RUNTIME_AUTODETECT", "")).strip().lower() in ("1", "true", "yes")
-    if not _runtime_kind:
-        if _autodetect_enabled:
-            # Auto-detect based on available API keys (opt-in only)
-            if os.environ.get("OPENAI_API_KEY", "").strip():
-                _runtime_kind = "openai"
-            elif os.environ.get("MINIMAX_API_KEY", "").strip():
-                _runtime_kind = "minimax"
-            elif os.environ.get("GLM_API_KEY", "").strip():
-                _runtime_kind = "glm"
-            else:
-                _runtime_kind = "llamacpp"
-            logger.info(f"Auto-detected REFRAG_RUNTIME={_runtime_kind}")
-        else:
-            # Default to llamacpp when no explicit runtime set
-            _runtime_kind = "llamacpp"
-
-    # Log the selected runtime for observability
+    # NOTE: Explicit REFRAG_RUNTIME required; defaults to llamacpp if unset
+    _runtime_kind = str(os.environ.get("REFRAG_RUNTIME", "")).strip().lower() or "llamacpp"
     logger.debug(f"Using decoder runtime: {_runtime_kind}")
 
     _decoder_available = _runtime_kind in ("openai", "glm", "minimax")

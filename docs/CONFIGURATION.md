@@ -191,7 +191,6 @@ RERANK_EVENTS_ENABLED=0
 |------|-------------|---------|
 | REFRAG_DECODER | Enable decoder for context_answer (required for llamacpp) | 1 (enabled) |
 | REFRAG_RUNTIME | Decoder backend: llamacpp, openai, glm, or minimax | llamacpp |
-| REFRAG_RUNTIME_AUTODETECT | Opt-in auto-detection based on API keys (1=enabled) | 0 (disabled) |
 | LLAMACPP_URL | llama.cpp server endpoint | http://llamacpp:8080 or http://host.docker.internal:8081 |
 | LLAMACPP_TIMEOUT_SEC | Decoder request timeout | 300 |
 | DECODER_MAX_TOKENS | Max tokens for decoder responses | 4000 |
@@ -219,7 +218,7 @@ Set `REFRAG_RUNTIME` explicitly to choose a decoder backend:
 - **glm**: ZhipuAI GLM models (GLM-4.5, GLM-4.6, GLM-4.7)
 - **minimax**: MiniMax M2 API
 
-**Auto-detection** is opt-in via `REFRAG_RUNTIME_AUTODETECT=1`. When enabled and `REFRAG_RUNTIME` is unset, the runtime is selected based on which API keys are present (priority: OpenAI > MiniMax > GLM > llamacpp). This is disabled by default to avoid surprise API calls.
+No auto-detection is performed to avoid surprise API calls. If `REFRAG_RUNTIME` is unset, it defaults to `llamacpp`.
 
 ## ReFRAG (Micro-Chunking & Retrieval)
 
