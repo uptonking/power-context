@@ -85,6 +85,8 @@ class CoSQACorpusEntry:
                 "end_line": 1,
                 # Provide text inline so snippet/keyword bump doesn't try to read files.
                 "text": self.code,
+                # Reranker expects metadata.code for cross-encoder scoring
+                "code": self.code,
             },
         }
 

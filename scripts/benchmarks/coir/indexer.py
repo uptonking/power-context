@@ -312,6 +312,8 @@ def index_coir_corpus(
                         "start_line": 1,
                         "end_line": 1,
                         "text": texts[j],
+                        # Reranker expects metadata.code for cross-encoder scoring
+                        "code": texts[j],
                     },
                 },
             )

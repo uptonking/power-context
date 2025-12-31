@@ -249,11 +249,14 @@ async def search_cosqa_corpus(
     start = time.perf_counter()
 
     # Use repo_search for consistency with CoIR and production
+    # Retrieve larger candidate pool for reranking (100 candidates -> top limit)
     result = await repo_search(
         query=query,
         limit=limit,
         collection=collection,
         rerank_enabled=rerank_enabled,
+        rerank_top_n=100 if rerank_enabled else None,  # Retrieve 100 candidates
+        rerank_return_m=limit if rerank_enabled else None,  # Rerank down to limit
         mode=mode,
     )
 

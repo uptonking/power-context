@@ -241,6 +241,7 @@ class ContextEngineRetriever:
             pass  # Collection reused, no indexing needed
 
         # Search each query using Context-Engine
+        # Use larger candidate pool for reranking (100 candidates -> top_k)
         results = {}
         for qid, query_text in queries.items():
             result = await repo_search(
@@ -248,6 +249,8 @@ class ContextEngineRetriever:
                 limit=top_k,
                 collection=collection,
                 rerank_enabled=self.rerank_enabled,
+                rerank_top_n=100 if self.rerank_enabled else None,  # Retrieve 100 candidates
+                rerank_return_m=top_k if self.rerank_enabled else None,  # Rerank down to top_k
             )
 
             # Extract scores
