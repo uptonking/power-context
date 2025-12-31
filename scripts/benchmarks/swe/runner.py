@@ -236,6 +236,7 @@ async def evaluate_instance(
     top_k: int = 20,
     collection_prefix: str = "swe-bench-",
     rerank_enabled: bool = True,
+    skip_index: bool = False,
 ) -> InstanceResult:
     """Evaluate retrieval for a single SWE-bench instance."""
     result = InstanceResult(
@@ -265,18 +266,19 @@ async def evaluate_instance(
         commit_short = instance.base_commit[:8]
         collection_name = f"{collection_prefix}{instance.repo.replace('/', '-')}-{commit_short}"
 
-        # Import indexer
-        from scripts import ingest_code
+        if not skip_index:
+            # Import indexer
+            from scripts import ingest_code
 
-        qdrant_url = os.environ.get("QDRANT_URL", "http://localhost:6333")
-        ingest_code.index_repo(
-            root=repo_path,
-            qdrant_url=qdrant_url,
-            api_key=os.environ.get("QDRANT_API_KEY", ""),
-            collection=collection_name,
-            model_name=os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5"),
-            recreate=False,  # Reuse if same commit (collection name includes commit hash)
-        )
+            qdrant_url = os.environ.get("QDRANT_URL", "http://localhost:6333")
+            ingest_code.index_repo(
+                root=repo_path,
+                qdrant_url=qdrant_url,
+                api_key=os.environ.get("QDRANT_API_KEY", ""),
+                collection=collection_name,
+                model_name=os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5"),
+                recreate=False,  # Reuse if same commit (collection name includes commit hash)
+            )
         result.index_time_s = time.perf_counter() - t0
 
         # 3. Search using the issue text
@@ -350,11 +352,13 @@ async def run_full_benchmark(
     repos: Optional[list[str]] = None,
     top_k: int = 20,
     rerank_enabled: bool = True,
+    skip_index: bool = False,
     cache_dir: Optional[str] = None,
 ) -> SWEReport:
     """Run full SWE-bench retrieval evaluation."""
     from scripts.benchmarks.swe.dataset import load_swe_bench, filter_by_repo
     from scripts.benchmarks.swe.repo_manager import RepoManager
+    from qdrant_client import QdrantClient
 
     print("=" * 60)
     print("SWE-bench Retrieval Evaluation")
@@ -370,6 +374,27 @@ async def run_full_benchmark(
     if limit and limit < len(instances):
         instances = instances[:limit]
         print(f"Limited to {limit} instances")
+
+    # If skip_index, validate that all required collections exist
+    if skip_index:
+        qdrant_url = os.environ.get("QDRANT_URL", "http://localhost:6333")
+        client = QdrantClient(url=qdrant_url)
+        existing = {c.name for c in client.get_collections().collections}
+
+        required = set()
+        for inst in instances:
+            commit_short = inst.base_commit[:8]
+            coll_name = f"swe-bench-{inst.repo.replace('/', '-')}-{commit_short}"
+            required.add(coll_name)
+
+        missing = required - existing
+        if missing:
+            print(f"\nERROR: --skip-index but missing collections:")
+            for m in sorted(missing):
+                print(f"  - {m}")
+            raise RuntimeError(f"Missing {len(missing)} collections. Run without --skip-index first.")
+
+        print(f"\n✓ All {len(required)} required collections exist, skipping indexing")
 
     # Initialize repo manager
     cache_path = Path(cache_dir) if cache_dir else None
@@ -400,6 +425,7 @@ async def run_full_benchmark(
             repo_manager,
             top_k=top_k,
             rerank_enabled=rerank_enabled,
+            skip_index=skip_index,
         )
 
         report.results.append(result)
@@ -445,6 +471,17 @@ def print_report(report: SWEReport):
     print(f"Avg index time: {report.mean_index_time_s:.1f}s")
     print(f"Avg search time: {report.mean_search_time_s:.3f}s")
 
+    # Print config
+    if report.config:
+        print()
+        print("Config:")
+        if "git_sha" in report.config:
+            print(f"  git_sha: {report.config['git_sha']}")
+        if "env_snapshot" in report.config:
+            env = report.config["env_snapshot"]
+            for k, v in sorted(env.items()):
+                print(f"  {k}={v}")
+
 
 def main():
     parser = argparse.ArgumentParser(description="SWE-bench retrieval evaluation")
@@ -453,6 +490,8 @@ def main():
     parser.add_argument("--repo", action="append", dest="repos", help="Filter to repo(s)")
     parser.add_argument("--top-k", type=int, default=20)
     parser.add_argument("--no-rerank", action="store_true")
+    parser.add_argument("--skip-index", action="store_true",
+                        help="Skip indexing, use existing collections")
     parser.add_argument("--cache-dir", type=str)
     parser.add_argument("--output", "-o", type=str, help="Output JSON file")
     parser.add_argument("--full-results", action="store_true",
@@ -466,6 +505,7 @@ def main():
         repos=args.repos,
         top_k=args.top_k,
         rerank_enabled=not args.no_rerank,
+        skip_index=args.skip_index,
         cache_dir=args.cache_dir,
     ))
 
