@@ -7,8 +7,18 @@ from types import SimpleNamespace
 import pytest
 from qdrant_client import QdrantClient, models
 
-# Reuse the existing Qdrant testcontainer fixture
-from tests.test_integration_qdrant import qdrant_container  # noqa: F401
+
+@pytest.fixture(scope="module")
+def qdrant_container():
+    """Connect to live Qdrant at localhost:6333 (or QDRANT_URL env var)."""
+    url = os.environ.get("QDRANT_URL", "http://localhost:6333")
+    # Quick health check
+    try:
+        client = QdrantClient(url=url, timeout=5)
+        client.get_collections()
+    except Exception as e:
+        pytest.skip(f"Qdrant not available at {url}: {e}")
+    yield url
 
 
 ing = importlib.import_module("scripts.ingest_code")
