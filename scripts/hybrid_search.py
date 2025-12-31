@@ -1906,11 +1906,24 @@ def run_hybrid_search(
         except Exception:
             pass
 
+        # Extract payload for benchmark consumers (code_id, _id, etc.)
+        _payload_out = None
+        try:
+            _pt = m.get("pt")
+            if _pt is not None and _pt.payload:
+                # Return full payload (excluding large fields already in result)
+                _payload_out = dict(_pt.payload)
+                # Remove 'metadata' if present - it's already unpacked into result fields
+                _payload_out.pop("metadata", None)
+        except Exception:
+            pass
+
         item = {
             "score": round(float(m["s"]), 4),
             "raw_score": float(m["s"]),  # expose raw fused score for downstream budgeter
             "fusion_score": round(fusion_score, 4),  # Always store fusion score
             "rerank_score": round(float(rerank_score), 4) if rerank_score is not None else None,  # Store rerank separately
+            "payload": _payload_out,  # Raw payload for benchmarks (code_id, _id, etc.)
             "path": _emit_path,
             "host_path": _host,
             "container_path": _cont,

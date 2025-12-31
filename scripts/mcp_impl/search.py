@@ -648,30 +648,42 @@ async def _repo_search_impl(
 
                 model_name = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
                 model = get_embedding_model_fn(model_name) if get_embedding_model_fn else None
-                items = run_hybrid_search(
-                    queries=queries,
-                    limit=int(limit),
-                    per_path=(
-                        int(per_path)
-                        if (per_path is not None and str(per_path).strip() != "")
-                        else 1
-                    ),
-                    language=language or None,
-                    under=under or None,
-                    kind=kind or None,
-                    symbol=symbol or None,
-                    ext=ext or None,
-                    not_filter=not_ or None,
-                    case=case or None,
-                    path_regex=path_regex or None,
-                    path_glob=(path_globs or None),
-                    not_glob=(not_globs or None),
-                    expand=str(os.environ.get("HYBRID_EXPAND", "0")).strip().lower()
-                    in {"1", "true", "yes", "on"},
-                    model=model,
-                    mode=mode_str or None,
-                    repo=repo_filter,  # Cross-codebase isolation
-                )
+                # Set collection env for hybrid_search fallback (matches in-process path)
+                prev_coll_fb = os.environ.get("COLLECTION_NAME")
+                try:
+                    os.environ["COLLECTION_NAME"] = collection
+                    items = run_hybrid_search(
+                        queries=queries,
+                        limit=int(limit),
+                        per_path=(
+                            int(per_path)
+                            if (per_path is not None and str(per_path).strip() != "")
+                            else 1
+                        ),
+                        language=language or None,
+                        under=under or None,
+                        kind=kind or None,
+                        symbol=symbol or None,
+                        ext=ext or None,
+                        not_filter=not_ or None,
+                        case=case or None,
+                        path_regex=path_regex or None,
+                        path_glob=(path_globs or None),
+                        not_glob=(not_globs or None),
+                        expand=str(os.environ.get("HYBRID_EXPAND", "0")).strip().lower()
+                        in {"1", "true", "yes", "on"},
+                        model=model,
+                        mode=mode_str or None,
+                        repo=repo_filter,  # Cross-codebase isolation
+                    )
+                finally:
+                    if prev_coll_fb is None:
+                        try:
+                            del os.environ["COLLECTION_NAME"]
+                        except Exception:
+                            pass
+                    else:
+                        os.environ["COLLECTION_NAME"] = prev_coll_fb
                 json_lines = items
             except Exception:
                 pass
@@ -726,6 +738,13 @@ async def _repo_search_impl(
                             components["fname_boost"] = float(obj.get("fname_boost", 0))
                             why_parts.append(f"fname:{float(obj.get('fname_boost', 0)):.2f}")
 
+                        # Extract benchmark IDs from payload for CoIR/CoSQA
+                        _payload = obj.get("payload") if isinstance(obj, dict) else None
+                        if not isinstance(_payload, dict):
+                            _payload = {}
+                        _doc_id = _payload.get("_id") or _payload.get("code_id") or _payload.get("id")
+                        _code_id = _payload.get("code_id")
+
                         item = {
                             "score": float(obj.get("score", 0)),
                             "path": obj.get("path", ""),
@@ -734,6 +753,9 @@ async def _repo_search_impl(
                             "end_line": int(obj.get("end_line") or 0),
                             "why": why_parts,
                             "components": components,
+                            # Benchmark IDs (preserved through rerank)
+                            "doc_id": str(_doc_id) if _doc_id is not None else None,
+                            "code_id": str(_code_id) if _code_id is not None else None,
                         }
                         # Preserve dual-path metadata
                         if obj.get("host_path"):
@@ -871,6 +893,12 @@ async def _repo_search_impl(
                         why_parts = obj.get("why", []) + [f"rerank_onnx:{float(rr_s):.3f}", f"blend:{float(blended_s):.3f}"]
                         if post_b > 0:
                             why_parts.append(f"post_sym:{float(post_b):.3f}")
+                        # Extract benchmark IDs from payload for CoIR/CoSQA
+                        _payload = obj.get("payload") if isinstance(obj, dict) else None
+                        if not isinstance(_payload, dict):
+                            _payload = {}
+                        _doc_id = _payload.get("_id") or _payload.get("code_id") or _payload.get("id")
+                        _code_id = _payload.get("code_id")
                         item = {
                             "score": float(blended_s),
                             "path": obj.get("path", ""),
@@ -880,6 +908,9 @@ async def _repo_search_impl(
                             "why": why_parts,
                             "components": (obj.get("components") or {})
                             | {"rerank_onnx": float(rr_s), "blended": float(blended_s), "post_symbol_boost": float(post_b)},
+                            # Benchmark IDs (preserved through rerank)
+                            "doc_id": str(_doc_id) if _doc_id is not None else None,
+                            "code_id": str(_code_id) if _code_id is not None else None,
                         }
                         # Preserve dual-path metadata when available so clients can prefer host paths
                         _hostp = obj.get("host_path")
@@ -1005,6 +1036,15 @@ async def _repo_search_impl(
     if not used_rerank:
         # Build results from hybrid JSON lines
         for obj in json_lines:
+            # NOTE: hybrid_search.py emits a "payload" field intended for benchmarks.
+            # We do NOT pass through the full payload here (it can include large code/text),
+            # but we *do* extract stable document identifiers for standard corpora (CoSQA/CoIR).
+            _payload = obj.get("payload") if isinstance(obj, dict) else None
+            if not isinstance(_payload, dict):
+                _payload = {}
+            # Prefer CoIR's "_id", else CoSQA's "code_id", else any generic "id".
+            _doc_id = _payload.get("_id") or _payload.get("code_id") or _payload.get("id")
+            _code_id = _payload.get("code_id")
             item = {
                 "score": float(obj.get("score", 0.0)),
                 "path": obj.get("path", ""),
@@ -1013,6 +1053,9 @@ async def _repo_search_impl(
                 "end_line": int(obj.get("end_line") or 0),
                 "why": obj.get("why", []),
                 "components": obj.get("components", {}),
+                # Benchmark IDs (small, safe to include in normal responses)
+                "doc_id": str(_doc_id) if _doc_id is not None else None,
+                "code_id": str(_code_id) if _code_id is not None else None,
             }
             # Preserve dual-path metadata when available so clients can prefer host paths
             _hostp = obj.get("host_path")
