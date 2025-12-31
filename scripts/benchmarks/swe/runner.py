@@ -200,11 +200,15 @@ class SWEReport:
     # Config snapshot for reproducibility
     config: dict[str, str] = field(default_factory=dict)
 
-    def to_dict(self) -> dict:
-        """Serialize for JSON output."""
+    def to_dict(self, full_results: bool = False) -> dict:
+        """Serialize for JSON output.
+
+        Args:
+            full_results: If True, include all results. If False (default),
+                         truncate to 20 results for readability.
+        """
         d = asdict(self)
-        # Truncate results for readability
-        if len(d["results"]) > 20:
+        if not full_results and len(d["results"]) > 20:
             d["results_sample"] = d["results"][:20]
             d["results_count"] = len(d["results"])
             del d["results"]
@@ -246,7 +250,7 @@ async def evaluate_instance(
     repo_manager,  # RepoManager
     top_k: int = 20,
     collection_prefix: str = "swe-bench-",
-    rerank_enabled: bool = True,  # noqa: ARG001 - reserved for future use
+    rerank_enabled: bool = True,
 ) -> InstanceResult:
     """Evaluate retrieval for a single SWE-bench instance."""
     result = InstanceResult(
@@ -255,21 +259,30 @@ async def evaluate_instance(
         ground_truth_files=instance.ground_truth_files,
         retrieved_files=[],
     )
-    
+
+    # Wire rerank_enabled to environment variable
+    old_rerank = os.environ.get("RERANK_ENABLED")
+    os.environ["RERANK_ENABLED"] = "1" if rerank_enabled else "0"
+
+    # Track env vars to restore
+    old_collection = os.environ.get("COLLECTION_NAME")
+
     try:
         # 1. Checkout the correct commit
         repo_path = repo_manager.checkout_commit(
             instance.repo,
             instance.base_commit,
         )
-        
-        # 2. Index the repository
+
+        # 2. Index the repository (keyed by commit for cache correctness)
         t0 = time.perf_counter()
-        collection_name = f"{collection_prefix}{instance.repo.replace('/', '-')}"
-        
+        # Include commit hash in collection name to avoid stale indices
+        commit_short = instance.base_commit[:8]
+        collection_name = f"{collection_prefix}{instance.repo.replace('/', '-')}-{commit_short}"
+
         # Import indexer
         from scripts import ingest_code
-        
+
         qdrant_url = os.environ.get("QDRANT_URL", "http://localhost:6333")
         ingest_code.index_repo(
             root=repo_path,
@@ -277,7 +290,7 @@ async def evaluate_instance(
             api_key=os.environ.get("QDRANT_API_KEY", ""),
             collection=collection_name,
             model_name=os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5"),
-            recreate=False,  # Reuse if same commit
+            recreate=False,  # Reuse if same commit (collection name includes commit hash)
         )
         result.index_time_s = time.perf_counter() - t0
 
@@ -288,19 +301,14 @@ async def evaluate_instance(
         from scripts import mcp_indexer_server as srv
 
         # Set collection for this repo
-        old_collection = os.environ.get("COLLECTION_NAME", "")
         os.environ["COLLECTION_NAME"] = collection_name
 
-        try:
-            search_result = await srv.repo_search(
-                queries=[instance.problem_statement],
-                limit=top_k * 2,  # Get more, then dedupe by file
-                include_snippet=False,
-                compact=True,
-            )
-        finally:
-            if old_collection:
-                os.environ["COLLECTION_NAME"] = old_collection
+        search_result = await srv.repo_search(
+            queries=[instance.problem_statement],
+            limit=top_k * 2,  # Get more, then dedupe by file
+            include_snippet=False,
+            compact=True,
+        )
 
         result.search_time_s = time.perf_counter() - t0
 
@@ -309,9 +317,15 @@ async def evaluate_instance(
         for r in search_result.get("results", []):
             path = r.get("path", "")
             if path and path not in seen_files:
-                # Normalize path relative to repo root
-                if str(repo_path) in path:
-                    path = path.replace(str(repo_path) + "/", "")
+                # Normalize path relative to repo root using os.path.relpath
+                try:
+                    rel_path = os.path.relpath(path, repo_path)
+                    # Skip paths that escape the repo (e.g., "../...")
+                    if not rel_path.startswith(".."):
+                        path = rel_path
+                except ValueError:
+                    # Different drives on Windows, use original
+                    pass
                 seen_files.add(path)
                 result.retrieved_files.append(path)
                 if len(result.retrieved_files) >= top_k:
@@ -328,7 +342,19 @@ async def evaluate_instance(
         result.all_found = all_found
 
     except Exception as e:
-        result.error = str(e)
+        result.error = f"{type(e).__name__}: {e}"
+
+    finally:
+        # Restore environment variables
+        if old_collection is not None:
+            os.environ["COLLECTION_NAME"] = old_collection
+        else:
+            os.environ.pop("COLLECTION_NAME", None)
+
+        if old_rerank is not None:
+            os.environ["RERANK_ENABLED"] = old_rerank
+        else:
+            os.environ.pop("RERANK_ENABLED", None)
 
     return result
 
@@ -444,6 +470,8 @@ def main():
     parser.add_argument("--no-rerank", action="store_true")
     parser.add_argument("--cache-dir", type=str)
     parser.add_argument("--output", "-o", type=str, help="Output JSON file")
+    parser.add_argument("--full-results", action="store_true",
+                        help="Include all results in JSON output (not truncated)")
 
     args = parser.parse_args()
 
@@ -460,7 +488,7 @@ def main():
 
     if args.output:
         with open(args.output, "w") as f:
-            json.dump(report.to_dict(), f, indent=2)
+            json.dump(report.to_dict(full_results=args.full_results), f, indent=2)
         print(f"\nResults saved to {args.output}")
 
 
