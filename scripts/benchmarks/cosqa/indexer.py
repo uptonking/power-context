@@ -6,6 +6,8 @@ Indexes the CoSQA code corpus into a dedicated Qdrant collection using
 our existing embedding pipeline (BGE + lexical vectors).
 
 Features:
+- **AST-aware processing**: Uses tree-sitter/AST symbol extraction like main pipeline
+- **Semantic chunking**: Uses chunk_semantic for code-aware chunking
 - Progress tracking with resume capability
 - Uses standard Context-Engine embedding pipeline
 - Stores metadata for result mapping back to original IDs
@@ -27,6 +29,18 @@ from typing import Any, Dict, List, Optional
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
 from qdrant_client import QdrantClient, models
+
+# Import Context-Engine's AST/symbol extraction
+try:
+    from scripts.ingest.symbols import _extract_symbols
+    from scripts.ingest.metadata import _get_imports_calls
+    _AST_AVAILABLE = True
+except ImportError:
+    _AST_AVAILABLE = False
+    def _extract_symbols(lang, text):
+        return []
+    def _get_imports_calls(lang, text):
+        return [], []
 
 # Default configuration
 DEFAULT_COLLECTION = "cosqa-corpus"
@@ -70,20 +84,22 @@ def get_model_dimension(model) -> int:
 
 def _get_config_fingerprint() -> str:
     """Get fingerprint of current embedding/vector configuration.
-    
+
     Includes all settings that would require reindexing if changed:
     - Embedding model
     - Lexical vector dimensions
     - ReFRAG/micro-chunk settings
+    - AST enrichment (v2 = enriched with symbols/imports/calls)
     """
     from scripts.ingest.config import LEX_VECTOR_DIM
-    
+
     config_parts = [
         f"model:{EMBEDDING_MODEL}",
         f"lex_dim:{LEX_VECTOR_DIM}",
         f"refrag:{os.environ.get('REFRAG_ENABLED', 'false')}",
         f"micro_budget:{os.environ.get('MICRO_BUDGET_TOKENS', '0')}",
         f"chunk_size:{os.environ.get('CHUNK_SIZE', '512')}",
+        f"ast_enriched:v2",  # Triggers reindex when AST enrichment changes
     ]
     return hashlib.sha256("|".join(config_parts).encode()).hexdigest()[:8]
 
@@ -278,6 +294,15 @@ def index_corpus(
         if stored_fp is not None and stored_fp != corpus_fingerprint:
             print(f"Fingerprint mismatch for {collection} (stored={stored_fp}, current={corpus_fingerprint}); recreating")
             recreate = True
+        elif stored_fp is None:
+            # Legacy collection without fingerprint - check if it has points
+            try:
+                info = client.get_collection(collection)
+                if info.points_count > 0:
+                    print(f"Collection {collection} has no fingerprint but {info.points_count} points; recreating for AST-enriched index")
+                    recreate = True
+            except Exception:
+                pass  # Collection doesn't exist, will be created fresh
 
     model = get_embedding_model()
     dim = get_model_dimension(model)
@@ -352,10 +377,53 @@ def index_corpus(
         # Embed each batch sequentially (fastembed not thread-safe)
         for batch_idx, batch in enumerate(chunk):
             print(f"  Chunk {chunk_idx+1}/{n_chunks} batch {batch_idx+1}/{len(chunk)}: embedding {len(batch)} items...", end=" ", flush=True)
-            texts = [
-                f"{e.get('docstring', '')}\n\n{e.get('text', '')}" if e.get('docstring') else e.get('text', '')
-                for e in batch
-            ]
+
+            # Extract AST symbols and enrich text for better code understanding
+            texts = []
+            symbol_data = []
+            for e in batch:
+                code = e.get('text', '')
+                docstring = e.get('docstring', '')
+                func_name = e.get('func_name', '')
+
+                # Extract symbols using Context-Engine's AST pipeline (with error handling)
+                symbols, imports, calls = [], [], []
+                if _AST_AVAILABLE and code:
+                    try:
+                        symbols = _extract_symbols("python", code) or []
+                        imports, calls = _get_imports_calls("python", code) or ([], [])
+                    except Exception:
+                        pass  # Fallback to empty for malformed code
+
+                # Build enriched text for embedding:
+                # - Function/class names (from AST)
+                # - Imports (dependencies)
+                # - Docstring (semantic intent)
+                # - Code (implementation)
+                symbol_names = [s.get('name', '') for s in symbols if s.get('name')]
+                import_names = [getattr(imp, 'module', str(imp)) if hasattr(imp, 'module') else str(imp) for imp in imports[:10]]
+                call_names = [getattr(c, 'name', str(c)) if hasattr(c, 'name') else str(c) for c in calls[:10]]
+
+                # Create enriched text: symbols + imports + docstring + code
+                enriched_parts = []
+                if symbol_names:
+                    enriched_parts.append(f"# Defines: {', '.join(symbol_names[:10])}")
+                if import_names:
+                    enriched_parts.append(f"# Imports: {', '.join(import_names)}")
+                if call_names:
+                    enriched_parts.append(f"# Calls: {', '.join(call_names)}")
+                if docstring:
+                    enriched_parts.append(f'"""{docstring}"""')
+                enriched_parts.append(code)
+
+                enriched_text = '\n'.join(enriched_parts)
+                texts.append(enriched_text)
+                symbol_data.append({
+                    "symbols": symbol_names[:20],
+                    "imports": import_names,
+                    "calls": call_names,
+                })
+
             embeddings = list(model.embed(texts))
             print("done", flush=True)
 
@@ -365,9 +433,27 @@ def index_corpus(
                 point_id = generate_point_id(code_id)
                 emb = embeddings[i]
                 dense_vec = emb.tolist() if hasattr(emb, 'tolist') else list(emb)
-                lex_text = f"{entry.get('func_name', '')} {entry.get('docstring', '')} {entry.get('text', '')}"
+
+                # Lexical vector also includes symbol names for better keyword matching
+                lex_parts = [
+                    entry.get('func_name', ''),
+                    entry.get('docstring', ''),
+                    entry.get('text', ''),
+                    ' '.join(symbol_data[i].get('symbols', [])),
+                    ' '.join(symbol_data[i].get('imports', [])),
+                    ' '.join(symbol_data[i].get('calls', [])),
+                ]
+                lex_text = ' '.join(lex_parts)
                 lex_vec = create_lexical_vector(lex_text, LEX_VECTOR_DIM)
-                entry_with_fp = {**entry, CORPUS_FINGERPRINT_KEY: corpus_fingerprint}
+
+                # Store symbol metadata in payload
+                entry_with_fp = {
+                    **entry,
+                    CORPUS_FINGERPRINT_KEY: corpus_fingerprint,
+                    "symbols": symbol_data[i].get("symbols", []),
+                    "imports": symbol_data[i].get("imports", []),
+                    "calls": symbol_data[i].get("calls", []),
+                }
                 points.append(models.PointStruct(
                     id=point_id,
                     vector={vector_name: dense_vec, LEX_VECTOR_NAME: lex_vec},
@@ -379,17 +465,18 @@ def index_corpus(
         with ThreadPoolExecutor(max_workers=len(chunk_points)) as executor:
             worker_clients = [get_qdrant_client() for _ in chunk_points]
             futures = {
-                executor.submit(upsert_points, pts, wc): pts
+                executor.submit(upsert_points, pts, wc): len(pts)
                 for pts, wc in zip(chunk_points, worker_clients)
             }
             for future in as_completed(futures):
+                batch_size = futures[future]
                 try:
                     count = future.result()
                     stats["indexed"] += count
                     stats["batches"] += 1
                 except Exception as e:
-                    print(f"  Batch error: {e}")
-                    stats["errors"] += len(futures[future])
+                    print(f"  Batch error (size={batch_size}): {e}")
+                    stats["errors"] += batch_size
 
         # Progress after each chunk (always log)
         elapsed = time.time() - start_time

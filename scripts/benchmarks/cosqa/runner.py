@@ -7,13 +7,39 @@ Runs evaluation against the CoSQA benchmark, computing:
 - NDCG@k (Normalized Discounted Cumulative Gain)
 - Recall@k
 
-Supports multiple search configurations:
-- Dense-only search
-- Hybrid search (dense + lexical)
-- With/without reranker
+## Context-Engine Features Used
+
+**Search Pipeline (via repo_search):**
+- [x] Hybrid search (dense + lexical RRF fusion)
+- [x] ONNX reranker (BAAI/bge-reranker-base)
+- [x] Query expansion (synonyms via HYBRID_EXPAND=1)
+- [x] Semantic expansion (SEMANTIC_EXPANSION_ENABLED=1)
+- [x] Multi-query fusion
+
+**Indexing Pipeline:**
+- [x] AST symbol extraction (_extract_symbols)
+- [x] Import/call extraction
+- [x] Enriched embeddings (symbols + imports + docstring + code)
+- [x] Lexical hash vectors (for hybrid search)
+- [ ] ReFRAG/micro-chunks (requires REFRAG_MODE=1, off by default)
+- [ ] Pattern vectors (requires indexed pattern vectors)
+
+**Not Applicable (CoSQA limitations):**
+- N/A Semantic chunking (snippets are atomic units)
+- N/A File-level metadata (no real file paths)
+- N/A Git metadata (not a real repo)
+
+## Environment Variables
+
+Enable additional features:
+    HYBRID_EXPAND=1          # Query expansion (synonyms)
+    SEMANTIC_EXPANSION_ENABLED=1  # Semantic similarity expansion
+    LLM_EXPAND_MAX=3         # LLM query expansion
+    REFRAG_MODE=1            # ReFRAG micro-chunking (if indexed)
+    HYBRID_IN_PROCESS=1      # Run hybrid search in-process
 
 References:
-- CoSQA paper baselines: MRR ~0.4-0.5 for neural models
+- CoSQA+ paper: https://arxiv.org/abs/2406.11589
 """
 from __future__ import annotations
 
@@ -34,11 +60,15 @@ from scripts.benchmarks.common import percentile
 # Collection name for CoSQA corpus
 DEFAULT_COLLECTION = "cosqa-corpus"
 
-# Baseline MRR from CoSQA paper (for comparison)
+# Baseline MRR from CoSQA/CoSQA+ papers (Table 5 in CoSQA+ paper)
+# These are actual published results on the CoSQA benchmark
 PAPER_BASELINES = {
-    "CodeBERT": 0.428,
-    "GraphCodeBERT": 0.445,
-    "CodeBERT-biencoder": 0.483,
+    "Lucene (BM25)": 0.167,            # CoSQA+ Table 5
+    "BoW": 0.065,                      # CoSQA+ Table 5
+    "CodeBERT": 0.392,                 # CoSQA+ Table 5
+    "UniXcoder": 0.319,                # CoSQA+ Table 5
+    "CodeT5+ embedding": 0.266,        # CoSQA+ Table 5
+    "text-embedding-3-large": 0.393,   # CoSQA+ Table 5 (best)
 }
 
 
@@ -455,6 +485,7 @@ async def run_full_benchmark(
 def main():
     """CLI entrypoint for CoSQA benchmark."""
     import argparse
+    import os
 
     parser = argparse.ArgumentParser(description="CoSQA Benchmark for Context-Engine")
     parser.add_argument("--split", default="test", choices=["train", "validation", "test"],
@@ -469,11 +500,20 @@ def main():
                         help="Limit corpus size (for testing)")
     parser.add_argument("--no-rerank", action="store_true",
                         help="Disable reranker")
+    parser.add_argument("--no-expand", action="store_true",
+                        help="Disable query expansion")
     parser.add_argument("--recreate", action="store_true",
                         help="Recreate index from scratch")
     parser.add_argument("--output", type=str,
                         help="Output JSON file")
     args = parser.parse_args()
+
+    # Enable Context-Engine features for accurate benchmarking
+    # These are the features that differentiate us from basic embedding search
+    if not args.no_expand:
+        os.environ.setdefault("HYBRID_EXPAND", "1")
+        os.environ.setdefault("SEMANTIC_EXPANSION_ENABLED", "1")
+    os.environ.setdefault("HYBRID_IN_PROCESS", "1")  # Use in-process hybrid search
 
     report = asyncio.run(run_full_benchmark(
         split=args.split,
