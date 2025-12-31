@@ -37,9 +37,9 @@ try:
     _AST_AVAILABLE = True
 except ImportError:
     _AST_AVAILABLE = False
-    def _extract_symbols(lang, text):
+    def _extract_symbols(_lang, _text):  # noqa: unused args for fallback
         return []
-    def _get_imports_calls(lang, text):
+    def _get_imports_calls(_lang, _text):  # noqa: unused args for fallback
         return [], []
 
 # Default configuration
