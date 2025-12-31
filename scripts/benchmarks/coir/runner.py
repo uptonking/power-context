@@ -5,6 +5,30 @@ CoIR Runner for Context-Engine.
 This module wires the external `coir-eval` package to Context-Engine's retriever
 adapter (`scripts.benchmarks.coir.retriever.ContextEngineRetriever`).
 
+## Context-Engine Features Used
+
+**Search Pipeline (via repo_search):**
+- [x] Hybrid search (dense + lexical RRF fusion)
+- [x] ONNX reranker (BAAI/bge-reranker-base)
+- [x] Query expansion (synonyms via HYBRID_EXPAND=1)
+- [x] Semantic expansion (SEMANTIC_EXPANSION_ENABLED=1)
+
+**Indexing Pipeline:**
+- [x] Dense embeddings (bge-base-en)
+- [x] Lexical hash vectors (for hybrid search)
+- [x] Corpus fingerprinting (smart reuse)
+
+**Not Applicable (CoIR = document retrieval, not code):**
+- N/A AST symbol extraction
+- N/A Import/call extraction
+
+## Environment Variables
+
+Enable additional features:
+    HYBRID_EXPAND=1          # Query expansion (default: on)
+    SEMANTIC_EXPANSION_ENABLED=1  # Semantic expansion (default: on)
+    HYBRID_IN_PROCESS=1      # In-process hybrid search (default: on)
+
 Notes:
 - CoIR datasets may require network access to download on first run.
 - We keep this runner dependency-light: if `coir-eval` isn't installed, we print
@@ -187,6 +211,7 @@ async def run_coir_benchmark(
 
 
 def main() -> None:
+    import os as _os
     parser = argparse.ArgumentParser(description="CoIR Benchmark Runner (Context-Engine)")
     parser.add_argument(
         "--tasks",
@@ -197,9 +222,16 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=None, help="Limit samples per task (best-effort)")
     parser.add_argument("--batch-size", type=int, default=64, help="Evaluation batch size (if supported)")
     parser.add_argument("--no-rerank", action="store_true", help="Disable reranking")
+    parser.add_argument("--no-expand", action="store_true", help="Disable query expansion")
     parser.add_argument("--output-folder", type=str, default=None, help="Write coir-eval artifacts here")
     parser.add_argument("--json", dest="json_out", action="store_true", help="Print JSON")
     args = parser.parse_args()
+
+    # Enable Context-Engine features for accurate benchmarking
+    if not args.no_expand:
+        _os.environ.setdefault("HYBRID_EXPAND", "1")
+        _os.environ.setdefault("SEMANTIC_EXPANSION_ENABLED", "1")
+    _os.environ.setdefault("HYBRID_IN_PROCESS", "1")
 
     try:
         report = run_coir_benchmark_sync(
