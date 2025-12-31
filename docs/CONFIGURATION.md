@@ -14,7 +14,7 @@ Complete environment variable reference for Context Engine.
 - [Watcher Settings](#watcher-settings)
 - [Reranker](#reranker)
 - [Learning Reranker](#learning-reranker)
-- [Decoder (llama.cpp / GLM / MiniMax)](#decoder-llamacpp--glm--minimax)
+- [Decoder (llama.cpp / OpenAI / GLM / MiniMax)](#decoder-llamacpp--openai--glm--minimax)
 - [ReFRAG](#refrag)
 - [Pattern Search](#pattern-search)
 - [Ports](#ports)
@@ -185,27 +185,40 @@ RERANK_EVENTS_ENABLED=0
 | RERANK_LEARNING_POLL_INTERVAL | Seconds between checking for new events | 30 |
 | RERANK_LEARNING_RATE | Initial learning rate for TinyScorer | 0.001 |
 
-## Decoder (llama.cpp / GLM / MiniMax)
+## Decoder (llama.cpp / OpenAI / GLM / MiniMax)
 
 | Name | Description | Default |
 |------|-------------|---------|
-| REFRAG_DECODER | Enable decoder for context_answer | 1 (enabled) |
-| REFRAG_RUNTIME | Decoder backend: llamacpp, glm, or minimax | llamacpp |
+| REFRAG_DECODER | Enable decoder for context_answer (required for llamacpp) | 1 (enabled) |
+| REFRAG_RUNTIME | Decoder backend: llamacpp, openai, glm, or minimax | llamacpp |
 | LLAMACPP_URL | llama.cpp server endpoint | http://llamacpp:8080 or http://host.docker.internal:8081 |
 | LLAMACPP_TIMEOUT_SEC | Decoder request timeout | 300 |
 | DECODER_MAX_TOKENS | Max tokens for decoder responses | 4000 |
 | REFRAG_DECODER_MODE | prompt or soft (soft requires patched llama.cpp) | prompt |
+| OPENAI_API_KEY | API key for OpenAI provider | unset |
+| OPENAI_MODEL | OpenAI model name | gpt-4.1-mini |
+| OPENAI_API_BASE | OpenAI API base URL (supports Azure/compatible endpoints) | https://api.openai.com/v1 |
 | GLM_API_KEY | API key for GLM provider | unset |
 | GLM_MODEL | GLM model name (used for context_answer) | glm-4.6 |
 | GLM_MODEL_FAST | GLM model for expand_query/simple tasks (higher concurrency) | glm-4.5 |
 | GLM_TIMEOUT_SEC | GLM request timeout in seconds | unset |
-| PSEUDO_BATCH_CONCURRENCY | Parallel GLM calls for pseudo-tag indexing (1=sequential, 4=4x speedup) | 1 |
+| PSEUDO_BATCH_CONCURRENCY | Parallel API calls for pseudo-tag indexing (1=sequential, 4=4x speedup) | 1 |
 | MINIMAX_API_KEY | API key for MiniMax M2 provider | unset |
 | MINIMAX_MODEL | MiniMax model name | MiniMax-M2 |
 | MINIMAX_API_BASE | MiniMax API base URL | https://api.minimax.io/v1 |
 | MINIMAX_TIMEOUT_SEC | MiniMax request timeout in seconds | unset |
 | USE_GPU_DECODER | Native Metal decoder (1) vs Docker (0) | 0 (docker) |
 | LLAMACPP_GPU_LAYERS | Number of layers to offload to GPU, -1 for all | 32 |
+
+### Runtime Selection
+
+Set `REFRAG_RUNTIME` explicitly to choose a decoder backend:
+- **llamacpp**: Local llama.cpp server (requires `REFRAG_DECODER=1`)
+- **openai**: OpenAI API (GPT-4.1, GPT-4.1-mini, o1, etc.)
+- **glm**: ZhipuAI GLM models (GLM-4.5, GLM-4.6, GLM-4.7)
+- **minimax**: MiniMax M2 API
+
+No auto-detection is performed to avoid surprise API calls. If `REFRAG_RUNTIME` is unset, it defaults to `llamacpp`.
 
 ## ReFRAG (Micro-Chunking & Retrieval)
 
@@ -285,9 +298,11 @@ To use legacy settings (pre-v2): `LEX_VECTOR_DIM=4096 LEX_MULTI_HASH=1 LEX_BIGRA
 
 ### LLM Query Expansion
 
-Query expansion uses the existing decoder infrastructure (GLM or llama.cpp/Granite):
-- **GLM**: Auto-detected when `GLM_API_KEY` is set
-- **llama.cpp/Granite**: Used when `REFRAG_DECODER=1` and GLM not detected
+Query expansion uses the decoder infrastructure (set via `REFRAG_RUNTIME`):
+- **openai**: Uses OpenAI API when `REFRAG_RUNTIME=openai` and `OPENAI_API_KEY` is set
+- **glm**: Uses GLM API when `REFRAG_RUNTIME=glm` and `GLM_API_KEY` is set
+- **minimax**: Uses MiniMax API when `REFRAG_RUNTIME=minimax` and `MINIMAX_API_KEY` is set
+- **llamacpp**: Uses local llama.cpp when `REFRAG_RUNTIME=llamacpp` and `REFRAG_DECODER=1`
 
 Set `LLM_EXPAND_MAX=4` to enable LLM-assisted query expansion (generates up to 4 alternate phrasings).
 `EXPAND_MAX_TOKENS` controls the response length budget for the LLM call.
