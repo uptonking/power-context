@@ -338,10 +338,69 @@ class BenchmarkReport:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+# Environment variables to capture for reproducibility
+ENV_SNAPSHOT_KEYS = [
+    # Hybrid search weights
+    "HYBRID_RRF_K", "HYBRID_DENSE_WEIGHT", "HYBRID_LEXICAL_WEIGHT",
+    "HYBRID_SYMBOL_BOOST", "HYBRID_SYMBOL_EQUALITY_BOOST",
+    # Scoring
+    "RECENCY_WEIGHT", "CORE_FILE_BOOST", "VENDOR_PENALTY",
+    "TEST_FILE_PENALTY", "IMPLEMENTATION_BOOST",
+    # Query expansion
+    "HYBRID_EXPAND", "SEMANTIC_EXPANSION_ENABLED",
+    "SEMANTIC_EXPANSION_MAX_TERMS", "LLM_EXPAND_MAX",
+    # Indexing
+    "USE_TREE_SITTER", "INDEX_USE_ENHANCED_AST", "INDEX_SEMANTIC_CHUNKS",
+    "INDEX_CHUNK_LINES", "INDEX_CHUNK_OVERLAP",
+    "REFRAG_MODE", "INDEX_MICRO_CHUNKS",
+    # Reranking
+    "RERANK_ENABLED", "RERANK_TOP_N", "RERANK_RETURN_M",
+    # Model
+    "EMBEDDING_MODEL",
+    # Collection
+    "COLLECTION_NAME", "QDRANT_URL",
+]
+
+
+def get_env_snapshot() -> Dict[str, str]:
+    """Capture current environment config for reproducibility."""
+    import os
+    return {k: os.environ.get(k, "") for k in ENV_SNAPSHOT_KEYS if os.environ.get(k)}
+
+
+def get_git_sha() -> str:
+    """Get current git commit SHA, or empty string if not in a git repo."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=5
+        )
+        return result.stdout.strip()[:12] if result.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def get_runtime_info() -> Dict[str, Any]:
+    """Get full runtime info for reproducibility.
+
+    Returns dict with:
+        - timestamp: ISO format
+        - git_sha: short commit hash
+        - env_snapshot: relevant env vars
+    """
+    return {
+        "timestamp": datetime.now().isoformat(),
+        "git_sha": get_git_sha(),
+        "env_snapshot": get_env_snapshot(),
+    }
+
+
 def create_report(name: str, config: Optional[Dict] = None) -> BenchmarkReport:
     """Create a new benchmark report with metadata."""
     import os
-    
+
     metadata = BenchmarkMetadata(
         benchmark_name=name,
         config=config or {},

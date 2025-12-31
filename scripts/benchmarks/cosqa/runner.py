@@ -55,7 +55,7 @@ from typing import Any, Dict, List, Optional, Tuple
 # Ensure project root is in path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
-from scripts.benchmarks.common import percentile
+from scripts.benchmarks.common import percentile, get_runtime_info
 
 # Collection name for CoSQA corpus
 DEFAULT_COLLECTION = "cosqa-corpus"
@@ -124,6 +124,8 @@ class CoSQAReport:
     results: List[CoSQAQueryResult] = field(default_factory=list)
     # Comparison to baselines
     baseline_comparison: Dict[str, float] = field(default_factory=dict)
+    # Runtime info for reproducibility
+    runtime_info: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -131,6 +133,7 @@ class CoSQAReport:
             "config": self.config,
             "corpus_size": self.corpus_size,
             "total_queries": self.total_queries,
+            "runtime_info": self.runtime_info,
             "metrics": {
                 "mrr": round(self.mrr, 4),
                 "ndcg@5": round(self.ndcg_5, 4),
@@ -397,6 +400,7 @@ async def run_cosqa_benchmark(
         p99_latency_ms=percentile(latencies, 0.99),
         results=results,
         baseline_comparison=baseline_comparison,
+        runtime_info=get_runtime_info(),
     )
 
     return report

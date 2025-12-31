@@ -45,6 +45,7 @@ from typing import Any, Dict, List, Optional
 
 from scripts.benchmarks.coir import DEFAULT_TASKS, COIR_TASKS
 from scripts.benchmarks.coir.retriever import ContextEngineRetriever
+from scripts.benchmarks.common import get_runtime_info
 
 
 @dataclass
@@ -53,6 +54,11 @@ class CoIRReport:
 
     tasks: List[str]
     raw: Any
+    runtime_info: Dict[str, Any] = None
+
+    def __post_init__(self):
+        if self.runtime_info is None:
+            self.runtime_info = get_runtime_info()
 
     def to_dict(self) -> Dict[str, Any]:
         try:
@@ -63,7 +69,11 @@ class CoIRReport:
                 payload = {"raw": self.raw}
         except Exception:
             payload = {"raw": str(self.raw)}
-        return {"tasks": list(self.tasks), "results": payload}
+        return {
+            "tasks": list(self.tasks),
+            "runtime_info": self.runtime_info,
+            "results": payload,
+        }
 
 
 def _ensure_env_defaults() -> None:

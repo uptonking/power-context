@@ -149,27 +149,12 @@ class InstanceResult:
 
 
 def get_config_snapshot() -> dict[str, str]:
-    """Capture current environment config for reproducibility."""
-    keys = [
-        # Hybrid search weights
-        "HYBRID_RRF_K", "HYBRID_DENSE_WEIGHT", "HYBRID_LEXICAL_WEIGHT",
-        "HYBRID_SYMBOL_BOOST", "HYBRID_SYMBOL_EQUALITY_BOOST",
-        # Scoring
-        "RECENCY_WEIGHT", "CORE_FILE_BOOST", "VENDOR_PENALTY",
-        "TEST_FILE_PENALTY", "IMPLEMENTATION_BOOST",
-        # Query expansion
-        "HYBRID_EXPAND", "SEMANTIC_EXPANSION_ENABLED",
-        "SEMANTIC_EXPANSION_MAX_TERMS", "LLM_EXPAND_MAX",
-        # Indexing
-        "USE_TREE_SITTER", "INDEX_USE_ENHANCED_AST", "INDEX_SEMANTIC_CHUNKS",
-        "INDEX_CHUNK_LINES", "INDEX_CHUNK_OVERLAP",
-        "REFRAG_MODE", "INDEX_MICRO_CHUNKS",
-        # Reranking
-        "RERANK_ENABLED", "RERANK_TOP_N",
-        # Model
-        "EMBEDDING_MODEL",
-    ]
-    return {k: os.environ.get(k, "") for k in keys if os.environ.get(k)}
+    """Capture current environment config for reproducibility.
+
+    Uses shared ENV_SNAPSHOT_KEYS from common module.
+    """
+    from scripts.benchmarks.common import get_runtime_info
+    return get_runtime_info()
 
 
 @dataclass
