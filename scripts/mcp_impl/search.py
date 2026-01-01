@@ -834,10 +834,14 @@ async def _repo_search_impl(
                             return "\n".join(meta_lines) if meta_lines else header
                         try:
                             p = path
+                            # Use rerank_base_path from env or workspace_path, fallback to /work
+                            base_path = os.environ.get("RERANK_BASE_PATH") or workspace_path or "/work"
                             if not os.path.isabs(p):
-                                p = os.path.join("/work", p)
+                                p = os.path.join(base_path, p)
                             realp = os.path.realpath(p)
-                            if not (realp == "/work" or realp.startswith("/work/")):
+                            # Allow any path under the base_path
+                            base_real = os.path.realpath(base_path)
+                            if not (realp == base_real or realp.startswith(base_real + os.sep)):
                                 return "\n".join(meta_lines) if meta_lines else header
                             with open(
                                 realp, "r", encoding="utf-8", errors="ignore"
@@ -862,6 +866,17 @@ async def _repo_search_impl(
                     max_workers = min(16, (os.cpu_count() or 4) * 4)
                     with _fut.ThreadPoolExecutor(max_workers=max_workers) as ex:
                         docs = list(ex.map(_doc_for, cand_objs))
+
+                    # Debug: log what text reranker is seeing
+                    if os.environ.get("DEBUG_RERANK_TEXT"):
+                        logger.info(f"[rerank] Query: {rq[:100]}...")
+                        for i, doc in enumerate(docs[:3]):
+                            preview = doc[:300].replace('\n', '\\n')
+                            logger.info(f"[rerank] Doc[{i}] ({len(doc)} chars): {preview}...")
+
+                    # Capture before-rerank order for comparison
+                    _before_paths = [(o.get("path", "?").split("/")[-1], o.get("score", 0)) for o in cand_objs[:10]]
+
                     pairs = [(rq, d) for d in docs]
                     scores = _rr_local(pairs)
                     # Blend rerank with fusion score to preserve pre-rerank boosts
@@ -924,6 +939,16 @@ async def _repo_search_impl(
                         results = tmp
                         used_rerank = True
                         rerank_counters["inproc_hybrid"] += 1
+
+                        # Debug: log before/after comparison
+                        if os.environ.get("DEBUG_RERANK_AB"):
+                            _after_paths = [(t.get("path", "?").split("/")[-1], t.get("score", 0)) for t in tmp[:10]]
+                            logger.info(f"[rerank A/B] BEFORE (fusion): {_before_paths}")
+                            logger.info(f"[rerank A/B] AFTER (reranked): {_after_paths}")
+                            # Show rerank scores
+                            _rr_scores = [(t.get("path", "?").split("/")[-1], t.get("why", [])) for t in tmp[:5]]
+                            for p, w in _rr_scores:
+                                logger.info(f"[rerank A/B] {p}: {w}")
             except Exception:
                 used_rerank = False
         # Fallback paths (in-process reranker dense candidates, then subprocess)

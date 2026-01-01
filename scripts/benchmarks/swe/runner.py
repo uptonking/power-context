@@ -312,12 +312,15 @@ async def evaluate_instance(
 
         # Set collection for this repo
         os.environ["COLLECTION_NAME"] = collection_name
+        # Set base path for reranker to find source files
+        os.environ["RERANK_BASE_PATH"] = str(repo_path)
 
         search_result = await srv.repo_search(
             queries=[instance.problem_statement],
             limit=top_k * 2,  # Get more, then dedupe by file
             include_snippet=False,
             compact=True,
+            workspace_path=str(repo_path),  # Also pass to search for snippet resolution
         )
 
         result.search_time_s = time.perf_counter() - t0
