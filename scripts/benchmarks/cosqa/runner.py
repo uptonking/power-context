@@ -38,6 +38,12 @@ Enable additional features:
     REFRAG_MODE=1            # ReFRAG micro-chunking (if indexed)
     HYBRID_IN_PROCESS=1      # Run hybrid search in-process
 
+Reranking:
+    RERANK_ENABLED=1         # Enable ONNX reranker (default: on)
+    RERANK_IN_PROCESS=1      # Run reranker in-process (required for reliability)
+    RERANK_TOP_N=50          # Number of candidates to rerank
+    RERANK_RETURN_M=20       # Number of results to return after rerank
+
 References:
 - CoSQA+ paper: https://arxiv.org/abs/2406.11589
 """
@@ -529,6 +535,7 @@ def main():
         os.environ.setdefault("HYBRID_EXPAND", "1")
         os.environ.setdefault("SEMANTIC_EXPANSION_ENABLED", "1")
     os.environ.setdefault("HYBRID_IN_PROCESS", "1")  # Use in-process hybrid search
+    os.environ.setdefault("RERANK_IN_PROCESS", "1")  # Use in-process reranker (required)
 
     report = asyncio.run(run_full_benchmark(
         split=args.split,

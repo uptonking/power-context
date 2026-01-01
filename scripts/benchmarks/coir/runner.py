@@ -29,6 +29,12 @@ Enable additional features:
     SEMANTIC_EXPANSION_ENABLED=1  # Semantic expansion (default: on)
     HYBRID_IN_PROCESS=1      # In-process hybrid search (default: on)
 
+Reranking:
+    RERANK_ENABLED=1         # Enable ONNX reranker (default: on)
+    RERANK_IN_PROCESS=1      # Run reranker in-process (required for reliability)
+    RERANK_TOP_N=50          # Number of candidates to rerank
+    RERANK_RETURN_M=20       # Number of results to return after rerank
+
 Notes:
 - CoIR datasets may require network access to download on first run.
 - We keep this runner dependency-light: if `coir-eval` isn't installed, we print

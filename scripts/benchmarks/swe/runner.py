@@ -42,6 +42,12 @@ modified in the ground-truth patch.
 
 ## Environment Variables (Tuning Knobs)
 
+Reranking:
+    RERANK_ENABLED=1             # Enable ONNX reranker (default: on)
+    RERANK_IN_PROCESS=1          # Run reranker in-process (required for reliability)
+    RERANK_TOP_N=50              # Number of candidates to rerank
+    RERANK_RETURN_M=20           # Number of results to return after rerank
+
 Hybrid Search Weights:
     HYBRID_RRF_K=30              # RRF constant (higher = more uniform)
     HYBRID_DENSE_WEIGHT=1.5      # Weight for dense vectors
@@ -134,8 +140,9 @@ os.environ.setdefault("USE_TREE_SITTER", "1")
 os.environ.setdefault("INDEX_USE_ENHANCED_AST", "1")
 os.environ.setdefault("INDEX_SEMANTIC_CHUNKS", "1")
 
-# Reranking (on by default)
+# Reranking (on by default, in-process for reliability)
 os.environ.setdefault("RERANK_ENABLED", "1")
+os.environ.setdefault("RERANK_IN_PROCESS", "1")
 
 
 @dataclass
@@ -371,6 +378,9 @@ async def run_full_benchmark(
     from scripts.benchmarks.swe.repo_manager import RepoManager
     from qdrant_client import QdrantClient
 
+    # Set RERANK_ENABLED based on rerank_enabled param (before config snapshot)
+    os.environ["RERANK_ENABLED"] = "1" if rerank_enabled else "0"
+
     print("=" * 60)
     print("SWE-bench Retrieval Evaluation")
     print("=" * 60)
@@ -418,6 +428,10 @@ async def run_full_benchmark(
         top_k=top_k,
         config=get_config_snapshot(),
     )
+
+    # Override env_snapshot with actual rerank value used
+    if "env_snapshot" in report.config:
+        report.config["env_snapshot"]["RERANK_ENABLED"] = "1" if rerank_enabled else "0"
 
     # Print active config
     print("\nActive configuration:")
