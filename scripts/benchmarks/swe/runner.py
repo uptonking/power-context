@@ -311,7 +311,23 @@ def _normalize_result_path(path: str, repo_path: str, repo_name: str) -> Optiona
 
     # Try to find repo_name in path components and extract suffix
     # e.g., "/work/repos/django/src/main.py" with repo_name="django" -> "src/main.py"
+    # Handle both sanitized names (org__repo) and path segment names (org/repo)
     parts = path.replace("\\", "/").split("/")
+
+    # If repo_name contains __ (sanitized org/repo), try to match org/repo in path
+    # e.g., repo_name="django__django" should match path /work/django/django/...
+    if "__" in repo_name:
+        org_repo_parts = repo_name.split("__")
+        if len(org_repo_parts) == 2:
+            org, repo = org_repo_parts
+            # Look for org/repo sequence in path
+            for i in range(len(parts) - 1):
+                if parts[i] == org and parts[i + 1] == repo and i + 2 < len(parts):
+                    suffix = "/".join(parts[i + 2:])
+                    if suffix and not suffix.startswith(".."):
+                        return suffix
+
+    # Standard single-segment match
     for i, part in enumerate(parts):
         if part == repo_name and i < len(parts) - 1:
             # Found repo name, return everything after it
@@ -325,9 +341,17 @@ def _normalize_result_path(path: str, repo_path: str, repo_name: str) -> Optiona
     for prefix in common_prefixes:
         if path.startswith(prefix):
             remainder = path[len(prefix):]
-            # Check if remainder starts with repo_name
+            # Check if remainder starts with repo_name (sanitized format)
             if remainder.startswith(repo_name + "/"):
                 return remainder[len(repo_name) + 1:]
+            # Also check org/repo format
+            if "__" in repo_name:
+                org_repo_parts = repo_name.split("__")
+                if len(org_repo_parts) == 2:
+                    org, repo = org_repo_parts
+                    org_repo_path = f"{org}/{repo}/"
+                    if remainder.startswith(org_repo_path):
+                        return remainder[len(org_repo_path):]
 
     # Unable to normalize - might be a completely different path
     return None

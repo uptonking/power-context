@@ -27,6 +27,11 @@ from typing import Any, Dict, List, Optional, Tuple, Iterator
 # Cache directory for downloaded datasets
 CACHE_DIR = Path(os.environ.get("COSQA_CACHE_DIR", Path.home() / ".cache" / "cosqa"))
 
+# Cache version - increment when ID generation scheme changes
+# v1: Initial version with positional IDs
+# v2: Content-hash based IDs for proper query aggregation
+CACHE_VERSION = 2
+
 
 @dataclass
 class CoSQAExample:
@@ -106,6 +111,8 @@ class CoSQADataset:
     queries: Dict[str, CoSQAQuery] = field(default_factory=dict)
     qrels: Dict[str, Dict[str, int]] = field(default_factory=dict)  # query_id -> {code_id: label}
     split: str = "test"
+    cache_version: int = CACHE_VERSION
+    fallback_used: bool = False  # True if MTEB format failed and fell back to original
 
     def __len__(self) -> int:
         return len(self.queries)
@@ -289,13 +296,13 @@ def load_from_huggingface(
         return dataset
 
     except Exception as e:
-        print(f"mteb/cosqa format failed ({e}), trying original format...")
+        print(f"⚠ mteb/cosqa format failed ({e}), falling back to original format...")
 
     # Fallback to original gonglinyuan/CoSQA format
     try:
         ds = load_dataset(dataset_name, split=split, cache_dir=str(cache_path))
-    except Exception as e:
-        raise RuntimeError(f"Failed to load CoSQA dataset: {e}")
+    except Exception as e2:
+        raise RuntimeError(f"Failed to load CoSQA dataset: {e2}")
 
     # Process examples from original format
     for idx, example in enumerate(ds):
@@ -314,7 +321,8 @@ def load_from_huggingface(
 
         # Normalize
         code = normalize_code(code)
-        query_normalized = normalize_query(query)
+        # query_normalized not used currently but kept for future use
+        _ = normalize_query(query)
 
         if not code or not query:
             continue
@@ -348,13 +356,14 @@ def load_from_huggingface(
             qrels[query_id][code_id] = label
             queries[query_id].relevant_code_ids.append(code_id)
 
-    print(f"Loaded {len(corpus)} code entries, {len(queries)} queries")
+    print(f"Loaded {len(corpus)} code entries, {len(queries)} queries (fallback format)")
 
     return CoSQADataset(
         corpus=corpus,
         queries=queries,
         qrels=qrels,
         split=split,
+        fallback_used=True,
     )
 
 
@@ -365,7 +374,9 @@ def save_dataset_cache(dataset: CoSQADataset, cache_path: Optional[Path] = None)
     path.parent.mkdir(parents=True, exist_ok=True)
 
     data = {
+        "cache_version": CACHE_VERSION,
         "split": dataset.split,
+        "fallback_used": dataset.fallback_used,
         "corpus": {k: asdict(v) for k, v in dataset.corpus.items()},
         "queries": {k: asdict(v) for k, v in dataset.queries.items()},
         "qrels": dataset.qrels,
@@ -374,12 +385,15 @@ def save_dataset_cache(dataset: CoSQADataset, cache_path: Optional[Path] = None)
     with open(path, "w") as f:
         json.dump(data, f, indent=2)
 
-    print(f"Saved dataset cache to {path}")
+    print(f"Saved dataset cache (v{CACHE_VERSION}) to {path}")
     return path
 
 
 def load_dataset_cache(cache_path: Optional[Path] = None, split: str = "test") -> Optional[CoSQADataset]:
-    """Load processed dataset from local cache."""
+    """Load processed dataset from local cache.
+
+    Returns None if cache doesn't exist or has incompatible version.
+    """
     path = cache_path or (CACHE_DIR / f"cosqa_{split}_processed.json")
 
     if not path.exists():
@@ -388,6 +402,12 @@ def load_dataset_cache(cache_path: Optional[Path] = None, split: str = "test") -
     try:
         with open(path) as f:
             data = json.load(f)
+
+        # Check cache version - invalidate if different
+        cached_version = data.get("cache_version", 1)
+        if cached_version != CACHE_VERSION:
+            print(f"Cache version mismatch (cached={cached_version}, current={CACHE_VERSION}), re-downloading...")
+            return None
 
         corpus = {
             k: CoSQACorpusEntry(**v) for k, v in data.get("corpus", {}).items()
@@ -401,6 +421,8 @@ def load_dataset_cache(cache_path: Optional[Path] = None, split: str = "test") -
             queries=queries,
             qrels=data.get("qrels", {}),
             split=data.get("split", split),
+            cache_version=cached_version,
+            fallback_used=data.get("fallback_used", False),
         )
     except Exception as e:
         print(f"Failed to load cache: {e}")
