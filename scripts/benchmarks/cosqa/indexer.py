@@ -128,7 +128,8 @@ def compute_corpus_fingerprint(corpus_entries: List[Dict[str, Any]]) -> str:
         # Use full content for accurate fingerprinting (truncation caused stale reuse)
         combined = f"{func_name}\n{docstring}\n{text}"
         hasher.update(f"{code_id}:{combined}".encode("utf-8", errors="ignore"))
-    hasher.update(f"count:{len(corpus_entries)}".encode())
+    # Note: We intentionally don't include count in fingerprint
+    # This allows resume to work when some entries fail to index
     
     return hasher.hexdigest()[:16]
 
@@ -150,14 +151,17 @@ def get_collection_fingerprint(collection: str) -> Optional[str]:
 
 
 def collection_matches_corpus(collection: str, corpus_entries: List[Dict[str, Any]]) -> bool:
-    """Check if an existing collection matches the given corpus."""
+    """Check if an existing collection matches the given corpus.
+    
+    Note: We intentionally don't require exact point count match.
+    If fingerprint matches, the resume logic will fill in any missing entries.
+    """
     try:
         client = get_qdrant_client()
         info = client.get_collection(collection)
-        # Quick check: point count must match
-        if info.points_count != len(corpus_entries):
-            return False
-        # Fingerprint check
+        if info.points_count == 0:
+            return False  # Empty collection, needs indexing
+        # Fingerprint check (content-based, not count-based)
         stored_fp = get_collection_fingerprint(collection)
         if stored_fp:
             return stored_fp == compute_corpus_fingerprint(corpus_entries)
@@ -289,11 +293,13 @@ def index_corpus(
                 "reused": True,
             }
         
-        # Check if collection exists with different fingerprint → force recreate
+        # Check if collection exists with different fingerprint
+        # Instead of recreating, we'll try to resume and fill in missing entries
         stored_fp = get_collection_fingerprint(collection)
         if stored_fp is not None and stored_fp != corpus_fingerprint:
-            print(f"Fingerprint mismatch for {collection} (stored={stored_fp}, current={corpus_fingerprint}); recreating")
-            recreate = True
+            print(f"Fingerprint mismatch for {collection} (stored={stored_fp}, current={corpus_fingerprint})")
+            print(f"  → Will resume and fill in missing entries (not recreating)")
+            # Don't set recreate=True - let resume logic handle it
         elif stored_fp is None:
             # Legacy collection without fingerprint - check if it has points
             try:
