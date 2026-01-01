@@ -52,6 +52,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import os
 import sys
 import time
 from dataclasses import dataclass, field, asdict
@@ -60,6 +61,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 # Ensure project root is in path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+# Avoid tokenizers fork warning in benchmark runs.
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 from scripts.benchmarks.common import percentile, get_runtime_info
 
@@ -291,6 +294,7 @@ async def run_cosqa_benchmark(
     limit: int = 10,
     rerank_enabled: bool = True,
     name: str = "cosqa",
+    subset_note: Optional[str] = None,
     progress_callback: Optional[callable] = None,
 ) -> CoSQAReport:
     """Run CoSQA evaluation on provided queries.
@@ -316,6 +320,8 @@ async def run_cosqa_benchmark(
         "rerank_enabled": rerank_enabled,
         "query_count": len(queries),
     }
+    if subset_note:
+        config["subset_note"] = subset_note
 
     print(f"Running CoSQA benchmark: {len(queries)} queries, limit={limit}, rerank={rerank_enabled}")
 
@@ -420,6 +426,8 @@ def print_report(report: CoSQAReport) -> None:
     print("=" * 70)
     print(f"Queries: {report.total_queries} | Corpus: {report.corpus_size}")
     print(f"Config: {report.config}")
+    if report.config.get("subset_note"):
+        print(f"NOTE: {report.config['subset_note']}")
 
     print("\n" + "-" * 70)
     print("METRICS:")
@@ -557,6 +565,14 @@ async def run_full_benchmark(
 
     # Step 4: Run evaluation
     print("\n▶ Step 4: Running evaluation...")
+    subset_note = None
+    if corpus_limit or query_limit:
+        parts = []
+        if corpus_limit:
+            parts.append(f"corpus_limit={corpus_limit}")
+        if query_limit:
+            parts.append(f"query_limit={query_limit}")
+        subset_note = f"subset evaluation ({', '.join(parts)})"
     report = await run_cosqa_benchmark(
         queries=queries,
         collection=collection,
@@ -564,6 +580,7 @@ async def run_full_benchmark(
         limit=limit,
         rerank_enabled=rerank_enabled,
         name=f"cosqa-{split}",
+        subset_note=subset_note,
     )
 
     return report
