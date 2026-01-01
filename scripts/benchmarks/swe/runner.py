@@ -47,6 +47,8 @@ Reranking:
     RERANK_IN_PROCESS=1          # Run reranker in-process (required for reliability)
     RERANK_TOP_N=50              # Number of candidates to rerank
     RERANK_RETURN_M=20           # Number of results to return after rerank
+    RERANK_LEARNING=0            # Disable learning reranker (default: off for benchmarks)
+    RERANK_EVENTS_ENABLED=0      # Disable event logging (default: off for benchmarks)
 
 Hybrid Search Weights:
     HYBRID_RRF_K=30              # RRF constant (higher = more uniform)
@@ -143,6 +145,12 @@ os.environ.setdefault("INDEX_SEMANTIC_CHUNKS", "1")
 # Reranking (on by default, in-process for reliability)
 os.environ.setdefault("RERANK_ENABLED", "1")
 os.environ.setdefault("RERANK_IN_PROCESS", "1")
+
+# Disable learning reranker for reproducible benchmarks
+# The ONNX teacher (bge-reranker-base) is MS MARCO-trained and hurts code retrieval
+# Learning from it would distill the same bias into TinyScorer
+os.environ.setdefault("RERANK_LEARNING", "0")
+os.environ.setdefault("RERANK_EVENTS_ENABLED", "0")
 
 # Set reranker model paths (relative to project root)
 _project_root = Path(__file__).parent.parent.parent.parent

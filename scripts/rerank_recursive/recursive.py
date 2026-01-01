@@ -23,6 +23,30 @@ except ImportError:
     Tokenizer = None
     HAS_ONNX = False
 
+# Use centralized reranker factory (supports FastEmbed + ONNX backends)
+try:
+    from scripts.reranker import (
+        get_reranker_model as _get_reranker_model,
+        rerank_pairs as _rerank_pairs,
+        is_reranker_available as _is_reranker_available,
+        RERANKER_MODEL,
+    )
+    HAS_RERANKER_FACTORY = True
+except ImportError:
+    HAS_RERANKER_FACTORY = False
+    _get_reranker_model = None
+    _rerank_pairs = None
+    _is_reranker_available = None
+    RERANKER_MODEL = None
+
+# Legacy: direct FastEmbed imports (fallback when factory unavailable)
+try:
+    from fastembed.rerank.cross_encoder import TextCrossEncoder
+    HAS_FASTEMBED_RERANK = True
+except ImportError:
+    TextCrossEncoder = None
+    HAS_FASTEMBED_RERANK = False
+
 from scripts.rerank_recursive.state import RefinementState
 from scripts.rerank_recursive.scorer import TinyScorer
 from scripts.rerank_recursive.refiner import LatentRefiner

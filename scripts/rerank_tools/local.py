@@ -1,7 +1,15 @@
 #!/usr/bin/env python3
 import os
 import argparse
+import sys
+import threading
+from pathlib import Path as _P
 from typing import List, Dict, Any, TYPE_CHECKING
+
+# Ensure project root is on sys.path when run as a script (so 'scripts' package imports work)
+_ROOT = _P(__file__).resolve().parent.parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
 
 from qdrant_client import QdrantClient, models
 
@@ -17,7 +25,21 @@ except ImportError:
     _EMBEDDER_FACTORY = False
     from fastembed import TextEmbedding
 
-# Optional imports for local ONNX reranker
+# Use centralized reranker factory (supports FastEmbed + ONNX backends)
+try:
+    from scripts.reranker import (
+        get_reranker_model as _get_reranker_model,
+        rerank_pairs as _rerank_pairs,
+        is_reranker_available as _is_reranker_available,
+    )
+    _RERANKER_FACTORY = True
+except ImportError:
+    _RERANKER_FACTORY = False
+    _get_reranker_model = None
+    _rerank_pairs = None
+    _is_reranker_available = None
+
+# Legacy ONNX imports (fallback when factory unavailable)
 try:
     import onnxruntime as ort  # type: ignore
     from tokenizers import Tokenizer  # type: ignore
@@ -29,32 +51,33 @@ MODEL_NAME = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
 API_KEY = os.environ.get("QDRANT_API_KEY")
 
+# Legacy config (still supported for backwards compatibility)
 RERANKER_ONNX_PATH = os.environ.get("RERANKER_ONNX_PATH", "")
 RERANKER_TOKENIZER_PATH = os.environ.get("RERANKER_TOKENIZER_PATH", "")
 RERANK_MAX_TOKENS = int(os.environ.get("RERANK_MAX_TOKENS", "512") or 512)
 EF_SEARCH = int(os.environ.get("EF_SEARCH", "128") or 128)
 
-
-# Ensure project root is on sys.path when run as a script (so 'scripts' package imports work)
-import sys
-from pathlib import Path as _P
-
-_ROOT = _P(__file__).resolve().parent.parent
-if str(_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ROOT))
-
-import threading
-
-# Module-level cache for ONNX session and tokenizer
+# Module-level cache for legacy ONNX session (used when factory unavailable)
 _RERANK_SESSION = None
 _RERANK_TOKENIZER = None
 _RERANK_LOCK = threading.Lock()
 
-
 _WARMUP_DONE = False
 
+
 def _get_rerank_session():
+    """Get reranker session - uses factory if available, else legacy ONNX loading."""
     global _RERANK_SESSION, _RERANK_TOKENIZER
+
+    # Prefer factory when available
+    if _RERANKER_FACTORY and _get_reranker_model is not None:
+        model = _get_reranker_model()
+        if model is not None:
+            # Return a marker that indicates factory mode
+            return ("__factory__", model)
+        # Factory available but no model configured - fall through to legacy
+
+    # Legacy ONNX path
     if not (ort and Tokenizer and RERANKER_ONNX_PATH and RERANKER_TOKENIZER_PATH):
         return None, None
     if _RERANK_SESSION is not None and _RERANK_TOKENIZER is not None:
@@ -228,10 +251,29 @@ def prepare_pairs(query: str, points: List[Any]) -> List[tuple[str, str]]:
 
 
 def rerank_local(pairs: List[tuple[str, str]]) -> List[float]:
-    # Cached ONNX session + tokenizer
-    sess, tok = _get_rerank_session()
-    if not (sess and tok):
+    """Score query-document pairs using available reranker backend.
+
+    Supports both factory mode (FastEmbed/ONNX) and legacy direct ONNX mode.
+    Backwards compatible - existing ONNX configs continue to work.
+    """
+    if not pairs:
+        return []
+
+    # Get reranker session (factory or legacy)
+    result = _get_rerank_session()
+    if result is None or result == (None, None):
         return [0.0 for _ in pairs]
+
+    sess, tok = result
+
+    # Factory mode: use centralized rerank_pairs
+    if sess == "__factory__" and _RERANKER_FACTORY and _rerank_pairs is not None:
+        return _rerank_pairs(pairs, model=tok)
+
+    # Legacy ONNX mode: direct inference
+    if sess is None or tok is None:
+        return [0.0 for _ in pairs]
+
     # Proper pair encoding for token_type_ids
     enc = tok.encode_batch(pairs)
     input_ids = [e.ids for e in enc]
