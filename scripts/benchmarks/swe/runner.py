@@ -43,10 +43,10 @@ modified in the ground-truth patch.
 ## Environment Variables (Tuning Knobs)
 
 Reranking:
-    RERANK_ENABLED=1             # Enable ONNX reranker (default: on)
+    RERANKER_ENABLED=1           # Enable ONNX reranker (default: on)
     RERANK_IN_PROCESS=1          # Run reranker in-process (required for reliability)
-    RERANK_TOP_N=50              # Number of candidates to rerank
-    RERANK_RETURN_M=20           # Number of results to return after rerank
+    RERANKER_TOPN=50             # Number of candidates to rerank
+    RERANKER_RETURN_M=20         # Number of results to return after rerank
     RERANK_LEARNING=0            # Disable learning reranker (default: off for benchmarks)
     RERANK_EVENTS_ENABLED=0      # Disable event logging (default: off for benchmarks)
 
@@ -79,8 +79,8 @@ Indexing:
     REFRAG_MODE=0                # ReFRAG micro-chunking
 
 Reranking:
-    RERANK_ENABLED=1             # Enable reranker
-    RERANK_TOP_N=50              # Candidates to rerank
+    RERANKER_ENABLED=1           # Enable reranker
+    RERANKER_TOPN=50             # Candidates to rerank
 
 ## Usage
 
@@ -143,7 +143,7 @@ os.environ.setdefault("INDEX_USE_ENHANCED_AST", "1")
 os.environ.setdefault("INDEX_SEMANTIC_CHUNKS", "1")
 
 # Reranking (on by default, in-process for reliability)
-os.environ.setdefault("RERANK_ENABLED", "1")
+os.environ.setdefault("RERANKER_ENABLED", "1")
 os.environ.setdefault("RERANK_IN_PROCESS", "1")
 
 # Disable learning reranker for reproducible benchmarks
@@ -277,9 +277,9 @@ async def evaluate_instance(
         retrieved_files=[],
     )
 
-    # Wire rerank_enabled to environment variable
-    old_rerank = os.environ.get("RERANK_ENABLED")
-    os.environ["RERANK_ENABLED"] = "1" if rerank_enabled else "0"
+    # Wire rerank_enabled to environment variable (RERANKER_ENABLED is read by repo_search)
+    old_rerank = os.environ.get("RERANKER_ENABLED")
+    os.environ["RERANKER_ENABLED"] = "1" if rerank_enabled else "0"
 
     # Track env vars to restore
     old_collection = os.environ.get("COLLECTION_NAME")
@@ -373,9 +373,9 @@ async def evaluate_instance(
             os.environ.pop("COLLECTION_NAME", None)
 
         if old_rerank is not None:
-            os.environ["RERANK_ENABLED"] = old_rerank
+            os.environ["RERANKER_ENABLED"] = old_rerank
         else:
-            os.environ.pop("RERANK_ENABLED", None)
+            os.environ.pop("RERANKER_ENABLED", None)
 
     return result
 
@@ -394,8 +394,8 @@ async def run_full_benchmark(
     from scripts.benchmarks.swe.repo_manager import RepoManager
     from qdrant_client import QdrantClient
 
-    # Set RERANK_ENABLED based on rerank_enabled param (before config snapshot)
-    os.environ["RERANK_ENABLED"] = "1" if rerank_enabled else "0"
+    # Set RERANKER_ENABLED based on rerank_enabled param (before config snapshot)
+    os.environ["RERANKER_ENABLED"] = "1" if rerank_enabled else "0"
 
     # Lock rerank knobs to ensure reproducibility:
     # - RERANKER_TOPN: candidates to rerank (at least 2x top_k or 100)
@@ -456,7 +456,7 @@ async def run_full_benchmark(
 
     # Override env_snapshot with actual rerank value used
     if "env_snapshot" in report.config:
-        report.config["env_snapshot"]["RERANK_ENABLED"] = "1" if rerank_enabled else "0"
+        report.config["env_snapshot"]["RERANKER_ENABLED"] = "1" if rerank_enabled else "0"
 
     # Print active config
     print("\nActive configuration:")

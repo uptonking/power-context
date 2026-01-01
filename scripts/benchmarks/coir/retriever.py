@@ -74,7 +74,17 @@ class ContextEngineRetriever:
         self.batch_size = batch_size
         self._model = None
         self._corpus_index = {}  # doc_id -> embedding
+        self._corpus_doc_ids: set = set()  # Track which doc IDs are in current corpus
         self._indexed_collections: set = set()  # Track all collections we've created
+
+    def reset_corpus_cache(self) -> None:
+        """Reset the corpus embedding cache.
+
+        Call this before processing a new corpus to avoid stale embeddings
+        or KeyError from doc ID mismatches.
+        """
+        self._corpus_index = {}
+        self._corpus_doc_ids = set()
 
     def _get_model(self):
         """Lazy load embedding model."""
@@ -132,9 +142,12 @@ class ContextEngineRetriever:
             embeddings = list(model.embed(batch))
             all_embeddings.extend(embeddings)
 
-        # Cache for search
+        # Cache for search (track which doc IDs belong to this corpus)
+        self._corpus_doc_ids = set()
         for idx, doc in enumerate(corpus):
-            self._corpus_index[doc["_id"]] = all_embeddings[idx]
+            doc_id = doc["_id"]
+            self._corpus_index[doc_id] = all_embeddings[idx]
+            self._corpus_doc_ids.add(doc_id)
 
         return np.array(all_embeddings)
 
@@ -170,9 +183,16 @@ class ContextEngineRetriever:
         top_k: int,
     ) -> Dict[str, Dict[str, float]]:
         """Pure embedding-based search (cosine similarity)."""
-        # Encode corpus if not cached
-        corpus_list = [{"_id": k, **v} for k, v in corpus.items()]
-        if not self._corpus_index:
+        # Check if corpus has changed (different doc IDs = different corpus)
+        current_doc_ids = set(corpus.keys())
+        corpus_changed = current_doc_ids != self._corpus_doc_ids
+
+        # Encode corpus if not cached or corpus changed
+        if not self._corpus_index or corpus_changed:
+            if corpus_changed and self._corpus_index:
+                # Clear stale embeddings before encoding new corpus
+                self.reset_corpus_cache()
+            corpus_list = [{"_id": k, **v} for k, v in corpus.items()]
             self.encode_corpus(corpus_list)
 
         # Encode queries

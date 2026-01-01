@@ -200,10 +200,14 @@ def index_coir_corpus(
     # force implies recreate (drop & full reindex)
     if force:
         recreate = True
-    
+
+    # Compute fingerprint for this corpus (needed for both matching and storing)
+    corpus_fingerprint = compute_corpus_fingerprint(corpus)
+
     # Check if we can reuse existing collection
     if not recreate:
-        if collection_matches_corpus(collection, corpus):
+        match_result = collection_matches_corpus(collection, corpus)
+        if match_result:
             if show_progress:
                 print(f"  Reusing existing collection: {collection} ({len(corpus)} docs, fingerprint match)")
             return {
@@ -212,10 +216,20 @@ def index_coir_corpus(
                 "time_s": 0.0,
                 "reused": True,
             }
-    
-    # Compute fingerprint for this corpus
-    corpus_fingerprint = compute_corpus_fingerprint(corpus)
-    
+        else:
+            # Check if collection exists with different data (fingerprint mismatch)
+            client = get_qdrant_client()
+            try:
+                existing = client.get_collection(collection)
+                if existing.points_count > 0:
+                    # Collection exists with different data - must recreate to avoid mixing
+                    if show_progress:
+                        print(f"  Collection {collection} exists but fingerprint mismatch ({existing.points_count} points) - recreating")
+                    recreate = True
+            except Exception:
+                # Collection doesn't exist, will be created below
+                pass
+
     # Get embedding model (same as production)
     try:
         from scripts.embedder import get_embedding_model
