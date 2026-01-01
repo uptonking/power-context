@@ -60,7 +60,25 @@ CoSQA evaluates natural language to code retrieval using web search queries pair
 ### Usage
 
 ```bash
+# Full benchmark (comparable to paper baselines)
 python -m scripts.benchmarks.cosqa.runner --limit 500
+```
+
+#### Quick subset runs (smoke tests)
+
+When you use `--corpus-limit`, the runner builds a corpus subset that includes
+the relevant docs for the selected queries. This keeps small runs meaningful,
+but results are **not** comparable to paper baselines. The report will include
+`NOTE: subset evaluation (...)` when limits are active.
+
+```bash
+# Subset run (smoke test)
+QDRANT_URL=http://localhost:6333 python3.11 -m scripts.benchmarks.cosqa.runner \
+    --limit 500 --corpus-limit 500 --query-limit 500 --output cosqa_no_rerank.json --no-rerank
+
+# Same subset with reranking enabled (for comparison)
+QDRANT_URL=http://localhost:6333 python3.11 -m scripts.benchmarks.cosqa.runner \
+    --limit 500 --corpus-limit 500 --query-limit 500 --output cosqa_rerank.json
 ```
 
 ---
@@ -439,4 +457,3 @@ We hypothesize Context Engine will:
 3. **SWE-bench**: Jimenez et al., "SWE-bench: Can Language Models Resolve Real-World GitHub Issues?" (ICLR 2024)
 4. **CoRNStack**: Suresh et al., "CoRNStack: High-Quality Contrastive Data for Better Code Ranking" (2024)
 5. **Agentless**: Xia et al., "Agentless: Demystifying LLM-based Software Engineering Agents" (2024)
-
