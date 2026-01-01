@@ -280,23 +280,16 @@ def load_from_huggingface(
             queries=queries,
             qrels=qrels,
             split=split,
+            fallback_used=False,
         )
 
-        # Cache result
-        cache_file = cache_path / f"cosqa_{split}_processed.json"
-        with open(cache_file, "w") as f:
-            json.dump({
-                "corpus": {k: v.__dict__ for k, v in corpus.items()},
-                "queries": {k: v.__dict__ for k, v in queries.items()},
-                "qrels": qrels,
-                "split": split,
-            }, f)
-        print(f"Saved cache to {cache_file}")
+        # Cache result using centralized function (includes version)
+        save_dataset_cache(dataset, cache_path / f"cosqa_{split}_processed.json")
 
         return dataset
 
     except Exception as e:
-        print(f"⚠ mteb/cosqa format failed ({e}), falling back to original format...")
+        print(f"[WARN] mteb/cosqa format failed ({e}), falling back to original format...")
 
     # Fallback to original gonglinyuan/CoSQA format
     try:

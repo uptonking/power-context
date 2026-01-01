@@ -316,16 +316,17 @@ def _normalize_result_path(path: str, repo_path: str, repo_name: str) -> Optiona
 
     # If repo_name contains __ (sanitized org/repo), try to match org/repo in path
     # e.g., repo_name="django__django" should match path /work/django/django/...
+    # Use maxsplit=1 to handle repos that already contain __ in their name
+    # e.g., "org__repo__special" -> org="org", repo="repo__special"
     if "__" in repo_name:
-        org_repo_parts = repo_name.split("__")
-        if len(org_repo_parts) == 2:
-            org, repo = org_repo_parts
-            # Look for org/repo sequence in path
-            for i in range(len(parts) - 1):
-                if parts[i] == org and parts[i + 1] == repo and i + 2 < len(parts):
-                    suffix = "/".join(parts[i + 2:])
-                    if suffix and not suffix.startswith(".."):
-                        return suffix
+        org_repo_parts = repo_name.split("__", 1)  # maxsplit=1
+        org, repo = org_repo_parts
+        # Look for org/repo sequence in path
+        for i in range(len(parts) - 1):
+            if parts[i] == org and parts[i + 1] == repo and i + 2 < len(parts):
+                suffix = "/".join(parts[i + 2:])
+                if suffix and not suffix.startswith(".."):
+                    return suffix
 
     # Standard single-segment match
     for i, part in enumerate(parts):
@@ -344,14 +345,13 @@ def _normalize_result_path(path: str, repo_path: str, repo_name: str) -> Optiona
             # Check if remainder starts with repo_name (sanitized format)
             if remainder.startswith(repo_name + "/"):
                 return remainder[len(repo_name) + 1:]
-            # Also check org/repo format
+            # Also check org/repo format (maxsplit=1 for nested __)
             if "__" in repo_name:
-                org_repo_parts = repo_name.split("__")
-                if len(org_repo_parts) == 2:
-                    org, repo = org_repo_parts
-                    org_repo_path = f"{org}/{repo}/"
-                    if remainder.startswith(org_repo_path):
-                        return remainder[len(org_repo_path):]
+                org_repo_parts = repo_name.split("__", 1)
+                org, repo = org_repo_parts
+                org_repo_path = f"{org}/{repo}/"
+                if remainder.startswith(org_repo_path):
+                    return remainder[len(org_repo_path):]
 
     # Unable to normalize - might be a completely different path
     return None
