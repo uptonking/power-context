@@ -470,11 +470,77 @@ async def run_full_benchmark(
     print("\n▶ Step 1: Loading CoSQA dataset...")
     dataset = load_cosqa(split=split)
 
+    # Prepare queries and corpus (corpus-limit uses query-matched subset)
+    all_queries = get_queries_for_evaluation(dataset, limit=None)
+    desired_queries = all_queries[:query_limit] if query_limit else all_queries
+    corpus_cap = corpus_limit
+
+    if corpus_cap:
+        corpus_by_id = {entry.code_id: entry for entry in dataset.iter_corpus()}
+        selected_queries = []
+        selected_ids: set[str] = set()
+        skipped_queries = 0
+
+        for query_id, query_text, relevant_ids in desired_queries:
+            rel_ids = [rid for rid in relevant_ids if rid in corpus_by_id]
+            if not rel_ids:
+                continue
+            new_ids = [rid for rid in rel_ids if rid not in selected_ids]
+            if selected_ids and len(selected_ids) + len(new_ids) > corpus_cap:
+                skipped_queries += 1
+                continue
+            selected_queries.append((query_id, query_text, rel_ids))
+            selected_ids.update(new_ids)
+
+        if not selected_queries:
+            for query_id, query_text, relevant_ids in desired_queries:
+                rel_ids = [rid for rid in relevant_ids if rid in corpus_by_id]
+                if rel_ids:
+                    selected_queries = [(query_id, query_text, rel_ids)]
+                    selected_ids.update(rel_ids)
+                    break
+
+        if not selected_queries:
+            print("  [WARN] No queries with relevant docs found; evaluation will be empty")
+        else:
+            if len(selected_ids) > corpus_cap:
+                print(
+                    f"  [WARN] corpus-limit too small for selected queries; "
+                    f"expanding corpus to {len(selected_ids)}"
+                )
+                corpus_cap = None
+            elif skipped_queries or (query_limit and len(selected_queries) < len(desired_queries)):
+                print(
+                    f"  [WARN] corpus-limit active; selected {len(selected_queries)}/"
+                    f"{len(desired_queries)} queries to fit {len(selected_ids)} docs"
+                )
+            else:
+                print(
+                    f"  [WARN] corpus-limit active; selected {len(selected_queries)} queries "
+                    f"with {len(selected_ids)} relevant docs"
+                )
+
+        subset_entries = []
+        if selected_ids:
+            for entry in dataset.iter_corpus():
+                if entry.code_id in selected_ids:
+                    subset_entries.append(entry)
+        if corpus_cap:
+            for entry in dataset.iter_corpus():
+                if entry.code_id not in selected_ids:
+                    subset_entries.append(entry)
+                    if len(subset_entries) >= corpus_cap:
+                        break
+
+        corpus = [entry.to_index_payload() for entry in subset_entries]
+        queries = selected_queries
+    else:
+        corpus = get_corpus_for_indexing(dataset)
+        queries = desired_queries
+
     # Step 2: Index corpus
     print("\n▶ Step 2: Indexing corpus...")
-    corpus = get_corpus_for_indexing(dataset)
-    if corpus_limit:
-        corpus = corpus[:corpus_limit]
+    if corpus_cap:
         print(f"  Limited corpus to {len(corpus)} entries")
 
     # Check if already indexed (use fingerprint matching, not just points_count)
@@ -487,7 +553,6 @@ async def run_full_benchmark(
 
     # Step 3: Get queries
     print("\n▶ Step 3: Preparing queries...")
-    queries = get_queries_for_evaluation(dataset, limit=query_limit)
     print(f"  {len(queries)} queries with relevance judgments")
 
     # Step 4: Run evaluation
@@ -563,4 +628,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
