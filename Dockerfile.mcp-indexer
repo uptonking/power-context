@@ -9,8 +9,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_RETRIES=10 \
     LOG_LEVEL=INFO
 
-# OS deps (git for history if we extend later, curl for model downloads)
-RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl \
+# OS deps (git for history if we extend later, curl for model downloads, build-essential for compiling native extensions)
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 # Python deps: reuse shared requirements (includes FastMCP + OpenAI SDK)
