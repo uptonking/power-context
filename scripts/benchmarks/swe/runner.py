@@ -98,9 +98,20 @@ import json
 import os
 import sys
 import time
+import logging
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Optional
+
+# Silence noisy loggers
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("query_optimizer").setLevel(logging.WARNING)
+logging.getLogger("async_subprocess_manager").setLevel(logging.WARNING)
+logging.getLogger("scripts.benchmarks.swe.repo_manager").setLevel(logging.WARNING)
+
+# Silence tokenizers parallelism warning
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 # Ensure project root is in path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
@@ -412,13 +423,16 @@ async def run_full_benchmark(
     print("\nActive configuration:")
     for k, v in report.config.items():
         print(f"  {k}={v}")
+    print()
 
     t_start = time.perf_counter()
 
-    # Evaluate each instance
-    for i, instance in enumerate(instances):
-        print(f"\n[{i+1}/{len(instances)}] {instance.instance_id}")
-        print(f"  Files: {instance.ground_truth_files}")
+    # Evaluate each instance with progress bar
+    from tqdm import tqdm
+
+    pbar = tqdm(instances, desc="Evaluating", unit="instance")
+    for instance in pbar:
+        pbar.set_postfix_str(f"{instance.instance_id[:30]}")
 
         result = await evaluate_instance(
             instance,
@@ -433,9 +447,12 @@ async def run_full_benchmark(
 
         if result.error:
             report.errors += 1
-            print(f"  ERROR: {result.error}")
-        else:
-            print(f"  Recall: {result.recall_at_k:.2%}, RR: {result.reciprocal_rank:.3f}")
+
+        # Update progress bar with running stats
+        valid = [r for r in report.results if not r.error]
+        if valid:
+            avg_recall = sum(r.recall_at_k for r in valid) / len(valid)
+            pbar.set_postfix_str(f"R@{top_k}={avg_recall:.0%}")
 
     report.total_time_s = time.perf_counter() - t_start
 
