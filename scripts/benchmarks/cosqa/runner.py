@@ -537,6 +537,11 @@ def main():
     os.environ.setdefault("HYBRID_IN_PROCESS", "1")  # Use in-process hybrid search
     os.environ.setdefault("RERANK_IN_PROCESS", "1")  # Use in-process reranker (required)
 
+    # Set reranker model paths (relative to project root)
+    _project_root = Path(__file__).parent.parent.parent.parent
+    os.environ.setdefault("RERANKER_ONNX_PATH", str(_project_root / "models" / "model_qint8_avx512_vnni.onnx"))
+    os.environ.setdefault("RERANKER_TOKENIZER_PATH", str(_project_root / "models" / "tokenizer.json"))
+
     report = asyncio.run(run_full_benchmark(
         split=args.split,
         collection=args.collection,

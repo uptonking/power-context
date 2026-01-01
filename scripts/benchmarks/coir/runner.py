@@ -91,6 +91,12 @@ def _ensure_env_defaults() -> None:
     # Enable in-process reranker for reliability
     os.environ.setdefault("RERANK_IN_PROCESS", "1")
 
+    # Set reranker model paths (relative to project root)
+    from pathlib import Path
+    _project_root = Path(__file__).parent.parent.parent.parent
+    os.environ.setdefault("RERANKER_ONNX_PATH", str(_project_root / "models" / "model_qint8_avx512_vnni.onnx"))
+    os.environ.setdefault("RERANKER_TOKENIZER_PATH", str(_project_root / "models" / "tokenizer.json"))
+
 
 def _load_coir_tasks(task_names: List[str], limit: Optional[int] = None) -> Any:
     """

@@ -144,6 +144,11 @@ os.environ.setdefault("INDEX_SEMANTIC_CHUNKS", "1")
 os.environ.setdefault("RERANK_ENABLED", "1")
 os.environ.setdefault("RERANK_IN_PROCESS", "1")
 
+# Set reranker model paths (relative to project root)
+_project_root = Path(__file__).parent.parent.parent.parent
+os.environ.setdefault("RERANKER_ONNX_PATH", str(_project_root / "models" / "model_qint8_avx512_vnni.onnx"))
+os.environ.setdefault("RERANKER_TOKENIZER_PATH", str(_project_root / "models" / "tokenizer.json"))
+
 
 @dataclass
 class InstanceResult:
@@ -381,9 +386,14 @@ async def run_full_benchmark(
     # Set RERANK_ENABLED based on rerank_enabled param (before config snapshot)
     os.environ["RERANK_ENABLED"] = "1" if rerank_enabled else "0"
 
-    # Ensure reranker returns at least top_k results (default is only 12!)
-    os.environ["RERANKER_TOPN"] = str(max(top_k * 2, 100))  # Rerank from larger pool
-    os.environ["RERANKER_RETURN_M"] = str(top_k)
+    # Lock rerank knobs to ensure reproducibility:
+    # - RERANKER_TOPN: candidates to rerank (at least 2x top_k or 100)
+    # - RERANKER_RETURN_M: must be >= top_k to avoid silent truncation
+    # - RERANK_BLEND_WEIGHT: weight for blending rerank scores with fusion scores
+    rerank_top_n = max(top_k * 2, 100)
+    os.environ["RERANKER_TOPN"] = str(rerank_top_n)
+    os.environ["RERANKER_RETURN_M"] = str(max(top_k, 50))  # At least 50 or top_k
+    os.environ.setdefault("RERANK_BLEND_WEIGHT", "0.6")  # Default blend weight
 
     print("=" * 60)
     print("SWE-bench Retrieval Evaluation")
