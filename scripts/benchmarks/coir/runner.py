@@ -88,6 +88,8 @@ def _ensure_env_defaults() -> None:
         os.environ["QDRANT_URL"] = "http://localhost:6333"
     if not (os.environ.get("QDRANT_URL") or "").strip():
         os.environ["QDRANT_URL"] = "http://localhost:6333"
+    # Enable in-process reranker for reliability
+    os.environ.setdefault("RERANK_IN_PROCESS", "1")
 
 
 def _load_coir_tasks(task_names: List[str], limit: Optional[int] = None) -> Any:

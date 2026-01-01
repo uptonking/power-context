@@ -381,6 +381,10 @@ async def run_full_benchmark(
     # Set RERANK_ENABLED based on rerank_enabled param (before config snapshot)
     os.environ["RERANK_ENABLED"] = "1" if rerank_enabled else "0"
 
+    # Ensure reranker returns at least top_k results (default is only 12!)
+    os.environ["RERANKER_TOPN"] = str(max(top_k * 2, 100))  # Rerank from larger pool
+    os.environ["RERANKER_RETURN_M"] = str(top_k)
+
     print("=" * 60)
     print("SWE-bench Retrieval Evaluation")
     print("=" * 60)
