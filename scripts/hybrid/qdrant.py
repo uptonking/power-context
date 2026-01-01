@@ -194,12 +194,30 @@ def _get_client_endpoint(client) -> str:
 
 
 def _ensure_collection(client, collection: str, dim: int, vec_name: str):
-    """Cached wrapper for ensure_collection - only calls once per (endpoint, collection, vec_name) pair."""
+    """Cached wrapper for ensure_collection - only calls once per (endpoint, collection, vec_name) pair.
+
+    IMPORTANT: This is called during SEARCH operations. We must NOT delete/recreate collections
+    that already exist with data. The ensure_collection in ingest_code can trigger recreation
+    when PATTERN_VECTORS=1 or LEX_SPARSE_MODE=1 if the collection lacks those vectors.
+
+    For search, we only need to verify the collection exists - not modify its schema.
+    """
     endpoint = _get_client_endpoint(client)
     cache_key = f"{endpoint}:{collection}:{vec_name}:{dim}"
     if cache_key in _ENSURED_COLLECTIONS:
         return
 
+    # For SEARCH operations, just verify collection exists - don't try to modify schema
+    # Schema modifications can trigger deletion of existing data!
+    try:
+        info = client.get_collection(collection)
+        # Collection exists - that's all we need for search
+        _ENSURED_COLLECTIONS.add(cache_key)
+        return
+    except Exception:
+        pass
+
+    # Collection doesn't exist - only then call ensure_collection to create it
     try:
         from scripts.ingest_code import ensure_collection as _ensure_collection_raw
         _ensure_collection_raw(client, collection, dim, vec_name)

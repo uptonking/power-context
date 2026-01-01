@@ -100,15 +100,38 @@ Reranking:
 """
 from __future__ import annotations
 
+import os
+import sys
+from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# CRITICAL: Isolate benchmark from user's env settings that can destroy data
+# ---------------------------------------------------------------------------
+# Clear COLLECTION_NAME - benchmark uses per-instance collections
+if "COLLECTION_NAME" in os.environ:
+    del os.environ["COLLECTION_NAME"]
+if "DEFAULT_COLLECTION" in os.environ:
+    del os.environ["DEFAULT_COLLECTION"]
+
+# Disable features that trigger collection recreation during search:
+# - LEX_SPARSE_MODE: Requires sparse vectors, triggers recreation if missing
+# - PATTERN_VECTORS: Requires pattern_vector, triggers recreation if missing
+# These can destroy indexed data when ensure_collection is called during search!
+os.environ["LEX_SPARSE_MODE"] = "0"
+os.environ["PATTERN_VECTORS"] = "0"
+
+# Silence tokenizers parallelism warning
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+# Ensure project root is in path
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+
 import argparse
 import asyncio
 import json
-import os
-import sys
 import time
 import logging
 from dataclasses import dataclass, field, asdict
-from pathlib import Path
 from typing import Optional
 
 # Silence noisy loggers
@@ -117,17 +140,6 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("query_optimizer").setLevel(logging.WARNING)
 logging.getLogger("async_subprocess_manager").setLevel(logging.WARNING)
 logging.getLogger("scripts.benchmarks.swe.repo_manager").setLevel(logging.WARNING)
-
-# Silence tokenizers parallelism warning
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
-
-# Ensure project root is in path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
-
-# ---------------------------------------------------------------------------
-# Default environment configuration
-# These can be overridden by setting env vars before running
-# ---------------------------------------------------------------------------
 
 # Query expansion (on by default for best recall)
 os.environ.setdefault("HYBRID_EXPAND", "1")
@@ -378,10 +390,11 @@ async def evaluate_instance(
         # Use repo_search from mcp_indexer_server
         from scripts import mcp_indexer_server as srv
 
-        # Set collection for this repo
-        os.environ["COLLECTION_NAME"] = collection_name
         # Set base path for reranker to find source files
         os.environ["RERANK_BASE_PATH"] = str(repo_path)
+
+        if os.environ.get("DEBUG_SWE_BENCH"):
+            print(f"[DEBUG] Searching collection={collection_name} query_len={len(instance.problem_statement)}")
 
         search_result = await srv.repo_search(
             queries=[instance.problem_statement],
@@ -389,7 +402,11 @@ async def evaluate_instance(
             include_snippet=False,
             compact=True,
             workspace_path=str(repo_path),  # Also pass to search for snippet resolution
+            collection=collection_name,  # Explicit collection for this instance
         )
+
+        if os.environ.get("DEBUG_SWE_BENCH"):
+            print(f"[DEBUG] Got {len(search_result.get('results', []))} results")
 
         result.search_time_s = time.perf_counter() - t0
 
@@ -482,25 +499,57 @@ async def run_full_benchmark(
         print(f"Limited to {limit} instances")
 
     # If skip_index, validate that all required collections exist
+    # Also check which collections have actual data (points > 0)
     if skip_index:
         qdrant_url = os.environ.get("QDRANT_URL", "http://localhost:6333")
         client = QdrantClient(url=qdrant_url)
         existing = {c.name for c in client.get_collections().collections}
 
+        # Build mapping of collection -> point count for populated collections
+        populated = {}
+        for coll_name in existing:
+            if coll_name.startswith("swe-bench-"):
+                try:
+                    info = client.get_collection(coll_name)
+                    if info.points_count and info.points_count > 0:
+                        populated[coll_name] = info.points_count
+                except Exception:
+                    pass
+
         required = set()
+        instance_to_coll = {}
         for inst in instances:
             commit_short = inst.base_commit[:8]
             coll_name = f"swe-bench-{inst.repo.replace('/', '-')}-{commit_short}"
             required.add(coll_name)
+            instance_to_coll[inst.instance_id] = coll_name
 
         missing = required - existing
-        if missing:
-            print(f"\nERROR: --skip-index but missing collections:")
-            for m in sorted(missing):
-                print(f"  - {m}")
-            raise RuntimeError(f"Missing {len(missing)} collections. Run without --skip-index first.")
+        empty = {c for c in (required - missing) if c not in populated}
 
-        print(f"\n✓ All {len(required)} required collections exist, skipping indexing")
+        if missing or empty:
+            # Filter to only instances with populated collections
+            valid_instances = []
+            for inst in instances:
+                coll = instance_to_coll[inst.instance_id]
+                if coll in populated:
+                    valid_instances.append(inst)
+
+            if not valid_instances:
+                print(f"\nERROR: --skip-index but no collections have data:")
+                for m in sorted(missing):
+                    print(f"  - {m} (missing)")
+                for e in sorted(empty):
+                    print(f"  - {e} (empty)")
+                raise RuntimeError("No populated collections found. Run without --skip-index first.")
+
+            # Replace instances with valid ones only
+            skipped = len(instances) - len(valid_instances)
+            instances = valid_instances
+            print(f"\n⚠ Skipping {skipped} instances with missing/empty collections")
+            print(f"✓ Found {len(instances)} instances with populated collections")
+        else:
+            print(f"\n✓ All {len(required)} required collections exist, skipping indexing")
 
     # Initialize repo manager
     cache_path = Path(cache_dir) if cache_dir else None
