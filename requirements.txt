@@ -40,5 +40,6 @@ anyio
 testcontainers
 python-toon>=0.1.3
 
-# Benchmark-only (external suite)
-coir-eval
+# # Benchmark-only (external suite)
+# coir-eval
+
