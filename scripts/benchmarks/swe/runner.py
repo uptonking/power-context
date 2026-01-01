@@ -278,6 +278,9 @@ def _normalize_result_path(path: str, repo_path: str, repo_name: str) -> Optiona
 
     path = path.strip()
 
+    # Normalize path separators for cross-platform comparison (Windows uses \)
+    path = path.replace("\\", "/")
+
     # Already relative and doesn't escape
     if not os.path.isabs(path):
         # Check it doesn't start with ".."

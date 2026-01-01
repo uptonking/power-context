@@ -828,6 +828,20 @@ async def _repo_search_impl(
                             # If any of the above fails, we just keep header-only
                             pass
 
+                        # Priority 1: Check for inline content (CoSQA/CoIR benchmarks store text in payload)
+                        inline_text = (
+                            obj.get("text") or obj.get("code") or obj.get("snippet") or
+                            (obj.get("payload") or {}).get("text") or
+                            (obj.get("payload") or {}).get("code")
+                        )
+                        if inline_text:
+                            # Use inline content directly (truncate for reranker input limit)
+                            inline_text = str(inline_text).strip()[:2000]
+                            if inline_text:
+                                meta = "\n".join(meta_lines) if meta_lines else header
+                                return (meta + "\n\n" + inline_text).strip()
+
+                        # Priority 2: Read from disk (for file-based corpora like SWE-bench)
                         sl = int(obj.get("start_line") or 0)
                         el = int(obj.get("end_line") or 0)
                         if not path or not sl:
