@@ -255,10 +255,67 @@ def compute_metrics(
         if f in gt_set:
             rr = 1.0 / (i + 1)
             break
-    
+
     all_found = gt_set <= retrieved_set
-    
+
     return recall, precision, rr, all_found
+
+
+def _normalize_result_path(path: str, repo_path: str, repo_name: str) -> Optional[str]:
+    """Normalize a search result path to be relative to repo root.
+
+    Handles:
+    - Already-relative paths (e.g., "src/main.py")
+    - Absolute paths matching repo_path (e.g., "/home/user/repo/src/main.py")
+    - Container paths (e.g., "/work/repo/src/main.py")
+    - Paths with repo name embedded (e.g., "/any/prefix/myrepo/src/main.py")
+
+    Returns:
+        Normalized relative path, or None if path is invalid/escapes repo.
+    """
+    if not path:
+        return None
+
+    path = path.strip()
+
+    # Already relative and doesn't escape
+    if not os.path.isabs(path):
+        # Check it doesn't start with ".."
+        if path.startswith(".."):
+            return None
+        return path
+
+    # Try os.path.relpath first (handles exact match)
+    try:
+        rel = os.path.relpath(path, repo_path)
+        if not rel.startswith(".."):
+            return rel
+    except ValueError:
+        # Different drives on Windows
+        pass
+
+    # Try to find repo_name in path components and extract suffix
+    # e.g., "/work/repos/django/src/main.py" with repo_name="django" -> "src/main.py"
+    parts = path.replace("\\", "/").split("/")
+    for i, part in enumerate(parts):
+        if part == repo_name and i < len(parts) - 1:
+            # Found repo name, return everything after it
+            suffix = "/".join(parts[i + 1:])
+            if suffix and not suffix.startswith(".."):
+                return suffix
+
+    # Last resort: strip leading path components that look like mount points
+    # e.g., "/work/", "/app/", "/home/user/"
+    common_prefixes = ["/work/", "/app/", "/home/", "/tmp/", "/var/"]
+    for prefix in common_prefixes:
+        if path.startswith(prefix):
+            remainder = path[len(prefix):]
+            # Check if remainder starts with repo_name
+            if remainder.startswith(repo_name + "/"):
+                return remainder[len(repo_name) + 1:]
+
+    # Unable to normalize - might be a completely different path
+    return None
 
 
 async def evaluate_instance(
@@ -335,20 +392,20 @@ async def evaluate_instance(
 
         # 4. Extract unique file paths from results
         seen_files = set()
+        repo_path_str = str(repo_path)
+        repo_name = os.path.basename(repo_path_str)
+
         for r in search_result.get("results", []):
             path = r.get("path", "")
-            if path and path not in seen_files:
-                # Normalize path relative to repo root using os.path.relpath
-                try:
-                    rel_path = os.path.relpath(path, repo_path)
-                    # Skip paths that escape the repo (e.g., "../...")
-                    if not rel_path.startswith(".."):
-                        path = rel_path
-                except ValueError:
-                    # Different drives on Windows, use original
-                    pass
-                seen_files.add(path)
-                result.retrieved_files.append(path)
+            if not path:
+                continue
+
+            # Normalize path: handle absolute paths, container paths, and relative paths
+            normalized = _normalize_result_path(path, repo_path_str, repo_name)
+
+            if normalized and normalized not in seen_files:
+                seen_files.add(normalized)
+                result.retrieved_files.append(normalized)
                 if len(result.retrieved_files) >= top_k:
                     break
 
