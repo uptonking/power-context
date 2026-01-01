@@ -57,22 +57,42 @@ class SWEInstance:
 
 def extract_files_from_patch(patch: str) -> list[str]:
     """Extract file paths from a unified diff patch.
-    
-    Handles both:
-    - diff --git a/path/to/file.py b/path/to/file.py
-    - --- a/path/to/file.py
+
+    Uses only the NEW file path (b/...) from the patch header.
+    Filters out:
+    - /dev/null (file deletions)
+    - Old paths from renames (--- a/... lines show old path)
+
+    For a patch that modifies existing files:
+        diff --git a/foo.py b/foo.py
+        +++ b/foo.py  <- this is the target file
+
+    For a rename:
+        diff --git a/old.py b/new.py
+        --- a/old.py  <- old path (excluded)
+        +++ b/new.py  <- new path (included)
+
+    For a deletion:
+        diff --git a/foo.py b/dev/null
+        +++ /dev/null  <- excluded (file deleted)
     """
     files = set()
-    
-    # Match "diff --git a/... b/..."
+
+    # Match "diff --git a/... b/..." - use the 'b' path (new/destination)
     for match in re.finditer(r"diff --git a/(.+?) b/(.+?)(?:\n|$)", patch):
-        # Use the 'b' path (new file path)
-        files.add(match.group(2))
-    
-    # Also check --- lines for safety
-    for match in re.finditer(r"^--- a/(.+?)$", patch, re.MULTILINE):
-        files.add(match.group(1))
-    
+        new_path = match.group(2)
+        # Skip /dev/null (file deletions)
+        if new_path != "/dev/null" and not new_path.endswith("/dev/null"):
+            files.add(new_path)
+
+    # Also parse "+++ b/..." lines for robustness (actual new file path)
+    # This is more reliable than "--- a/..." which shows the OLD path
+    for match in re.finditer(r"^\+\+\+ b/(.+?)$", patch, re.MULTILINE):
+        new_path = match.group(1)
+        # Skip /dev/null
+        if new_path != "/dev/null" and new_path != "dev/null":
+            files.add(new_path)
+
     return sorted(files)
 
 

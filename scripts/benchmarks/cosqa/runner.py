@@ -464,7 +464,7 @@ async def run_full_benchmark(
         CoSQAReport with all metrics
     """
     from scripts.benchmarks.cosqa.dataset import load_cosqa, get_corpus_for_indexing, get_queries_for_evaluation
-    from scripts.benchmarks.cosqa.indexer import index_corpus, verify_collection
+    from scripts.benchmarks.cosqa.indexer import index_corpus
 
     # Step 1: Load dataset
     print("\n▶ Step 1: Loading CoSQA dataset...")
@@ -477,12 +477,13 @@ async def run_full_benchmark(
         corpus = corpus[:corpus_limit]
         print(f"  Limited corpus to {len(corpus)} entries")
 
-    # Check if already indexed
-    status = verify_collection(collection)
-    if status.get("exists") and status.get("points_count", 0) >= len(corpus) and not recreate_index:
-        print(f"  Corpus already indexed ({status['points_count']} points)")
+    # Check if already indexed (use fingerprint matching, not just points_count)
+    # The indexer handles fingerprint checking internally and will recreate if needed
+    result = index_corpus(corpus, collection=collection, recreate=recreate_index or bool(corpus_limit))
+    if result.get("reused"):
+        print(f"  Corpus already indexed (fingerprint match, {result.get('indexed', 0)} entries)")
     else:
-        index_corpus(corpus, collection=collection, recreate=recreate_index or bool(corpus_limit))
+        print(f"  Indexed {result.get('indexed', 0)} entries ({result.get('skipped', 0)} skipped, {result.get('errors', 0)} errors)")
 
     # Step 3: Get queries
     print("\n▶ Step 3: Preparing queries...")

@@ -173,10 +173,20 @@ def generate_code_id(code: str, idx: int = 0) -> str:
     return f"cosqa-{content_hash}"
 
 
-def generate_query_id(query: str, idx: int) -> str:
-    """Generate a stable ID for a query."""
-    content_hash = hashlib.md5(query.encode("utf-8", errors="ignore")).hexdigest()[:8]
-    return f"q-{idx:04d}-{content_hash}"
+def generate_query_id(query: str, idx: int = 0) -> str:
+    """Generate a stable ID for a query.
+
+    Uses content-only hash so identical queries aggregate their relevance
+    judgments properly. The idx parameter is ignored (kept for API compat).
+
+    This is important because:
+    - Same query appearing multiple times should have same ID
+    - Relevance judgments for the same query text should aggregate
+    - Without this, repeated queries get different IDs and metrics are skewed
+    """
+    del idx  # Unused - kept for API compat
+    content_hash = hashlib.md5(query.encode("utf-8", errors="ignore")).hexdigest()[:12]
+    return f"q-{content_hash}"
 
 
 def load_from_huggingface(
