@@ -63,6 +63,7 @@ from scripts.rerank_recursive.alpha_scheduler import (
 from scripts.rerank_recursive.recursive import (
     RecursiveReranker,
     ONNXRecursiveReranker,
+    FastEmbedRecursiveReranker,
     SessionAwareReranker,
     rerank_recursive,
     rerank_recursive_inprocess,
@@ -71,6 +72,7 @@ from scripts.rerank_recursive.recursive import (
     get_recursive_reranker,
     _get_learning_reranker,
     HAS_ONNX,
+    HAS_RERANKER_FACTORY,
 )
 
 __all__ = [
@@ -88,6 +90,7 @@ __all__ = [
     "LearnedAlphaWeights",
     "RecursiveReranker",
     "ONNXRecursiveReranker",
+    "FastEmbedRecursiveReranker",
     "SessionAwareReranker",
     # Utilities
     "_COMMON_TOKENS",
@@ -108,4 +111,5 @@ __all__ = [
     "_get_learning_reranker",
     # Constants
     "HAS_ONNX",
+    "HAS_RERANKER_FACTORY",
 ]
