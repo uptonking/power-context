@@ -155,15 +155,11 @@ def rerank_pairs(
     if hasattr(model, "rerank"):
         try:
             # TextCrossEncoder.rerank expects query and documents separately
-            # We need to group by query for efficiency
             query = pairs[0][0]
             documents = [doc for _, doc in pairs]
             results = list(model.rerank(query, documents, top_k=len(documents)))
-            # Results are RerankResult objects with score and index
-            scores = [0.0] * len(pairs)
-            for r in results:
-                scores[r.index] = r.score
-            return scores
+            # Results are floats (scores in document order)
+            return [float(s) for s in results]
         except Exception:
             return [0.0] * len(pairs)
 
