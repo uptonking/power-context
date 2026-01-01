@@ -113,12 +113,16 @@ if "COLLECTION_NAME" in os.environ:
 if "DEFAULT_COLLECTION" in os.environ:
     del os.environ["DEFAULT_COLLECTION"]
 
-# Disable features that trigger collection recreation during search:
+# Disable features that trigger collection recreation or add extra vectors:
 # - LEX_SPARSE_MODE: Requires sparse vectors, triggers recreation if missing
 # - PATTERN_VECTORS: Requires pattern_vector, triggers recreation if missing
+# - REFRAG_MODE: Adds mini vector, causes schema mismatch with existing collections
+# - INDEX_MICRO_CHUNKS: Uses token-based micro chunking, different schema
 # These can destroy indexed data when ensure_collection is called during search!
 os.environ["LEX_SPARSE_MODE"] = "0"
 os.environ["PATTERN_VECTORS"] = "0"
+os.environ["REFRAG_MODE"] = "0"
+os.environ["INDEX_MICRO_CHUNKS"] = "0"
 
 # Silence tokenizers parallelism warning
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
