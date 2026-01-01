@@ -69,6 +69,9 @@ class CoSQACorpusEntry:
         #
         # This keeps the canonical identifier in `code_id` for MRR computations.
         _synthetic_path = f"cosqa/{self.code_id}.py"
+        rerank_text = self.code
+        if self.docstring and self.docstring.strip():
+            rerank_text = f"{self.docstring.strip()}\n\n{self.code}"
         return {
             "code_id": self.code_id,
             "text": self.code,
@@ -90,8 +93,8 @@ class CoSQACorpusEntry:
                 "end_line": 1,
                 # Provide text inline so snippet/keyword bump doesn't try to read files.
                 "text": self.code,
-                # Reranker expects metadata.code for cross-encoder scoring
-                "code": self.code,
+                # Reranker expects metadata.code for cross-encoder scoring (include docstring).
+                "code": rerank_text,
             },
         }
 
@@ -477,4 +480,3 @@ def get_queries_for_evaluation(
         result = result[:limit]
 
     return result
-
