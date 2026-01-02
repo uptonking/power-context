@@ -490,7 +490,7 @@ def index_corpus(
 
     print(f"Indexing {len(to_index)} entries (skipping {skipped} already indexed)")
 
-    stats = {"indexed": 0, "skipped": skipped, "errors": 0, "batches": 0}
+    stats = {"indexed": 0, "indexed_entries": 0, "skipped": skipped, "errors": 0, "batches": 0}
     start_time = time.time()
     total = len(to_index)
     last_pct = 0
@@ -510,6 +510,7 @@ def index_corpus(
     print(f"  Processing {len(batches)} batches in {n_chunks} chunks of {N_WORKERS}...")
 
     # Process in chunks: embed sequentially (not thread-safe), upsert in parallel
+    processed_entries = 0
     for chunk_idx, chunk_start in enumerate(range(0, len(batches), N_WORKERS)):
         chunk = batches[chunk_start:chunk_start + N_WORKERS]
         chunk_points = []
@@ -661,10 +662,15 @@ def index_corpus(
                     stats["errors"] += batch_size
 
         # Progress after each chunk (always log)
+        processed_entries += sum(len(b) for b in chunk)
+        stats["indexed_entries"] = processed_entries
         elapsed = time.time() - start_time
         rate = stats["indexed"] / elapsed if elapsed > 0 else 0
-        pct = int(100 * stats["indexed"] / total) if total else 100
-        print(f"  Chunk {chunk_idx+1}/{n_chunks} done: {stats['indexed']}/{total} ({pct}%, {rate:.1f}/s)")
+        pct = int(100 * processed_entries / total) if total else 100
+        print(
+            f"  Chunk {chunk_idx+1}/{n_chunks} done: {processed_entries}/{total} entries, "
+            f"{stats['indexed']} points ({pct}%, {rate:.1f}/s)"
+        )
         last_pct = pct
 
     elapsed = time.time() - start_time
@@ -672,7 +678,10 @@ def index_corpus(
     stats["rate_per_second"] = round(stats["indexed"] / elapsed, 2) if elapsed > 0 else 0
     stats["reused"] = False
 
-    print(f"\nIndexing complete: {stats['indexed']} entries in {elapsed:.1f}s")
+    print(
+        f"\nIndexing complete: {stats['indexed_entries']} entries "
+        f"({stats['indexed']} points) in {elapsed:.1f}s"
+    )
     return stats
 
 
