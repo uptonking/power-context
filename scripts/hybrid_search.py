@@ -693,7 +693,7 @@ def run_hybrid_search(
                 max_extra=max(2, _semantic_max_terms),
                 client=client,
                 model=_model,
-                collection=_collection()
+                collection=_collection(collection)
             )
         else:
             qlist = expand_queries(qlist, eff_language)
@@ -1053,7 +1053,7 @@ def run_hybrid_search(
 
             if top_results:
                 semantic_prf_terms = expand_queries_with_prf(
-                    clean_queries, top_results, _model, max_terms=4
+                    clean_queries, top_results, _model, max_expansions=4
                 )
 
                 # Create PRF queries using semantic terms
