@@ -62,12 +62,23 @@ from typing import Any, Dict, List, Optional, Tuple
 # Ensure project root is in path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
-# Load .env file for reranker config (critical for benchmark accuracy)
-try:
-    from dotenv import load_dotenv
-    load_dotenv(Path(__file__).parent.parent.parent.parent / ".env")
-except ImportError:
-    pass  # dotenv optional
+# NOTE: .env loading moved to _load_benchmark_env() to avoid polluting
+# environment when this module is imported (e.g., by tests or __init__.py).
+# Call _load_benchmark_env() explicitly before running benchmarks.
+_ENV_LOADED = False
+
+
+def _load_benchmark_env() -> None:
+    """Load .env file for benchmark config. Safe to call multiple times."""
+    global _ENV_LOADED
+    if _ENV_LOADED:
+        return
+    _ENV_LOADED = True
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(Path(__file__).parent.parent.parent.parent / ".env")
+    except ImportError:
+        pass  # dotenv optional
 
 # Critical reranker settings - ensure these are set for proper benchmark scoring
 os.environ.setdefault("RERANKER_MODEL", "jinaai/jina-reranker-v2-base-multilingual")
@@ -324,6 +335,9 @@ async def run_cosqa_benchmark(
     Returns:
         CoSQAReport with all metrics
     """
+    # Load .env for benchmark config (only when actually running benchmark)
+    _load_benchmark_env()
+
     results: List[CoSQAQueryResult] = []
     latencies: List[float] = []
 
@@ -493,6 +507,9 @@ async def run_full_benchmark(
     Returns:
         CoSQAReport with all metrics
     """
+    # Load .env for benchmark config (only when actually running benchmark)
+    _load_benchmark_env()
+
     from scripts.benchmarks.cosqa.dataset import load_cosqa, get_corpus_for_indexing, get_queries_for_evaluation
     from scripts.benchmarks.cosqa.indexer import index_corpus
 
