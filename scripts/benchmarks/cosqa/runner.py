@@ -61,6 +61,19 @@ from typing import Any, Dict, List, Optional, Tuple
 
 # Ensure project root is in path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+
+# Load .env file for reranker config (critical for benchmark accuracy)
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).parent.parent.parent.parent / ".env")
+except ImportError:
+    pass  # dotenv optional
+
+# Critical reranker settings - ensure these are set for proper benchmark scoring
+os.environ.setdefault("RERANKER_MODEL", "jinaai/jina-reranker-v2-base-multilingual")
+os.environ.setdefault("RERANK_IN_PROCESS", "1")
+os.environ.setdefault("RERANK_LEARNING", "1")
+
 # Avoid tokenizers fork warning in benchmark runs.
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
