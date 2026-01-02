@@ -478,6 +478,8 @@ def print_report(report: CoSQAReport) -> None:
 
     print("\n" + "-" * 70)
     print("BASELINE COMPARISON (MRR):")
+    if report.config.get("subset_note"):
+        print("  NOTE: Subset results are not comparable to paper baselines.")
     for name, comp in report.baseline_comparison.items():
         print(f"  vs {name}: {comp['paper_mrr']:.3f} → {comp['our_mrr']:.3f} ({comp['improvement']})")
 

@@ -178,7 +178,8 @@ def _legacy_vector_search(
 # Collection caching
 # ---------------------------------------------------------------------------
 
-_ENSURED_COLLECTIONS: set = set()
+_ENSURED_COLLECTIONS: set[str] = set()
+_COLLECTION_VECTOR_NAMES: Dict[str, set[str]] = {}
 
 
 def _get_client_endpoint(client) -> str:
@@ -191,6 +192,44 @@ def _get_client_endpoint(client) -> str:
         return os.environ.get("QDRANT_URL", "localhost:6333")
     except Exception:
         return os.environ.get("QDRANT_URL", "localhost:6333")
+
+
+def _collection_cache_key(client, collection: str) -> str:
+    return f"{_get_client_endpoint(client)}:{collection}"
+
+
+def _cache_collection_vectors(client, collection: str) -> set[str] | None:
+    """Cache available vector names (dense + sparse) for a collection."""
+    cache_key = _collection_cache_key(client, collection)
+    if cache_key in _COLLECTION_VECTOR_NAMES:
+        return _COLLECTION_VECTOR_NAMES[cache_key]
+    try:
+        info = client.get_collection(collection)
+    except Exception:
+        return None
+    try:
+        vnames: set[str] = set()
+        vcfg = info.config.params.vectors
+        if isinstance(vcfg, dict):
+            vnames.update(vcfg.keys())
+        elif hasattr(vcfg, "size"):
+            vnames.add("")  # Default (unnamed) vector
+        scfg = info.config.params.sparse_vectors
+        if isinstance(scfg, dict):
+            vnames.update(scfg.keys())
+        _COLLECTION_VECTOR_NAMES[cache_key] = vnames
+        return vnames
+    except Exception:
+        return None
+
+
+def _vector_available(client, collection: str, vector_name: str | None) -> bool:
+    if not vector_name:
+        return True
+    vnames = _cache_collection_vectors(client, collection)
+    if vnames is None:
+        return True
+    return vector_name in vnames
 
 
 def _ensure_collection(client, collection: str, dim: int, vec_name: str):
@@ -209,13 +248,10 @@ def _ensure_collection(client, collection: str, dim: int, vec_name: str):
 
     # For SEARCH operations, just verify collection exists - don't try to modify schema
     # Schema modifications can trigger deletion of existing data!
-    try:
-        info = client.get_collection(collection)
-        # Collection exists - that's all we need for search
+    vnames = _cache_collection_vectors(client, collection)
+    if vnames is not None:
         _ENSURED_COLLECTIONS.add(cache_key)
         return
-    except Exception:
-        pass
 
     # Collection doesn't exist - only then call ensure_collection to create it
     try:
@@ -224,13 +260,18 @@ def _ensure_collection(client, collection: str, dim: int, vec_name: str):
     except ImportError:
         pass
 
+    try:
+        _cache_collection_vectors(client, collection)
+    except Exception:
+        pass
     _ENSURED_COLLECTIONS.add(cache_key)
 
 
 def clear_ensured_collections():
     """Clear the collection cache (useful for testing)."""
-    global _ENSURED_COLLECTIONS
+    global _ENSURED_COLLECTIONS, _COLLECTION_VECTOR_NAMES
     _ENSURED_COLLECTIONS = set()
+    _COLLECTION_VECTOR_NAMES = {}
 
 
 # ---------------------------------------------------------------------------
@@ -401,6 +442,10 @@ def lex_query(
     ef = max(EF_SEARCH, 32 + 4 * int(per_query))
     flt = _sanitize_filter_obj(flt)
     collection = _collection(collection_name)
+    if not _vector_available(client, collection, LEX_VECTOR_NAME):
+        if os.environ.get("DEBUG_HYBRID_SEARCH"):
+            logger.debug(f"Skipping lex query: {LEX_VECTOR_NAME} not in collection vectors")
+        return []
 
     try:
         qp = client.query_points(
@@ -475,6 +520,13 @@ def sparse_lex_query(
     """Query using sparse lexical vector for lossless exact matching."""
     flt = _sanitize_filter_obj(flt)
     collection = _collection(collection_name)
+    
+    # Check if sparse vector exists in collection
+    vnames = _cache_collection_vectors(client, collection)
+    if vnames is not None and LEX_SPARSE_NAME not in vnames:
+        if os.environ.get("DEBUG_HYBRID_SEARCH"):
+            logger.debug(f"Skipping sparse lex query: {LEX_SPARSE_NAME} not in {vnames}")
+        return []
 
     if not sparse_vec.get("indices"):
         return []
@@ -542,6 +594,10 @@ def dense_query(
 
     flt = _sanitize_filter_obj(flt)
     collection = _collection(collection_name)
+    if not _vector_available(client, collection, vec_name):
+        if os.environ.get("DEBUG_HYBRID_SEARCH"):
+            logger.debug(f"Skipping dense query: {vec_name} not in collection vectors")
+        return []
 
     try:
         qp = client.query_points(

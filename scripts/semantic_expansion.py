@@ -107,6 +107,31 @@ def _coerce_embedding_vector(raw: Any) -> Optional[List[float]]:
         return None
 
 
+def _select_vector_name(
+    client: Any,
+    collection: str,
+    model_dim: int,
+    model_name: Optional[str] = None,
+) -> Optional[str]:
+    """Pick a dense vector name by matching embedding dimension when possible."""
+    try:
+        info = client.get_collection(collection)
+        cfg = info.config.params.vectors
+        if isinstance(cfg, dict) and cfg:
+            for name, params in cfg.items():
+                psize = getattr(params, "size", None) or getattr(params, "dim", None)
+                if psize and int(psize) == int(model_dim):
+                    return name
+            lex_name = os.environ.get("LEX_VECTOR_NAME", "lex")
+            if lex_name in cfg:
+                for name in cfg.keys():
+                    if name != lex_name:
+                        return name
+        return None
+    except Exception:
+        return None
+
+
 def _get_expansion_cache_key(queries: List[str], language: Optional[str] = None) -> str:
     """Generate a cache key for query expansion."""
     # Normalize queries for consistent caching
@@ -279,16 +304,27 @@ def expand_queries_semantically(
         
         # Qdrant collections with multiple vectors require the vector name
         vector_name = None
-        try:
-            vector_name = _sanitize_vector_name(model_name) if _sanitize_vector_name else None
-        except Exception:
-            vector_name = None
-        if not vector_name and model_name:
-            vector_name = str(model_name).replace("/", "-").replace("_", "-")[:64]
-        
         if collection is None:
             collection = os.environ.get("COLLECTION_NAME", "codebase")
-        
+
+        model_dim = getattr(model, "dim", None) if model is not None else None
+        if client and model and model_dim and collection:
+            vector_name = _select_vector_name(
+                client,
+                collection,
+                model_dim,
+                model_name=model_name,
+            )
+
+        # Fallback to sanitized model name if auto-detection fails
+        if not vector_name and model_name:
+            try:
+                vector_name = _sanitize_vector_name(model_name) if _sanitize_vector_name else None
+            except Exception:
+                vector_name = None
+            if not vector_name:
+                vector_name = str(model_name).replace("/", "-").replace("_", "-")[:64]
+
         # If we don't have the required components, fall back to lexical expansion
         if not (client and model):
             logger.debug("Semantic expansion unavailable: missing client or model")
