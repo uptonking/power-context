@@ -704,7 +704,7 @@ async def _repo_search_impl(
                     for obj in reranked:
                         # Copy the list to avoid mutating the original object
                         why_parts = list(obj.get("why", []))
-                        why_parts.append(f"learning:{obj.get('recursive_iterations', 0)}")
+                        why_parts.append(f"refine:{obj.get('recursive_iterations', 0)}")
                         why_parts.append(f"score:{float(obj.get('score', 0)):.3f}")
 
                         # Build components with optional fname_boost

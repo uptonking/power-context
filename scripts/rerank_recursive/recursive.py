@@ -98,6 +98,11 @@ class RecursiveReranker:
         self._proj_cache: Dict[int, np.ndarray] = {}
         self._proj_cache_lock = threading.Lock()
 
+        # Observability counters for learning status
+        self._proj_learned_count = 0
+        self._proj_fallback_count = 0
+        self._fallback_warned = False
+
     def _get_embedder(self):
         if self._embedder is not None:
             return self._embedder
@@ -198,10 +203,26 @@ class RecursiveReranker:
         if embeddings.shape[-1] == self.dim:
             return embeddings
         input_dim = embeddings.shape[-1]
-        if (hasattr(self, '_learned_projection') and
-            self._learned_projection._weights_loaded and
-            self._learned_projection.input_dim == input_dim):
-            return self._learned_projection.forward(embeddings)
+        # Try to use learned projection if available (hot-reloads from worker)
+        if hasattr(self, '_learned_projection') and self._learned_projection.input_dim == input_dim:
+            # forward() calls maybe_reload_weights() internally
+            if self._learned_projection._weights_loaded:
+                self._proj_learned_count += 1
+                return self._learned_projection.forward(embeddings)
+            # Try one reload attempt if not yet loaded
+            self._learned_projection.maybe_reload_weights()
+            if self._learned_projection._weights_loaded:
+                self._proj_learned_count += 1
+                return self._learned_projection.forward(embeddings)
+        # Fallback to random projection
+        self._proj_fallback_count += 1
+        if not self._fallback_warned and self._proj_fallback_count >= 10:
+            from scripts.logger import get_logger
+            get_logger(__name__).warning(
+                f"LearnedProjection not loaded after {self._proj_fallback_count} calls; "
+                f"using random projection (learning may be disabled or weights missing)"
+            )
+            self._fallback_warned = True
         with self._proj_cache_lock:
             if input_dim not in self._proj_cache:
                 rng = np.random.RandomState(44)
@@ -211,6 +232,25 @@ class RecursiveReranker:
         projected = embeddings @ proj_matrix
         norms = np.linalg.norm(projected, axis=-1, keepdims=True) + 1e-8
         return projected / norms
+
+    def get_learning_status(self) -> Dict[str, Any]:
+        """Return observability info for learning components."""
+        scorer_metrics = self.scorer.get_metrics()
+        proj_loaded = (
+            hasattr(self, '_learned_projection') and
+            self._learned_projection._weights_loaded
+        )
+        return {
+            "projection_loaded": proj_loaded,
+            "projection_version": self._learned_projection._version if proj_loaded else 0,
+            "projection_learned_calls": self._proj_learned_count,
+            "projection_fallback_calls": self._proj_fallback_count,
+            "scorer_version": scorer_metrics.get("version", 0),
+            "scorer_converged": scorer_metrics.get("converged", False),
+            "scorer_avg_loss": scorer_metrics.get("avg_loss", 0.0),
+            "scorer_update_count": scorer_metrics.get("update_count", 0),
+            "refiner_version": self.refiner._version,
+        }
 
     def rerank(
         self,

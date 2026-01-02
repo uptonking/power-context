@@ -123,6 +123,9 @@ class TinyScorer:
 
     def maybe_reload_weights(self):
         """Check if weights file changed and reload if needed (hot reload)."""
+        # Fast path: skip if reload disabled (interval <= 0)
+        if self.WEIGHTS_RELOAD_INTERVAL <= 0:
+            return
         now = time.time()
         if now - self._last_reload_check < self.WEIGHTS_RELOAD_INTERVAL:
             return
@@ -245,6 +248,8 @@ class TinyScorer:
         try:
             self._version += 1
             tmp_base = self._weights_path.replace(".npz", ".tmp")
+            # Keep only last 200 losses for convergence (avoid unbounded growth)
+            recent_losses_to_save = self._recent_losses[-200:] if self._recent_losses else []
             np.savez(
                 tmp_base,
                 W1=self.W1, b1=self.b1, W2=self.W2, b2=self.b2,
@@ -256,6 +261,7 @@ class TinyScorer:
                 learning_rate=self.lr,
                 version=self._version,
                 collection=self._collection,
+                recent_losses=np.array(recent_losses_to_save, dtype=np.float32),
             )
             tmp_path = tmp_base + ".npz"
             lock_path = self._weights_path + ".lock"
@@ -351,6 +357,12 @@ class TinyScorer:
             self._momentum_b1 = np.zeros_like(self.b1)
             self._momentum_W2 = np.zeros_like(self.W2)
             self._momentum_b2 = np.zeros_like(self.b2)
+
+        # Restore recent losses for convergence detection (survives restarts)
+        if "recent_losses" in data.files:
+            self._recent_losses = list(data["recent_losses"].astype(np.float32))
+        else:
+            self._recent_losses = []
 
         self._weights_mtime = os.path.getmtime(self._weights_path)
         data.close()

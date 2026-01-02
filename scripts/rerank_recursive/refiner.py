@@ -71,6 +71,9 @@ class LatentRefiner:
                 pass
 
     def maybe_reload_weights(self):
+        # Fast path: skip if reload disabled (interval <= 0)
+        if self.WEIGHTS_RELOAD_INTERVAL <= 0:
+            return
         now = time.time()
         if now - self._last_reload_check < self.WEIGHTS_RELOAD_INTERVAL:
             return
