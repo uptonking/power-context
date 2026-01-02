@@ -110,6 +110,30 @@ def _desired_vector_configs(
     return vectors_cfg, sparse_cfg
 
 
+def _as_vector_params_diff(vec: models.VectorParams) -> Any:
+    diff_cls = getattr(models, "VectorParamsDiff", None)
+    if diff_cls is None:
+        return vec
+    try:
+        return diff_cls(
+            size=getattr(vec, "size", None) or getattr(vec, "dim", None),
+            distance=getattr(vec, "distance", None),
+            hnsw_config=getattr(vec, "hnsw_config", None),
+            quantization_config=getattr(vec, "quantization_config", None),
+            on_disk=getattr(vec, "on_disk", None),
+            datatype=getattr(vec, "datatype", None),
+            multivector_config=getattr(vec, "multivector_config", None),
+        )
+    except Exception:
+        return vec
+
+
+def _prepare_vector_update_config(
+    vectors_cfg: Dict[str, models.VectorParams],
+) -> Dict[str, Any]:
+    return {name: _as_vector_params_diff(params) for name, params in vectors_cfg.items()}
+
+
 def _missing_payload_indexes(info: Any) -> list[str]:
     schema = getattr(info, "payload_schema", None)
     if isinstance(schema, dict):
@@ -117,6 +141,36 @@ def _missing_payload_indexes(info: Any) -> list[str]:
     else:
         existing = set()
     return [field for field in PAYLOAD_INDEX_FIELDS if field not in existing]
+
+
+def get_collection_vector_names(
+    client: QdrantClient,
+    name: str,
+) -> tuple[set[str] | None, set[str] | None]:
+    """Return (dense_vector_names, sparse_vector_names) for a collection.
+
+    Returns (None, None) if the schema cannot be inspected.
+    """
+    if not name:
+        return None, None
+    try:
+        info = client.get_collection(name)
+    except Exception:
+        return None, None
+
+    vectors_cfg = getattr(info.config.params, "vectors", None)
+    if isinstance(vectors_cfg, dict):
+        dense_names = set(vectors_cfg.keys())
+    else:
+        dense_names = None
+
+    sparse_cfg = getattr(info.config.params, "sparse_vectors", None)
+    if isinstance(sparse_cfg, dict):
+        sparse_names = set(sparse_cfg.keys())
+    else:
+        sparse_names = set() if dense_names is not None else None
+
+    return dense_names, sparse_names
 
 
 def _ensure_collection_with_mode(
@@ -203,6 +257,7 @@ def _ensure_collection_with_mode(
 
     if missing_vectors:
         missing_cfg = {k: vectors_cfg[k] for k in missing_vectors if k in vectors_cfg}
+        missing_cfg = _prepare_vector_update_config(missing_cfg)
         try:
             client.update_collection(collection_name=name, vectors_config=missing_cfg)
             print(f"[COLLECTION_SUCCESS] Successfully updated collection {name} with missing vectors")
@@ -249,14 +304,10 @@ def ensure_collection(
                 has_sparse = sparse_cfg and LEX_SPARSE_NAME in (sparse_cfg if isinstance(sparse_cfg, dict) else {})
 
                 if LEX_SPARSE_MODE and not has_sparse:
-                    print(f"[COLLECTION_INFO] Collection {name} lacks sparse vector '{LEX_SPARSE_NAME}' - recreating...")
-                    backup_file = _backup_memories_before_recreate(name)
-                    try:
-                        client.delete_collection(name)
-                        print(f"[COLLECTION_INFO] Deleted existing collection {name}")
-                    except Exception:
-                        pass
-                    raise CollectionNeedsRecreateError(f"Collection {name} needs sparse vectors")
+                    print(
+                        f"[COLLECTION_WARNING] Collection {name} lacks sparse vector '{LEX_SPARSE_NAME}'. "
+                        "Sparse indexing will be skipped for this run."
+                    )
 
                 missing = {}
                 if not has_lex:
@@ -295,22 +346,16 @@ def ensure_collection(
 
                 if missing:
                     try:
+                        update_cfg = _prepare_vector_update_config(missing)
                         client.update_collection(
-                            collection_name=name, vectors_config=missing
+                            collection_name=name, vectors_config=update_cfg
                         )
                         print(f"[COLLECTION_SUCCESS] Successfully updated collection {name} with missing vectors")
                     except Exception as update_e:
-                        print(f"[COLLECTION_WARNING] Cannot add missing vectors to {name} ({update_e}). Recreating collection...")
-                        backup_file = _backup_memories_before_recreate(name)
-                        try:
-                            client.delete_collection(name)
-                            print(f"[COLLECTION_INFO] Deleted existing collection {name}")
-                        except Exception:
-                            pass
-                        raise CollectionNeedsRecreateError(f"Collection {name} needs recreation for new vectors")
-        except CollectionNeedsRecreateError:
-            print(f"[COLLECTION_INFO] Collection {name} needs recreation - proceeding...")
-            raise
+                        print(
+                            f"[COLLECTION_WARNING] Cannot add missing vectors to {name} ({update_e}). "
+                            "Continuing without them for this run."
+                        )
         except Exception as e:
             print(f"[COLLECTION_ERROR] Failed to update collection {name}: {e}")
             pass

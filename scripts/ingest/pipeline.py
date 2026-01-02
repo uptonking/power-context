@@ -66,6 +66,7 @@ from scripts.ingest.qdrant import (
     ensure_collection_and_indexes_once,
     ensure_payload_indexes,
     recreate_collection,
+    get_collection_vector_names,
     get_indexed_file_hash,
     delete_points_by_path,
     upsert_points,
@@ -127,6 +128,8 @@ def index_single_file(
     pseudo_mode: str = "full",
     trust_cache: bool | None = None,
     repo_name_for_cache: str | None = None,
+    allowed_vectors: set[str] | None = None,
+    allowed_sparse: set[str] | None = None,
 ) -> bool:
     """Index a single file path. Returns True if indexed, False if skipped."""
     try:
@@ -155,7 +158,10 @@ def index_single_file(
         return _index_single_file_inner(
             client, model, collection, vector_name, file_path,
             dedupe=dedupe, skip_unchanged=skip_unchanged, pseudo_mode=pseudo_mode,
-            trust_cache=trust_cache, repo_name_for_cache=repo_name_for_cache,
+            trust_cache=trust_cache,
+            repo_name_for_cache=repo_name_for_cache,
+            allowed_vectors=allowed_vectors,
+            allowed_sparse=allowed_sparse,
         )
     finally:
         if _file_lock_ctx is not None:
@@ -177,6 +183,8 @@ def _index_single_file_inner(
     pseudo_mode: str = "full",
     trust_cache: bool | None = None,
     repo_name_for_cache: str | None = None,
+    allowed_vectors: set[str] | None = None,
+    allowed_sparse: set[str] | None = None,
 ) -> bool:
     """Inner implementation of index_single_file (after lock is acquired)."""
     if trust_cache is None:
@@ -328,14 +336,28 @@ def _index_single_file_inner(
     batch_lex_text: List[str] = []
     batch_code: List[str] = []  # Raw code for pattern vectors
 
+    if allowed_vectors is None and allowed_sparse is None:
+        allowed_vectors, allowed_sparse = get_collection_vector_names(client, collection)
+
+    allow_lex = allowed_vectors is None or LEX_VECTOR_NAME in allowed_vectors
+    allow_mini = allowed_vectors is None or MINI_VECTOR_NAME in allowed_vectors
+    allow_pattern = allowed_vectors is None or PATTERN_VECTOR_NAME in allowed_vectors
+    allow_sparse = allowed_sparse is None or LEX_SPARSE_NAME in allowed_sparse
+
     # Check if pattern vectors are enabled
     pattern_vectors_on = os.environ.get("PATTERN_VECTORS", "").strip().lower() in {"1", "true", "yes", "on"}
+    pattern_vectors_on = pattern_vectors_on and allow_pattern
+    refrag_on = os.environ.get("REFRAG_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
+    use_mini = refrag_on and allow_mini
+    use_sparse = LEX_SPARSE_MODE and allow_sparse
 
     def make_point(pid, dense_vec, lex_vec, payload, lex_text: str = "", code_text: str = ""):
         if vector_name:
-            vecs = {vector_name: dense_vec, LEX_VECTOR_NAME: lex_vec}
+            vecs = {vector_name: dense_vec}
+            if allow_lex:
+                vecs[LEX_VECTOR_NAME] = lex_vec
             try:
-                if os.environ.get("REFRAG_MODE", "").strip().lower() in {"1", "true", "yes", "on"}:
+                if use_mini:
                     vecs[MINI_VECTOR_NAME] = project_mini(list(dense_vec), MINI_VEC_DIM)
             except Exception:
                 pass
@@ -347,7 +369,7 @@ def _index_single_file_inner(
                         vecs[PATTERN_VECTOR_NAME] = pv
                 except Exception:
                     pass
-            if LEX_SPARSE_MODE and lex_text:
+            if use_sparse and lex_text:
                 sparse_vec = _lex_sparse_vector_text(lex_text)
                 if sparse_vec.get("indices"):
                     vecs[LEX_SPARSE_NAME] = models.SparseVector(**sparse_vec)
@@ -627,6 +649,36 @@ def index_repo(
         if mode_value in {"legacy", "migrate"}:
             ensure_payload_indexes(client, collection)
 
+    allowed_vectors, allowed_sparse = get_collection_vector_names(client, collection)
+    if allowed_vectors is not None and vector_name and vector_name not in allowed_vectors:
+        print(
+            f"[COLLECTION_WARNING] Collection {collection} missing dense vector '{vector_name}'. "
+            "Indexing may fail until schema is updated."
+        )
+    if allowed_vectors is not None:
+        refrag_on = os.environ.get("REFRAG_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
+        if refrag_on and MINI_VECTOR_NAME not in allowed_vectors:
+            print(
+                f"[COLLECTION_WARNING] Collection {collection} lacks mini vector '{MINI_VECTOR_NAME}'. "
+                "ReFRAG vectors will be skipped for this run."
+            )
+        pattern_on = os.environ.get("PATTERN_VECTORS", "").strip().lower() in {"1", "true", "yes", "on"}
+        if pattern_on and PATTERN_VECTOR_NAME not in allowed_vectors:
+            print(
+                f"[COLLECTION_WARNING] Collection {collection} lacks pattern vector '{PATTERN_VECTOR_NAME}'. "
+                "Pattern vectors will be skipped for this run."
+            )
+        if LEX_VECTOR_NAME not in allowed_vectors:
+            print(
+                f"[COLLECTION_WARNING] Collection {collection} lacks lexical vector '{LEX_VECTOR_NAME}'. "
+                "Lexical vectors will be skipped for this run."
+            )
+    if allowed_sparse is not None and LEX_SPARSE_MODE and LEX_SPARSE_NAME not in allowed_sparse:
+        print(
+            f"[COLLECTION_WARNING] Collection {collection} lacks sparse vector '{LEX_SPARSE_NAME}'. "
+            "Sparse vectors will be skipped for this run."
+        )
+
     is_multi_repo = bool(is_multi_repo_mode and is_multi_repo_mode())
     root_repo_for_cache = (
         _detect_repo_name_from_path(root)
@@ -673,6 +725,8 @@ def index_repo(
                 dedupe=dedupe, skip_unchanged=skip_unchanged,
                 pseudo_mode=pseudo_mode,
                 repo_name_for_cache=per_file_repo_for_cache,
+                allowed_vectors=allowed_vectors,
+                allowed_sparse=allowed_sparse,
             )
         except Exception as e:
             print(f"Error indexing {file_path}: {e}")
@@ -690,6 +744,9 @@ def process_file_with_smart_reindexing(
     per_file_repo,
     model,
     vector_name: str | None,
+    *,
+    allowed_vectors: set[str] | None = None,
+    allowed_sparse: set[str] | None = None,
 ) -> str:
     """Smart, chunk-level reindexing for a single file.
 
@@ -735,6 +792,20 @@ def process_file_with_smart_reindexing(
         file_path = Path(fp)
 
     file_hash = hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest()
+
+    if allowed_vectors is None and allowed_sparse is None:
+        allowed_vectors, allowed_sparse = get_collection_vector_names(client, current_collection)
+
+    allow_lex = allowed_vectors is None or LEX_VECTOR_NAME in allowed_vectors
+    allow_mini = allowed_vectors is None or MINI_VECTOR_NAME in allowed_vectors
+    allow_pattern = allowed_vectors is None or PATTERN_VECTOR_NAME in allowed_vectors
+    allow_sparse = allowed_sparse is None or LEX_SPARSE_NAME in allowed_sparse
+
+    pattern_vectors_on = os.environ.get("PATTERN_VECTORS", "").strip().lower() in {"1", "true", "yes", "on"}
+    pattern_vectors_on = pattern_vectors_on and allow_pattern
+    refrag_on = os.environ.get("REFRAG_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
+    use_mini = refrag_on and allow_mini
+    use_sparse = LEX_SPARSE_MODE and allow_sparse
 
     repo_id: str | None = None
     repo_rel_path: str | None = None
@@ -853,9 +924,6 @@ def process_file_with_smart_reindexing(
     embed_lex: list[list[float]] = []
     embed_lex_text: list[str] = []
     embed_code: list[str] = []  # Raw code for pattern vectors
-
-    # Check if pattern vectors are enabled
-    pattern_vectors_on = os.environ.get("PATTERN_VECTORS", "").strip().lower() in {"1", "true", "yes", "on"}
 
     imports, calls = _get_imports_calls(language, text)
     last_mod, churn_count, author_count = _git_metadata(file_path)
@@ -1021,8 +1089,9 @@ def process_file_with_smart_reindexing(
                 if vector_name:
                     if isinstance(vec, dict):
                         vec = dict(vec)
-                        vec[LEX_VECTOR_NAME] = refreshed_lex
-                        if LEX_SPARSE_MODE and aug_lex_text:
+                        if allow_lex:
+                            vec[LEX_VECTOR_NAME] = refreshed_lex
+                        if use_sparse and aug_lex_text:
                             try:
                                 sparse_vec = _lex_sparse_vector_text(aug_lex_text)
                                 if sparse_vec.get("indices"):
@@ -1030,13 +1099,15 @@ def process_file_with_smart_reindexing(
                             except Exception:
                                 pass
                     else:
-                        vecs = {vector_name: vec, LEX_VECTOR_NAME: refreshed_lex}
+                        vecs = {vector_name: vec}
+                        if allow_lex:
+                            vecs[LEX_VECTOR_NAME] = refreshed_lex
                         try:
-                            if os.environ.get("REFRAG_MODE", "").strip().lower() in {"1", "true", "yes", "on"}:
+                            if use_mini:
                                 vecs[MINI_VECTOR_NAME] = project_mini(list(vec), MINI_VEC_DIM)
                         except Exception:
                             pass
-                        if LEX_SPARSE_MODE and aug_lex_text:
+                        if use_sparse and aug_lex_text:
                             try:
                                 sparse_vec = _lex_sparse_vector_text(aug_lex_text)
                                 if sparse_vec.get("indices"):
@@ -1078,9 +1149,11 @@ def process_file_with_smart_reindexing(
         vectors = _embed_batch(model, embed_texts)
         for pid, v, lx, pl, lt, ct in zip(embed_ids, vectors, embed_lex, embed_payloads, embed_lex_text, embed_code):
             if vector_name:
-                vecs = {vector_name: v, LEX_VECTOR_NAME: lx}
+                vecs = {vector_name: v}
+                if allow_lex:
+                    vecs[LEX_VECTOR_NAME] = lx
                 try:
-                    if os.environ.get("REFRAG_MODE", "").strip().lower() in {"1", "true", "yes", "on"}:
+                    if use_mini:
                         vecs[MINI_VECTOR_NAME] = project_mini(list(v), MINI_VEC_DIM)
                 except Exception:
                     pass
@@ -1092,7 +1165,7 @@ def process_file_with_smart_reindexing(
                             vecs[PATTERN_VECTOR_NAME] = pv
                     except Exception:
                         pass
-                if LEX_SPARSE_MODE and lt:
+                if use_sparse and lt:
                     sparse_vec = _lex_sparse_vector_text(lt)
                     if sparse_vec.get("indices"):
                         vecs[LEX_SPARSE_NAME] = models.SparseVector(**sparse_vec)
@@ -1137,6 +1210,8 @@ def pseudo_backfill_tick(
     dim: int | None = None,
     vector_name: str | None = None,
     schema_mode: str | None = None,
+    allowed_vectors: set[str] | None = None,
+    allowed_sparse: set[str] | None = None,
 ) -> int:
     """Best-effort pseudo/tag backfill for a collection."""
     from scripts.ingest.qdrant import ensure_collection_and_indexes_once
@@ -1194,6 +1269,12 @@ def pseudo_backfill_tick(
         "1", "true", "yes", "on",
     }
     next_offset = None
+
+    if allowed_vectors is None and allowed_sparse is None:
+        allowed_vectors, allowed_sparse = get_collection_vector_names(client, collection)
+    allow_lex = allowed_vectors is None or LEX_VECTOR_NAME in allowed_vectors
+    allow_sparse = allowed_sparse is None or LEX_SPARSE_NAME in allowed_sparse
+    use_sparse = LEX_SPARSE_MODE and allow_sparse
 
     def _maybe_ensure_collection() -> bool:
         if not dim or not vector_name:
@@ -1271,12 +1352,13 @@ def pseudo_backfill_tick(
                 vec = rec.vector
                 if isinstance(vec, dict):
                     vecs = dict(vec)
-                    vecs[LEX_VECTOR_NAME] = lex_vec
+                    if allow_lex:
+                        vecs[LEX_VECTOR_NAME] = lex_vec
                     new_vec = vecs
                 else:
                     new_vec = vec
 
-                if LEX_SPARSE_MODE and aug_text and isinstance(new_vec, dict):
+                if use_sparse and aug_text and isinstance(new_vec, dict):
                     sparse_vec = _lex_sparse_vector_text(aug_text)
                     if sparse_vec.get("indices"):
                         new_vec[LEX_SPARSE_NAME] = models.SparseVector(**sparse_vec)
