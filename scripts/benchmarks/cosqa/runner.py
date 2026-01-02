@@ -72,7 +72,7 @@ except ImportError:
 # Critical reranker settings - ensure these are set for proper benchmark scoring
 os.environ.setdefault("RERANKER_MODEL", "jinaai/jina-reranker-v2-base-multilingual")
 os.environ.setdefault("RERANK_IN_PROCESS", "1")
-os.environ.setdefault("RERANK_LEARNING", "1")
+os.environ["RERANK_LEARNING"] = "0"  # FORCE LEARNING OFF as requested
 
 # Avoid tokenizers fork warning in benchmark runs.
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
@@ -332,6 +332,15 @@ async def run_cosqa_benchmark(
         "limit": limit,
         "rerank_enabled": rerank_enabled,
         "query_count": len(queries),
+        # Capture reranker config for reproducibility
+        "env": {
+            "RERANKER_MODEL": os.environ.get("RERANKER_MODEL", ""),
+            "RERANK_IN_PROCESS": os.environ.get("RERANK_IN_PROCESS", ""),
+            "RERANK_LEARNING": os.environ.get("RERANK_LEARNING", ""),
+            "HYBRID_IN_PROCESS": os.environ.get("HYBRID_IN_PROCESS", ""),
+            "HYBRID_EXPAND": os.environ.get("HYBRID_EXPAND", ""),
+            "SEMANTIC_EXPANSION_ENABLED": os.environ.get("SEMANTIC_EXPANSION_ENABLED", ""),
+        },
     }
     if subset_note:
         config["subset_note"] = subset_note
