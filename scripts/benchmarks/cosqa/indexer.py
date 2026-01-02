@@ -30,15 +30,39 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
 from qdrant_client import QdrantClient, models
 
-# Import Context-Engine's AST/symbol extraction
+from scripts.ingest.chunking import chunk_by_tokens, chunk_lines, chunk_semantic
+from scripts.ingest.pipeline import build_information
+from scripts.ingest.vectors import project_mini, extract_pattern_vector
+from scripts.ingest.qdrant import (
+    hash_id,
+    get_collection_vector_names,
+    PATTERN_VECTOR_NAME,
+    PATTERN_VECTOR_DIM,
+)
+from scripts.utils import (
+    lex_hash_vector_text as _lex_hash_vector_text,
+    lex_sparse_vector_text as _lex_sparse_vector_text,
+)
+from scripts.ingest.config import (
+    LEX_VECTOR_NAME,
+    LEX_VECTOR_DIM,
+    MINI_VECTOR_NAME,
+    MINI_VEC_DIM,
+    LEX_SPARSE_NAME,
+    LEX_SPARSE_MODE,
+)
+
+# Import Context-Engine's AST/symbol extraction (optional)
 try:
-    from scripts.ingest.symbols import _extract_symbols
+    from scripts.ingest.symbols import _extract_symbols, _choose_symbol_for_chunk
     from scripts.ingest.metadata import _get_imports_calls
     _AST_AVAILABLE = True
 except ImportError:
     _AST_AVAILABLE = False
     def _extract_symbols(_lang, _text):  # noqa: unused args for fallback
         return []
+    def _choose_symbol_for_chunk(_start, _end, _symbols):  # noqa: unused args for fallback
+        return "", "", ""
     def _get_imports_calls(_lang, _text):  # noqa: unused args for fallback
         return [], []
 
@@ -88,17 +112,29 @@ def _get_config_fingerprint() -> str:
     Includes all settings that would require reindexing if changed:
     - Embedding model
     - Lexical vector dimensions
-    - ReFRAG/micro-chunk settings
+    - ReFRAG/mini vector settings
+    - Chunking settings (semantic vs micro)
+    - Sparse/pattern vector toggles
     - AST enrichment (v2 = enriched with symbols/imports/calls)
     """
-    from scripts.ingest.config import LEX_VECTOR_DIM
+    from scripts.ingest.config import LEX_VECTOR_DIM, MINI_VEC_DIM
 
     config_parts = [
         f"model:{EMBEDDING_MODEL}",
         f"lex_dim:{LEX_VECTOR_DIM}",
-        f"refrag:{os.environ.get('REFRAG_ENABLED', 'false')}",
-        f"micro_budget:{os.environ.get('MICRO_BUDGET_TOKENS', '0')}",
-        f"chunk_size:{os.environ.get('CHUNK_SIZE', '512')}",
+        f"refrag_mode:{os.environ.get('REFRAG_MODE', '0')}",
+        f"mini_dim:{MINI_VEC_DIM}",
+        f"mini_seed:{os.environ.get('MINI_VEC_SEED', '1337')}",
+        f"lex_sparse:{os.environ.get('LEX_SPARSE_MODE', '0')}",
+        f"pattern_vectors:{os.environ.get('PATTERN_VECTORS', '0')}",
+        f"index_micro:{os.environ.get('INDEX_MICRO_CHUNKS', '0')}",
+        f"micro_tokens:{os.environ.get('MICRO_CHUNK_TOKENS', '16')}",
+        f"micro_stride:{os.environ.get('MICRO_CHUNK_STRIDE', '')}",
+        f"semantic_chunks:{os.environ.get('INDEX_SEMANTIC_CHUNKS', '1')}",
+        f"chunk_lines:{os.environ.get('INDEX_CHUNK_LINES', '120')}",
+        f"chunk_overlap:{os.environ.get('INDEX_CHUNK_OVERLAP', '20')}",
+        f"use_tree_sitter:{os.environ.get('USE_TREE_SITTER', '1')}",
+        f"enhanced_ast:{os.environ.get('INDEX_USE_ENHANCED_AST', '1')}",
         f"ast_enriched:v2",  # Triggers reindex when AST enrichment changes
     ]
     return hashlib.sha256("|".join(config_parts).encode()).hexdigest()[:8]
@@ -110,7 +146,7 @@ def compute_corpus_fingerprint(corpus_entries: List[Dict[str, Any]]) -> str:
     Includes:
     - Sorted code_ids + all content that affects embeddings (text, docstring, func_name)
     - Embedding model and vector config (invalidates on model/config change)
-    - ReFRAG/chunking settings (invalidates on processing change)
+    - ReFRAG/mini vector settings (invalidates on processing change)
     """
     hasher = hashlib.sha256()
     
@@ -177,7 +213,15 @@ def create_collection(
     recreate: bool = False,
 ) -> None:
     """Create or recreate the CoSQA collection with proper vector config."""
-    from scripts.ingest.config import LEX_VECTOR_NAME, LEX_VECTOR_DIM
+    from scripts.ingest.config import (
+        LEX_VECTOR_NAME,
+        LEX_VECTOR_DIM,
+        MINI_VECTOR_NAME,
+        MINI_VEC_DIM,
+        LEX_SPARSE_NAME,
+        LEX_SPARSE_MODE,
+    )
+    from scripts.ingest.qdrant import PATTERN_VECTOR_NAME, PATTERN_VECTOR_DIM
 
     # Use sanitized model name for vector name (matches hybrid_search)
     from scripts.utils import sanitize_vector_name
@@ -204,10 +248,29 @@ def create_collection(
         vector_name: models.VectorParams(size=dim, distance=models.Distance.COSINE),
         LEX_VECTOR_NAME: models.VectorParams(size=LEX_VECTOR_DIM, distance=models.Distance.COSINE),
     }
+    refrag_on = os.environ.get("REFRAG_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
+    if refrag_on:
+        vectors_config[MINI_VECTOR_NAME] = models.VectorParams(
+            size=MINI_VEC_DIM, distance=models.Distance.COSINE
+        )
+    pattern_on = os.environ.get("PATTERN_VECTORS", "").strip().lower() in {"1", "true", "yes", "on"}
+    if pattern_on:
+        vectors_config[PATTERN_VECTOR_NAME] = models.VectorParams(
+            size=PATTERN_VECTOR_DIM, distance=models.Distance.COSINE
+        )
+
+    sparse_cfg = None
+    if LEX_SPARSE_MODE:
+        sparse_cfg = {
+            LEX_SPARSE_NAME: models.SparseVectorParams(
+                index=models.SparseIndexParams(full_scan_threshold=5000)
+            )
+        }
 
     client.create_collection(
         collection_name=collection,
         vectors_config=vectors_config,
+        sparse_vectors_config=sparse_cfg,
         hnsw_config=models.HnswConfigDiff(m=16, ef_construct=256),
     )
     print(f"Created collection: {collection} (dim={dim})")
@@ -229,14 +292,14 @@ def generate_point_id(code_id: str) -> str:
     return hashlib.md5(code_id.encode()).hexdigest()
 
 
-def create_lexical_vector(text: str, dim: int = 256) -> List[float]:
+def create_lexical_vector(text: str, dim: int | None = None) -> List[float]:
     """Create lexical hash vector for hybrid search."""
     try:
-        from scripts.ingest.vectors import _lex_hash_vector
-        return _lex_hash_vector(text, dim)
-    except ImportError:
+        return _lex_hash_vector_text(text, dim)
+    except Exception:
         # Fallback: simple hash-based vector
         import re
+        dim = int(dim or 256)
         vec = [0.0] * dim
         tokens = re.findall(r'\w+', text.lower())
         for t in tokens:
@@ -272,7 +335,13 @@ def index_corpus(
     Returns:
         Stats dict with indexed count, time, errors, reused
     """
-    from scripts.ingest.config import LEX_VECTOR_NAME, LEX_VECTOR_DIM
+    from scripts.ingest.config import (
+        LEX_VECTOR_NAME,
+        LEX_VECTOR_DIM,
+        MINI_VECTOR_NAME,
+        MINI_VEC_DIM,
+    )
+    from scripts.ingest.vectors import project_mini
 
     # force implies recreate (drop & full reindex)
     if force:
@@ -319,6 +388,22 @@ def index_corpus(
 
     # Create collection (recreate=True will drop existing)
     create_collection(client, collection, dim, recreate=recreate)
+
+    refrag_on = os.environ.get("REFRAG_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
+    use_mini = False
+    if refrag_on:
+        try:
+            info = client.get_collection(collection)
+            vcfg = info.config.params.vectors
+            if isinstance(vcfg, dict) and MINI_VECTOR_NAME in vcfg:
+                use_mini = True
+            else:
+                print(
+                    f"[COLLECTION_WARNING] Collection {collection} lacks mini vector "
+                    f"'{MINI_VECTOR_NAME}'. ReFRAG vectors will be skipped."
+                )
+        except Exception:
+            pass
 
     # Build set of already-indexed code_ids by querying Qdrant (skip if recreating)
     indexed_set = set()
@@ -460,9 +545,15 @@ def index_corpus(
                     "imports": symbol_data[i].get("imports", []),
                     "calls": symbol_data[i].get("calls", []),
                 }
+                vecs = {vector_name: dense_vec, LEX_VECTOR_NAME: lex_vec}
+                if use_mini:
+                    try:
+                        vecs[MINI_VECTOR_NAME] = project_mini(dense_vec, MINI_VEC_DIM)
+                    except Exception:
+                        pass
                 points.append(models.PointStruct(
                     id=point_id,
-                    vector={vector_name: dense_vec, LEX_VECTOR_NAME: lex_vec},
+                    vector=vecs,
                     payload=entry_with_fp,
                 ))
             chunk_points.append(points)
@@ -512,4 +603,3 @@ def verify_collection(collection: str = DEFAULT_COLLECTION) -> Dict[str, Any]:
         }
     except Exception as e:
         return {"exists": False, "error": str(e)}
-
