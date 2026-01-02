@@ -35,6 +35,7 @@ from scripts.ingest.pipeline import build_information
 from scripts.ingest.vectors import project_mini, extract_pattern_vector
 from scripts.ingest.qdrant import (
     hash_id,
+    embed_batch,
     get_collection_vector_names,
     PATTERN_VECTOR_NAME,
     PATTERN_VECTOR_DIM,
@@ -335,14 +336,6 @@ def index_corpus(
     Returns:
         Stats dict with indexed count, time, errors, reused
     """
-    from scripts.ingest.config import (
-        LEX_VECTOR_NAME,
-        LEX_VECTOR_DIM,
-        MINI_VECTOR_NAME,
-        MINI_VEC_DIM,
-    )
-    from scripts.ingest.vectors import project_mini
-
     # force implies recreate (drop & full reindex)
     if force:
         recreate = True
@@ -389,27 +382,73 @@ def index_corpus(
     # Create collection (recreate=True will drop existing)
     create_collection(client, collection, dim, recreate=recreate)
 
-    refrag_on = os.environ.get("REFRAG_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
-    use_mini = False
-    if refrag_on:
-        try:
-            info = client.get_collection(collection)
-            vcfg = info.config.params.vectors
-            if isinstance(vcfg, dict) and MINI_VECTOR_NAME in vcfg:
-                use_mini = True
-            else:
-                print(
-                    f"[COLLECTION_WARNING] Collection {collection} lacks mini vector "
-                    f"'{MINI_VECTOR_NAME}'. ReFRAG vectors will be skipped."
-                )
-        except Exception:
-            pass
+    allowed_vectors, allowed_sparse = get_collection_vector_names(client, collection)
+    allow_lex = allowed_vectors is None or LEX_VECTOR_NAME in allowed_vectors
+    allow_mini = allowed_vectors is None or MINI_VECTOR_NAME in allowed_vectors
+    allow_pattern = allowed_vectors is None or PATTERN_VECTOR_NAME in allowed_vectors
+    allow_sparse = allowed_sparse is None or LEX_SPARSE_NAME in allowed_sparse
 
-    # Build set of already-indexed code_ids by querying Qdrant (skip if recreating)
-    indexed_set = set()
+    refrag_on = os.environ.get("REFRAG_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
+    pattern_on = os.environ.get("PATTERN_VECTORS", "").strip().lower() in {"1", "true", "yes", "on"}
+    use_mini = refrag_on and allow_mini
+    use_pattern = pattern_on and allow_pattern
+    use_sparse = LEX_SPARSE_MODE and allow_sparse
+
+    if refrag_on and not allow_mini:
+        print(
+            f"[COLLECTION_WARNING] Collection {collection} lacks mini vector "
+            f"'{MINI_VECTOR_NAME}'. ReFRAG vectors will be skipped."
+        )
+    if pattern_on and not allow_pattern:
+        print(
+            f"[COLLECTION_WARNING] Collection {collection} lacks pattern vector "
+            f"'{PATTERN_VECTOR_NAME}'. Pattern vectors will be skipped."
+        )
+    if LEX_SPARSE_MODE and not allow_sparse:
+        print(
+            f"[COLLECTION_WARNING] Collection {collection} lacks sparse vector "
+            f"'{LEX_SPARSE_NAME}'. Sparse vectors will be skipped."
+        )
+
+    use_micro = os.environ.get("INDEX_MICRO_CHUNKS", "0").strip().lower() in {"1", "true", "yes", "on"}
+    use_semantic = os.environ.get("INDEX_SEMANTIC_CHUNKS", "1").strip().lower() in {"1", "true", "yes", "on"}
+    chunk_lines = int(os.environ.get("INDEX_CHUNK_LINES", "120") or 120)
+    chunk_overlap = int(os.environ.get("INDEX_CHUNK_OVERLAP", "20") or 20)
+
+    def _entry_path(entry: Dict[str, Any]) -> str:
+        meta = entry.get("metadata") or {}
+        return meta.get("path") or f"cosqa/{entry.get('code_id', 'unknown')}.py"
+
+    def _chunk_entry(entry: Dict[str, Any]) -> List[Dict[str, Any]]:
+        text = entry.get("text", "") or ""
+        if not text:
+            return []
+        language = entry.get("language") or "python"
+        if use_micro:
+            try:
+                cap = int(os.environ.get("MAX_MICRO_CHUNKS_PER_FILE", "200") or 200)
+                base_tokens = int(os.environ.get("MICRO_CHUNK_TOKENS", "128") or 128)
+                base_stride = int(os.environ.get("MICRO_CHUNK_STRIDE", "64") or 64)
+                chunks = chunk_by_tokens(text, k_tokens=base_tokens, stride_tokens=base_stride)
+                if cap > 0 and len(chunks) > cap:
+                    scale = (len(chunks) / cap) * 1.1
+                    new_tokens = max(base_tokens, int(base_tokens * scale))
+                    new_stride = max(base_stride, int(base_stride * scale))
+                    chunks = chunk_by_tokens(text, k_tokens=new_tokens, stride_tokens=new_stride)
+            except Exception:
+                chunks = chunk_by_tokens(text)
+        elif use_semantic:
+            chunks = chunk_semantic(text, language, chunk_lines, chunk_overlap)
+        else:
+            chunks = chunk_lines(text, chunk_lines, chunk_overlap)
+        if not chunks:
+            return [{"text": text, "start": 1, "end": 1}]
+        return chunks
+
+    # Build set of already-indexed point IDs by querying Qdrant (skip if recreating)
+    indexed_ids: set[str] = set()
     if resume and not recreate:
         try:
-            # Scroll through collection to get all code_ids
             next_offset = None
             page = 0
             while True:
@@ -417,31 +456,41 @@ def index_corpus(
                     collection_name=collection,
                     limit=1000,
                     offset=next_offset,
-                    with_payload=["code_id"],
+                    with_payload=["pid_str"],
                 )
                 if not points:
                     break
                 for pt in points:
-                    if pt.payload and pt.payload.get("code_id"):
-                        indexed_set.add(pt.payload["code_id"])
+                    if pt.payload and pt.payload.get("pid_str"):
+                        indexed_ids.add(str(pt.payload["pid_str"]))
                 page += 1
                 if next_offset is None:
                     break
-            if indexed_set:
-                print(f"Found {len(indexed_set)} already-indexed entries in Qdrant (scanned {page} pages)")
+            if indexed_ids:
+                print(f"Found {len(indexed_ids)} already-indexed chunks in Qdrant (scanned {page} pages)")
         except Exception as e:
             print(f"Warning: Could not query existing entries: {e}")
 
-    # Filter out already indexed
-    to_index = [e for e in corpus_entries if e["code_id"] not in indexed_set]
+    to_index: List[Dict[str, Any]] = []
+    skipped = 0
+    for entry in corpus_entries:
+        chunks = _chunk_entry(entry)
+        if not chunks:
+            continue
+        if indexed_ids:
+            path = _entry_path(entry)
+            if all(str(hash_id(ch["text"], path, ch["start"], ch["end"])) in indexed_ids for ch in chunks):
+                skipped += 1
+                continue
+        to_index.append({"entry": entry, "chunks": chunks})
 
     if not to_index:
         print(f"All {len(corpus_entries)} entries already indexed")
         return {"indexed": 0, "skipped": len(corpus_entries), "errors": 0, "reused": True}
 
-    print(f"Indexing {len(to_index)} entries (skipping {len(indexed_set)} already indexed)")
+    print(f"Indexing {len(to_index)} entries (skipping {skipped} already indexed)")
 
-    stats = {"indexed": 0, "skipped": len(indexed_set), "errors": 0, "batches": 0}
+    stats = {"indexed": 0, "skipped": skipped, "errors": 0, "batches": 0}
     start_time = time.time()
     total = len(to_index)
     last_pct = 0
@@ -467,94 +516,130 @@ def index_corpus(
 
         # Embed each batch sequentially (fastembed not thread-safe)
         for batch_idx, batch in enumerate(chunk):
-            print(f"  Chunk {chunk_idx+1}/{n_chunks} batch {batch_idx+1}/{len(chunk)}: embedding {len(batch)} items...", end=" ", flush=True)
+            total_chunks = sum(len(item["chunks"]) for item in batch)
+            print(
+                f"  Chunk {chunk_idx+1}/{n_chunks} batch {batch_idx+1}/{len(chunk)}: "
+                f"embedding {total_chunks} chunks...",
+                end=" ",
+                flush=True,
+            )
 
-            # Extract AST symbols and enrich text for better code understanding
-            texts = []
-            symbol_data = []
-            for e in batch:
-                code = e.get('text', '')
-                docstring = e.get('docstring', '')
-                func_name = e.get('func_name', '')
+            chunk_records = []
+            for item in batch:
+                entry = item["entry"]
+                chunks = item["chunks"]
+                code = entry.get("text", "") or ""
+                language = entry.get("language") or "python"
 
-                # Extract symbols using Context-Engine's AST pipeline (with error handling)
                 symbols, imports, calls = [], [], []
                 if _AST_AVAILABLE and code:
                     try:
-                        symbols = _extract_symbols("python", code) or []
-                        imports, calls = _get_imports_calls("python", code) or ([], [])
+                        symbols = _extract_symbols(language, code) or []
+                        imports, calls = _get_imports_calls(language, code) or ([], [])
                     except Exception:
-                        pass  # Fallback to empty for malformed code
+                        pass
 
-                # Build enriched text for embedding:
-                # - Function/class names (from AST)
-                # - Imports (dependencies)
-                # - Docstring (semantic intent)
-                # - Code (implementation)
-                symbol_names = [s.get('name', '') for s in symbols if s.get('name')]
-                import_names = [getattr(imp, 'module', str(imp)) if hasattr(imp, 'module') else str(imp) for imp in imports[:10]]
-                call_names = [getattr(c, 'name', str(c)) if hasattr(c, 'name') else str(c) for c in calls[:10]]
+                symbol_names = [s.get("name", "") for s in symbols if s.get("name")]
+                import_names = [
+                    getattr(imp, "module", str(imp)) if hasattr(imp, "module") else str(imp)
+                    for imp in imports[:10]
+                ]
+                call_names = [
+                    getattr(c, "name", str(c)) if hasattr(c, "name") else str(c)
+                    for c in calls[:10]
+                ]
 
-                # Create enriched text: symbols + imports + docstring + code
-                enriched_parts = []
-                if symbol_names:
-                    enriched_parts.append(f"# Defines: {', '.join(symbol_names[:10])}")
-                if import_names:
-                    enriched_parts.append(f"# Imports: {', '.join(import_names)}")
-                if call_names:
-                    enriched_parts.append(f"# Calls: {', '.join(call_names)}")
-                if docstring:
-                    enriched_parts.append(f'"""{docstring}"""')
-                enriched_parts.append(code)
+                path = _entry_path(entry)
+                for ch_idx, ch in enumerate(chunks):
+                    first_line = ch["text"].splitlines()[0] if ch.get("text") else ""
+                    info = build_information(language, Path(path), ch["start"], ch["end"], first_line)
+                    kind, sym, sym_path = _choose_symbol_for_chunk(ch["start"], ch["end"], symbols)
+                    if ch.get("kind"):
+                        kind = ch.get("kind") or kind
+                    if ch.get("symbol"):
+                        sym = ch.get("symbol") or sym
+                    if ch.get("symbol_path"):
+                        sym_path = ch.get("symbol_path") or sym_path
+                    if not sym:
+                        sym = entry.get("func_name") or entry.get("code_id") or ""
+                    if not sym_path:
+                        sym_path = sym
+                    if not kind:
+                        kind = entry.get("kind") or "function"
 
-                enriched_text = '\n'.join(enriched_parts)
-                texts.append(enriched_text)
-                symbol_data.append({
-                    "symbols": symbol_names[:20],
-                    "imports": import_names,
-                    "calls": call_names,
-                })
+                    pid = hash_id(ch["text"], path, ch["start"], ch["end"])
+                    lex_text = ch.get("text") or ""
+                    entry_with_fp = {
+                        **entry,
+                        CORPUS_FINGERPRINT_KEY: corpus_fingerprint,
+                        "symbols": symbol_names[:20],
+                        "imports": import_names,
+                        "calls": call_names,
+                        "document": info,
+                        "information": info,
+                        "pid_str": str(pid),
+                    }
+                    meta = dict(entry_with_fp.get("metadata") or {})
+                    meta.update({
+                        "path": path,
+                        "path_prefix": str(Path(path).parent),
+                        "language": language,
+                        "kind": kind,
+                        "symbol": sym,
+                        "symbol_path": sym_path,
+                        "start_line": ch["start"],
+                        "end_line": ch["end"],
+                        "text": lex_text,
+                        "code": lex_text,
+                        "imports": import_names,
+                        "calls": call_names,
+                        "source": entry.get("source", "cosqa"),
+                        "chunk_idx": ch_idx,
+                    })
+                    entry_with_fp["metadata"] = meta
 
-            embeddings = list(model.embed(texts))
+                    chunk_records.append({
+                        "id": pid,
+                        "info": info,
+                        "lex_text": lex_text,
+                        "payload": entry_with_fp,
+                        "code_text": lex_text,
+                        "language": language,
+                    })
+
+            embeddings = embed_batch(model, [r["info"] for r in chunk_records])
             print("done", flush=True)
 
             points = []
-            for i, entry in enumerate(batch):
-                code_id = entry["code_id"]
-                point_id = generate_point_id(code_id)
-                emb = embeddings[i]
-                dense_vec = emb.tolist() if hasattr(emb, 'tolist') else list(emb)
-
-                # Lexical vector also includes symbol names for better keyword matching
-                lex_parts = [
-                    entry.get('func_name', ''),
-                    entry.get('docstring', ''),
-                    entry.get('text', ''),
-                    ' '.join(symbol_data[i].get('symbols', [])),
-                    ' '.join(symbol_data[i].get('imports', [])),
-                    ' '.join(symbol_data[i].get('calls', [])),
-                ]
-                lex_text = ' '.join(lex_parts)
-                lex_vec = create_lexical_vector(lex_text, LEX_VECTOR_DIM)
-
-                # Store symbol metadata in payload
-                entry_with_fp = {
-                    **entry,
-                    CORPUS_FINGERPRINT_KEY: corpus_fingerprint,
-                    "symbols": symbol_data[i].get("symbols", []),
-                    "imports": symbol_data[i].get("imports", []),
-                    "calls": symbol_data[i].get("calls", []),
-                }
-                vecs = {vector_name: dense_vec, LEX_VECTOR_NAME: lex_vec}
+            for rec, emb in zip(chunk_records, embeddings):
+                dense_vec = emb
+                vecs = {vector_name: dense_vec}
+                if allow_lex:
+                    vecs[LEX_VECTOR_NAME] = create_lexical_vector(rec["lex_text"], LEX_VECTOR_DIM)
                 if use_mini:
                     try:
-                        vecs[MINI_VECTOR_NAME] = project_mini(dense_vec, MINI_VEC_DIM)
+                        vecs[MINI_VECTOR_NAME] = project_mini(list(dense_vec), MINI_VEC_DIM)
                     except Exception:
                         pass
+                if use_pattern:
+                    try:
+                        pv = extract_pattern_vector(rec["code_text"], rec["language"])
+                        if pv:
+                            vecs[PATTERN_VECTOR_NAME] = pv
+                    except Exception:
+                        pass
+                if use_sparse and rec["lex_text"]:
+                    try:
+                        sparse_vec = _lex_sparse_vector_text(rec["lex_text"])
+                        if sparse_vec.get("indices"):
+                            vecs[LEX_SPARSE_NAME] = models.SparseVector(**sparse_vec)
+                    except Exception:
+                        pass
+
                 points.append(models.PointStruct(
-                    id=point_id,
+                    id=rec["id"],
                     vector=vecs,
-                    payload=entry_with_fp,
+                    payload=rec["payload"],
                 ))
             chunk_points.append(points)
 
