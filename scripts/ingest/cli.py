@@ -40,6 +40,16 @@ def parse_args():
         action="store_true",
         help="Do not skip files whose content hash matches existing index",
     )
+    parser.add_argument(
+        "--schema-mode",
+        type=str,
+        default=None,
+        choices=["validate", "create", "migrate"],
+        help=(
+            "Schema handling mode: validate (read-only), create (create if missing), "
+            "migrate (add missing vectors/indexes). Default preserves legacy behavior."
+        ),
+    )
     # Exclusion controls
     parser.add_argument(
         "--ignore-file",
@@ -224,6 +234,7 @@ def main():
                 dedupe=(not args.no_dedupe),
                 skip_unchanged=(not args.no_skip_unchanged),
                 pseudo_mode="off" if (os.environ.get("PSEUDO_BACKFILL_ENABLED") or "").strip().lower() in {"1", "true", "yes", "on"} else "full",
+                schema_mode=args.schema_mode,
             )
         return
     else:
@@ -252,6 +263,7 @@ def main():
         dedupe=(not args.no_dedupe),
         skip_unchanged=(not args.no_skip_unchanged),
         pseudo_mode=pseudo_mode,
+        schema_mode=args.schema_mode,
     )
 
 

@@ -7,8 +7,18 @@ from types import SimpleNamespace
 import pytest
 from qdrant_client import QdrantClient, models
 
-# Reuse the existing Qdrant testcontainer fixture
-from tests.test_integration_qdrant import qdrant_container  # noqa: F401
+
+@pytest.fixture(scope="module")
+def qdrant_container():
+    """Connect to live Qdrant at localhost:6333 (or QDRANT_URL env var)."""
+    url = os.environ.get("QDRANT_URL", "http://localhost:6333")
+    # Quick health check
+    try:
+        client = QdrantClient(url=url, timeout=5)
+        client.get_collections()
+    except Exception as e:
+        pytest.skip(f"Qdrant not available at {url}: {e}")
+    yield url
 
 
 ing = importlib.import_module("scripts.ingest_code")
@@ -68,16 +78,14 @@ def _get_point_ids(client: QdrantClient, collection_name: str) -> set[str]:
 
 
 def test_memory_backup_restore_happy_path(qdrant_container, monkeypatch):
-    """ensure_collection should backup, recreate, and restore memories.
+    """ensure_collection should avoid destructive changes by default.
 
     Scenario:
     - Start with a collection that has dense+lex vectors and at least one
       "memory" point.
     - Enable REFRAG_MODE so ensure_collection wants to add the mini vector.
-    - Qdrant will reject adding a new vector name via update_collection, so we
-      exercise the backup -> delete -> recreate -> restore path.
-    - In tolerant mode (STRICT_MEMORY_RESTORE not set / 0) indexing should
-      succeed and the memory should still be present.
+    - The collection should be updated (if possible) without recreation.
+    - Existing points should remain intact.
     """
     os.environ["QDRANT_URL"] = qdrant_container
     collection = f"test-mem-{uuid.uuid4().hex[:8]}"
@@ -98,22 +106,16 @@ def test_memory_backup_restore_happy_path(qdrant_container, monkeypatch):
     assert "code" in cfg
     assert ing.LEX_VECTOR_NAME in cfg
 
-    # When REFRAG_MODE is on, mini vector should be present too
-    mini_name = os.environ.get("MINI_VECTOR_NAME", getattr(ing, "MINI_VECTOR_NAME", "mini"))
-    assert mini_name in cfg
+    # When REFRAG_MODE is on, mini vector may be added if supported by the server/client
 
-    # Memory id should still exist after restore, but code points are not restored
+    # Existing points should still exist (no destructive recreate)
     ids = _get_point_ids(client, collection)
     assert "1" in ids
-    assert "2" not in ids
+    assert "2" in ids
 
 
-def test_memory_restore_strict_mode_raises_on_failure(qdrant_container, monkeypatch):
-    """STRICT_MEMORY_RESTORE=1 should turn restore failures into hard errors.
-
-    We let the real backup script run against Qdrant, but we force the restore
-    subprocess to fail and assert that ensure_collection raises.
-    """
+def test_memory_restore_strict_mode_no_recreate(qdrant_container, monkeypatch):
+    """STRICT_MEMORY_RESTORE should not trigger errors when no recreate occurs."""
     os.environ["QDRANT_URL"] = qdrant_container
     collection = f"test-mem-strict-{uuid.uuid4().hex[:8]}"
 
@@ -137,16 +139,16 @@ def test_memory_restore_strict_mode_raises_on_failure(qdrant_container, monkeypa
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    with pytest.raises(RuntimeError):
-        ing.ensure_collection(client, collection, dim=8, vector_name="code")
+    ing.ensure_collection(client, collection, dim=8, vector_name="code")
+
+    ids = _get_point_ids(client, collection)
+    assert "1" in ids
+    assert "2" in ids
 
 
-def test_memory_backup_failure_tolerant_mode_still_recreates_collection(qdrant_container, monkeypatch):
+def test_memory_backup_failure_tolerant_mode_no_recreate(qdrant_container, monkeypatch):
     """If backup fails but STRICT_MEMORY_RESTORE is not set, ensure_collection
-    should still recreate the collection with the correct vectors, even though
-    memories may be dropped.
-
-    This makes the behavior explicit: backup failure is best-effort by default.
+    should still proceed without destructive recreation.
     """
     os.environ["QDRANT_URL"] = qdrant_container
     collection = f"test-mem-backup-fail-{uuid.uuid4().hex[:8]}"
@@ -173,15 +175,14 @@ def test_memory_backup_failure_tolerant_mode_still_recreates_collection(qdrant_c
     info = client.get_collection(collection)
     cfg = info.config.params.vectors
 
-    # Collection should still have the expected vectors (including mini)
+    # Collection should still have the expected vectors
     assert "code" in cfg
     assert ing.LEX_VECTOR_NAME in cfg
-    mini_name = os.environ.get("MINI_VECTOR_NAME", getattr(ing, "MINI_VECTOR_NAME", "mini"))
-    assert mini_name in cfg
 
-    # Because backup failed and no restore occurred, the original memory is gone
+    # Backup failure should not delete existing points
     ids = _get_point_ids(client, collection)
-    assert "1" not in ids
+    assert "1" in ids
+    assert "2" in ids
 
 
 def test_memory_backup_and_restore_scripts_roundtrip(qdrant_container, tmp_path):

@@ -62,6 +62,10 @@ services:
       - TOOL_STORE_DESCRIPTION=${TOOL_STORE_DESCRIPTION}
       - TOOL_FIND_DESCRIPTION=${TOOL_FIND_DESCRIPTION}
       - FASTMCP_HEALTH_PORT=18000
+      # Cross-encoder reranker configuration
+      - RERANKER_MODEL=${RERANKER_MODEL:-}
+      - RERANKER_ONNX_PATH=${RERANKER_ONNX_PATH:-}
+      - RERANKER_TOKENIZER_PATH=${RERANKER_TOKENIZER_PATH:-}
       # Learning reranker configuration
       - RERANK_LEARNING=${RERANK_LEARNING:-1}
       - RERANKER_WEIGHTS_DIR=/tmp/rerank_weights
@@ -146,6 +150,10 @@ services:
       - LEX_SPARSE_NAME=${LEX_SPARSE_NAME:-}
       # Pattern vectors for structural code similarity
       - PATTERN_VECTORS=${PATTERN_VECTORS:-}
+      # Cross-encoder reranker configuration
+      - RERANKER_MODEL=${RERANKER_MODEL:-}
+      - RERANKER_ONNX_PATH=${RERANKER_ONNX_PATH:-}
+      - RERANKER_TOKENIZER_PATH=${RERANKER_TOKENIZER_PATH:-}
       # Learning reranker configuration
       - RERANK_LEARNING=${RERANK_LEARNING:-1}
       - RERANKER_WEIGHTS_DIR=/tmp/rerank_weights
@@ -184,6 +192,10 @@ services:
       - FASTEMBED_CACHE_PATH=/tmp/huggingface/fastembed
       - EMBEDDING_MODEL=${EMBEDDING_MODEL}
       - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER}
+      # Cross-encoder reranker (used as teacher for learning)
+      - RERANKER_MODEL=${RERANKER_MODEL:-}
+      - RERANKER_ONNX_PATH=${RERANKER_ONNX_PATH:-}
+      - RERANKER_TOKENIZER_PATH=${RERANKER_TOKENIZER_PATH:-}
       - RERANK_EVENTS_DIR=/tmp/rerank_events
       - RERANKER_WEIGHTS_DIR=/tmp/rerank_weights
       - RERANK_LEARNING_BATCH_SIZE=${RERANK_LEARNING_BATCH_SIZE:-32}
@@ -251,6 +263,10 @@ services:
       - TOOL_STORE_DESCRIPTION=${TOOL_STORE_DESCRIPTION}
       - TOOL_FIND_DESCRIPTION=${TOOL_FIND_DESCRIPTION}
       - FASTMCP_HEALTH_PORT=18000
+      # Cross-encoder reranker configuration
+      - RERANKER_MODEL=${RERANKER_MODEL:-}
+      - RERANKER_ONNX_PATH=${RERANKER_ONNX_PATH:-}
+      - RERANKER_TOKENIZER_PATH=${RERANKER_TOKENIZER_PATH:-}
       # Learning reranker configuration
       - RERANK_LEARNING=${RERANK_LEARNING:-1}
       - RERANKER_WEIGHTS_DIR=/tmp/rerank_weights
@@ -333,6 +349,10 @@ services:
       - LEX_SPARSE_NAME=${LEX_SPARSE_NAME:-}
       # Pattern vectors for structural code similarity
       - PATTERN_VECTORS=${PATTERN_VECTORS:-}
+      # Cross-encoder reranker configuration
+      - RERANKER_MODEL=${RERANKER_MODEL:-}
+      - RERANKER_ONNX_PATH=${RERANKER_ONNX_PATH:-}
+      - RERANKER_TOKENIZER_PATH=${RERANKER_TOKENIZER_PATH:-}
       # Learning reranker configuration
       - RERANK_LEARNING=${RERANK_LEARNING:-1}
       - RERANKER_WEIGHTS_DIR=/tmp/rerank_weights

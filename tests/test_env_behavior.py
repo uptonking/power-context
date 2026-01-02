@@ -14,6 +14,8 @@ def test_rerank_timeout_floor_and_env_defaults(monkeypatch):
 
     # Floor 1500ms; client asks 200ms -> effective >= 1500ms -> 1.5s
     monkeypatch.setenv("RERANK_TIMEOUT_FLOOR_MS", "1500")
+    # Fix default timeout for test determinism (CI may set a higher value)
+    monkeypatch.setenv("RERANKER_TIMEOUT_MS", "200")
 
     # Fake _run_async to capture calls
     calls = []

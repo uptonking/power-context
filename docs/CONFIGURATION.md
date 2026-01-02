@@ -124,11 +124,39 @@ Dynamic HNSW_EF tuning and intelligent query routing for 2x faster simple querie
 
 ## Reranker
 
+Cross-encoder reranking improves search quality by scoring query-document pairs directly. Context Engine supports two configuration methods:
+
+### FastEmbed Model (Recommended)
+
+Set `RERANKER_MODEL` to use FastEmbed's auto-downloading cross-encoder models:
+
+| Name | Description | Default |
+|------|-------------|---------|
+| RERANKER_MODEL | FastEmbed reranker model name | unset |
+| RERANKER_ENABLED | Enable reranker by default | 1 (enabled) |
+
+**Popular models:**
+- `jinaai/jina-reranker-v2-base-multilingual` - Multilingual, good quality
+- `BAAI/bge-reranker-base` - English-focused, fast
+- `Xenova/ms-marco-MiniLM-L-6-v2` - Lightweight, fast inference
+
+Example:
+```bash
+RERANKER_MODEL=jinaai/jina-reranker-v2-base-multilingual
+RERANKER_ENABLED=1
+```
+
+### Manual ONNX Paths (Legacy)
+
+For custom models or explicit control, set both ONNX path and tokenizer:
+
 | Name | Description | Default |
 |------|-------------|---------|
 | RERANKER_ONNX_PATH | Local ONNX cross-encoder model path | unset |
 | RERANKER_TOKENIZER_PATH | Tokenizer path for reranker | unset |
 | RERANKER_ENABLED | Enable reranker by default | 1 (enabled) |
+
+**Note:** If both `RERANKER_MODEL` and `RERANKER_ONNX_PATH` are set, `RERANKER_MODEL` takes priority.
 
 ## Learning Reranker
 

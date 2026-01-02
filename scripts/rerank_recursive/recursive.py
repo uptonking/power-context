@@ -23,6 +23,30 @@ except ImportError:
     Tokenizer = None
     HAS_ONNX = False
 
+# Use centralized reranker factory (supports FastEmbed + ONNX backends)
+try:
+    from scripts.reranker import (
+        get_reranker_model as _get_reranker_model,
+        rerank_pairs as _rerank_pairs,
+        is_reranker_available as _is_reranker_available,
+        RERANKER_MODEL,
+    )
+    HAS_RERANKER_FACTORY = True
+except ImportError:
+    HAS_RERANKER_FACTORY = False
+    _get_reranker_model = None
+    _rerank_pairs = None
+    _is_reranker_available = None
+    RERANKER_MODEL = None
+
+# Legacy: direct FastEmbed imports (fallback when factory unavailable)
+try:
+    from fastembed.rerank.cross_encoder import TextCrossEncoder
+    HAS_FASTEMBED_RERANK = True
+except ImportError:
+    TextCrossEncoder = None
+    HAS_FASTEMBED_RERANK = False
+
 from scripts.rerank_recursive.state import RefinementState
 from scripts.rerank_recursive.scorer import TinyScorer
 from scripts.rerank_recursive.refiner import LatentRefiner
@@ -73,6 +97,11 @@ class RecursiveReranker:
         self._embedder_lock = threading.Lock()
         self._proj_cache: Dict[int, np.ndarray] = {}
         self._proj_cache_lock = threading.Lock()
+
+        # Observability counters for learning status
+        self._proj_learned_count = 0
+        self._proj_fallback_count = 0
+        self._fallback_warned = False
 
     def _get_embedder(self):
         if self._embedder is not None:
@@ -174,10 +203,26 @@ class RecursiveReranker:
         if embeddings.shape[-1] == self.dim:
             return embeddings
         input_dim = embeddings.shape[-1]
-        if (hasattr(self, '_learned_projection') and
-            self._learned_projection._weights_loaded and
-            self._learned_projection.input_dim == input_dim):
-            return self._learned_projection.forward(embeddings)
+        # Try to use learned projection if available (hot-reloads from worker)
+        if hasattr(self, '_learned_projection') and self._learned_projection.input_dim == input_dim:
+            # forward() calls maybe_reload_weights() internally
+            if self._learned_projection._weights_loaded:
+                self._proj_learned_count += 1
+                return self._learned_projection.forward(embeddings)
+            # Try one reload attempt if not yet loaded
+            self._learned_projection.maybe_reload_weights()
+            if self._learned_projection._weights_loaded:
+                self._proj_learned_count += 1
+                return self._learned_projection.forward(embeddings)
+        # Fallback to random projection
+        self._proj_fallback_count += 1
+        if not self._fallback_warned and self._proj_fallback_count >= 10:
+            from scripts.logger import get_logger
+            get_logger(__name__).warning(
+                f"LearnedProjection not loaded after {self._proj_fallback_count} calls; "
+                f"using random projection (learning may be disabled or weights missing)"
+            )
+            self._fallback_warned = True
         with self._proj_cache_lock:
             if input_dim not in self._proj_cache:
                 rng = np.random.RandomState(44)
@@ -187,6 +232,25 @@ class RecursiveReranker:
         projected = embeddings @ proj_matrix
         norms = np.linalg.norm(projected, axis=-1, keepdims=True) + 1e-8
         return projected / norms
+
+    def get_learning_status(self) -> Dict[str, Any]:
+        """Return observability info for learning components."""
+        scorer_metrics = self.scorer.get_metrics()
+        proj_loaded = (
+            hasattr(self, '_learned_projection') and
+            self._learned_projection._weights_loaded
+        )
+        return {
+            "projection_loaded": proj_loaded,
+            "projection_version": self._learned_projection._version if proj_loaded else 0,
+            "projection_learned_calls": self._proj_learned_count,
+            "projection_fallback_calls": self._proj_fallback_count,
+            "scorer_version": scorer_metrics.get("version", 0),
+            "scorer_converged": scorer_metrics.get("converged", False),
+            "scorer_avg_loss": scorer_metrics.get("avg_loss", 0.0),
+            "scorer_update_count": scorer_metrics.get("update_count", 0),
+            "refiner_version": self.refiner._version,
+        }
 
     def rerank(
         self,
@@ -452,6 +516,127 @@ class ONNXRecursiveReranker(RecursiveReranker):
         return reranked
 
 
+class FastEmbedRecursiveReranker(RecursiveReranker):
+    """Recursive reranker using FastEmbed cross-encoder (via reranker factory).
+
+    Uses the centralized reranker factory which supports both RERANKER_MODEL
+    (FastEmbed auto-download) and legacy RERANKER_ONNX_PATH configs.
+    """
+
+    def __init__(self, n_iterations: int = 3, **kwargs):
+        super().__init__(n_iterations=n_iterations, **kwargs)
+        self._reranker_model = None
+        self._model_lock = threading.Lock()
+
+    def _get_model(self):
+        """Get cached reranker model from factory."""
+        if self._reranker_model is not None:
+            return self._reranker_model
+        if not HAS_RERANKER_FACTORY or _get_reranker_model is None:
+            return None
+        with self._model_lock:
+            if self._reranker_model is not None:
+                return self._reranker_model
+            self._reranker_model = _get_reranker_model()
+            return self._reranker_model
+
+    def _factory_score(self, query: str, docs: List[str]) -> Optional[np.ndarray]:
+        """Score documents using reranker factory."""
+        model = self._get_model()
+        if model is None or _rerank_pairs is None:
+            return None
+        try:
+            pairs = [(query, doc) for doc in docs]
+            scores = _rerank_pairs(pairs, model=model)
+            return np.array(scores, dtype=np.float32)
+        except Exception:
+            return None
+
+    def rerank(
+        self,
+        query: str,
+        candidates: List[Dict[str, Any]],
+        initial_scores: Optional[List[float]] = None,
+    ) -> List[Dict[str, Any]]:
+        if not candidates:
+            return []
+
+        confidence = ConfidenceEstimator()
+
+        doc_texts = []
+        for c in candidates:
+            parts = []
+            if c.get("symbol"):
+                parts.append(str(c["symbol"]))
+            if c.get("path"):
+                parts.append(str(c["path"]))
+            code = c.get("code") or c.get("snippet") or c.get("text") or ""
+            if code:
+                parts.append(str(code)[:400])
+            doc_texts.append(" ".join(parts) if parts else "empty")
+
+        factory_scores = self._factory_score(query, doc_texts)
+        if factory_scores is None:
+            return super().rerank(query, candidates, initial_scores)
+
+        scores = factory_scores.copy()
+        query_emb = self._encode([query])[0]
+        doc_embs = self._encode(doc_texts)
+        query_emb = self._project_to_dim(query_emb.reshape(1, -1))[0]
+        doc_embs = self._project_to_dim(doc_embs)
+
+        z = query_emb.copy()
+        state = RefinementState(z=z, scores=scores, iteration=0)
+        state.score_history.append(scores.copy())
+
+        for i in range(self.n_iterations - 1):
+            state.iteration = i + 1
+            state.z = self.refiner.refine(state.z, query_emb, doc_embs, state.scores)
+            adjustment = self.scorer.forward(query_emb, doc_embs, state.z)
+            try:
+                metrics = self.scorer.get_metrics()
+                if metrics.get("converged", False) and metrics.get("avg_loss", 1.0) < 0.3:
+                    alpha = 0.5
+                elif metrics.get("update_count", 0) > 100:
+                    alpha = 0.35
+                else:
+                    alpha = 0.2
+            except Exception:
+                alpha = 0.2
+            state.scores = (1 - alpha) * state.scores + alpha * adjustment
+            state.score_history.append(state.scores.copy())
+            if self.early_stop and confidence.should_stop(state):
+                break
+
+        final_scores = state.scores
+        if initial_scores is not None and self.blend_with_initial > 0:
+            init_arr = np.array(initial_scores, dtype=np.float32)
+            std = final_scores.std()
+            if std > 1e-6:
+                final_norm = (final_scores - final_scores.mean()) / std
+            else:
+                final_norm = final_scores - final_scores.mean()
+            std = init_arr.std()
+            if std > 1e-6:
+                init_norm = (init_arr - init_arr.mean()) / std
+            else:
+                init_norm = init_arr - init_arr.mean()
+            final_scores = (1 - self.blend_with_initial) * final_norm + self.blend_with_initial * init_norm
+
+        ranked_indices = np.argsort(-final_scores)
+        reranked = []
+        for rank, idx in enumerate(ranked_indices):
+            candidate = candidates[idx].copy()
+            candidate["recursive_score"] = float(final_scores[idx])
+            candidate["factory_score"] = float(factory_scores[idx])
+            candidate["recursive_rank"] = rank
+            candidate["recursive_iterations"] = state.iteration + 1
+            candidate["score_trajectory"] = [float(h[idx]) for h in state.score_history]
+            candidate["score"] = float(final_scores[idx])
+            reranked.append(candidate)
+        return reranked
+
+
 class SessionAwareReranker:
     """Session-aware recursive reranker with latent state carryover."""
 
@@ -704,13 +889,28 @@ def rerank_with_learning(
 
 
 def get_recursive_reranker(n_iterations: int = 3, **kwargs) -> RecursiveReranker:
-    """Get the best available recursive reranker."""
+    """Get the best available recursive reranker.
+
+    Priority:
+    1. RERANKER_MODEL (FastEmbed) via factory -> FastEmbedRecursiveReranker
+    2. RERANKER_ONNX_PATH + RERANKER_TOKENIZER_PATH -> ONNXRecursiveReranker
+    3. Fallback -> base RecursiveReranker (no neural reranking)
+
+    Backwards compatible: existing ONNX configs continue to work.
+    """
+    # Priority 1: Use factory if RERANKER_MODEL is set
+    if HAS_RERANKER_FACTORY and _is_reranker_available is not None:
+        if _is_reranker_available():
+            return FastEmbedRecursiveReranker(n_iterations=n_iterations, **kwargs)
+
+    # Priority 2: Legacy ONNX path (backwards compatibility)
     onnx_path = os.environ.get("RERANKER_ONNX_PATH", "")
     tokenizer_path = os.environ.get("RERANKER_TOKENIZER_PATH", "")
     if HAS_ONNX and onnx_path and tokenizer_path:
         return ONNXRecursiveReranker(n_iterations=n_iterations, **kwargs)
-    else:
-        return RecursiveReranker(n_iterations=n_iterations, **kwargs)
+
+    # Priority 3: Base reranker (no neural scoring)
+    return RecursiveReranker(n_iterations=n_iterations, **kwargs)
 
 
 def rerank_with_session(

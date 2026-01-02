@@ -41,14 +41,254 @@ class CollectionNeedsRecreateError(Exception):
 PATTERN_VECTOR_NAME = "pattern_vector"
 PATTERN_VECTOR_DIM = 64  # Structural pattern embedding dimension
 
+PAYLOAD_INDEX_FIELDS = (
+    "metadata.language",
+    "metadata.path_prefix",
+    "metadata.repo_id",
+    "metadata.repo_rel_path",
+    "metadata.repo",
+    "metadata.kind",
+    "metadata.symbol",
+    "metadata.symbol_path",
+    "metadata.imports",
+    "metadata.calls",
+    "metadata.file_hash",
+    "metadata.ingested_at",
+    "metadata.last_modified_at",
+    "metadata.churn_count",
+    "metadata.author_count",
+    "pid_str",
+)
 
-def ensure_collection(client: QdrantClient, name: str, dim: int, vector_name: str):
+_SCHEMA_MODES = {"legacy", "validate", "create", "migrate"}
+
+
+def _normalize_schema_mode(schema_mode: str | None) -> str:
+    mode = (schema_mode or "").strip().lower()
+    if not mode:
+        return "legacy"
+    if mode in _SCHEMA_MODES:
+        return mode
+    print(f"[COLLECTION_WARNING] Unknown schema_mode={schema_mode!r}; using legacy behavior")
+    return "legacy"
+
+
+def _desired_vector_configs(
+    dim: int,
+    vector_name: str,
+) -> tuple[Dict[str, models.VectorParams], Dict[str, models.SparseVectorParams] | None]:
+    vectors_cfg: Dict[str, models.VectorParams] = {
+        vector_name: models.VectorParams(size=dim, distance=models.Distance.COSINE),
+        LEX_VECTOR_NAME: models.VectorParams(
+            size=LEX_VECTOR_DIM, distance=models.Distance.COSINE
+        ),
+    }
+    try:
+        if os.environ.get("REFRAG_MODE", "").strip().lower() in {"1", "true", "yes", "on"}:
+            vectors_cfg[MINI_VECTOR_NAME] = models.VectorParams(
+                size=int(os.environ.get("MINI_VEC_DIM", MINI_VEC_DIM) or MINI_VEC_DIM),
+                distance=models.Distance.COSINE,
+            )
+    except Exception:
+        pass
+    try:
+        if os.environ.get("PATTERN_VECTORS", "").strip().lower() in {"1", "true", "yes", "on"}:
+            vectors_cfg[PATTERN_VECTOR_NAME] = models.VectorParams(
+                size=PATTERN_VECTOR_DIM,
+                distance=models.Distance.COSINE,
+            )
+    except Exception:
+        pass
+
+    sparse_cfg = None
+    if LEX_SPARSE_MODE:
+        sparse_cfg = {
+            LEX_SPARSE_NAME: models.SparseVectorParams(
+                index=models.SparseIndexParams(full_scan_threshold=5000)
+            )
+        }
+    return vectors_cfg, sparse_cfg
+
+
+def _as_vector_params_diff(vec: models.VectorParams) -> Any:
+    diff_cls = getattr(models, "VectorParamsDiff", None)
+    if diff_cls is None:
+        return vec
+    try:
+        return diff_cls(
+            size=getattr(vec, "size", None) or getattr(vec, "dim", None),
+            distance=getattr(vec, "distance", None),
+            hnsw_config=getattr(vec, "hnsw_config", None),
+            quantization_config=getattr(vec, "quantization_config", None),
+            on_disk=getattr(vec, "on_disk", None),
+            datatype=getattr(vec, "datatype", None),
+            multivector_config=getattr(vec, "multivector_config", None),
+        )
+    except Exception:
+        return vec
+
+
+def _prepare_vector_update_config(
+    vectors_cfg: Dict[str, models.VectorParams],
+) -> Dict[str, Any]:
+    return {name: _as_vector_params_diff(params) for name, params in vectors_cfg.items()}
+
+
+def _missing_payload_indexes(info: Any) -> list[str]:
+    schema = getattr(info, "payload_schema", None)
+    if isinstance(schema, dict):
+        existing = set(schema.keys())
+    else:
+        existing = set()
+    return [field for field in PAYLOAD_INDEX_FIELDS if field not in existing]
+
+
+def get_collection_vector_names(
+    client: QdrantClient,
+    name: str,
+) -> tuple[set[str] | None, set[str] | None]:
+    """Return (dense_vector_names, sparse_vector_names) for a collection.
+
+    Returns (None, None) if the schema cannot be inspected.
+    """
+    if not name:
+        return None, None
+    try:
+        info = client.get_collection(name)
+    except Exception:
+        return None, None
+
+    vectors_cfg = getattr(info.config.params, "vectors", None)
+    if isinstance(vectors_cfg, dict):
+        dense_names = set(vectors_cfg.keys())
+    else:
+        dense_names = None
+
+    sparse_cfg = getattr(info.config.params, "sparse_vectors", None)
+    if isinstance(sparse_cfg, dict):
+        sparse_names = set(sparse_cfg.keys())
+    else:
+        sparse_names = set() if dense_names is not None else None
+
+    return dense_names, sparse_names
+
+
+def _ensure_collection_with_mode(
+    client: QdrantClient,
+    name: str,
+    dim: int,
+    vector_name: str,
+    mode: str,
+) -> None:
+    if not name:
+        print("[BUG] ensure_collection called with name=None! Fix the caller - collection name is required.", flush=True)
+        return
+
+    vectors_cfg, sparse_cfg = _desired_vector_configs(dim, vector_name)
+    desired_vectors = set(vectors_cfg.keys())
+    desired_sparse = set(sparse_cfg.keys()) if sparse_cfg else set()
+
+    try:
+        info = client.get_collection(name)
+    except Exception as e:
+        if mode == "validate":
+            raise RuntimeError(
+                f"Collection {name} does not exist; run with --schema-mode create "
+                "or --recreate to create it."
+            ) from e
+        client.create_collection(
+            collection_name=name,
+            vectors_config=vectors_cfg,
+            sparse_vectors_config=sparse_cfg,
+            hnsw_config=models.HnswConfigDiff(m=16, ef_construct=256),
+        )
+        sparse_info = f", sparse: [{LEX_SPARSE_NAME}]" if sparse_cfg else ""
+        print(
+            f"[COLLECTION_INFO] Successfully created new collection {name} with vectors: "
+            f"{list(vectors_cfg.keys())}{sparse_info}"
+        )
+        ensure_payload_indexes(client, name)
+        return
+
+    cfg = getattr(info.config.params, "vectors", None)
+    if not isinstance(cfg, dict):
+        if mode == "validate":
+            raise RuntimeError(
+                f"Collection {name} uses unnamed vector schema; cannot validate. "
+                "Recreate the collection with named vectors."
+            )
+        return
+
+    sparse_existing_cfg = getattr(info.config.params, "sparse_vectors", None)
+    existing_vectors = set(cfg.keys())
+    existing_sparse = (
+        set(sparse_existing_cfg.keys())
+        if isinstance(sparse_existing_cfg, dict)
+        else set()
+    )
+
+    missing_vectors = sorted(desired_vectors - existing_vectors)
+    missing_sparse = sorted(desired_sparse - existing_sparse)
+    missing_indexes = _missing_payload_indexes(info)
+
+    if mode in {"validate", "create"}:
+        if missing_vectors or missing_sparse or missing_indexes:
+            parts = []
+            if missing_vectors:
+                parts.append(f"vectors={missing_vectors}")
+            if missing_sparse:
+                parts.append(f"sparse={missing_sparse}")
+            if missing_indexes:
+                parts.append(f"payload_indexes={missing_indexes}")
+            detail = ", ".join(parts) if parts else "unknown schema mismatch"
+            raise RuntimeError(
+                f"Collection {name} schema mismatch ({detail}). "
+                "Run with --schema-mode migrate or --recreate to update it."
+            )
+        return
+
+    # migrate: allow additive changes but avoid destructive recreation
+    if missing_sparse:
+        raise RuntimeError(
+            f"Collection {name} missing sparse vectors {missing_sparse}. "
+            "Recreate the collection (e.g., --recreate) to add sparse vectors, "
+            "or disable LEX_SPARSE_MODE."
+        )
+
+    if missing_vectors:
+        missing_cfg = {k: vectors_cfg[k] for k in missing_vectors if k in vectors_cfg}
+        missing_cfg = _prepare_vector_update_config(missing_cfg)
+        try:
+            client.update_collection(collection_name=name, vectors_config=missing_cfg)
+            print(f"[COLLECTION_SUCCESS] Successfully updated collection {name} with missing vectors")
+        except Exception as update_e:
+            raise RuntimeError(
+                f"Cannot add missing vectors to {name} ({update_e}). "
+                "Recreate the collection (e.g., --recreate) to apply schema changes."
+            ) from update_e
+
+    if missing_indexes:
+        ensure_payload_indexes(client, name)
+
+
+def ensure_collection(
+    client: QdrantClient,
+    name: str,
+    dim: int,
+    vector_name: str,
+    *,
+    schema_mode: str | None = None,
+):
     """Ensure collection exists with named vectors.
 
     Always includes dense (vector_name) and lexical (LEX_VECTOR_NAME).
     When REFRAG_MODE=1, also includes a compact mini vector (MINI_VECTOR_NAME).
     When PATTERN_VECTORS=1, also includes pattern_vector for structural similarity.
     """
+    mode = _normalize_schema_mode(schema_mode)
+    if mode != "legacy":
+        _ensure_collection_with_mode(client, name, dim, vector_name, mode)
+        return
     if not name:
         print("[BUG] ensure_collection called with name=None! Fix the caller - collection name is required.", flush=True)
         return
@@ -64,14 +304,10 @@ def ensure_collection(client: QdrantClient, name: str, dim: int, vector_name: st
                 has_sparse = sparse_cfg and LEX_SPARSE_NAME in (sparse_cfg if isinstance(sparse_cfg, dict) else {})
 
                 if LEX_SPARSE_MODE and not has_sparse:
-                    print(f"[COLLECTION_INFO] Collection {name} lacks sparse vector '{LEX_SPARSE_NAME}' - recreating...")
-                    backup_file = _backup_memories_before_recreate(name)
-                    try:
-                        client.delete_collection(name)
-                        print(f"[COLLECTION_INFO] Deleted existing collection {name}")
-                    except Exception:
-                        pass
-                    raise CollectionNeedsRecreateError(f"Collection {name} needs sparse vectors")
+                    print(
+                        f"[COLLECTION_WARNING] Collection {name} lacks sparse vector '{LEX_SPARSE_NAME}'. "
+                        "Sparse indexing will be skipped for this run."
+                    )
 
                 missing = {}
                 if not has_lex:
@@ -110,22 +346,16 @@ def ensure_collection(client: QdrantClient, name: str, dim: int, vector_name: st
 
                 if missing:
                     try:
+                        update_cfg = _prepare_vector_update_config(missing)
                         client.update_collection(
-                            collection_name=name, vectors_config=missing
+                            collection_name=name, vectors_config=update_cfg
                         )
                         print(f"[COLLECTION_SUCCESS] Successfully updated collection {name} with missing vectors")
                     except Exception as update_e:
-                        print(f"[COLLECTION_WARNING] Cannot add missing vectors to {name} ({update_e}). Recreating collection...")
-                        backup_file = _backup_memories_before_recreate(name)
-                        try:
-                            client.delete_collection(name)
-                            print(f"[COLLECTION_INFO] Deleted existing collection {name}")
-                        except Exception:
-                            pass
-                        raise CollectionNeedsRecreateError(f"Collection {name} needs recreation for new vectors")
-        except CollectionNeedsRecreateError:
-            print(f"[COLLECTION_INFO] Collection {name} needs recreation - proceeding...")
-            raise
+                        print(
+                            f"[COLLECTION_WARNING] Cannot add missing vectors to {name} ({update_e}). "
+                            "Continuing without them for this run."
+                        )
         except Exception as e:
             print(f"[COLLECTION_ERROR] Failed to update collection {name}: {e}")
             pass
@@ -307,24 +537,7 @@ def recreate_collection(client: QdrantClient, name: str, dim: int, vector_name: 
 
 def ensure_payload_indexes(client: QdrantClient, collection: str):
     """Create helpful payload indexes if they don't exist (idempotent)."""
-    for field in (
-        "metadata.language",
-        "metadata.path_prefix",
-        "metadata.repo_id",
-        "metadata.repo_rel_path",
-        "metadata.repo",
-        "metadata.kind",
-        "metadata.symbol",
-        "metadata.symbol_path",
-        "metadata.imports",
-        "metadata.calls",
-        "metadata.file_hash",
-        "metadata.ingested_at",
-        "metadata.last_modified_at",
-        "metadata.churn_count",
-        "metadata.author_count",
-        "pid_str",
-    ):
+    for field in PAYLOAD_INDEX_FIELDS:
         try:
             client.create_payload_index(
                 collection_name=collection,
@@ -340,11 +553,14 @@ def ensure_collection_and_indexes_once(
     collection: str,
     dim: int,
     vector_name: str | None,
+    *,
+    schema_mode: str | None = None,
 ) -> None:
     """Ensure collection and indexes exist (cached per-process)."""
     if not collection:
         return
-    if collection in ENSURED_COLLECTIONS:
+    mode = _normalize_schema_mode(schema_mode)
+    if mode not in {"validate", "create"} and collection in ENSURED_COLLECTIONS:
         try:
             ping_seconds = float(os.environ.get("ENSURED_COLLECTION_PING_SECONDS", "0") or 0)
         except Exception:
@@ -370,13 +586,15 @@ def ensure_collection_and_indexes_once(
                 ENSURED_COLLECTIONS_LAST_CHECK.pop(collection, None)
             except Exception:
                 pass
-    ensure_collection(client, collection, dim, vector_name)
-    ensure_payload_indexes(client, collection)
-    ENSURED_COLLECTIONS.add(collection)
-    try:
-        ENSURED_COLLECTIONS_LAST_CHECK[collection] = time.time()
-    except Exception:
-        pass
+    ensure_collection(client, collection, dim, vector_name, schema_mode=mode)
+    if mode in {"legacy", "migrate"}:
+        ensure_payload_indexes(client, collection)
+    if mode != "validate":
+        ENSURED_COLLECTIONS.add(collection)
+        try:
+            ENSURED_COLLECTIONS_LAST_CHECK[collection] = time.time()
+        except Exception:
+            pass
 
 
 def get_indexed_file_hash(
