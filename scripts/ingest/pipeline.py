@@ -517,6 +517,7 @@ def index_repo(
     dedupe: bool = True,
     skip_unchanged: bool = True,
     pseudo_mode: str = "full",
+    schema_mode: str | None = None,
 ):
     """Index a repository into Qdrant."""
     fast_fs = _env_truthy(os.environ.get("INDEX_FS_FASTPATH"), False)
@@ -599,11 +600,32 @@ def index_repo(
     if recreate:
         recreate_collection(client, collection, dim, vector_name)
 
+    ensure_mode = schema_mode
+    mode_value = (ensure_mode or "legacy").strip().lower()
+    if recreate and mode_value in {"validate", "create"}:
+        ensure_mode = "migrate"
+        mode_value = "migrate"
+
     try:
-        ensure_collection_and_indexes_once(client, collection, dim, vector_name)
+        ensure_collection_and_indexes_once(
+            client,
+            collection,
+            dim,
+            vector_name,
+            schema_mode=ensure_mode,
+        )
     except Exception:
-        ensure_collection(client, collection, dim, vector_name)
-        ensure_payload_indexes(client, collection)
+        if mode_value in {"validate", "create"}:
+            raise
+        ensure_collection(
+            client,
+            collection,
+            dim,
+            vector_name,
+            schema_mode=ensure_mode,
+        )
+        if mode_value in {"legacy", "migrate"}:
+            ensure_payload_indexes(client, collection)
 
     is_multi_repo = bool(is_multi_repo_mode and is_multi_repo_mode())
     root_repo_for_cache = (
@@ -1114,6 +1136,7 @@ def pseudo_backfill_tick(
     max_points: int = 256,
     dim: int | None = None,
     vector_name: str | None = None,
+    schema_mode: str | None = None,
 ) -> int:
     """Best-effort pseudo/tag backfill for a collection."""
     from scripts.ingest.qdrant import ensure_collection_and_indexes_once
@@ -1176,7 +1199,13 @@ def pseudo_backfill_tick(
         if not dim or not vector_name:
             return False
         try:
-            ensure_collection_and_indexes_once(client, collection, int(dim), vector_name)
+            ensure_collection_and_indexes_once(
+                client,
+                collection,
+                int(dim),
+                vector_name,
+                schema_mode=schema_mode,
+            )
             return True
         except Exception:
             return False
