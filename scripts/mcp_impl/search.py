@@ -526,8 +526,6 @@ async def _repo_search_impl(
 
             model_name = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
             model = get_embedding_model_fn(model_name) if get_embedding_model_fn else None
-            # Ensure hybrid_search uses the intended collection when running in-process
-            prev_coll = os.environ.get("COLLECTION_NAME")
             # Determine effective hybrid candidate limit: if rerank is enabled, search up to rerank_top_n
             try:
                 base_limit = int(limit)
@@ -541,41 +539,32 @@ async def _repo_search_impl(
                     rt = 0
                 if rt > eff_limit:
                     eff_limit = rt
-            try:
-                os.environ["COLLECTION_NAME"] = collection
-                # In-process path_glob/not_glob accept a single string; reduce list inputs safely
-                items = run_hybrid_search(
-                    queries=queries,
-                    limit=eff_limit,
-                    per_path=(
-                        int(per_path)
-                        if (per_path is not None and str(per_path).strip() != "")
-                        else 1
-                    ),
-                    language=language or None,
-                    under=under or None,
-                    kind=kind or None,
-                    symbol=symbol or None,
-                    ext=ext or None,
-                    not_filter=not_ or None,
-                    case=case or None,
-                    path_regex=path_regex or None,
-                    path_glob=(path_globs or None),
-                    not_glob=(not_globs or None),
-                    expand=str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower()
-                    in {"1", "true", "yes", "on"},
-                    model=model,
-                    mode=mode_str or None,
-                    repo=repo_filter,  # Cross-codebase isolation
-                )
-            finally:
-                if prev_coll is None:
-                    try:
-                        del os.environ["COLLECTION_NAME"]
-                    except Exception:
-                        pass
-                else:
-                    os.environ["COLLECTION_NAME"] = prev_coll
+            # In-process path_glob/not_glob accept a single string; reduce list inputs safely
+            items = run_hybrid_search(
+                queries=queries,
+                limit=eff_limit,
+                per_path=(
+                    int(per_path)
+                    if (per_path is not None and str(per_path).strip() != "")
+                    else 1
+                ),
+                language=language or None,
+                under=under or None,
+                kind=kind or None,
+                symbol=symbol or None,
+                ext=ext or None,
+                not_filter=not_ or None,
+                case=case or None,
+                path_regex=path_regex or None,
+                path_glob=(path_globs or None),
+                not_glob=(not_globs or None),
+                expand=str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower()
+                in {"1", "true", "yes", "on"},
+                model=model,
+                collection=collection,
+                mode=mode_str or None,
+                repo=repo_filter,  # Cross-codebase isolation
+            )
             # items are already in structured dict form
             json_lines = items  # reuse downstream shaping
         except Exception as e:
@@ -648,42 +637,31 @@ async def _repo_search_impl(
 
                 model_name = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
                 model = get_embedding_model_fn(model_name) if get_embedding_model_fn else None
-                # Set collection env for hybrid_search fallback (matches in-process path)
-                prev_coll_fb = os.environ.get("COLLECTION_NAME")
-                try:
-                    os.environ["COLLECTION_NAME"] = collection
-                    items = run_hybrid_search(
-                        queries=queries,
-                        limit=int(limit),
-                        per_path=(
-                            int(per_path)
-                            if (per_path is not None and str(per_path).strip() != "")
-                            else 1
-                        ),
-                        language=language or None,
-                        under=under or None,
-                        kind=kind or None,
-                        symbol=symbol or None,
-                        ext=ext or None,
-                        not_filter=not_ or None,
-                        case=case or None,
-                        path_regex=path_regex or None,
-                        path_glob=(path_globs or None),
-                        not_glob=(not_globs or None),
-                        expand=str(os.environ.get("HYBRID_EXPAND", "0")).strip().lower()
-                        in {"1", "true", "yes", "on"},
-                        model=model,
-                        mode=mode_str or None,
-                        repo=repo_filter,  # Cross-codebase isolation
-                    )
-                finally:
-                    if prev_coll_fb is None:
-                        try:
-                            del os.environ["COLLECTION_NAME"]
-                        except Exception:
-                            pass
-                    else:
-                        os.environ["COLLECTION_NAME"] = prev_coll_fb
+                items = run_hybrid_search(
+                    queries=queries,
+                    limit=int(limit),
+                    per_path=(
+                        int(per_path)
+                        if (per_path is not None and str(per_path).strip() != "")
+                        else 1
+                    ),
+                    language=language or None,
+                    under=under or None,
+                    kind=kind or None,
+                    symbol=symbol or None,
+                    ext=ext or None,
+                    not_filter=not_ or None,
+                    case=case or None,
+                    path_regex=path_regex or None,
+                    path_glob=(path_globs or None),
+                    not_glob=(not_globs or None),
+                    expand=str(os.environ.get("HYBRID_EXPAND", "0")).strip().lower()
+                    in {"1", "true", "yes", "on"},
+                    model=model,
+                    collection=collection,
+                    mode=mode_str or None,
+                    repo=repo_filter,  # Cross-codebase isolation
+                )
                 json_lines = items
             except Exception:
                 pass
@@ -1433,4 +1411,3 @@ async def _repo_search_impl(
     if _should_use_toon(output_format):
         return _format_results_as_toon(response, compact=bool(compact))
     return response
-
