@@ -64,6 +64,30 @@ CoSQA evaluates natural language to code retrieval using web search queries pair
 python -m scripts.benchmarks.cosqa.runner --limit 500
 ```
 
+#### CoSQA ablation runs (refrag/mini, rerank, learning)
+
+Use the helper script to run a consistent matrix across:
+- rerank vs no rerank
+- ReFRAG/mini vectors vs no ReFRAG
+- learning vs no learning
+
+```bash
+# Default: 50/50 subset per run, new collection per variant
+bash scripts/benchmarks/cosqa/run_ablation.sh
+
+# Full corpus/queries (set 0 to disable limits)
+CORPUS_LIMIT=0 QUERY_LIMIT=0 RUN_TAG=full \
+  bash scripts/benchmarks/cosqa/run_ablation.sh
+```
+
+Outputs:
+- JSON reports: `cosqa_<label>_<RUN_TAG>.json`
+- Logs: `/tmp/cosqa_<label>_<RUN_TAG>.log` (override with `LOG_DIR=...`)
+
+Useful knobs (env):
+- `QDRANT_URL`, `LEX_VECTOR_DIM`, `HYBRID_EXPAND`, `SEMANTIC_EXPANSION_ENABLED`
+- `RUN_TAG`, `COLL_PREFIX`, `OUT_DIR`, `LOG_DIR`
+
 #### Quick subset runs (smoke tests)
 
 When you use `--corpus-limit`, the runner builds a corpus subset that includes
