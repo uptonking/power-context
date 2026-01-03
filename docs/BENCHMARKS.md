@@ -159,12 +159,13 @@ python -m scripts.benchmarks.coir.runner
 python -m scripts.benchmarks.coir.runner --tasks cosqa codesearchnet-python apps
 
 # Quick test with subset
-python -m scripts.benchmarks.coir.runner --tasks cosqa --limit 100
+python -m scripts.benchmarks.coir.runner --tasks cosqa --query-limit 100 --corpus-limit 100
 
 # Ablation sweep (rerank ± ReFRAG ± micro-chunks)
 ./scripts/benchmarks/coir/run_ablation.sh \
   TASKS="cosqa codesearchnet-python" \
-  LIMIT=200 \
+  QUERY_LIMIT=200 \
+  CORPUS_LIMIT=200 \
   OUT_DIR=bench_results/coir/$(date +%Y%m%d-%H%M%S)
 ```
 

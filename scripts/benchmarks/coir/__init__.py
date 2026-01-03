@@ -22,7 +22,7 @@ Usage:
     python -m scripts.benchmarks.coir.runner --tasks cosqa codesearchnet-python
 
     # Quick test with subset
-    python -m scripts.benchmarks.coir.runner --tasks cosqa --limit 100
+    python -m scripts.benchmarks.coir.runner --tasks cosqa --query-limit 100 --corpus-limit 100
 
 Programmatic Usage:
     from scripts.benchmarks.coir import run_coir_benchmark
@@ -82,4 +82,3 @@ def __getattr__(name):
         from scripts.benchmarks.coir.runner import CoIRReport
         return CoIRReport
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-

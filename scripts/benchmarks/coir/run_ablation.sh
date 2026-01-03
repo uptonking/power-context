@@ -9,7 +9,8 @@ RUN_TAG="${RUN_TAG:-$(date +%Y%m%d-%H%M%S)}"
 OUT_DIR="${OUT_DIR:-bench_results/coir/${RUN_TAG}}"
 LOG_DIR="${LOG_DIR:-${OUT_DIR}}"
 TASKS="${TASKS:-cosqa codesearchnet-python}"
-LIMIT="${LIMIT:-200}"
+QUERY_LIMIT="${QUERY_LIMIT:-200}"
+CORPUS_LIMIT="${CORPUS_LIMIT:-200}"
 BATCH_SIZE="${BATCH_SIZE:-64}"
 
 BASE_ENV=(
@@ -44,10 +45,15 @@ run_one() {
     "--batch-size" "${BATCH_SIZE}"
     "--output-folder" "${OUT_DIR}"
     "--output" "${output}"
-    "--limit" "${LIMIT}"
     "--tasks"
   )
   args+=("${task_arr[@]}")
+  if [ "${QUERY_LIMIT}" -gt 0 ]; then
+    args+=("--query-limit" "${QUERY_LIMIT}")
+  fi
+  if [ "${CORPUS_LIMIT}" -gt 0 ]; then
+    args+=("--corpus-limit" "${CORPUS_LIMIT}")
+  fi
   if [ "${rerank}" = "0" ]; then
     args+=("--no-rerank")
   fi

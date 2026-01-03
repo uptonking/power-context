@@ -113,12 +113,9 @@ def _ensure_env_defaults() -> None:
         pass
 
 
-def _load_coir_tasks(task_names: List[str], limit: Optional[int] = None) -> Any:
+def _load_coir_tasks(task_names: List[str]) -> Any:
     """
     Load tasks using coir-eval.
-
-    We use signature introspection so this code stays compatible across minor
-    upstream API changes (e.g., `limit` vs `max_samples`).
     """
     try:
         from coir.data_loader import get_tasks  # type: ignore
@@ -127,24 +124,7 @@ def _load_coir_tasks(task_names: List[str], limit: Optional[int] = None) -> Any:
             "Missing dependency: coir-eval. Install with: pip install coir-eval"
         ) from e
 
-    import inspect
-
-    kwargs: Dict[str, Any] = {"tasks": list(task_names)}
-    if limit is not None:
-        sig = None
-        try:
-            sig = inspect.signature(get_tasks)
-        except Exception:
-            sig = None
-        if sig is not None:
-            if "limit" in sig.parameters:
-                kwargs["limit"] = int(limit)
-            elif "max_samples" in sig.parameters:
-                kwargs["max_samples"] = int(limit)
-            elif "n_samples" in sig.parameters:
-                kwargs["n_samples"] = int(limit)
-
-    return get_tasks(**kwargs)
+    return get_tasks(tasks=list(task_names))
 
 
 def _safe_len(obj: Any) -> Optional[int]:
@@ -316,6 +296,7 @@ def _evaluate_with_custom_search(
     model: ContextEngineRetriever,
     output_folder: str,
     top_k: int = 10,
+    query_limit: Optional[int] = None,
     corpus_limit: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
@@ -328,7 +309,8 @@ def _evaluate_with_custom_search(
     This function calls model.search() directly and computes metrics ourselves.
 
     Args:
-        corpus_limit: If set, cap the corpus size for faster smoke tests.
+        query_limit: If set, cap the number of queries (for quick testing).
+        corpus_limit: If set, cap the corpus size (for quick testing).
     """
     import json as json_mod
     from datetime import datetime
@@ -374,30 +356,15 @@ def _evaluate_with_custom_search(
             print(f"[coir][warn] Could not extract corpus/queries/qrels for {task_name}", flush=True)
             continue
 
-        # Apply corpus limit for smoke tests
-        if corpus_limit is not None and len(corpus) > corpus_limit:
-            print(f"[coir] Limiting corpus from {len(corpus)} to {corpus_limit} docs", flush=True)
-            # Keep only corpus docs that are referenced in qrels (for valid eval)
-            # Then fill up to corpus_limit with additional docs
-            relevant_doc_ids = set()
-            for _, rels in qrels.items():
-                relevant_doc_ids.update(rels.keys())
+        # Apply query/corpus limits (CoSQA-style subset building)
+        original_corpus_size = len(corpus)
+        original_query_count = len(queries)
+        corpus, queries, qrels, subset_note = _build_subset(
+            corpus, queries, qrels, query_limit=query_limit, corpus_limit=corpus_limit
+        )
 
-            # Build limited corpus: relevant docs first, then random others
-            limited_corpus = {}
-            for doc_id in relevant_doc_ids:
-                if doc_id in corpus and len(limited_corpus) < corpus_limit:
-                    limited_corpus[doc_id] = corpus[doc_id]
-
-            # Fill remaining slots with other docs
-            for doc_id, doc in corpus.items():
-                if len(limited_corpus) >= corpus_limit:
-                    break
-                if doc_id not in limited_corpus:
-                    limited_corpus[doc_id] = doc
-
-            corpus = limited_corpus
-            print(f"[coir] Limited corpus size: {len(corpus)}", flush=True)
+        if subset_note:
+            print(f"[coir] {subset_note}: {original_query_count}→{len(queries)} queries, {original_corpus_size}→{len(corpus)} docs", flush=True)
 
         # CRITICAL: Call OUR search() method directly
         # This uses hybrid search + reranking - the full Context-Engine pipeline
@@ -434,11 +401,11 @@ def _evaluate_with_custom_search(
 
 def run_coir_benchmark_sync(
     tasks: Optional[List[str]] = None,
-    limit: Optional[int] = None,
     batch_size: int = 64,
     rerank_enabled: bool = True,
     output_folder: Optional[str] = None,
     top_k: int = 10,
+    query_limit: Optional[int] = None,
     corpus_limit: Optional[int] = None,
     **kwargs: Any,
 ) -> CoIRReport:
@@ -447,12 +414,12 @@ def run_coir_benchmark_sync(
 
     Args:
       tasks: list of task names (subset of COIR_TASKS)
-      limit: optional sample limit passed to coir task loader (best-effort)
       batch_size: batch size for coir-eval (if supported)
       rerank_enabled: whether repo_search should attempt reranking
       output_folder: where to write coir-eval artifacts (if supported)
       top_k: number of results to retrieve per query
-      corpus_limit: cap corpus size for faster smoke tests
+      query_limit: cap query count for faster smoke tests (reliable)
+      corpus_limit: cap corpus size for faster smoke tests (reliable)
     """
     _ensure_env_defaults()
 
@@ -462,8 +429,8 @@ def run_coir_benchmark_sync(
         raise ValueError(f"Unknown CoIR task(s): {invalid}. Known: {COIR_TASKS}")
 
     # Load tasks (may download data)
-    print(f"[coir] Loading tasks: {task_names} (limit={limit})", flush=True)
-    tasks_obj = _load_coir_tasks(task_names, limit=limit)
+    print(f"[coir] Loading tasks: {task_names}", flush=True)
+    tasks_obj = _load_coir_tasks(task_names)
     task_stats = _summarize_task_sizes(tasks_obj)
     if task_stats:
         print(f"[coir] Task sizes: {task_stats}", flush=True)
@@ -472,23 +439,9 @@ def run_coir_benchmark_sync(
 
     runtime_info = get_runtime_info()
     runtime_info["coir_tasks"] = list(task_names)
-    runtime_info["coir_limit_requested"] = limit
     runtime_info["coir_task_stats"] = task_stats
-
-    if limit is not None and task_stats:
-        limit_warnings: List[str] = []
-        for stat in task_stats:
-            task_name = stat.get("task") or "unknown"
-            for key in ("corpus_size", "query_size"):
-                size = stat.get(key)
-                if size is not None and size > int(limit * 1.1):
-                    limit_warnings.append(
-                        f"{task_name} {key}={size} exceeds requested limit={limit}"
-                    )
-        if limit_warnings:
-            runtime_info["coir_limit_warnings"] = limit_warnings
-            for msg in limit_warnings:
-                print(f"[coir][warn] {msg}", flush=True)
+    runtime_info["coir_query_limit"] = query_limit
+    runtime_info["coir_corpus_limit"] = corpus_limit
 
     print("[coir] Tasks loaded. Starting evaluation...", flush=True)
 
@@ -509,7 +462,7 @@ def run_coir_benchmark_sync(
     # encode_queries/encode_corpus and does its own similarity computation,
     # completely bypassing our hybrid search, reranking, and other features.
     raw = _evaluate_with_custom_search(
-        tasks_obj, model, out_dir, top_k=top_k, corpus_limit=corpus_limit
+        tasks_obj, model, out_dir, top_k=top_k, query_limit=query_limit, corpus_limit=corpus_limit
     )
 
     print("[coir] Evaluation complete.", flush=True)
@@ -518,11 +471,11 @@ def run_coir_benchmark_sync(
 
 async def run_coir_benchmark(
     tasks: Optional[List[str]] = None,
-    limit: Optional[int] = None,
     batch_size: int = 64,
     rerank_enabled: bool = True,
     output_folder: Optional[str] = None,
     top_k: int = 10,
+    query_limit: Optional[int] = None,
     corpus_limit: Optional[int] = None,
     **kwargs: Any,
 ) -> CoIRReport:
@@ -530,11 +483,11 @@ async def run_coir_benchmark(
     return await asyncio.to_thread(
         run_coir_benchmark_sync,
         tasks=tasks,
-        limit=limit,
         batch_size=batch_size,
         rerank_enabled=rerank_enabled,
         output_folder=output_folder,
         top_k=top_k,
+        query_limit=query_limit,
         corpus_limit=corpus_limit,
         **kwargs,
     )
@@ -548,8 +501,8 @@ def main() -> None:
         default=None,
         help=f"Task(s) to run. Default: {DEFAULT_TASKS}. Options: {COIR_TASKS}",
     )
-    parser.add_argument("--limit", type=int, default=None, help="Limit queries per task (best-effort)")
-    parser.add_argument("--corpus-limit", type=int, default=None, help="Limit corpus size for smoke tests")
+    parser.add_argument("--query-limit", type=int, default=None, help="Limit queries per task (reliable)")
+    parser.add_argument("--corpus-limit", type=int, default=None, help="Limit corpus size for smoke tests (reliable)")
     parser.add_argument("--batch-size", type=int, default=64, help="Evaluation batch size (if supported)")
     parser.add_argument("--top-k", type=int, default=10, help="Number of results to retrieve per query")
     parser.add_argument("--no-rerank", action="store_true", help="Disable reranking")
@@ -567,7 +520,7 @@ def main() -> None:
 
     report = run_coir_benchmark_sync(
         tasks=args.tasks,
-        limit=args.limit,
+        query_limit=args.query_limit,
         corpus_limit=args.corpus_limit,
         batch_size=args.batch_size,
         rerank_enabled=not args.no_rerank,
