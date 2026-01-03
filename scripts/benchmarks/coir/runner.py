@@ -240,6 +240,7 @@ def _evaluate_with_custom_search(
         corpus_limit: If set, cap the corpus size for faster smoke tests.
     """
     import json as json_mod
+    from datetime import datetime
     try:
         from coir.beir.retrieval.evaluation import EvaluateRetrieval
     except ImportError as e:
@@ -261,13 +262,13 @@ def _evaluate_with_custom_search(
     for task_name, task_data in task_items:
         print(f"[coir] Evaluating task: {task_name}", flush=True)
         output_file = os.path.join(output_folder, f"{task_name}.json")
-
-        # Skip if already evaluated
         if os.path.exists(output_file):
-            print(f"[coir] Results for {task_name} already exist. Skipping.", flush=True)
-            with open(output_file) as f:
-                results[task_name] = json_mod.load(f).get("metrics", {})
-            continue
+            ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+            output_file = os.path.join(output_folder, f"{task_name}-{ts}.json")
+            print(
+                f"[coir] Results for {task_name} already exist. Writing to {output_file}.",
+                flush=True,
+            )
 
         # Extract corpus, queries, qrels from task data
         if isinstance(task_data, tuple) and len(task_data) == 3:
@@ -288,7 +289,7 @@ def _evaluate_with_custom_search(
             # Keep only corpus docs that are referenced in qrels (for valid eval)
             # Then fill up to corpus_limit with additional docs
             relevant_doc_ids = set()
-            for qid, rels in qrels.items():
+            for _, rels in qrels.items():
                 relevant_doc_ids.update(rels.keys())
 
             # Build limited corpus: relevant docs first, then random others
@@ -315,8 +316,12 @@ def _evaluate_with_custom_search(
         # Use coir's evaluation metrics (NDCG, MAP, Recall, Precision)
         # EvaluateRetrieval.evaluate is a static-ish method that just computes metrics
         dummy_retriever = EvaluateRetrieval(None, score_function="cos_sim")
+        k_values = [int(k) for k in getattr(dummy_retriever, "k_values", []) if int(k) <= int(top_k)]
+        if not k_values:
+            k_values = [int(top_k)]
+        dummy_retriever.k_values = k_values
         ndcg, map_score, recall, precision = dummy_retriever.evaluate(
-            qrels, task_results, dummy_retriever.k_values
+            qrels, task_results, k_values
         )
 
         metrics = {
@@ -427,6 +432,7 @@ async def run_coir_benchmark(
     rerank_enabled: bool = True,
     output_folder: Optional[str] = None,
     top_k: int = 10,
+    corpus_limit: Optional[int] = None,
     **kwargs: Any,
 ) -> CoIRReport:
     """Async wrapper for environments that already use asyncio."""
@@ -438,6 +444,7 @@ async def run_coir_benchmark(
         rerank_enabled=rerank_enabled,
         output_folder=output_folder,
         top_k=top_k,
+        corpus_limit=corpus_limit,
         **kwargs,
     )
 
@@ -450,7 +457,8 @@ def main() -> None:
         default=None,
         help=f"Task(s) to run. Default: {DEFAULT_TASKS}. Options: {COIR_TASKS}",
     )
-    parser.add_argument("--limit", type=int, default=None, help="Limit samples per task (best-effort)")
+    parser.add_argument("--limit", type=int, default=None, help="Limit queries per task (best-effort)")
+    parser.add_argument("--corpus-limit", type=int, default=None, help="Limit corpus size for smoke tests")
     parser.add_argument("--batch-size", type=int, default=64, help="Evaluation batch size (if supported)")
     parser.add_argument("--top-k", type=int, default=10, help="Number of results to retrieve per query")
     parser.add_argument("--no-rerank", action="store_true", help="Disable reranking")
@@ -469,6 +477,7 @@ def main() -> None:
     report = run_coir_benchmark_sync(
         tasks=args.tasks,
         limit=args.limit,
+        corpus_limit=args.corpus_limit,
         batch_size=args.batch_size,
         rerank_enabled=not args.no_rerank,
         output_folder=args.output_folder,
