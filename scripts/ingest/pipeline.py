@@ -106,6 +106,13 @@ def detect_language(path: Path) -> str:
     return "unknown"
 
 
+_TEXT_LIKE_LANGS = {"unknown", "markdown", "text"}
+
+
+def _is_text_like_language(language: str) -> bool:
+    return str(language or "").strip().lower() in _TEXT_LIKE_LANGS
+
+
 def build_information(
     language: str, path: Path, start: int, end: int, first_line: str
 ) -> str:
@@ -219,6 +226,7 @@ def _index_single_file_inner(
         return False
 
     language = detect_language(file_path)
+    is_text_like = _is_text_like_language(language)
     file_hash = hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest()
 
     repo_tag = repo_name_for_cache or _detect_repo_name_from_path(file_path)
@@ -497,7 +505,13 @@ def _index_single_file_inner(
             payload["pseudo"] = pseudo
         if tags:
             payload["tags"] = tags
-        batch_texts.append(cd["info"])
+        dense_text = cd["info"]
+        if is_text_like:
+            text_body = ch.get("text") or ""
+            if text_body:
+                dense_text = text_body
+                payload["dense_text"] = text_body
+        batch_texts.append(dense_text)
         batch_meta.append(payload)
         batch_ids.append(hash_id(ch["text"], str(file_path), ch["start"], ch["end"]))
         aug_lex_text = (ch.get("text") or "") + (" " + pseudo if pseudo else "") + (" " + " ".join(tags) if tags else "")
@@ -889,7 +903,7 @@ def process_file_with_smart_reindexing(
             payload = rec.payload or {}
             md = payload.get("metadata") or {}
             code_text = md.get("code") or ""
-            embed_text = payload.get("information") or payload.get("document") or ""
+            embed_text = payload.get("dense_text") or payload.get("information") or payload.get("document") or ""
             kind = md.get("kind") or ""
             sym_name = md.get("symbol") or ""
             start_line = md.get("start_line") or 0
@@ -914,7 +928,8 @@ def process_file_with_smart_reindexing(
         chunks = chunk_semantic(text, language, CHUNK_LINES, CHUNK_OVERLAP)
     else:
         chunks = chunk_lines(text, CHUNK_LINES, CHUNK_OVERLAP)
-    
+
+    is_text_like = _is_text_like_language(language)
     symbol_spans = _extract_symbols(language, text)
 
     reused_points: list[models.PointStruct] = []
@@ -1053,12 +1068,16 @@ def process_file_with_smart_reindexing(
         sym = cd["sym"]
 
         code_text = ch.get("text") or ""
+        dense_text = info
+        if is_text_like and code_text:
+            dense_text = code_text
+            payload["dense_text"] = code_text
         chunk_symbol_id = ""
         if sym and kind:
             chunk_symbol_id = f"{kind}_{sym}_{ch['start']}"
 
-        reuse_key = (chunk_symbol_id, code_text, info)
-        fallback_key = ("", code_text, info)
+        reuse_key = (chunk_symbol_id, code_text, dense_text)
+        fallback_key = ("", code_text, dense_text)
         reused_rec = None
         used_key = None
         bucket = points_by_code.get(reuse_key)
@@ -1136,7 +1155,7 @@ def process_file_with_smart_reindexing(
             except Exception:
                 pass
 
-        embed_texts.append(info)
+        embed_texts.append(dense_text)
         embed_payloads.append(payload)
         embed_ids.append(hash_id(code_text, fp, ch["start"], ch["end"]))
         aug_lex_text = (code_text or "") + (" " + pseudo if pseudo else "") + (" " + " ".join(tags) if tags else "")
