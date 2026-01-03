@@ -125,6 +125,7 @@ def _get_config_fingerprint() -> str:
         f"use_tree_sitter:{os.environ.get('USE_TREE_SITTER', '1')}",
         f"enhanced_ast:{os.environ.get('INDEX_USE_ENHANCED_AST', '1')}",
         f"ast_enriched:v2",
+        "text_dense_mode:chunk_text_v1",
     ]
     return hashlib.sha256("|".join(config_parts).encode()).hexdigest()[:8]
 
