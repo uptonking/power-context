@@ -81,8 +81,8 @@ CORPUS_LIMIT=0 QUERY_LIMIT=0 RUN_TAG=full \
 ```
 
 Outputs:
-- JSON reports: `cosqa_<label>_<RUN_TAG>.json`
-- Logs: `/tmp/cosqa_<label>_<RUN_TAG>.log` (override with `LOG_DIR=...`)
+- JSON reports: `bench_results/cosqa/<RUN_TAG>/cosqa_<label>.json`
+- Logs: `bench_results/cosqa/<RUN_TAG>/cosqa_<label>.log` (override with `LOG_DIR=...`)
 
 Useful knobs (env):
 - `QDRANT_URL`, `LEX_VECTOR_DIM`, `HYBRID_EXPAND`, `SEMANTIC_EXPANSION_ENABLED`
@@ -170,6 +170,8 @@ python -m scripts.benchmarks.coir.runner --tasks cosqa --query-limit 100 --corpu
 ```
 
 **Note**: Requires `pip install coir-eval` for the external evaluation harness.
+The CoIR runner uses Context-Engine's hybrid search directly (not the coir-eval
+embedding-only DRES path), so rerank/expansion settings are honored.
 
 ---
 
@@ -245,9 +247,11 @@ python -m scripts.benchmarks.swe.runner --subset lite --limit 10
 # Full evaluation  
 python -m scripts.benchmarks.swe.runner --subset lite -o results.json
 
-# With tuning
-RERANK_ENABLED=1 HYBRID_SYMBOL_BOOST=0.25 \
-    python -m scripts.benchmarks.swe.runner --subset lite
+# With tuning (CLI flags for major features)
+python -m scripts.benchmarks.swe.runner --subset lite --refrag --micro-chunks
+
+# Optional weight tuning (env)
+HYBRID_SYMBOL_BOOST=0.25 python -m scripts.benchmarks.swe.runner --subset lite
 ```
 
 ---
@@ -291,6 +295,9 @@ RERANK_RETURN_M=20
 INDEX_BATCH_SIZE=256
 INDEX_CHUNK_LINES=120
 ```
+
+Benchmark reports always log the effective config snapshot, including embedding
+model, rerank on/off, expansion on/off, micro/semantic chunking, and ReFRAG.
 
 ---
 

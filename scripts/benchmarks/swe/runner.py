@@ -40,7 +40,20 @@ modified in the ground-truth patch.
 - Full AST with call relationships
 - Git history context
 
-## Environment Variables (Tuning Knobs)
+## Configuration (CLI-first)
+
+This runner sets feature toggles explicitly for reproducibility. Prefer CLI flags:
+    --no-rerank
+    --no-expand
+    --refrag
+    --micro-chunks
+    --no-semantic-chunks
+    --embedding-model MODEL
+
+The JSON report captures a config snapshot including embedding model, rerank
+on/off, expansion on/off, micro/semantic chunking, and ReFRAG.
+
+## Advanced Environment Tuning (optional)
 
 Reranking:
     RERANKER_ENABLED=1           # Enable ONNX reranker (default: on)
@@ -78,10 +91,6 @@ Indexing:
     INDEX_CHUNK_OVERLAP=20       # Overlap between chunks
     REFRAG_MODE=0                # ReFRAG micro-chunking
 
-Reranking:
-    RERANKER_ENABLED=1           # Enable reranker
-    RERANKER_TOPN=50             # Candidates to rerank
-
 ## Usage
 
     # Quick test (10 instances)
@@ -90,8 +99,8 @@ Reranking:
     # Single repo focus
     python -m scripts.benchmarks.swe.runner --repo django/django --limit 20
 
-    # Full evaluation with tuning
-    python -m scripts.benchmarks.swe.runner --subset lite --refrag
+    # Full evaluation with tuning (CLI toggles)
+    python -m scripts.benchmarks.swe.runner --subset lite --refrag --micro-chunks
 
     # Compare with/without features
     python -m scripts.benchmarks.swe.runner --limit 50 -o baseline.json
