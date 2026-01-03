@@ -555,8 +555,10 @@ def index_coir_corpus(
                 doc = item["doc"]
                 chunks = item["chunks"]
                 code = doc.get("text", "") or ""
-                language = doc.get("language") or "text"
+                raw_language = doc.get("language")
+                language = raw_language or "text"
                 title = doc.get("title", "") or ""
+                is_text_corpus = not raw_language or raw_language == "text"
 
                 symbols, imports, calls = [], [], []
                 if _AST_AVAILABLE and code:
@@ -596,6 +598,7 @@ def index_coir_corpus(
 
                     pid = hash_id(ch["text"], path, ch["start"], ch["end"])
                     lex_text = ch.get("text") or ""
+                    dense_text = lex_text if is_text_corpus and lex_text else info
                     entry_with_fp = dict(doc)
                     entry_with_fp.update(
                         {
@@ -639,6 +642,7 @@ def index_coir_corpus(
                         {
                             "id": pid,
                             "info": info,
+                            "dense_text": dense_text,
                             "lex_text": lex_text,
                             "payload": entry_with_fp,
                             "code_text": lex_text,
@@ -646,7 +650,7 @@ def index_coir_corpus(
                         }
                     )
 
-            embeddings = embed_batch(model, [r["info"] for r in chunk_records])
+            embeddings = embed_batch(model, [r["dense_text"] for r in chunk_records])
             if show_progress:
                 print("done", flush=True)
 
