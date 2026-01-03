@@ -46,7 +46,7 @@ import argparse
 import asyncio
 import os
 from dataclasses import dataclass, asdict
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from scripts.benchmarks.coir import DEFAULT_TASKS, COIR_TASKS
 from scripts.benchmarks.coir.retriever import ContextEngineRetriever
@@ -211,12 +211,100 @@ def _summarize_task_sizes(tasks_obj: Any) -> List[Dict[str, Optional[int]]]:
     return stats
 
 
+def _evaluate_with_custom_search(
+    tasks_obj: Any,
+    model: ContextEngineRetriever,
+    output_folder: str,
+    top_k: int = 10,
+) -> Dict[str, Any]:
+    """
+    Run evaluation using OUR search() method, not coir-eval's DRES wrapper.
+
+    This is critical: coir-eval's default path uses encode_queries/encode_corpus
+    and does its own similarity computation, completely bypassing our hybrid
+    search, reranking, and other features.
+
+    This function calls model.search() directly and computes metrics ourselves.
+    """
+    import json as json_mod
+    try:
+        from coir.beir.retrieval.evaluation import EvaluateRetrieval
+    except ImportError as e:
+        raise RuntimeError("Missing coir-eval. Install with: pip install coir-eval") from e
+
+    results: Dict[str, Any] = {}
+    os.makedirs(output_folder, exist_ok=True)
+
+    # Handle both dict-style and list-style task objects
+    task_items: List[Tuple[str, Any]] = []
+    if isinstance(tasks_obj, dict):
+        task_items = list(tasks_obj.items())
+    else:
+        # List/tuple of task objects
+        for idx, task in enumerate(_task_iter(tasks_obj)):
+            name = _get_task_name(task, f"task_{idx}")
+            task_items.append((name, task))
+
+    for task_name, task_data in task_items:
+        print(f"[coir] Evaluating task: {task_name}", flush=True)
+        output_file = os.path.join(output_folder, f"{task_name}.json")
+
+        # Skip if already evaluated
+        if os.path.exists(output_file):
+            print(f"[coir] Results for {task_name} already exist. Skipping.", flush=True)
+            with open(output_file) as f:
+                results[task_name] = json_mod.load(f).get("metrics", {})
+            continue
+
+        # Extract corpus, queries, qrels from task data
+        if isinstance(task_data, tuple) and len(task_data) == 3:
+            corpus, queries, qrels = task_data
+        else:
+            # Task object with attributes
+            corpus = _get_task_field(task_data, ["corpus", "documents", "docs", "docstore"])
+            queries = _get_task_field(task_data, ["queries", "query", "questions"])
+            qrels = _get_task_field(task_data, ["qrels", "relevance", "labels"])
+
+        if corpus is None or queries is None or qrels is None:
+            print(f"[coir][warn] Could not extract corpus/queries/qrels for {task_name}", flush=True)
+            continue
+
+        # CRITICAL: Call OUR search() method directly
+        # This uses hybrid search + reranking - the full Context-Engine pipeline
+        print(f"[coir] Running Context-Engine search on {len(queries)} queries...", flush=True)
+        task_results = model.search(corpus, queries, top_k=top_k)
+
+        # Use coir's evaluation metrics (NDCG, MAP, Recall, Precision)
+        # EvaluateRetrieval.evaluate is a static-ish method that just computes metrics
+        dummy_retriever = EvaluateRetrieval(None, score_function="cos_sim")
+        ndcg, map_score, recall, precision = dummy_retriever.evaluate(
+            qrels, task_results, dummy_retriever.k_values
+        )
+
+        metrics = {
+            "NDCG": ndcg,
+            "MAP": map_score,
+            "Recall": recall,
+            "Precision": precision,
+        }
+
+        # Save results
+        with open(output_file, "w") as f:
+            json_mod.dump({"metrics": metrics, "pipeline": "context-engine-hybrid"}, f, indent=2)
+
+        print(f"[coir] {task_name}: NDCG@10={ndcg.get('NDCG@10', 'N/A')}", flush=True)
+        results[task_name] = metrics
+
+    return results
+
+
 def run_coir_benchmark_sync(
     tasks: Optional[List[str]] = None,
     limit: Optional[int] = None,
     batch_size: int = 64,
     rerank_enabled: bool = True,
     output_folder: Optional[str] = None,
+    top_k: int = 10,
     **kwargs: Any,
 ) -> CoIRReport:
     """
@@ -267,56 +355,23 @@ def run_coir_benchmark_sync(
 
     print("[coir] Tasks loaded. Starting evaluation...", flush=True)
 
-    # Build model adapter
+    # Build model adapter with hybrid search enabled
     model = ContextEngineRetriever(
         use_hybrid_search=True,
         rerank_enabled=bool(rerank_enabled),
+        batch_size=batch_size,
         **kwargs,
     )
 
-    # Run evaluation
-    try:
-        from coir.evaluation import COIR  # type: ignore
-    except Exception as e:  # pragma: no cover
-        raise RuntimeError(
-            "Missing dependency: coir-eval. Install with: pip install coir-eval"
-        ) from e
-
-    import inspect
-
-    ev_kwargs: Dict[str, Any] = {"tasks": tasks_obj}
-    try:
-        sig = inspect.signature(COIR)
-        if "batch_size" in sig.parameters:
-            ev_kwargs["batch_size"] = int(batch_size)
-    except Exception:
-        # Best-effort; COIR may not accept batch_size in older versions.
-        pass
-
-    evaluation = COIR(**ev_kwargs)
-
-    # Some coir-eval versions require output_folder as a positional arg.
-    # If caller didn't provide one, default to a stable local folder.
+    # Output directory
     out_dir = (output_folder or "bench_results/coir").strip()
-    try:
-        os.makedirs(out_dir, exist_ok=True)
-    except Exception:
-        # If we can't create it (permissions), still try letting coir-eval handle it.
-        pass
+    os.makedirs(out_dir, exist_ok=True)
 
-    # Call evaluation.run in a version-tolerant way.
-    # Prefer keyword if accepted; otherwise pass as positional.
-    raw = None
-    try:
-        run_sig = inspect.signature(evaluation.run)
-    except Exception:
-        run_sig = None
-
-    if run_sig is not None and "output_folder" in run_sig.parameters:
-        raw = evaluation.run(model, output_folder=out_dir)
-    else:
-        # Fall back to positional required arg.
-        raw = evaluation.run(model, out_dir)
+    # CRITICAL: Use our custom evaluation that calls model.search() directly.
+    # coir-eval's default COIR.run() wraps models in DRES which only uses
+    # encode_queries/encode_corpus and does its own similarity computation,
+    # completely bypassing our hybrid search, reranking, and other features.
+    raw = _evaluate_with_custom_search(tasks_obj, model, out_dir, top_k=top_k)
 
     print("[coir] Evaluation complete.", flush=True)
     return CoIRReport(tasks=task_names, raw=raw, runtime_info=runtime_info)
@@ -328,6 +383,7 @@ async def run_coir_benchmark(
     batch_size: int = 64,
     rerank_enabled: bool = True,
     output_folder: Optional[str] = None,
+    top_k: int = 10,
     **kwargs: Any,
 ) -> CoIRReport:
     """Async wrapper for environments that already use asyncio."""
@@ -338,6 +394,7 @@ async def run_coir_benchmark(
         batch_size=batch_size,
         rerank_enabled=rerank_enabled,
         output_folder=output_folder,
+        top_k=top_k,
         **kwargs,
     )
 
