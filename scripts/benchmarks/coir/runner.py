@@ -196,14 +196,23 @@ def _get_task_field(task: Any, names: List[str]) -> Any:
 
 def _summarize_task_sizes(tasks_obj: Any) -> List[Dict[str, Optional[int]]]:
     stats: List[Dict[str, Optional[int]]] = []
-    tasks = _task_iter(tasks_obj)
-    for idx, task in enumerate(tasks):
-        name = _get_task_name(task, f"task_{idx}")
-        corpus_obj = _get_task_field(task, ["corpus", "documents", "docs", "docstore"])
-        query_obj = _get_task_field(task, ["queries", "query", "questions"])
+    if isinstance(tasks_obj, dict):
+        task_items = list(tasks_obj.items())
+    else:
+        task_items = [
+            (_get_task_name(task, f"task_{idx}"), task)
+            for idx, task in enumerate(_task_iter(tasks_obj))
+        ]
+
+    for name, task in task_items:
+        if isinstance(task, tuple) and len(task) >= 2:
+            corpus_obj, query_obj = task[0], task[1]
+        else:
+            corpus_obj = _get_task_field(task, ["corpus", "documents", "docs", "docstore"])
+            query_obj = _get_task_field(task, ["queries", "query", "questions"])
         stats.append(
             {
-                "task": name,
+                "task": str(name),
                 "corpus_size": _safe_len(corpus_obj),
                 "query_size": _safe_len(query_obj),
             }
