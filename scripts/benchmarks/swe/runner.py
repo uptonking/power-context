@@ -91,12 +91,11 @@ Reranking:
     python -m scripts.benchmarks.swe.runner --repo django/django --limit 20
 
     # Full evaluation with tuning
-    HYBRID_SYMBOL_BOOST=0.25 REFRAG_MODE=1 \\
-        python -m scripts.benchmarks.swe.runner --subset lite
+    python -m scripts.benchmarks.swe.runner --subset lite --refrag
 
     # Compare with/without features
     python -m scripts.benchmarks.swe.runner --limit 50 -o baseline.json
-    REFRAG_MODE=1 python -m scripts.benchmarks.swe.runner --limit 50 -o refrag.json
+    python -m scripts.benchmarks.swe.runner --limit 50 --refrag -o refrag.json
 """
 from __future__ import annotations
 
@@ -145,33 +144,50 @@ logging.getLogger("query_optimizer").setLevel(logging.WARNING)
 logging.getLogger("async_subprocess_manager").setLevel(logging.WARNING)
 logging.getLogger("scripts.benchmarks.swe.repo_manager").setLevel(logging.WARNING)
 
-# Query expansion (on by default for best recall)
-os.environ.setdefault("HYBRID_EXPAND", "1")
-os.environ.setdefault("SEMANTIC_EXPANSION_ENABLED", "1")
-os.environ.setdefault("SEMANTIC_EXPANSION_MAX_TERMS", "3")
+def _apply_swe_env_config(
+    *,
+    embedding_model: Optional[str],
+    rerank_enabled: bool,
+    expand_enabled: bool,
+    refrag_enabled: bool,
+    micro_chunks: bool,
+    semantic_chunks: bool,
+) -> None:
+    """Apply explicit SWE benchmark settings (avoid env drift)."""
+    if embedding_model:
+        os.environ["EMBEDDING_MODEL"] = embedding_model
+    else:
+        os.environ.setdefault("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
 
-# In-process search (faster, no subprocess)
-os.environ.setdefault("HYBRID_IN_PROCESS", "1")
+    os.environ["HYBRID_EXPAND"] = "1" if expand_enabled else "0"
+    os.environ["SEMANTIC_EXPANSION_ENABLED"] = "1" if expand_enabled else "0"
+    os.environ["SEMANTIC_EXPANSION_MAX_TERMS"] = "3"
+    os.environ["HYBRID_IN_PROCESS"] = "1"
 
-# Tree-sitter AST extraction (critical for code understanding)
-os.environ.setdefault("USE_TREE_SITTER", "1")
-os.environ.setdefault("INDEX_USE_ENHANCED_AST", "1")
-os.environ.setdefault("INDEX_SEMANTIC_CHUNKS", "1")
+    os.environ["USE_TREE_SITTER"] = "1"
+    os.environ["INDEX_USE_ENHANCED_AST"] = "1"
+    os.environ["INDEX_SEMANTIC_CHUNKS"] = "1" if semantic_chunks else "0"
+    os.environ["INDEX_MICRO_CHUNKS"] = "1" if micro_chunks else "0"
+    os.environ["REFRAG_MODE"] = "1" if refrag_enabled else "0"
 
-# Reranking (on by default, in-process for reliability)
-os.environ.setdefault("RERANKER_ENABLED", "1")
-os.environ.setdefault("RERANK_IN_PROCESS", "1")
+    os.environ["RERANKER_ENABLED"] = "1" if rerank_enabled else "0"
+    os.environ["RERANK_ENABLED"] = "1" if rerank_enabled else "0"
+    os.environ.setdefault("RERANK_IN_PROCESS", "1")
 
-# Disable learning reranker for reproducible benchmarks
-# The ONNX teacher (bge-reranker-base) is MS MARCO-trained and hurts code retrieval
-# Learning from it would distill the same bias into TinyScorer
-os.environ.setdefault("RERANK_LEARNING", "0")
-os.environ.setdefault("RERANK_EVENTS_ENABLED", "0")
+    # Disable learning reranker for reproducible benchmarks
+    os.environ.setdefault("RERANK_LEARNING", "0")
+    os.environ.setdefault("RERANK_EVENTS_ENABLED", "0")
 
-# Set reranker model paths (relative to project root)
-_project_root = Path(__file__).parent.parent.parent.parent
-os.environ.setdefault("RERANKER_ONNX_PATH", str(_project_root / "models" / "model_qint8_avx512_vnni.onnx"))
-os.environ.setdefault("RERANKER_TOKENIZER_PATH", str(_project_root / "models" / "tokenizer.json"))
+    # Set reranker model paths (relative to project root)
+    _project_root = Path(__file__).parent.parent.parent.parent
+    os.environ.setdefault(
+        "RERANKER_ONNX_PATH",
+        str(_project_root / "models" / "model_qint8_avx512_vnni.onnx"),
+    )
+    os.environ.setdefault(
+        "RERANKER_TOKENIZER_PATH",
+        str(_project_root / "models" / "tokenizer.json"),
+    )
 
 
 @dataclass
@@ -367,6 +383,8 @@ async def evaluate_instance(
     top_k: int = 20,
     collection_prefix: str = "swe-bench-",
     rerank_enabled: bool = True,
+    rerank_top_n: Optional[int] = None,
+    rerank_return_m: Optional[int] = None,
     skip_index: bool = False,
 ) -> InstanceResult:
     """Evaluate retrieval for a single SWE-bench instance."""
@@ -376,13 +394,6 @@ async def evaluate_instance(
         ground_truth_files=instance.ground_truth_files,
         retrieved_files=[],
     )
-
-    # Wire rerank_enabled to environment variable (RERANKER_ENABLED is read by repo_search)
-    old_rerank = os.environ.get("RERANKER_ENABLED")
-    os.environ["RERANKER_ENABLED"] = "1" if rerank_enabled else "0"
-
-    # Track env vars to restore
-    old_collection = os.environ.get("COLLECTION_NAME")
 
     try:
         # 1. Checkout the correct commit
@@ -431,6 +442,9 @@ async def evaluate_instance(
             compact=True,
             workspace_path=str(repo_path),  # Also pass to search for snippet resolution
             collection=collection_name,  # Explicit collection for this instance
+            rerank_enabled=rerank_enabled,
+            rerank_top_n=rerank_top_n,
+            rerank_return_m=rerank_return_m,
         )
 
         if os.environ.get("DEBUG_SWE_BENCH"):
@@ -470,18 +484,6 @@ async def evaluate_instance(
     except Exception as e:
         result.error = f"{type(e).__name__}: {e}"
 
-    finally:
-        # Restore environment variables
-        if old_collection is not None:
-            os.environ["COLLECTION_NAME"] = old_collection
-        else:
-            os.environ.pop("COLLECTION_NAME", None)
-
-        if old_rerank is not None:
-            os.environ["RERANKER_ENABLED"] = old_rerank
-        else:
-            os.environ.pop("RERANKER_ENABLED", None)
-
     return result
 
 
@@ -491,6 +493,11 @@ async def run_full_benchmark(
     repos: Optional[list[str]] = None,
     top_k: int = 20,
     rerank_enabled: bool = True,
+    expand_enabled: bool = True,
+    refrag_enabled: bool = False,
+    micro_chunks: bool = False,
+    semantic_chunks: bool = True,
+    embedding_model: Optional[str] = None,
     skip_index: bool = False,
     cache_dir: Optional[str] = None,
 ) -> SWEReport:
@@ -499,16 +506,23 @@ async def run_full_benchmark(
     from scripts.benchmarks.swe.repo_manager import RepoManager
     from qdrant_client import QdrantClient
 
-    # Set RERANKER_ENABLED based on rerank_enabled param (before config snapshot)
-    os.environ["RERANKER_ENABLED"] = "1" if rerank_enabled else "0"
+    _apply_swe_env_config(
+        embedding_model=embedding_model,
+        rerank_enabled=rerank_enabled,
+        expand_enabled=expand_enabled,
+        refrag_enabled=refrag_enabled,
+        micro_chunks=micro_chunks,
+        semantic_chunks=semantic_chunks,
+    )
 
     # Lock rerank knobs to ensure reproducibility:
     # - RERANKER_TOPN: candidates to rerank (at least 2x top_k or 100)
     # - RERANKER_RETURN_M: must be >= top_k to avoid silent truncation
     # - RERANK_BLEND_WEIGHT: weight for blending rerank scores with fusion scores
     rerank_top_n = max(top_k * 2, 100)
+    rerank_return_m = max(top_k, 50)
     os.environ["RERANKER_TOPN"] = str(rerank_top_n)
-    os.environ["RERANKER_RETURN_M"] = str(max(top_k, 50))  # At least 50 or top_k
+    os.environ["RERANKER_RETURN_M"] = str(rerank_return_m)  # At least 50 or top_k
     os.environ.setdefault("RERANK_BLEND_WEIGHT", "0.6")  # Default blend weight
 
     print("=" * 60)
@@ -615,6 +629,8 @@ async def run_full_benchmark(
             repo_manager,
             top_k=top_k,
             rerank_enabled=rerank_enabled,
+            rerank_top_n=rerank_top_n,
+            rerank_return_m=rerank_return_m,
             skip_index=skip_index,
         )
 
@@ -683,6 +699,11 @@ def main():
     parser.add_argument("--repo", action="append", dest="repos", help="Filter to repo(s)")
     parser.add_argument("--top-k", type=int, default=20)
     parser.add_argument("--no-rerank", action="store_true")
+    parser.add_argument("--no-expand", action="store_true")
+    parser.add_argument("--refrag", action="store_true")
+    parser.add_argument("--micro-chunks", action="store_true")
+    parser.add_argument("--no-semantic-chunks", action="store_true")
+    parser.add_argument("--embedding-model", type=str, default=None)
     parser.add_argument("--skip-index", action="store_true",
                         help="Skip indexing, use existing collections")
     parser.add_argument("--cache-dir", type=str)
@@ -698,6 +719,11 @@ def main():
         repos=args.repos,
         top_k=args.top_k,
         rerank_enabled=not args.no_rerank,
+        expand_enabled=not args.no_expand,
+        refrag_enabled=bool(args.refrag),
+        micro_chunks=bool(args.micro_chunks),
+        semantic_chunks=not args.no_semantic_chunks,
+        embedding_model=args.embedding_model,
         skip_index=args.skip_index,
         cache_dir=args.cache_dir,
     ))
@@ -712,4 +738,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
