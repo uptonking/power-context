@@ -4,8 +4,8 @@ set -euo pipefail
 PYTHON_BIN="${PYTHON_BIN:-python3.11}"
 COLL_PREFIX="${COLL_PREFIX:-cosqa-ablate}"
 RUN_TAG="${RUN_TAG:-$(date +%Y%m%d-%H%M%S)}"
-OUT_DIR="${OUT_DIR:-.}"
-LOG_DIR="${LOG_DIR:-/tmp}"
+OUT_DIR="${OUT_DIR:-bench_results/cosqa/${RUN_TAG}}"
+LOG_DIR="${LOG_DIR:-${OUT_DIR}}"
 CORPUS_LIMIT="${CORPUS_LIMIT:-50}"
 QUERY_LIMIT="${QUERY_LIMIT:-50}"
 RECREATE="${RECREATE:-1}"
@@ -28,8 +28,8 @@ run_one() {
   local rerank="$4"
   local learning="$5"
   local collection="${COLL_PREFIX}-${label}-${RUN_TAG}"
-  local output="${OUT_DIR}/cosqa_${label}_${RUN_TAG}.json"
-  local log="${LOG_DIR}/cosqa_${label}_${RUN_TAG}.log"
+  local output="${OUT_DIR}/cosqa_${label}.json"
+  local log="${LOG_DIR}/cosqa_${label}.log"
 
   local args=(
     "-m" "scripts.benchmarks.cosqa.runner"
@@ -52,6 +52,7 @@ run_one() {
     args+=("--learning-worker")
   fi
 
+  mkdir -p "${OUT_DIR}" "${LOG_DIR}"
   (
     export "${BASE_ENV[@]}"
     export REFRAG_MODE="${refrag}"
