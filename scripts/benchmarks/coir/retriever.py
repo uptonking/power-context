@@ -267,6 +267,7 @@ class ContextEngineRetriever:
             result = await repo_search(
                 query=query_text,
                 limit=top_k,
+                per_path=1,
                 collection=collection,
                 rerank_enabled=self.rerank_enabled,
                 rerank_top_n=100 if self.rerank_enabled else None,  # Retrieve 100 candidates
@@ -281,7 +282,9 @@ class ContextEngineRetriever:
                 doc_id = r.get("doc_id") or r.get("code_id") or r.get("_id") or (r.get("payload") or {}).get("_id")
                 score = r.get("score", 0.0)
                 if doc_id:
-                    doc_scores[doc_id] = float(score)
+                    score_val = float(score)
+                    prev = doc_scores.get(doc_id)
+                    doc_scores[doc_id] = score_val if prev is None else max(prev, score_val)
 
             results[qid] = doc_scores
 

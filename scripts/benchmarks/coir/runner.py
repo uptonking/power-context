@@ -13,14 +13,13 @@ adapter (`scripts.benchmarks.coir.retriever.ContextEngineRetriever`).
 - [x] Query expansion (synonyms via HYBRID_EXPAND=1)
 - [x] Semantic expansion (SEMANTIC_EXPANSION_ENABLED=1)
 
-**Indexing Pipeline:**
+**Indexing Pipeline (benchmark corpus):**
 - [x] Dense embeddings (bge-base-en)
 - [x] Lexical hash vectors (for hybrid search)
+- [x] Chunking (semantic or micro, depending on env)
+- [x] Optional AST symbol/import/call enrichment (when supported)
+- [x] Optional ReFRAG mini vectors / pattern / sparse vectors
 - [x] Corpus fingerprinting (smart reuse)
-
-**Not Applicable (CoIR = document retrieval, not code):**
-- N/A AST symbol extraction
-- N/A Import/call extraction
 
 ## Environment Variables
 
@@ -287,5 +286,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
 
