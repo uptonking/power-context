@@ -176,7 +176,11 @@ def get_collection_fingerprint(collection: str) -> Optional[str]:
     return None
 
 
-def collection_matches_corpus(collection: str, corpus: List[Dict[str, Any]]) -> bool:
+def collection_matches_corpus(
+    collection: str,
+    corpus: List[Dict[str, Any]],
+    corpus_fingerprint: Optional[str] = None,
+) -> bool:
     """Check if an existing collection matches the given corpus.
 
     Note: We intentionally don't require exact point count match.
@@ -190,7 +194,8 @@ def collection_matches_corpus(collection: str, corpus: List[Dict[str, Any]]) -> 
         # Fingerprint check
         stored_fp = get_collection_fingerprint(collection)
         if stored_fp:
-            return stored_fp == compute_corpus_fingerprint(corpus)
+            current_fp = corpus_fingerprint or compute_corpus_fingerprint(corpus)
+            return stored_fp == current_fp
         return False
     except Exception:
         return False
@@ -350,7 +355,7 @@ def index_coir_corpus(
 
     # Check if we can reuse existing collection
     if not recreate:
-        if collection_matches_corpus(collection, corpus):
+        if collection_matches_corpus(collection, corpus, corpus_fingerprint=corpus_fingerprint):
             if show_progress:
                 print(f"  Reusing existing collection: {collection} ({len(corpus)} docs, fingerprint match)")
             return {
@@ -688,15 +693,15 @@ def index_coir_corpus(
                 for pts, wc in zip(chunk_points, worker_clients)
             }
             for future in as_completed(futures):
-                batch_size = futures[future]
+                pts_count = futures[future]
                 try:
                     count = future.result()
                     stats["indexed_points"] += count
                     stats["batches"] += 1
                 except Exception as e:
                     if show_progress:
-                        print(f"  Batch error (size={batch_size}): {e}")
-                    stats["errors"] += batch_size
+                        print(f"  Batch error (size={pts_count}): {e}")
+                    stats["errors"] += pts_count
 
         # Progress after each chunk (always log)
         processed_entries += sum(len(b) for b in chunk)

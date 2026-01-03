@@ -160,6 +160,12 @@ python -m scripts.benchmarks.coir.runner --tasks cosqa codesearchnet-python apps
 
 # Quick test with subset
 python -m scripts.benchmarks.coir.runner --tasks cosqa --limit 100
+
+# Ablation sweep (rerank ± ReFRAG ± micro-chunks)
+./scripts/benchmarks/coir/run_ablation.sh \
+  TASKS="cosqa codesearchnet-python" \
+  LIMIT=200 \
+  OUT_DIR=bench_results/coir/$(date +%Y%m%d-%H%M%S)
 ```
 
 **Note**: Requires `pip install coir-eval` for the external evaluation harness.

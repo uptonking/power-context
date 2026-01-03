@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -143,9 +144,10 @@ class ContextEngineRetriever:
             all_embeddings.extend(embeddings)
 
         # Cache for search (track which doc IDs belong to this corpus)
+        # Note: coir-eval may use "_id" or "id" depending on the code path
         self._corpus_doc_ids = set()
         for idx, doc in enumerate(corpus):
-            doc_id = doc["_id"]
+            doc_id = doc.get("_id") or doc.get("id") or str(idx)
             self._corpus_index[doc_id] = all_embeddings[idx]
             self._corpus_doc_ids.add(doc_id)
 
@@ -229,9 +231,18 @@ class ContextEngineRetriever:
         For CoIR benchmarks, we need to index the corpus first, then search.
         This is slower but more representative of real performance.
         """
-        # For CoIR tasks, the corpus is provided per-task
-        # We need to index it temporarily and search
-        return asyncio.run(self._search_hybrid_async(corpus, queries, top_k))
+        # For CoIR tasks, the corpus is provided per-task.
+        # Use a background thread if we're already inside a running event loop.
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(self._search_hybrid_async(corpus, queries, top_k))
+
+        def _run():
+            return asyncio.run(self._search_hybrid_async(corpus, queries, top_k))
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            return executor.submit(_run).result()
 
     async def _search_hybrid_async(
         self,
@@ -303,7 +314,7 @@ class ContextEngineRetriever:
         deleted = 0
         if delete_collections and self._indexed_collections:
             try:
-                from scripts.benchmarks.cosqa.indexer import get_qdrant_client
+                from scripts.benchmarks.coir.indexer import get_qdrant_client
                 client = get_qdrant_client()
                 for coll in self._indexed_collections:
                     try:

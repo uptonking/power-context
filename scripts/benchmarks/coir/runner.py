@@ -59,7 +59,7 @@ class CoIRReport:
 
     tasks: List[str]
     raw: Any
-    runtime_info: Dict[str, Any] = None
+    runtime_info: Optional[Dict[str, Any]] = None
 
     def __post_init__(self):
         if self.runtime_info is None:
@@ -89,12 +89,28 @@ def _ensure_env_defaults() -> None:
         os.environ["QDRANT_URL"] = "http://localhost:6333"
     # Enable in-process reranker for reliability
     os.environ.setdefault("RERANK_IN_PROCESS", "1")
+    # Determinism defaults (best-effort; still recorded in runtime info)
+    os.environ.setdefault("EMBEDDING_SEED", "42")
+    os.environ.setdefault("PYTHONHASHSEED", "0")
+    os.environ.setdefault("QDRANT_EF_SEARCH", "128")
 
     # Set reranker model paths (relative to project root)
     from pathlib import Path
     _project_root = Path(__file__).parent.parent.parent.parent
     os.environ.setdefault("RERANKER_ONNX_PATH", str(_project_root / "models" / "model_qint8_avx512_vnni.onnx"))
     os.environ.setdefault("RERANKER_TOKENIZER_PATH", str(_project_root / "models" / "tokenizer.json"))
+
+    try:
+        seed = int(os.environ.get("EMBEDDING_SEED", "42") or 42)
+        import random
+        random.seed(seed)
+        try:
+            import numpy as np  # type: ignore
+            np.random.seed(seed)
+        except Exception:
+            pass
+    except Exception:
+        pass
 
 
 def _load_coir_tasks(task_names: List[str], limit: Optional[int] = None) -> Any:
@@ -131,6 +147,70 @@ def _load_coir_tasks(task_names: List[str], limit: Optional[int] = None) -> Any:
     return get_tasks(**kwargs)
 
 
+def _safe_len(obj: Any) -> Optional[int]:
+    try:
+        return len(obj)
+    except Exception:
+        return None
+
+
+def _task_iter(tasks_obj: Any) -> List[Any]:
+    if tasks_obj is None:
+        return []
+    if isinstance(tasks_obj, dict):
+        return list(tasks_obj.values())
+    if isinstance(tasks_obj, (list, tuple)):
+        return list(tasks_obj)
+    tasks_attr = getattr(tasks_obj, "tasks", None)
+    if isinstance(tasks_attr, (list, tuple)):
+        return list(tasks_attr)
+    return []
+
+
+def _get_task_name(task: Any, fallback: str) -> str:
+    if isinstance(task, dict):
+        return str(
+            task.get("name")
+            or task.get("task_name")
+            or task.get("id")
+            or fallback
+        )
+    for attr in ("name", "task_name", "id", "dataset"):
+        val = getattr(task, attr, None)
+        if val:
+            return str(val)
+    return fallback
+
+
+def _get_task_field(task: Any, names: List[str]) -> Any:
+    if isinstance(task, dict):
+        for name in names:
+            if name in task:
+                return task.get(name)
+        return None
+    for name in names:
+        if hasattr(task, name):
+            return getattr(task, name)
+    return None
+
+
+def _summarize_task_sizes(tasks_obj: Any) -> List[Dict[str, Optional[int]]]:
+    stats: List[Dict[str, Optional[int]]] = []
+    tasks = _task_iter(tasks_obj)
+    for idx, task in enumerate(tasks):
+        name = _get_task_name(task, f"task_{idx}")
+        corpus_obj = _get_task_field(task, ["corpus", "documents", "docs", "docstore"])
+        query_obj = _get_task_field(task, ["queries", "query", "questions"])
+        stats.append(
+            {
+                "task": name,
+                "corpus_size": _safe_len(corpus_obj),
+                "query_size": _safe_len(query_obj),
+            }
+        )
+    return stats
+
+
 def run_coir_benchmark_sync(
     tasks: Optional[List[str]] = None,
     limit: Optional[int] = None,
@@ -157,7 +237,35 @@ def run_coir_benchmark_sync(
         raise ValueError(f"Unknown CoIR task(s): {invalid}. Known: {COIR_TASKS}")
 
     # Load tasks (may download data)
+    print(f"[coir] Loading tasks: {task_names} (limit={limit})", flush=True)
     tasks_obj = _load_coir_tasks(task_names, limit=limit)
+    task_stats = _summarize_task_sizes(tasks_obj)
+    if task_stats:
+        print(f"[coir] Task sizes: {task_stats}", flush=True)
+    else:
+        print("[coir] Task size verification unavailable (unknown task shape).", flush=True)
+
+    runtime_info = get_runtime_info()
+    runtime_info["coir_tasks"] = list(task_names)
+    runtime_info["coir_limit_requested"] = limit
+    runtime_info["coir_task_stats"] = task_stats
+
+    if limit is not None and task_stats:
+        limit_warnings: List[str] = []
+        for stat in task_stats:
+            task_name = stat.get("task") or "unknown"
+            for key in ("corpus_size", "query_size"):
+                size = stat.get(key)
+                if size is not None and size > int(limit * 1.1):
+                    limit_warnings.append(
+                        f"{task_name} {key}={size} exceeds requested limit={limit}"
+                    )
+        if limit_warnings:
+            runtime_info["coir_limit_warnings"] = limit_warnings
+            for msg in limit_warnings:
+                print(f"[coir][warn] {msg}", flush=True)
+
+    print("[coir] Tasks loaded. Starting evaluation...", flush=True)
 
     # Build model adapter
     model = ContextEngineRetriever(
@@ -210,7 +318,8 @@ def run_coir_benchmark_sync(
         # Fall back to positional required arg.
         raw = evaluation.run(model, out_dir)
 
-    return CoIRReport(tasks=task_names, raw=raw)
+    print("[coir] Evaluation complete.", flush=True)
+    return CoIRReport(tasks=task_names, raw=raw, runtime_info=runtime_info)
 
 
 async def run_coir_benchmark(
@@ -234,7 +343,6 @@ async def run_coir_benchmark(
 
 
 def main() -> None:
-    import os as _os
     parser = argparse.ArgumentParser(description="CoIR Benchmark Runner (Context-Engine)")
     parser.add_argument(
         "--tasks",
@@ -247,29 +355,30 @@ def main() -> None:
     parser.add_argument("--no-rerank", action="store_true", help="Disable reranking")
     parser.add_argument("--no-expand", action="store_true", help="Disable query expansion")
     parser.add_argument("--output-folder", type=str, default=None, help="Write coir-eval artifacts here")
+    parser.add_argument("--output", type=str, default=None, help="Write JSON report to this file")
     parser.add_argument("--json", dest="json_out", action="store_true", help="Print JSON")
     args = parser.parse_args()
 
     # Enable Context-Engine features for accurate benchmarking
     if not args.no_expand:
-        _os.environ.setdefault("HYBRID_EXPAND", "1")
-        _os.environ.setdefault("SEMANTIC_EXPANSION_ENABLED", "1")
-    _os.environ.setdefault("HYBRID_IN_PROCESS", "1")
+        os.environ.setdefault("HYBRID_EXPAND", "1")
+        os.environ.setdefault("SEMANTIC_EXPANSION_ENABLED", "1")
+    os.environ.setdefault("HYBRID_IN_PROCESS", "1")
 
-    try:
-        report = run_coir_benchmark_sync(
-            tasks=args.tasks,
-            limit=args.limit,
-            batch_size=args.batch_size,
-            rerank_enabled=not args.no_rerank,
-            output_folder=args.output_folder,
-        )
-    except Exception as e:
-        # Keep this error message helpful for first-time users.
-        msg = str(e)
-        if "coir-eval" in msg.lower() or "coir." in msg.lower() or "coir " in msg.lower():
-            raise
-        raise
+    report = run_coir_benchmark_sync(
+        tasks=args.tasks,
+        limit=args.limit,
+        batch_size=args.batch_size,
+        rerank_enabled=not args.no_rerank,
+        output_folder=args.output_folder,
+    )
+
+    if args.output:
+        import json
+
+        with open(args.output, "w") as f:
+            json.dump(report.to_dict(), f, indent=2)
+        print(f"Saved report to: {args.output}")
 
     if args.json_out:
         import json
@@ -286,4 +395,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
