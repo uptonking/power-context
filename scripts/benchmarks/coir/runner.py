@@ -45,7 +45,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 from scripts.benchmarks.coir import DEFAULT_TASKS, COIR_TASKS
@@ -528,24 +528,29 @@ def main() -> None:
         top_k=args.top_k,
     )
 
-    if args.output:
-        import json
+    # Auto-generate output filename if not specified
+    import json
+    from datetime import datetime
 
-        with open(args.output, "w") as f:
-            json.dump(report.to_dict(), f, indent=2)
-        print(f"Saved report to: {args.output}")
+    out_dir = args.output_folder or "bench_results/coir"
+    os.makedirs(out_dir, exist_ok=True)
+
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    task_slug = "-".join(args.tasks) if args.tasks else "default"
+    output_file = args.output or os.path.join(out_dir, f"coir-{task_slug}-{ts}.json")
+
+    with open(output_file, "w") as f:
+        json.dump(report.to_dict(), f, indent=2)
+    print(f"\n✓ Saved report to: {output_file}")
 
     if args.json_out:
-        import json
-
         print(json.dumps(report.to_dict(), indent=2))
     else:
-        # Print something human-friendly without assuming a particular coir-eval output schema.
-        print("CoIR results:")
-        try:
-            print(report.to_dict())
-        except Exception:
-            print(asdict(report))
+        # Print something human-friendly
+        print("\nCoIR results:")
+        for task_name, metrics in report.raw.items():
+            ndcg10 = metrics.get("NDCG", {}).get("NDCG@10", "N/A")
+            print(f"  {task_name}: NDCG@10={ndcg10}")
 
 
 if __name__ == "__main__":
