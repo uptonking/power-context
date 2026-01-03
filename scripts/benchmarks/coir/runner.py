@@ -225,6 +225,7 @@ def _evaluate_with_custom_search(
     model: ContextEngineRetriever,
     output_folder: str,
     top_k: int = 10,
+    corpus_limit: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Run evaluation using OUR search() method, not coir-eval's DRES wrapper.
@@ -234,6 +235,9 @@ def _evaluate_with_custom_search(
     search, reranking, and other features.
 
     This function calls model.search() directly and computes metrics ourselves.
+
+    Args:
+        corpus_limit: If set, cap the corpus size for faster smoke tests.
     """
     import json as json_mod
     try:
@@ -278,9 +282,34 @@ def _evaluate_with_custom_search(
             print(f"[coir][warn] Could not extract corpus/queries/qrels for {task_name}", flush=True)
             continue
 
+        # Apply corpus limit for smoke tests
+        if corpus_limit is not None and len(corpus) > corpus_limit:
+            print(f"[coir] Limiting corpus from {len(corpus)} to {corpus_limit} docs", flush=True)
+            # Keep only corpus docs that are referenced in qrels (for valid eval)
+            # Then fill up to corpus_limit with additional docs
+            relevant_doc_ids = set()
+            for qid, rels in qrels.items():
+                relevant_doc_ids.update(rels.keys())
+
+            # Build limited corpus: relevant docs first, then random others
+            limited_corpus = {}
+            for doc_id in relevant_doc_ids:
+                if doc_id in corpus and len(limited_corpus) < corpus_limit:
+                    limited_corpus[doc_id] = corpus[doc_id]
+
+            # Fill remaining slots with other docs
+            for doc_id, doc in corpus.items():
+                if len(limited_corpus) >= corpus_limit:
+                    break
+                if doc_id not in limited_corpus:
+                    limited_corpus[doc_id] = doc
+
+            corpus = limited_corpus
+            print(f"[coir] Limited corpus size: {len(corpus)}", flush=True)
+
         # CRITICAL: Call OUR search() method directly
         # This uses hybrid search + reranking - the full Context-Engine pipeline
-        print(f"[coir] Running Context-Engine search on {len(queries)} queries...", flush=True)
+        print(f"[coir] Running Context-Engine search on {len(queries)} queries over {len(corpus)} docs...", flush=True)
         task_results = model.search(corpus, queries, top_k=top_k)
 
         # Use coir's evaluation metrics (NDCG, MAP, Recall, Precision)
@@ -314,6 +343,7 @@ def run_coir_benchmark_sync(
     rerank_enabled: bool = True,
     output_folder: Optional[str] = None,
     top_k: int = 10,
+    corpus_limit: Optional[int] = None,
     **kwargs: Any,
 ) -> CoIRReport:
     """
@@ -325,6 +355,8 @@ def run_coir_benchmark_sync(
       batch_size: batch size for coir-eval (if supported)
       rerank_enabled: whether repo_search should attempt reranking
       output_folder: where to write coir-eval artifacts (if supported)
+      top_k: number of results to retrieve per query
+      corpus_limit: cap corpus size for faster smoke tests
     """
     _ensure_env_defaults()
 
@@ -380,7 +412,9 @@ def run_coir_benchmark_sync(
     # coir-eval's default COIR.run() wraps models in DRES which only uses
     # encode_queries/encode_corpus and does its own similarity computation,
     # completely bypassing our hybrid search, reranking, and other features.
-    raw = _evaluate_with_custom_search(tasks_obj, model, out_dir, top_k=top_k)
+    raw = _evaluate_with_custom_search(
+        tasks_obj, model, out_dir, top_k=top_k, corpus_limit=corpus_limit
+    )
 
     print("[coir] Evaluation complete.", flush=True)
     return CoIRReport(tasks=task_names, raw=raw, runtime_info=runtime_info)
