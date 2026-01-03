@@ -220,6 +220,97 @@ def _summarize_task_sizes(tasks_obj: Any) -> List[Dict[str, Optional[int]]]:
     return stats
 
 
+def _build_subset(
+    corpus: Dict[str, Any],
+    queries: Dict[str, str],
+    qrels: Dict[str, Dict[str, int]],
+    query_limit: Optional[int] = None,
+    corpus_limit: Optional[int] = None,
+) -> Tuple[Dict[str, Any], Dict[str, str], Dict[str, Dict[str, int]], Optional[str]]:
+    """
+    Build a query-compatible subset following CoSQA's pattern.
+
+    1. Apply query limit first
+    2. Build corpus subset ensuring relevant docs fit
+    3. Fill remaining corpus slots with non-relevant docs
+    4. Return (corpus, queries, qrels, subset_note)
+    """
+    subset_note = None
+
+    # Step 1: Apply query limit
+    if query_limit and len(queries) > query_limit:
+        query_ids = list(queries.keys())[:query_limit]
+        queries = {qid: queries[qid] for qid in query_ids}
+        qrels = {qid: qrels[qid] for qid in query_ids if qid in qrels}
+
+    # Step 2: Build corpus subset if corpus_limit is set
+    if corpus_limit and len(corpus) > corpus_limit:
+        # Collect all relevant doc IDs from qrels
+        relevant_doc_ids: set = set()
+        for _, rels in qrels.items():
+            relevant_doc_ids.update(rels.keys())
+
+        # Filter to docs that exist in corpus
+        relevant_doc_ids = {did for did in relevant_doc_ids if did in corpus}
+
+        # If relevant docs exceed corpus_limit, we need to drop some queries
+        if len(relevant_doc_ids) > corpus_limit:
+            # Walk queries and add only those whose relevant docs fit
+            selected_queries: Dict[str, str] = {}
+            selected_qrels: Dict[str, Dict[str, int]] = {}
+            selected_doc_ids: set = set()
+
+            for qid, qtext in queries.items():
+                if qid not in qrels:
+                    continue
+                rel_ids = {did for did in qrels[qid].keys() if did in corpus}
+                new_ids = rel_ids - selected_doc_ids
+                if len(selected_doc_ids) + len(new_ids) <= corpus_limit:
+                    selected_queries[qid] = qtext
+                    selected_qrels[qid] = qrels[qid]
+                    selected_doc_ids.update(rel_ids)
+
+            if not selected_queries:
+                # Take at least one query
+                for qid, qtext in queries.items():
+                    if qid in qrels:
+                        selected_queries[qid] = qtext
+                        selected_qrels[qid] = qrels[qid]
+                        selected_doc_ids.update(qrels[qid].keys())
+                        break
+
+            queries = selected_queries
+            qrels = selected_qrels
+            relevant_doc_ids = selected_doc_ids
+            print(f"[coir] Dropped queries to fit corpus_limit; {len(queries)} queries remain", flush=True)
+
+        # Build limited corpus: relevant docs first
+        limited_corpus: Dict[str, Any] = {}
+        for doc_id in relevant_doc_ids:
+            if doc_id in corpus:
+                limited_corpus[doc_id] = corpus[doc_id]
+
+        # Fill remaining slots with non-relevant docs
+        for doc_id, doc in corpus.items():
+            if len(limited_corpus) >= corpus_limit:
+                break
+            if doc_id not in limited_corpus:
+                limited_corpus[doc_id] = doc
+
+        corpus = limited_corpus
+
+    # Build subset note
+    if query_limit or corpus_limit:
+        parts = []
+        if query_limit:
+            parts.append(f"query_limit={query_limit}")
+        if corpus_limit:
+            parts.append(f"corpus_limit={corpus_limit}")
+        subset_note = f"subset evaluation ({', '.join(parts)})"
+
+    return corpus, queries, qrels, subset_note
+
+
 def _evaluate_with_custom_search(
     tasks_obj: Any,
     model: ContextEngineRetriever,
