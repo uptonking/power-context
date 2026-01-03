@@ -64,6 +64,30 @@ CoSQA evaluates natural language to code retrieval using web search queries pair
 python -m scripts.benchmarks.cosqa.runner --limit 500
 ```
 
+#### CoSQA ablation runs (refrag/mini, rerank, learning)
+
+Use the helper script to run a consistent matrix across:
+- rerank vs no rerank
+- ReFRAG/mini vectors vs no ReFRAG
+- learning vs no learning
+
+```bash
+# Default: 50/50 subset per run, new collection per variant
+bash scripts/benchmarks/cosqa/run_ablation.sh
+
+# Full corpus/queries (set 0 to disable limits)
+CORPUS_LIMIT=0 QUERY_LIMIT=0 RUN_TAG=full \
+  bash scripts/benchmarks/cosqa/run_ablation.sh
+```
+
+Outputs:
+- JSON reports: `bench_results/cosqa/<RUN_TAG>/cosqa_<label>.json`
+- Logs: `bench_results/cosqa/<RUN_TAG>/cosqa_<label>.log` (override with `LOG_DIR=...`)
+
+Useful knobs (env):
+- `QDRANT_URL`, `LEX_VECTOR_DIM`, `HYBRID_EXPAND`, `SEMANTIC_EXPANSION_ENABLED`
+- `RUN_TAG`, `COLL_PREFIX`, `OUT_DIR`, `LOG_DIR`
+
 #### Quick subset runs (smoke tests)
 
 When you use `--corpus-limit`, the runner builds a corpus subset that includes
@@ -135,10 +159,19 @@ python -m scripts.benchmarks.coir.runner
 python -m scripts.benchmarks.coir.runner --tasks cosqa codesearchnet-python apps
 
 # Quick test with subset
-python -m scripts.benchmarks.coir.runner --tasks cosqa --limit 100
+python -m scripts.benchmarks.coir.runner --tasks cosqa --query-limit 100 --corpus-limit 100
+
+# Ablation sweep (rerank ± ReFRAG ± micro-chunks)
+./scripts/benchmarks/coir/run_ablation.sh \
+  TASKS="cosqa codesearchnet-python" \
+  QUERY_LIMIT=200 \
+  CORPUS_LIMIT=200 \
+  OUT_DIR=bench_results/coir/$(date +%Y%m%d-%H%M%S)
 ```
 
 **Note**: Requires `pip install coir-eval` for the external evaluation harness.
+The CoIR runner uses Context-Engine's hybrid search directly (not the coir-eval
+embedding-only DRES path), so rerank/expansion settings are honored.
 
 ---
 
@@ -214,9 +247,11 @@ python -m scripts.benchmarks.swe.runner --subset lite --limit 10
 # Full evaluation  
 python -m scripts.benchmarks.swe.runner --subset lite -o results.json
 
-# With tuning
-RERANK_ENABLED=1 HYBRID_SYMBOL_BOOST=0.25 \
-    python -m scripts.benchmarks.swe.runner --subset lite
+# With tuning (CLI flags for major features)
+python -m scripts.benchmarks.swe.runner --subset lite --refrag --micro-chunks
+
+# Optional weight tuning (env)
+HYBRID_SYMBOL_BOOST=0.25 python -m scripts.benchmarks.swe.runner --subset lite
 ```
 
 ---
@@ -260,6 +295,9 @@ RERANK_RETURN_M=20
 INDEX_BATCH_SIZE=256
 INDEX_CHUNK_LINES=120
 ```
+
+Benchmark reports always log the effective config snapshot, including embedding
+model, rerank on/off, expansion on/off, micro/semantic chunking, and ReFRAG.
 
 ---
 

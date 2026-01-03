@@ -41,6 +41,7 @@ def percentile(values: List[float], p: float) -> float:
 
 def compute_percentiles(values: List[float]) -> Dict[str, float]:
     """Compute standard percentiles (p50, p90, p95, p99)."""
+    stddev = round(statistics.stdev(values), 2) if len(values) > 1 else 0.0
     return {
         "p50": round(percentile(values, 0.50), 2),
         "p90": round(percentile(values, 0.90), 2),
@@ -49,6 +50,7 @@ def compute_percentiles(values: List[float]) -> Dict[str, float]:
         "min": round(min(values), 2) if values else 0.0,
         "max": round(max(values), 2) if values else 0.0,
         "mean": round(statistics.mean(values), 2) if values else 0.0,
+        "stddev": stddev,
     }
 
 
@@ -272,10 +274,12 @@ class BenchmarkReport:
         for key in metric_keys:
             values = [q.metrics.get(key, 0) for q in self.per_query if key in q.metrics]
             if values:
+                stddev = round(statistics.stdev(values), 4) if len(values) > 1 else 0.0
                 self.aggregates[key] = {
                     "mean": round(statistics.mean(values), 4),
                     "min": round(min(values), 4),
                     "max": round(max(values), 4),
+                    "stddev": stddev,
                 }
     
     def to_dict(self) -> Dict[str, Any]:
@@ -355,12 +359,16 @@ ENV_SNAPSHOT_KEYS = [
     "INDEX_CHUNK_LINES", "INDEX_CHUNK_OVERLAP",
     "REFRAG_MODE", "INDEX_MICRO_CHUNKS",
     # Reranking
-    "RERANK_ENABLED", "RERANK_IN_PROCESS", "RERANKER_TOPN", "RERANKER_RETURN_M",
+    "RERANK_ENABLED", "RERANKER_ENABLED", "RERANK_IN_PROCESS", "RERANKER_TOPN", "RERANKER_RETURN_M",
     "RERANK_BLEND_WEIGHT", "RERANKER_MODEL", "RERANKER_ONNX_PATH", "RERANKER_TOKENIZER_PATH",
     # Model
     "EMBEDDING_MODEL",
+    "EMBEDDING_SEED",
+    "PYTHONHASHSEED",
     # Collection
     "COLLECTION_NAME", "QDRANT_URL",
+    "QDRANT_EF_SEARCH",
+    "QUERY_OPTIMIZER_MIN_EF", "QUERY_OPTIMIZER_MAX_EF",
 ]
 
 

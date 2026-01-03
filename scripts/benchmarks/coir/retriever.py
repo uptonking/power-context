@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -143,9 +144,10 @@ class ContextEngineRetriever:
             all_embeddings.extend(embeddings)
 
         # Cache for search (track which doc IDs belong to this corpus)
+        # Note: coir-eval may use "_id" or "id" depending on the code path
         self._corpus_doc_ids = set()
         for idx, doc in enumerate(corpus):
-            doc_id = doc["_id"]
+            doc_id = doc.get("_id") or doc.get("id") or str(idx)
             self._corpus_index[doc_id] = all_embeddings[idx]
             self._corpus_doc_ids.add(doc_id)
 
@@ -229,9 +231,18 @@ class ContextEngineRetriever:
         For CoIR benchmarks, we need to index the corpus first, then search.
         This is slower but more representative of real performance.
         """
-        # For CoIR tasks, the corpus is provided per-task
-        # We need to index it temporarily and search
-        return asyncio.run(self._search_hybrid_async(corpus, queries, top_k))
+        # For CoIR tasks, the corpus is provided per-task.
+        # Use a background thread if we're already inside a running event loop.
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(self._search_hybrid_async(corpus, queries, top_k))
+
+        def _run():
+            return asyncio.run(self._search_hybrid_async(corpus, queries, top_k))
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            return executor.submit(_run).result()
 
     async def _search_hybrid_async(
         self,
@@ -260,30 +271,48 @@ class ContextEngineRetriever:
         if index_result.get("reused"):
             pass  # Collection reused, no indexing needed
 
-        # Search each query using Context-Engine
+        # Search queries in parallel batches using Context-Engine
         # Use larger candidate pool for reranking (100 candidates -> top_k)
+        query_items = list(queries.items())
+        batch_size = self.batch_size or 32  # Parallel batch size
         results = {}
-        for qid, query_text in queries.items():
+
+        async def search_one(qid: str, query_text: str) -> tuple:
             result = await repo_search(
                 query=query_text,
                 limit=top_k,
+                per_path=1,
                 collection=collection,
                 rerank_enabled=self.rerank_enabled,
-                rerank_top_n=100 if self.rerank_enabled else None,  # Retrieve 100 candidates
-                rerank_return_m=top_k if self.rerank_enabled else None,  # Rerank down to top_k
+                rerank_top_n=100 if self.rerank_enabled else None,
+                rerank_return_m=top_k if self.rerank_enabled else None,
             )
-
             # Extract scores
             doc_scores = {}
             for r in result.get("results", []):
-                # Prefer the lightweight IDs returned by repo_search for benchmarks.
-                # CoIR corpus IDs live under "_id" at index-time; repo_search now surfaces that as doc_id.
                 doc_id = r.get("doc_id") or r.get("code_id") or r.get("_id") or (r.get("payload") or {}).get("_id")
                 score = r.get("score", 0.0)
                 if doc_id:
-                    doc_scores[doc_id] = float(score)
+                    score_val = float(score)
+                    prev = doc_scores.get(doc_id)
+                    doc_scores[doc_id] = score_val if prev is None else max(prev, score_val)
+            return qid, doc_scores
 
-            results[qid] = doc_scores
+        # Process in batches
+        total_queries = len(query_items)
+        for batch_start in range(0, total_queries, batch_size):
+            batch_end = min(batch_start + batch_size, total_queries)
+            batch = query_items[batch_start:batch_end]
+
+            # Run batch in parallel
+            tasks = [search_one(qid, qtext) for qid, qtext in batch]
+            batch_results = await asyncio.gather(*tasks)
+
+            for qid, doc_scores in batch_results:
+                results[qid] = doc_scores
+
+            # Progress update
+            print(f"[coir] Searched {batch_end}/{total_queries} queries", flush=True)
 
         return results
     
@@ -300,7 +329,7 @@ class ContextEngineRetriever:
         deleted = 0
         if delete_collections and self._indexed_collections:
             try:
-                from scripts.benchmarks.cosqa.indexer import get_qdrant_client
+                from scripts.benchmarks.coir.indexer import get_qdrant_client
                 client = get_qdrant_client()
                 for coll in self._indexed_collections:
                     try:

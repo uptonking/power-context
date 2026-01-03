@@ -53,6 +53,7 @@ import asyncio
 import json
 import math
 import os
+import subprocess
 import sys
 import time
 from dataclasses import dataclass, field, asdict
@@ -83,7 +84,7 @@ def _load_benchmark_env() -> None:
 # Critical reranker settings - ensure these are set for proper benchmark scoring
 os.environ.setdefault("RERANKER_MODEL", "jinaai/jina-reranker-v2-base-multilingual")
 os.environ.setdefault("RERANK_IN_PROCESS", "1")
-os.environ["RERANK_LEARNING"] = "0"  # FORCE LEARNING OFF as requested
+os.environ.setdefault("RERANK_LEARNING", "0")  # Default off for benchmarks; CLI can override
 
 # Avoid tokenizers fork warning in benchmark runs.
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
@@ -627,6 +628,17 @@ async def run_full_benchmark(
     return report
 
 
+def _spawn_learning_worker(collection: str, project_root: Path) -> subprocess.Popen:
+    cmd = [
+        sys.executable,
+        str(project_root / "scripts" / "learning_reranker_worker.py"),
+        "--daemon",
+        "--collection",
+        collection,
+    ]
+    return subprocess.Popen(cmd, cwd=project_root, env=os.environ.copy())
+
+
 def main():
     """CLI entrypoint for CoSQA benchmark."""
     import argparse
@@ -649,6 +661,8 @@ def main():
                         help="Disable query expansion")
     parser.add_argument("--recreate", action="store_true",
                         help="Recreate index from scratch")
+    parser.add_argument("--learning-worker", action="store_true",
+                        help="Spawn learning reranker worker during the run (enables learning + event logging)")
     parser.add_argument("--output", type=str,
                         help="Output JSON file")
     args = parser.parse_args()
@@ -666,15 +680,33 @@ def main():
     os.environ.setdefault("RERANKER_ONNX_PATH", str(_project_root / "models" / "model_qint8_avx512_vnni.onnx"))
     os.environ.setdefault("RERANKER_TOKENIZER_PATH", str(_project_root / "models" / "tokenizer.json"))
 
-    report = asyncio.run(run_full_benchmark(
-        split=args.split,
-        collection=args.collection,
-        limit=args.limit,
-        query_limit=args.query_limit,
-        corpus_limit=args.corpus_limit,
-        rerank_enabled=not args.no_rerank,
-        recreate_index=args.recreate,
-    ))
+    learning_proc = None
+    if args.learning_worker:
+        if args.no_rerank:
+            print("  [WARN] --learning-worker ignored because --no-rerank is set")
+        else:
+            os.environ["RERANK_LEARNING"] = "1"
+            os.environ["RERANK_EVENTS_ENABLED"] = "1"
+            learning_proc = _spawn_learning_worker(args.collection, _project_root)
+            print(f"  [learning-worker] Started (pid {learning_proc.pid}) for {args.collection}")
+
+    try:
+        report = asyncio.run(run_full_benchmark(
+            split=args.split,
+            collection=args.collection,
+            limit=args.limit,
+            query_limit=args.query_limit,
+            corpus_limit=args.corpus_limit,
+            rerank_enabled=not args.no_rerank,
+            recreate_index=args.recreate,
+        ))
+    finally:
+        if learning_proc and learning_proc.poll() is None:
+            learning_proc.terminate()
+            try:
+                learning_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                learning_proc.kill()
 
     print_report(report)
 
