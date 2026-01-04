@@ -8,17 +8,8 @@ import pytest
 from qdrant_client import QdrantClient, models
 
 
-@pytest.fixture(scope="module")
-def qdrant_container():
-    """Connect to live Qdrant at localhost:6333 (or QDRANT_URL env var)."""
-    url = os.environ.get("QDRANT_URL", "http://localhost:6333")
-    # Quick health check
-    try:
-        client = QdrantClient(url=url, timeout=5)
-        client.get_collections()
-    except Exception as e:
-        pytest.skip(f"Qdrant not available at {url}: {e}")
-    yield url
+# qdrant_container fixture is now provided by conftest.py
+# It uses CI Qdrant service (localhost:6333) or testcontainers (local dev)
 
 
 ing = importlib.import_module("scripts.ingest_code")
