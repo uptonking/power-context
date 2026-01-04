@@ -45,9 +45,12 @@ jobs:
     - name: Set environment variables
       run: |
         echo "QDRANT_URL=http://localhost:6333" >> $GITHUB_ENV
-        echo "COLLECTION_NAME=test-ci-${{ github.run_id }}" >> $GITHUB_ENV
         echo "PYTHONPATH=${{ github.workspace }}/scripts:$PYTHONPATH" >> $GITHUB_ENV
-        
+        echo "CI=true" >> $GITHUB_ENV
+        # Note: COLLECTION_NAME is intentionally NOT set globally.
+        # Integration tests set their own unique collection names.
+        # Unit tests mock Qdrant and don't need a real collection.
+
     - name: Run tests
       run: pytest -q
       
