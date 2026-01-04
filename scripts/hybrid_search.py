@@ -1527,8 +1527,10 @@ def _run_hybrid_search_impl(
                 with open(cache_key, "r", encoding="utf-8", errors="ignore") as f:
                     lines = f.readlines()
 
-                # Skip caching for large files to prevent memory bloat
-                if file_size > _FILE_LINES_MAX_FILE_SIZE:
+                # Skip caching for large files or if cache is disabled/too small
+                if (file_size > _FILE_LINES_MAX_FILE_SIZE
+                        or _FILE_LINES_MAX_TOTAL_SIZE <= 0
+                        or file_size > _FILE_LINES_MAX_TOTAL_SIZE):
                     return lines
 
                 # LRU eviction: remove oldest entries when at capacity (count or size)
