@@ -1474,8 +1474,13 @@ def _run_hybrid_search_impl(
     # File content cache to avoid re-reading files for each snippet
     # Controlled by HYBRID_SNIPPET_DISK_READ env var (default ON for backwards compatibility)
     # Uses OrderedDict for LRU eviction to bound memory usage
+    # Size limits: max files, max bytes per file, max total cache bytes
     _FILE_LINES_CACHE_MAX = int(os.environ.get("HYBRID_FILE_CACHE_MAX", "100") or 100)
+    _FILE_LINES_MAX_FILE_SIZE = int(os.environ.get("HYBRID_FILE_CACHE_MAX_FILE_KB", "256") or 256) * 1024
+    _FILE_LINES_MAX_TOTAL_SIZE = int(os.environ.get("HYBRID_FILE_CACHE_MAX_TOTAL_MB", "16") or 16) * 1024 * 1024
     _file_lines_cache: _FileCacheOD[str, List[str]] = _FileCacheOD()
+    _file_lines_cache_sizes: dict[str, int] = {}  # Track size of each cached file
+    _file_lines_cache_total_size = 0
     _file_lines_cache_lock = threading.Lock()
     _snippet_disk_reads = os.environ.get("HYBRID_SNIPPET_DISK_READ", "1").strip().lower() not in {
         "0", "false", "no", "off"
@@ -1486,7 +1491,13 @@ def _run_hybrid_search_impl(
 
         Cache key is normalized to realpath to prevent duplicate entries
         for the same file accessed via different path forms.
+
+        Size limits:
+        - Files > HYBRID_FILE_CACHE_MAX_FILE_KB (default 256KB) are not cached
+        - Total cache size capped at HYBRID_FILE_CACHE_MAX_TOTAL_MB (default 16MB)
         """
+        global _file_lines_cache_total_size
+
         # Normalize path for consistent cache keys
         p = path
         if not os.path.isabs(p):
@@ -1507,17 +1518,37 @@ def _run_hybrid_search_impl(
 
         try:
             if cache_key == "/work" or cache_key.startswith("/work/"):
+                # Check file size before reading to avoid caching large files
+                try:
+                    file_size = os.path.getsize(cache_key)
+                except OSError:
+                    file_size = 0
+
                 with open(cache_key, "r", encoding="utf-8", errors="ignore") as f:
                     lines = f.readlines()
-                # LRU eviction: remove oldest entries when at capacity
+
+                # Skip caching for large files to prevent memory bloat
+                if file_size > _FILE_LINES_MAX_FILE_SIZE:
+                    return lines
+
+                # LRU eviction: remove oldest entries when at capacity (count or size)
                 with _file_lines_cache_lock:
-                    _file_lines_cache[cache_key] = lines
-                    _file_lines_cache.move_to_end(cache_key)
-                    while len(_file_lines_cache) > _FILE_LINES_CACHE_MAX:
+                    # Evict until we have room for this file
+                    while (_file_lines_cache_total_size + file_size > _FILE_LINES_MAX_TOTAL_SIZE
+                           or len(_file_lines_cache) >= _FILE_LINES_CACHE_MAX):
+                        if not _file_lines_cache:
+                            break
                         try:
-                            _file_lines_cache.popitem(last=False)
+                            evicted_key, _ = _file_lines_cache.popitem(last=False)
+                            evicted_size = _file_lines_cache_sizes.pop(evicted_key, 0)
+                            _file_lines_cache_total_size -= evicted_size
                         except KeyError:
                             break
+
+                    _file_lines_cache[cache_key] = lines
+                    _file_lines_cache_sizes[cache_key] = file_size
+                    _file_lines_cache_total_size += file_size
+                    _file_lines_cache.move_to_end(cache_key)
                 return lines
         except Exception:
             logging.debug("Failed to read file for snippet lines: %s", path, exc_info=True)

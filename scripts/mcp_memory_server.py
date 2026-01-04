@@ -284,9 +284,17 @@ def _get_qdrant_client() -> QdrantClient:
 
 
 def _return_qdrant_client(client: QdrantClient):
-    """Return a client to the pool (no-op if pooling unavailable)."""
-    if _POOL_AVAILABLE and client is not None:
+    """Return a client to the pool, or close it if pooling unavailable."""
+    if client is None:
+        return
+    if _POOL_AVAILABLE:
         return_qdrant_client(client)
+    else:
+        # Fallback path: close client to avoid socket leak
+        try:
+            client.close()
+        except Exception:
+            pass  # Best effort cleanup
 
 
 # Ensure collection exists with dual vectors
