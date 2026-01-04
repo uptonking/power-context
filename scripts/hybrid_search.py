@@ -1496,7 +1496,7 @@ def _run_hybrid_search_impl(
         - Files > HYBRID_FILE_CACHE_MAX_FILE_KB (default 256KB) are not cached
         - Total cache size capped at HYBRID_FILE_CACHE_MAX_TOTAL_MB (default 16MB)
         """
-        global _file_lines_cache_total_size
+        nonlocal _file_lines_cache_total_size
 
         # Normalize path for consistent cache keys
         p = path
