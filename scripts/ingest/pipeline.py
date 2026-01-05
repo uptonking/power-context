@@ -117,18 +117,19 @@ def _select_dense_text(
     *,
     info: str,
     code_text: str,
-    signature: str = "",
     pseudo: str = "",
     tags: list[str] | None = None,
     mode: str | None = None,
 ) -> str:
     """Choose the text used for dense embedding.
 
-    Default is pseudo+sig+tags for semantic "what" retrieval. Set
-    INDEX_DENSE_MODE=code or =info to embed code/info instead (legacy behavior).
+    Default is info+pseudo+tags for semantic "what" retrieval.
+    - info = "{language} code from {path} lines {start}-{end}. {first_line}" (baseline that worked)
+    - pseudo/tags = semantic enrichment from LLM
+    Dense captures the "what" (intent), lexical handles the "how" (code body).
     """
     mode = (
-        (str(mode) if mode is not None else str(os.environ.get("INDEX_DENSE_MODE", "pseudo+sig+tags") or ""))
+        (str(mode) if mode is not None else str(os.environ.get("INDEX_DENSE_MODE", "info+pseudo+tags") or ""))
         .strip()
         .lower()
     )
@@ -153,7 +154,7 @@ def _select_dense_text(
         "signature": "sig",
     }
     if not mode:
-        mode = "pseudo+sig+tags"
+        mode = "info+pseudo+tags"
     raw_parts = [p for p in mode.replace(",", "+").split("+") if p.strip()]
     parts = {alias.get(p.strip().lower(), p.strip().lower()) for p in raw_parts}
 
@@ -163,15 +164,13 @@ def _select_dense_text(
         include_info = True
         include_pseudo = False
         include_tags = False
-        include_sig = False
     else:
-        _recognized = {"code", "info", "pseudo", "tags", "sig"}
+        _recognized = {"code", "info", "pseudo", "tags"}
         _unknown_only = bool(parts) and parts.isdisjoint(_recognized)
         include_code = ("code" in parts) or (not parts) or _unknown_only  # default to code when unknown
         include_info = ("info" in parts)
         include_pseudo = ("pseudo" in parts)
         include_tags = ("tags" in parts)
-        include_sig = ("sig" in parts)
 
     def _normalize_info_for_dense(s: str) -> str:
         s = (s or "").strip()
@@ -187,10 +186,6 @@ def _select_dense_text(
         return s.strip()
 
     header: list[str] = []
-    if include_sig and signature:
-        sig = str(signature).strip()
-        if sig:
-            header.append(f"Sig: {sig}")
     if include_info:
         info_norm = _normalize_info_for_dense(info)
         if info_norm:
@@ -216,42 +211,20 @@ def _select_dense_text(
         pieces.append(body)
     text = "\n".join(pieces).strip()
 
-    text = text.strip()
-    if not text:
-        text = _normalize_info_for_dense(info)
+    # Fallback: if no semantic content (no pseudo/tags), include text body.
+    # This ensures text files without pseudo generation still get meaningful embeddings.
+    has_semantic = bool(pseudo) or bool(tags)
+    if not text or (not has_semantic and not include_code):
+        # No semantic enrichment available - fall back to text content
+        fallback = (code_text or "").strip()
+        if fallback:
+            info_norm = _normalize_info_for_dense(info)
+            text = f"{info_norm}\n\n{fallback}" if info_norm else fallback
+        elif not text:
+            text = _normalize_info_for_dense(info)
     if max_chars > 0 and len(text) > max_chars:
         text = text[:max_chars]
     return text
-
-
-def _build_signature_text(
-    *,
-    kind: str | None,
-    symbol: str | None,
-    symbol_path: str | None,
-    code_text: str,
-) -> str:
-    """Build a compact signature string for dense embeddings."""
-    sig = ""
-    sym = (symbol_path or symbol or "").strip()
-    if sym:
-        sig = f"{(kind or '').strip()} {sym}".strip()
-
-    line = ""
-    if code_text:
-        lines = code_text.splitlines()
-        if lines:
-            line = (lines[0] or "").strip()
-    if line:
-        line = line[:200]
-    if line and not line.lstrip().startswith(("#", "//", "/*", "*")):
-        has_signature = "(" in line or line.lstrip().startswith(
-            ("def ", "class ", "function ", "func ", "interface ", "struct ", "type ", "enum ", "trait ", "impl ")
-        )
-        if has_signature:
-            if not sig or sym and sym.lower() in line.lower():
-                sig = line
-    return sig.strip()
 
 
 def build_information(
@@ -647,22 +620,15 @@ def _index_single_file_inner(
         if tags:
             payload["tags"] = tags
         dense_mode = (
-            str(os.environ.get("INDEX_DENSE_MODE", "pseudo+sig+tags") or "")
+            str(os.environ.get("INDEX_DENSE_MODE", "info+pseudo+tags") or "")
             .strip()
             .lower()
-            or "pseudo+sig+tags"
+            or "info+pseudo+tags"
         )
         payload["dense_mode"] = dense_mode
-        signature = _build_signature_text(
-            kind=ch.get("kind"),
-            symbol=ch.get("symbol"),
-            symbol_path=ch.get("symbol_path"),
-            code_text=ch.get("text") or "",
-        )
         dense_text = _select_dense_text(
             info=cd["info"],
             code_text=ch.get("text") or "",
-            signature=signature,
             pseudo=pseudo,
             tags=tags,
             mode=dense_mode,
@@ -1066,16 +1032,9 @@ def process_file_with_smart_reindexing(
             if not embed_text:
                 dense_mode = payload.get("dense_mode")
                 if dense_mode:
-                    signature = _build_signature_text(
-                        kind=md.get("kind"),
-                        symbol=md.get("symbol"),
-                        symbol_path=md.get("symbol_path"),
-                        code_text=code_text,
-                    )
                     embed_text = _select_dense_text(
                         info=payload.get("information") or payload.get("document") or "",
                         code_text=code_text,
-                        signature=signature,
                         pseudo=payload.get("pseudo") or "",
                         tags=payload.get("tags") if isinstance(payload.get("tags"), list) else None,
                         mode=str(dense_mode),
@@ -1266,22 +1225,15 @@ def process_file_with_smart_reindexing(
 
         code_text = ch.get("text") or ""
         dense_mode = (
-            str(os.environ.get("INDEX_DENSE_MODE", "pseudo+sig+tags") or "")
+            str(os.environ.get("INDEX_DENSE_MODE", "info+pseudo+tags") or "")
             .strip()
             .lower()
-            or "pseudo+sig+tags"
+            or "info+pseudo+tags"
         )
         payload["dense_mode"] = dense_mode
-        signature = _build_signature_text(
-            kind=ch.get("kind"),
-            symbol=ch.get("symbol"),
-            symbol_path=ch.get("symbol_path"),
-            code_text=code_text,
-        )
         dense_text = _select_dense_text(
             info=info,
             code_text=code_text,
-            signature=signature,
             pseudo=pseudo,
             tags=tags,
             mode=dense_mode,
