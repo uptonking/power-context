@@ -15,6 +15,7 @@ services:
     volumes:
       - clickhouse_data:/var/lib/clickhouse
       - ./config/clickhouse-config.xml:/etc/clickhouse-server/config.d/custom-config.xml:ro
+      - ./config/docker_related_config.xml:/etc/clickhouse-server/config.d/docker_related_config.xml:ro
     environment:
       - CLICKHOUSE_PASSWORD=OPENLIT
       - CLICKHOUSE_USER=default
