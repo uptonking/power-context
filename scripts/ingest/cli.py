@@ -112,6 +112,13 @@ def parse_args():
 
 def main():
     """Main entry point for the CLI."""
+    # Load .env file for REFRAG_*, GLM_*, and other settings
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(Path(__file__).parent.parent.parent / ".env")
+    except ImportError:
+        pass  # python-dotenv not installed, rely on exported env vars
+    
     args = parse_args()
 
     # Map CLI overrides to env so downstream helpers pick them up
