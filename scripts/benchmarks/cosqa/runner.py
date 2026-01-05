@@ -80,11 +80,11 @@ def _load_benchmark_env() -> None:
         load_dotenv(Path(__file__).parent.parent.parent.parent / ".env")
     except ImportError:
         pass  # dotenv optional
-
-# Critical reranker settings - ensure these are set for proper benchmark scoring
-os.environ.setdefault("RERANKER_MODEL", "jinaai/jina-reranker-v2-base-multilingual")
-os.environ.setdefault("RERANK_IN_PROCESS", "1")
-os.environ.setdefault("RERANK_LEARNING", "0")  # Default off for benchmarks; CLI can override
+    
+    # Set defaults AFTER loading .env so .env takes priority
+    os.environ.setdefault("RERANKER_MODEL", "BAAI/bge-reranker-base")
+    os.environ.setdefault("RERANK_IN_PROCESS", "1")
+    os.environ.setdefault("RERANK_LEARNING", "0")  # Default off for benchmarks; CLI can override
 
 # Avoid tokenizers fork warning in benchmark runs.
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")

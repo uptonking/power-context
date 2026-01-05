@@ -20,11 +20,26 @@ from typing import Any, List, Optional, Tuple
 # Default FastEmbed reranker model (None = disabled, use ONNX paths)
 DEFAULT_RERANKER_MODEL: Optional[str] = None
 
-# Configuration from environment
-RERANKER_MODEL = os.environ.get("RERANKER_MODEL", "").strip() or None
-RERANKER_ONNX_PATH = os.environ.get("RERANKER_ONNX_PATH", "").strip() or None
-RERANKER_TOKENIZER_PATH = os.environ.get("RERANKER_TOKENIZER_PATH", "").strip() or None
-RERANK_MAX_TOKENS = int(os.environ.get("RERANK_MAX_TOKENS", "512") or 512)
+
+def _get_reranker_model_name() -> Optional[str]:
+    """Get RERANKER_MODEL from environment, allowing dotenv to work."""
+    return os.environ.get("RERANKER_MODEL", "").strip() or None
+
+
+def _get_reranker_onnx_path() -> Optional[str]:
+    """Get RERANKER_ONNX_PATH from environment."""
+    return os.environ.get("RERANKER_ONNX_PATH", "").strip() or None
+
+
+def _get_reranker_tokenizer_path() -> Optional[str]:
+    """Get RERANKER_TOKENIZER_PATH from environment."""
+    return os.environ.get("RERANKER_TOKENIZER_PATH", "").strip() or None
+
+
+def _get_rerank_max_tokens() -> int:
+    """Get RERANK_MAX_TOKENS from environment."""
+    return int(os.environ.get("RERANK_MAX_TOKENS", "512") or 512)
+
 
 # Module-level cache and locks
 _RERANKER_CACHE: dict[str, Any] = {}
@@ -74,7 +89,7 @@ def get_reranker_model(model_name: Optional[str] = None) -> Optional[Any]:
     Returns:
         TextCrossEncoder instance, (session, tokenizer) tuple, or None.
     """
-    effective_model = model_name or RERANKER_MODEL
+    effective_model = model_name or _get_reranker_model_name()
 
     # FastEmbed path
     if effective_model and _check_fastembed_rerank():
@@ -96,7 +111,9 @@ def get_reranker_model(model_name: Optional[str] = None) -> Optional[Any]:
                 return None
 
     # ONNX fallback path
-    if RERANKER_ONNX_PATH and RERANKER_TOKENIZER_PATH and _check_onnx():
+    onnx_path = _get_reranker_onnx_path()
+    tokenizer_path = _get_reranker_tokenizer_path()
+    if onnx_path and tokenizer_path and _check_onnx():
         cached = _RERANKER_CACHE.get("onnx:manual")
         if cached is not None:
             return cached
@@ -110,14 +127,15 @@ def get_reranker_model(model_name: Optional[str] = None) -> Optional[Any]:
                 import onnxruntime as ort
                 from tokenizers import Tokenizer
 
-                tok = Tokenizer.from_file(RERANKER_TOKENIZER_PATH)
+                tok = Tokenizer.from_file(tokenizer_path)
+                max_tokens = _get_rerank_max_tokens()
                 try:
-                    tok.enable_truncation(max_length=RERANK_MAX_TOKENS)
+                    tok.enable_truncation(max_length=max_tokens)
                 except Exception:
                     pass
 
                 sess = ort.InferenceSession(
-                    RERANKER_ONNX_PATH,
+                    onnx_path,
                     providers=["CPUExecutionProvider"]
                 )
                 result = (sess, tok)
@@ -223,30 +241,37 @@ def _onnx_rerank(sess: Any, tok: Any, pairs: List[Tuple[str, str]]) -> List[floa
 
 def is_reranker_available() -> bool:
     """Check if any reranker backend is available."""
-    if RERANKER_MODEL and _check_fastembed_rerank():
+    model = _get_reranker_model_name()
+    if model and _check_fastembed_rerank():
         return True
-    if RERANKER_ONNX_PATH and RERANKER_TOKENIZER_PATH and _check_onnx():
+    onnx_path = _get_reranker_onnx_path()
+    tokenizer_path = _get_reranker_tokenizer_path()
+    if onnx_path and tokenizer_path and _check_onnx():
         return True
     return False
 
 
 def get_reranker_info() -> dict:
     """Get information about the configured reranker."""
-    if RERANKER_MODEL and _check_fastembed_rerank():
+    model = _get_reranker_model_name()
+    if model and _check_fastembed_rerank():
         return {
             "backend": "fastembed",
-            "model": RERANKER_MODEL,
+            "model": model,
             "available": True,
         }
-    if RERANKER_ONNX_PATH and RERANKER_TOKENIZER_PATH and _check_onnx():
+    onnx_path = _get_reranker_onnx_path()
+    tokenizer_path = _get_reranker_tokenizer_path()
+    if onnx_path and tokenizer_path and _check_onnx():
         return {
             "backend": "onnx",
-            "onnx_path": RERANKER_ONNX_PATH,
-            "tokenizer_path": RERANKER_TOKENIZER_PATH,
+            "onnx_path": onnx_path,
+            "tokenizer_path": tokenizer_path,
             "available": True,
         }
     return {
         "backend": None,
         "available": False,
     }
+
 

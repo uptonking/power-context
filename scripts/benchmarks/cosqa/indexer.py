@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 from qdrant_client import QdrantClient, models
 
 from scripts.ingest.chunking import chunk_by_tokens, chunk_lines, chunk_semantic
-from scripts.ingest.pipeline import build_information
+from scripts.ingest.pipeline import build_information, _select_dense_text
 from scripts.ingest.vectors import project_mini, extract_pattern_vector
 from scripts.ingest.qdrant import (
     hash_id,
@@ -136,7 +136,8 @@ def _get_config_fingerprint() -> str:
         f"chunk_overlap:{os.environ.get('INDEX_CHUNK_OVERLAP', '20')}",
         f"use_tree_sitter:{os.environ.get('USE_TREE_SITTER', '1')}",
         f"enhanced_ast:{os.environ.get('INDEX_USE_ENHANCED_AST', '1')}",
-        f"ast_enriched:v2",  # Triggers reindex when AST enrichment changes
+        f"dense_mode:{os.environ.get('INDEX_DENSE_MODE', 'code+info+pseudo+tags')}",  # Dense enrichment strategy
+        f"ast_enriched:v3",  # Bump version for enriched embedding change
     ]
     return hashlib.sha256("|".join(config_parts).encode()).hexdigest()[:8]
 
@@ -599,16 +600,25 @@ def index_corpus(
                     })
                     entry_with_fp["metadata"] = meta
 
+                    # Build enriched dense text (code+info+pseudo+tags) like production
+                    dense_text = _select_dense_text(
+                        info=info,
+                        code_text=lex_text,
+                        pseudo=entry.get("docstring", "") or "",  # Use docstring as pseudo
+                        tags=symbol_names[:12],  # Use extracted symbols as tags
+                    )
                     chunk_records.append({
                         "id": pid,
                         "info": info,
+                        "dense_text": dense_text,
                         "lex_text": lex_text,
                         "payload": entry_with_fp,
                         "code_text": lex_text,
                         "language": language,
                     })
 
-            embeddings = embed_batch(model, [r["info"] for r in chunk_records])
+            # Embed enriched dense text (code+info+pseudo+tags) instead of just info
+            embeddings = embed_batch(model, [r["dense_text"] for r in chunk_records])
             print("done", flush=True)
 
             points = []
