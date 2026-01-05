@@ -70,6 +70,7 @@ from scripts.hybrid_config import (
     EF_SEARCH,
     SYMBOL_BOOST,
     SYMBOL_EQUALITY_BOOST,
+    FNAME_BOOST,
     RECENCY_WEIGHT,
     CORE_FILE_BOOST,
     VENDOR_PENALTY,
@@ -215,6 +216,7 @@ from scripts.hybrid_ranking import (
     sparse_lex_score,
     # Lexical scoring
     lexical_score,
+    lexical_text_score,
     # Adaptive weights
     _compute_query_stats,
     _adaptive_weights,
@@ -324,6 +326,36 @@ def _split_ident_lex(s: str) -> List[str]:
         segs = re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|\d+", p)
         out.extend([x for x in segs if x])
     return [x.lower() for x in out if x and x.lower() not in _STOP]
+
+
+# ---------------------------------------------------------------------------
+# Query Intent Classification (for adaptive weights)
+# ---------------------------------------------------------------------------
+_CONCEPTUAL_KEYWORDS = {"how", "why", "what", "when", "where", "explain", "mechanism", "works", "architecture", "design", "purpose", "difference"}
+_IDENTIFIER_PATTERNS = re.compile(r"[_A-Z]|^\w+\.\w+$|^[a-z]+[A-Z]")  # underscore, dot-qualified, camelCase
+
+
+def _classify_query_intent(query: str) -> str:
+    """
+    Classify query intent for adaptive scoring.
+    
+    Returns:
+        'conceptual' - boosts dense weight (semantic queries: how/why/what)
+        'identifier' - keeps weights as-is (code symbols, function names)
+        'mixed' - default balanced weights
+    """
+    q_lower = query.lower()
+    words = set(q_lower.split())
+    
+    # Conceptual: question words, explanatory queries
+    if words & _CONCEPTUAL_KEYWORDS:
+        return "conceptual"
+    
+    # Identifier: has code-like patterns (underscores, camelCase, qualified names)
+    if _IDENTIFIER_PATTERNS.search(query):
+        return "identifier"
+    
+    return "mixed"
 
 
 # ---------------------------------------------------------------------------
@@ -844,6 +876,12 @@ def _run_hybrid_search_impl(
     else:
         _AD_DENSE_W, _AD_LEX_VEC_W, _AD_LEX_TEXT_W = DENSE_WEIGHT, LEX_VECTOR_WEIGHT, LEXICAL_WEIGHT
 
+    # Intent-based dense boost: conceptual queries need more semantic weight
+    _query_intent = _classify_query_intent(" ".join(qlist))
+    _CONCEPTUAL_DENSE_BOOST = float(os.environ.get("CONCEPTUAL_DENSE_BOOST", "3.0"))
+    if _query_intent == "conceptual":
+        _AD_DENSE_W *= _CONCEPTUAL_DENSE_BOOST  # Boost dense for semantic queries
+
     for rank, p in enumerate(lex_results, 1):
         pid = str(p.id)
         score_map.setdefault(
@@ -855,6 +893,7 @@ def _run_hybrid_search_impl(
                 "lx": 0.0,
                 "sym_sub": 0.0,
                 "sym_eq": 0.0,
+                "fname": 0.0,
                 "core": 0.0,
                 "vendor": 0.0,
                 "langb": 0.0,
@@ -1060,6 +1099,7 @@ def _run_hybrid_search_impl(
                                 "lx": 0.0,
                                 "sym_sub": 0.0,
                                 "sym_eq": 0.0,
+                                "fname": 0.0,
                                 "core": 0.0,
                                 "vendor": 0.0,
                                 "langb": 0.0,
@@ -1122,6 +1162,7 @@ def _run_hybrid_search_impl(
                                     "lx": 0.0,
                                     "sym_sub": 0.0,
                                     "sym_eq": 0.0,
+                                    "fname": 0.0,
                                     "core": 0.0,
                                     "vendor": 0.0,
                                     "langb": 0.0,
@@ -1225,6 +1266,7 @@ def _run_hybrid_search_impl(
                         "lx": 0.0,
                         "sym_sub": 0.0,
                         "sym_eq": 0.0,
+                        "fname": 0.0,
                         "core": 0.0,
                         "vendor": 0.0,
                         "langb": 0.0,
@@ -1255,6 +1297,7 @@ def _run_hybrid_search_impl(
                                 "lx": 0.0,
                                 "sym_sub": 0.0,
                                 "sym_eq": 0.0,
+                                "fname": 0.0,
                                 "core": 0.0,
                                 "vendor": 0.0,
                                 "langb": 0.0,
@@ -1281,6 +1324,7 @@ def _run_hybrid_search_impl(
                     "lx": 0.0,
                     "sym_sub": 0.0,
                     "sym_eq": 0.0,
+                    "fname": 0.0,
                     "core": 0.0,
                     "vendor": 0.0,
                     "langb": 0.0,
@@ -1302,8 +1346,35 @@ def _run_hybrid_search_impl(
     impl_boost = IMPLEMENTATION_BOOST
     doc_penalty = DOCUMENTATION_PENALTY
     test_penalty = TEST_FILE_PENALTY
-    # Query intent detection: boost implementation files more when query signals code search
-    if _detect_implementation_intent(qlist):
+    cfg_penalty = CONFIG_FILE_PENALTY
+    # Conditional test penalty: disable when query targets tests (pytest/fixture/mock etc.)
+    _test_intent_keywords = {"test", "pytest", "fixture", "unittest", "mock", "spec", "conftest"}
+    _query_lower = " ".join(qlist).lower()
+    _base_query = clean_queries[0] if clean_queries else (_query_lower.strip())
+    # Intent-based config/docs handling: only penalize these when query is clearly code-first.
+    _docs_intent_keywords = {
+        "readme", "docs", "documentation", "guide", "tutorial", "how to", "how-to",
+        "usage", "example", "examples", "reference", "faq", "troubleshooting",
+    }
+    _config_intent_keywords = {
+        "config", "configuration", "settings", "env", "dotenv",
+        "yaml", "yml", "json", "toml", "ini",
+        "docker", "compose", "kubernetes", "k8s", "helm", "chart", "manifest", "deployment",
+        "workflow", "github actions", "ci", "pipeline",
+    }
+    _is_docs_query = any(kw in _query_lower for kw in _docs_intent_keywords)
+    _is_config_query = any(kw in _query_lower for kw in _config_intent_keywords)
+    if _is_docs_query and not eff_mode:
+        # Prefer docs when the query explicitly asks for docs/README/guide.
+        doc_penalty = 0.0
+        impl_boost = IMPLEMENTATION_BOOST * 0.5
+    if _is_config_query:
+        cfg_penalty = 0.0
+    _is_test_query = any(kw in _query_lower for kw in _test_intent_keywords)
+    if _is_test_query:
+        test_penalty = 0.0  # User wants test files, don't penalize them
+    elif (not _is_docs_query) and _detect_implementation_intent(qlist):
+        # Query intent detection: boost implementation files more when query signals code search
         impl_boost += INTENT_IMPL_BOOST
         # Also increase test/doc penalties when user clearly wants implementation
         test_penalty += INTENT_IMPL_BOOST
@@ -1324,7 +1395,22 @@ def _run_hybrid_search_impl(
         if "tags" in payload:
             md["tags"] = payload["tags"]
 
-        lx = (_AD_LEX_TEXT_W * lexical_score(qlist, md, token_weights=_bm25_tok_w, bm25_weight=_BM25_W)) if _USE_ADAPT else (LEXICAL_WEIGHT * lexical_score(qlist, md, token_weights=_bm25_tok_w, bm25_weight=_BM25_W))
+        if _USE_ADAPT:
+            lx = lexical_text_score(
+                qlist,
+                md,
+                weight=_AD_LEX_TEXT_W,
+                token_weights=_bm25_tok_w,
+                bm25_weight=_BM25_W,
+            )
+        else:
+            lx = lexical_text_score(
+                qlist,
+                md,
+                weight=LEXICAL_WEIGHT,
+                token_weights=_bm25_tok_w,
+                bm25_weight=_BM25_W,
+            )
         rec["lx"] += lx
         rec["s"] += lx
         ts = md.get("last_modified_at") or md.get("ingested_at")
@@ -1347,17 +1433,16 @@ def _run_hybrid_search_impl(
                 rec["sym_eq"] += SYMBOL_EQUALITY_BOOST
                 rec["s"] += SYMBOL_EQUALITY_BOOST
         path = str(md.get("path") or "")
-        # Filename match boost: query matches file basename or stem parts
-        if path:
-            basename = path.rsplit("/", 1)[-1].lower()
-            stem = basename.rsplit(".", 1)[0] if "." in basename else basename
-            stem_parts = set(p.lower() for p in _split_ident(stem) if len(p) >= 2)
-            for q in qlist:
-                ql = q.lower()
-                if ql and len(ql) >= 3 and (ql == stem or ql in stem_parts or ql in basename):
-                    rec["sym_eq"] += SYMBOL_EQUALITY_BOOST * 0.5
-                    rec["s"] += SYMBOL_EQUALITY_BOOST * 0.5
-                    break
+        # Filename boost: production-grade matching (handles snake/camel/kebab, acronyms, etc.)
+        if FNAME_BOOST > 0.0 and path:
+            try:
+                from scripts.rerank_recursive.utils import _compute_fname_boost as _compute_fname_boost  # type: ignore
+                fname_boost = float(_compute_fname_boost(_base_query, md, float(FNAME_BOOST)))
+                if fname_boost > 0:
+                    rec["fname"] += fname_boost
+                    rec["s"] += fname_boost
+            except Exception:
+                pass
         if CORE_FILE_BOOST > 0.0 and path and is_core_file(path):
             rec["core"] += CORE_FILE_BOOST
             rec["s"] += CORE_FILE_BOOST
@@ -1372,10 +1457,10 @@ def _run_hybrid_search_impl(
         path_lower = path.lower()
         ext = ("." + path_lower.rsplit(".", 1)[-1]) if "." in path_lower else ""
         # Penalize config/metadata files
-        if CONFIG_FILE_PENALTY > 0.0 and path:
+        if cfg_penalty > 0.0 and path:
             if ext in {".json", ".yml", ".yaml", ".toml", ".ini"} or "/.codebase/" in path_lower or "/.kiro/" in path_lower:
-                rec["cfg"] = float(rec.get("cfg", 0.0)) - CONFIG_FILE_PENALTY
-                rec["s"] -= CONFIG_FILE_PENALTY
+                rec["cfg"] = float(rec.get("cfg", 0.0)) - cfg_penalty
+                rec["s"] -= cfg_penalty
         # Boost likely implementation files (mode-aware)
         if impl_boost > 0.0 and path:
             if ext in {".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".java", ".rs", ".rb", ".php", ".cs", ".cpp", ".c", ".hpp", ".h"}:
@@ -1837,6 +1922,7 @@ def _run_hybrid_search_impl(
             "lexical": round(float(m.get("lx", 0.0)), 4),
             "symbol_substr": round(float(m.get("sym_sub", 0.0)), 4),
             "symbol_exact": round(float(m.get("sym_eq", 0.0)), 4),
+            "fname_boost": round(float(m.get("fname", 0.0)), 4),
             "core_boost": round(float(m.get("core", 0.0)), 4),
             "vendor_penalty": round(float(m.get("vendor", 0.0)), 4),
             "lang_boost": round(float(m.get("langb", 0.0)), 4),
@@ -1857,7 +1943,7 @@ def _run_hybrid_search_impl(
             why = []
             if comp["dense_rrf"]:
                 why.append(f"dense_rrf:{comp['dense_rrf']}")
-            for k in ("lexical", "symbol_substr", "symbol_exact", "core_boost", "lang_boost", "impl_boost"):
+            for k in ("lexical", "symbol_substr", "symbol_exact", "fname_boost", "core_boost", "lang_boost", "impl_boost"):
                 if comp[k]:
                     why.append(f"{k}:{comp[k]}")
             if comp["vendor_penalty"]:

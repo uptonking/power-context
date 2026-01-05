@@ -8,7 +8,7 @@ from hybrid_search.py for reuse and testing.
 
 __all__ = [
     "rrf", "_scale_rrf_k", "_adaptive_per_query", "_normalize_scores",
-    "sparse_lex_score", "lexical_score",
+    "sparse_lex_score", "lexical_score", "lexical_text_score",
     "_compute_query_stats", "_adaptive_weights", "_bm25_token_weights_from_results",
     "_mmr_diversify", "_merge_and_budget_spans",
     "_detect_implementation_intent", "_IMPL_INTENT_PATTERNS",
@@ -67,6 +67,10 @@ SCORE_NORMALIZE_ENABLED = os.environ.get("HYBRID_SCORE_NORMALIZE", "1").lower() 
 SPARSE_LEX_MAX_SCORE = _safe_float(os.environ.get("HYBRID_SPARSE_LEX_MAX", "15.0"), 15.0)
 SPARSE_RRF_MAX = 1.0 / (RRF_K + 1)
 SPARSE_RRF_MIN = 1.0 / (RRF_K + 50)
+
+# Lexical text normalization (keeps lexical and dense on comparable scales)
+LEXICAL_TEXT_MODE = (os.environ.get("HYBRID_LEXICAL_TEXT_MODE", "tanh") or "").strip().lower()
+LEXICAL_TEXT_SAT = _safe_float(os.environ.get("HYBRID_LEXICAL_TEXT_SAT", "12.0"), 12.0)
 
 # Micro-span budgeting defaults
 def _get_micro_defaults() -> Tuple[int, int, int, int]:
@@ -314,6 +318,48 @@ def lexical_score(
             contrib *= (1.0 + float(bm25_weight) * (w - 1.0))
         s += contrib
     return s
+
+
+def lexical_text_score(
+    phrases: List[str],
+    md: Dict[str, Any],
+    *,
+    weight: float = LEXICAL_WEIGHT,
+    token_weights: Dict[str, float] | None = None,
+    bm25_weight: float | None = None,
+) -> float:
+    """Compute a *weighted* lexical text score suitable for fusion.
+
+    `lexical_score()` returns an unbounded additive score (token matches across
+    symbol/path/code). That can swamp RRF-based dense scoring. This wrapper
+    normalizes it into a bounded range while preserving ordering.
+
+    Modes (HYBRID_LEXICAL_TEXT_MODE):
+      - "raw":  legacy behavior (weight * raw_score)
+      - "tanh": default; saturating nonlinearity (weight * tanh(raw/sat))
+      - "rrf":  map to RRF-equivalent range (weight * rrf_equiv)
+    """
+    raw = lexical_score(phrases, md, token_weights=token_weights, bm25_weight=bm25_weight)
+    if raw <= 0 or weight <= 0:
+        return 0.0
+
+    mode = LEXICAL_TEXT_MODE
+    if mode == "raw":
+        return float(weight) * float(raw)
+
+    if mode == "rrf":
+        # Clamp raw score into a tunable range, then map to the same scale as RRF.
+        # Default max chosen to cover typical 2–6 token matches.
+        max_raw = _safe_float(os.environ.get("HYBRID_LEXICAL_TEXT_MAX", "20.0"), 20.0)
+        max_raw = max(1e-6, max_raw)
+        clamped = min(float(raw), float(max_raw))
+        ratio = clamped / float(max_raw)
+        rrf_equiv = SPARSE_RRF_MIN + ratio * (SPARSE_RRF_MAX - SPARSE_RRF_MIN)
+        return float(weight) * float(rrf_equiv)
+
+    # Default: tanh saturation (bounded in [0, weight])
+    sat = max(1e-6, float(LEXICAL_TEXT_SAT))
+    return float(weight) * float(math.tanh(float(raw) / sat))
 
 
 # ---------------------------------------------------------------------------

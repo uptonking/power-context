@@ -29,3 +29,29 @@ def test_chunk_semantic_fallback_no_ts(monkeypatch):
     for c in chunks:
         c.pop("is_semantic", None)
     assert chunks == chunks2
+
+
+def test_chunk_semantic_does_not_cross_large_symbol_boundary(monkeypatch):
+    monkeypatch.setenv("USE_TREE_SITTER", "0")
+    big_body = "\n".join("    x = 1" for _ in range(120))
+    text = textwrap.dedent(
+        f"""
+        def big():
+        {big_body}
+            return x
+
+        def small():
+            return 2
+        """
+    ).strip()
+    # big(): 1 (def) + 120 body + 1 return
+    big_start = 1
+    big_end = 1 + 120 + 1
+
+    chunks = ing.chunk_semantic(text, language="python", max_lines=30, overlap=5)
+    assert any(c.get("symbol") == "big" for c in chunks)
+    assert any(c.get("symbol") == "small" for c in chunks)
+
+    for c in chunks:
+        if big_start <= c["start"] <= big_end:
+            assert c["end"] <= big_end

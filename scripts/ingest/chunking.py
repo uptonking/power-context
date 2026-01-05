@@ -103,14 +103,24 @@ def chunk_semantic(
 
     chunks = []
     i = 0  # Current line index (0-based)
+    sym_idx = 0  # cursor into sorted symbols
 
     while i < n:
         chunk_start = i + 1  # 1-based for output
         chunk_end = min(n, i + max_lines)  # 1-based
 
+        # Advance symbol cursor to the first symbol that could contain chunk_start
+        while sym_idx < len(symbols) and symbols[sym_idx].end < chunk_start:
+            sym_idx += 1
+        enclosing_symbol = None
+        if sym_idx < len(symbols):
+            sym = symbols[sym_idx]
+            if sym.start <= chunk_start <= sym.end:
+                enclosing_symbol = sym
+
         # Try to find a symbol that starts within our current window
         best_symbol = None
-        for sym in symbols:
+        for sym in symbols[sym_idx:]:
             if sym.start >= chunk_start and sym.start <= chunk_end:
                 # Check if the entire symbol fits within max_lines from current position
                 symbol_size = sym.end - sym.start + 1
@@ -134,9 +144,17 @@ def chunk_semantic(
             i = max(best_symbol.end - overlap, i + 1)
         else:
             # No suitable symbol found, fall back to line-based chunking
-            chunk_text = "\n".join(lines[i : i + max_lines])
             actual_end = min(n, i + max_lines)
-            chunks.append({"text": chunk_text, "start": i + 1, "end": actual_end})
+            # If we're currently inside a symbol that's too large to fit, avoid
+            # crossing the symbol boundary into the next definition.
+            if enclosing_symbol is not None:
+                actual_end = min(actual_end, enclosing_symbol.end)
+            chunk_text = "\n".join(lines[i:actual_end])
+            rec = {"text": chunk_text, "start": i + 1, "end": actual_end}
+            if enclosing_symbol is not None:
+                rec["symbol"] = enclosing_symbol.name
+                rec["kind"] = enclosing_symbol.kind
+            chunks.append(rec)
             i = max(actual_end - overlap, i + 1)
 
     return chunks
