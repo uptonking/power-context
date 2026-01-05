@@ -151,7 +151,6 @@ def _select_dense_text(
         "text": "info",
         "doc": "info",
         "docs": "info",
-        "signature": "sig",
     }
     if not mode:
         mode = "info+pseudo+tags"
@@ -191,11 +190,11 @@ def _select_dense_text(
         if info_norm:
             header.append(info_norm)
     if include_pseudo and pseudo:
-        header.append(f"Pseudo: {str(pseudo).strip()}")
+        header.append(str(pseudo).strip())
     if include_tags and tags:
         clean_tags = [str(t).strip() for t in (tags or []) if str(t).strip()]
         if clean_tags:
-            header.append("Tags: " + " ".join(clean_tags[:12]))
+            header.append(" ".join(clean_tags[:12]))
 
     body = ""
     if include_code:
