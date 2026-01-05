@@ -11,7 +11,6 @@ __all__ = [
     "sparse_lex_score", "lexical_score", "lexical_text_score",
     "_compute_query_stats", "_adaptive_weights", "_bm25_token_weights_from_results",
     "_mmr_diversify", "_merge_and_budget_spans",
-    "_detect_implementation_intent", "_IMPL_INTENT_PATTERNS",
     "_get_collection_stats", "_COLL_STATS_CACHE", "_COLL_STATS_TTL",
     "_get_symbol_extent", "ADAPTIVE_SPAN_SIZING",
 ]
@@ -105,16 +104,6 @@ ADAPTIVE_SPAN_SIZING = os.environ.get("ADAPTIVE_SPAN_SIZING", "1").strip().lower
 _ADAPTIVE_MAX_EXPAND_LINES = 80      # Max extra lines per expansion
 _ADAPTIVE_MAX_BUDGET_PCT = 0.4       # Max % of budget a single expansion can use
 _ADAPTIVE_MAX_EXPANDED = 3           # Max spans to expand
-
-# Intent detection for implementation preference
-INTENT_IMPL_BOOST = _safe_float(os.environ.get("HYBRID_INTENT_IMPL_BOOST", "0.15"), 0.15)
-
-_IMPL_INTENT_PATTERNS = frozenset({
-    "implementation", "how does", "how is", "where is", "code for",
-    "function that", "method that", "class that", "implements",
-    "defined", "definition", "source", "logic", "algorithm",
-    "where", "find", "locate", "show me", "actual code",
-})
 
 # ---------------------------------------------------------------------------
 # Collection stats cache (for large collection scaling)
@@ -842,17 +831,3 @@ def _merge_and_budget_spans(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]
         result.append(m)
     return result
 
-
-# ---------------------------------------------------------------------------
-# Intent detection
-# ---------------------------------------------------------------------------
-
-def _detect_implementation_intent(queries: List[str]) -> bool:
-    """Detect if query signals user wants implementation code."""
-    if not queries:
-        return False
-    joined = " ".join(queries).lower()
-    for pattern in _IMPL_INTENT_PATTERNS:
-        if pattern in joined:
-            return True
-    return False

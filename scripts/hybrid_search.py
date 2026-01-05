@@ -225,9 +225,6 @@ from scripts.hybrid_ranking import (
     _mmr_diversify,
     # Micro-span budgeting
     _merge_and_budget_spans,
-    # Intent detection
-    _detect_implementation_intent,
-    _IMPL_INTENT_PATTERNS,
     # Collection stats
     _get_collection_stats,
     _COLL_STATS_CACHE,
@@ -1373,12 +1370,7 @@ def _run_hybrid_search_impl(
     _is_test_query = any(kw in _query_lower for kw in _test_intent_keywords)
     if _is_test_query:
         test_penalty = 0.0  # User wants test files, don't penalize them
-    elif (not _is_docs_query) and _detect_implementation_intent(qlist):
-        # Query intent detection: boost implementation files more when query signals code search
-        impl_boost += INTENT_IMPL_BOOST
-        # Also increase test/doc penalties when user clearly wants implementation
-        test_penalty += INTENT_IMPL_BOOST
-        doc_penalty += INTENT_IMPL_BOOST * 0.5
+    # Removed _detect_implementation_intent heuristic - let embeddings handle semantic intent
     if eff_mode in {"balanced"}:
         doc_penalty = DOCUMENTATION_PENALTY * 0.5
     elif eff_mode in {"docs_first", "docs-first", "docs"}:
