@@ -33,10 +33,10 @@ def init_openlit():
         # Initialize OpenLit with modern params
         openlit.init(
             otlp_endpoint=_otel_endpoint,
-            service_name=_app_name,
+            application_name=_app_name,
             environment=_environment,
             disabled_instrumentors=None,
-            capture_message_content=True,
+            trace_content=True,
         )
         
         print(f"[OpenLit] Initialized with endpoint={_otel_endpoint}, service={_app_name}")
