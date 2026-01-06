@@ -60,6 +60,10 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+# Force-disable OpenLit/OTel for benchmarks so they never try to talk to openlit-dashboard
+os.environ["OPENLIT_ENABLED"] = "0"
+os.environ["OTEL_SDK_DISABLED"] = "true"
+
 # Ensure project root is in path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 

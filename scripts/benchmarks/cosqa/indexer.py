@@ -69,7 +69,7 @@ except ImportError:
 
 # Default configuration
 DEFAULT_COLLECTION = "cosqa-corpus"
-DEFAULT_BATCH_SIZE = 256  # Larger batches for faster embedding throughput
+DEFAULT_BATCH_SIZE = 100  # Balance between throughput and timeout avoidance
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
 
 # Metadata key for corpus fingerprint (stored in collection)
