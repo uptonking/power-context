@@ -136,7 +136,7 @@ def _get_config_fingerprint() -> str:
         f"chunk_overlap:{os.environ.get('INDEX_CHUNK_OVERLAP', '20')}",
         f"use_tree_sitter:{os.environ.get('USE_TREE_SITTER', '1')}",
         f"enhanced_ast:{os.environ.get('INDEX_USE_ENHANCED_AST', '1')}",
-        f"dense_mode:{os.environ.get('INDEX_DENSE_MODE', 'code+info+pseudo+tags')}",  # Dense enrichment strategy
+        f"dense_mode:{os.environ.get('INDEX_DENSE_MODE', 'code+info')}",  # Dense enrichment strategy
         f"ast_enriched:v3",  # Bump version for enriched embedding change
     ]
     return hashlib.sha256("|".join(config_parts).encode()).hexdigest()[:8]
@@ -600,7 +600,7 @@ def index_corpus(
                     })
                     entry_with_fp["metadata"] = meta
 
-                    # Build enriched dense text (code+info+pseudo+tags) like production
+                    # Build dense text (code+info default; pseudo/tags if enabled)
                     dense_text = _select_dense_text(
                         info=info,
                         code_text=lex_text,
@@ -617,7 +617,7 @@ def index_corpus(
                         "language": language,
                     })
 
-            # Embed enriched dense text (code+info+pseudo+tags) instead of just info
+            # Embed dense text (code+info default) instead of just info
             embeddings = embed_batch(model, [r["dense_text"] for r in chunk_records])
             print("done", flush=True)
 

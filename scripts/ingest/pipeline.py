@@ -123,13 +123,13 @@ def _select_dense_text(
 ) -> str:
     """Choose the text used for dense embedding.
 
-    Default is info+pseudo+tags for semantic "what" retrieval.
+    Default is code+info for semantic context plus a code snippet.
     - info = "{language} code from {path} lines {start}-{end}. {first_line}" (baseline that worked)
     - pseudo/tags = semantic enrichment from LLM
     Dense captures the "what" (intent), lexical handles the "how" (code body).
     """
     mode = (
-        (str(mode) if mode is not None else str(os.environ.get("INDEX_DENSE_MODE", "info+pseudo+tags") or ""))
+        (str(mode) if mode is not None else str(os.environ.get("INDEX_DENSE_MODE", "code+info") or ""))
         .strip()
         .lower()
     )
@@ -153,7 +153,7 @@ def _select_dense_text(
         "docs": "info",
     }
     if not mode:
-        mode = "info+pseudo+tags"
+        mode = "code+info"
     raw_parts = [p for p in mode.replace(",", "+").split("+") if p.strip()]
     parts = {alias.get(p.strip().lower(), p.strip().lower()) for p in raw_parts}
 
@@ -619,10 +619,10 @@ def _index_single_file_inner(
         if tags:
             payload["tags"] = tags
         dense_mode = (
-            str(os.environ.get("INDEX_DENSE_MODE", "info+pseudo+tags") or "")
+            str(os.environ.get("INDEX_DENSE_MODE", "code+info") or "")
             .strip()
             .lower()
-            or "info+pseudo+tags"
+            or "code+info"
         )
         payload["dense_mode"] = dense_mode
         dense_text = _select_dense_text(
@@ -1224,10 +1224,10 @@ def process_file_with_smart_reindexing(
 
         code_text = ch.get("text") or ""
         dense_mode = (
-            str(os.environ.get("INDEX_DENSE_MODE", "info+pseudo+tags") or "")
+            str(os.environ.get("INDEX_DENSE_MODE", "code+info") or "")
             .strip()
             .lower()
-            or "info+pseudo+tags"
+            or "code+info"
         )
         payload["dense_mode"] = dense_mode
         dense_text = _select_dense_text(
