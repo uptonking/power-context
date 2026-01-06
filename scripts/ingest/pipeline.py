@@ -619,10 +619,10 @@ def _index_single_file_inner(
         if tags:
             payload["tags"] = tags
         dense_mode = (
-            str(os.environ.get("INDEX_DENSE_MODE", "code+info") or "")
+            str(os.environ.get("INDEX_DENSE_MODE", "info+pseudo+tags") or "")
             .strip()
             .lower()
-            or "code+info"
+            or "info+pseudo+tags"
         )
         payload["dense_mode"] = dense_mode
         dense_text = _select_dense_text(
