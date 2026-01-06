@@ -211,3 +211,43 @@ class TestConstants:
         """LEX_VECTOR_WEIGHT constant is defined."""
         assert hasattr(ranking_module, "LEX_VECTOR_WEIGHT")
         assert 0 <= ranking_module.LEX_VECTOR_WEIGHT <= 1
+
+
+# ============================================================================
+# Tests: Adaptive Candidate Retrieval
+# ============================================================================
+class TestAdaptivePerQuery:
+    """Tests for _adaptive_per_query scaling logic."""
+
+    def test_scales_with_collection_size(self, ranking_module):
+        """Candidate retrieval increases as collection size grows."""
+        base_size = max(1000, ranking_module.LARGE_COLLECTION_THRESHOLD // 10)
+        base_limit = 24
+
+        at_base = ranking_module._adaptive_per_query(base_limit, base_size, has_filters=False)
+        at_2x = ranking_module._adaptive_per_query(base_limit, base_size * 2, has_filters=False)
+        at_20x = ranking_module._adaptive_per_query(base_limit, base_size * 20, has_filters=False)
+
+        assert at_base == base_limit
+        assert at_2x > at_base
+        assert at_20x > at_2x
+
+    def test_filters_reduce_scaling(self, ranking_module):
+        """Filters should not increase candidate budgets compared to unfiltered queries."""
+        base_size = max(1000, ranking_module.LARGE_COLLECTION_THRESHOLD // 10)
+        base_limit = 24
+        size = base_size * 20
+
+        unfiltered = ranking_module._adaptive_per_query(base_limit, size, has_filters=False)
+        filtered = ranking_module._adaptive_per_query(base_limit, size, has_filters=True)
+
+        assert filtered <= unfiltered
+
+    def test_clamped_to_max(self, ranking_module):
+        """Adaptive scaling should clamp to a hard max to avoid runaway retrieval."""
+        base_size = max(1000, ranking_module.LARGE_COLLECTION_THRESHOLD // 10)
+        # Use a larger base_limit so we deterministically hit the clamp.
+        base_limit = 100
+
+        out = ranking_module._adaptive_per_query(base_limit, base_size * 1000, has_filters=False)
+        assert out <= 200

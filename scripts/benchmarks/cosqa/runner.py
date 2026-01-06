@@ -288,8 +288,14 @@ def _scaled_rerank_top_n(corpus_size: int) -> int:
     """
     if corpus_size <= 0:
         return 100
-    if corpus_size <= 10_000:
+    if corpus_size <= 500:
         return 100
+    if corpus_size <= 2_000:
+        # Scale linearly: 100 + (corpus_size / 20)
+        # e.g. 1000 docs -> 150, 2000 docs -> 200
+        return min(200, 100 + corpus_size // 20)
+    if corpus_size <= 10_000:
+        return 200
     if corpus_size <= 50_000:
         return 200
     return 400
@@ -328,9 +334,16 @@ async def search_cosqa_corpus(
     if rerank_enabled:
         eff_rerank_top_n = rerank_top_n if rerank_top_n is not None else 100
 
+    # When not reranking, request more results to allow for deduplication.
+    # Chunked indexing may return multiple chunks per code_id, so we need
+    # extra candidates to ensure we get `limit` unique code_ids after dedup.
+    eff_limit = limit
+    if not rerank_enabled:
+        eff_limit = limit * 5  # Request 5x to account for chunk duplicates
+
     result = await repo_search(
         query=query,
-        limit=limit,
+        limit=eff_limit,
         collection=collection,
         rerank_enabled=rerank_enabled,
         rerank_top_n=eff_rerank_top_n,
@@ -368,7 +381,9 @@ async def search_cosqa_corpus(
     # Extract stable code_ids for evaluation.
     # NOTE: rerank paths may not include payload; for CoSQA we can fall back to parsing
     # the synthetic path "cosqa/<code_id>.py".
+    # IMPORTANT: Deduplicate by code_id to avoid wasting top-k slots on chunks from same doc.
     code_ids: List[str] = []
+    seen_ids: set[str] = set()
     for r in result.get("results", []) or []:
         if not isinstance(r, dict):
             continue
@@ -385,8 +400,9 @@ async def search_cosqa_corpus(
         )
         if not code_id:
             code_id = _cosqa_id_from_path(str(r.get("path") or ""))
-        if code_id:
+        if code_id and code_id not in seen_ids:
             code_ids.append(code_id)
+            seen_ids.add(code_id)
 
     # Defensive: ensure we never return more than requested.
     if limit is not None and limit > 0:
@@ -428,8 +444,25 @@ async def run_cosqa_benchmark(
     # Load .env for benchmark config (only when actually running benchmark)
     _load_benchmark_env()
 
-    # Scale rerank_top_n with corpus size so relevant docs still reach reranker
-    scaled_top_n = _scaled_rerank_top_n(corpus_size)
+    # Get actual points_count from Qdrant for proper scaling (chunks != docs)
+    from scripts.benchmarks.qdrant_utils import get_qdrant_client
+    try:
+        _client = get_qdrant_client()
+        _coll_info = _client.get_collection(collection)
+        points_count = _coll_info.points_count or corpus_size
+    except Exception:
+        points_count = corpus_size
+
+    # Scale rerank_top_n with points_count (not corpus_size) so relevant docs reach reranker
+    scaled_top_n = _scaled_rerank_top_n(points_count)
+
+    # When rerank is disabled, widen candidate pool for hybrid search to avoid
+    # recall collapse as corpus grows. The default per_query=24 is too small.
+    # Use points_count for scaling since chunked indexing creates multiple points per doc.
+    if not rerank_enabled and points_count > 0:
+        # At least 100 candidates, up to 10x limit, capped by points_count
+        hybrid_per_query = min(points_count, max(100, 10 * limit))
+        os.environ["HYBRID_PER_QUERY"] = str(hybrid_per_query)
 
     results: List[CoSQAQueryResult] = []
     latencies: List[float] = []
@@ -447,6 +480,7 @@ async def run_cosqa_benchmark(
             "RERANK_LEARNING": os.environ.get("RERANK_LEARNING", ""),
             "HYBRID_IN_PROCESS": os.environ.get("HYBRID_IN_PROCESS", ""),
             "HYBRID_EXPAND": os.environ.get("HYBRID_EXPAND", ""),
+            "HYBRID_PER_QUERY": os.environ.get("HYBRID_PER_QUERY", ""),
             "SEMANTIC_EXPANSION_ENABLED": os.environ.get("SEMANTIC_EXPANSION_ENABLED", ""),
             "HYBRID_LEXICAL_TEXT_MODE": os.environ.get("HYBRID_LEXICAL_TEXT_MODE", ""),
             "EMBEDDING_MODEL": os.environ.get("EMBEDDING_MODEL", ""),
@@ -623,77 +657,51 @@ async def run_full_benchmark(
     print("\n▶ Step 1: Loading CoSQA dataset...")
     dataset = load_cosqa(split=split)
 
-    # Prepare queries and corpus (corpus-limit uses query-matched subset)
+    # Prepare queries and corpus using BEIR-style protocol:
+    # 1. Sample corpus INDEPENDENTLY of qrels (fixed random seed for reproducibility)
+    # 2. Then filter queries to those whose relevant docs are in the sample
+    # This avoids artificially inflating metrics by biasing corpus toward relevant docs.
+    import random
+    CORPUS_SEED = 42  # Fixed seed for reproducible subsets
+
     all_queries = get_queries_for_evaluation(dataset, limit=None)
-    desired_queries = all_queries[:query_limit] if query_limit else all_queries
-    corpus_cap = corpus_limit
+    all_corpus_entries = list(dataset.iter_corpus())
+    corpus_by_id = {entry.code_id: entry for entry in all_corpus_entries}
 
-    if corpus_cap:
-        corpus_by_id = {entry.code_id: entry for entry in dataset.iter_corpus()}
-        selected_queries = []
-        selected_ids: set[str] = set()
-        skipped_queries = 0
+    if corpus_limit:
+        # BEIR-style: random sample of corpus, independent of qrels
+        rng = random.Random(CORPUS_SEED)
+        sampled_entries = rng.sample(all_corpus_entries, min(corpus_limit, len(all_corpus_entries)))
+        sampled_ids = {entry.code_id for entry in sampled_entries}
 
-        for query_id, query_text, relevant_ids in desired_queries:
-            rel_ids = [rid for rid in relevant_ids if rid in corpus_by_id]
-            if not rel_ids:
-                continue
-            new_ids = [rid for rid in rel_ids if rid not in selected_ids]
-            if selected_ids and len(selected_ids) + len(new_ids) > corpus_cap:
-                skipped_queries += 1
-                continue
-            selected_queries.append((query_id, query_text, rel_ids))
-            selected_ids.update(new_ids)
+        # Filter queries to those with at least one relevant doc in sampled corpus
+        filtered_queries = []
+        for query_id, query_text, relevant_ids in all_queries:
+            # Keep only relevant IDs that are in our sample
+            valid_rel_ids = [rid for rid in relevant_ids if rid in sampled_ids]
+            if valid_rel_ids:
+                filtered_queries.append((query_id, query_text, valid_rel_ids))
 
-        if not selected_queries:
-            for query_id, query_text, relevant_ids in desired_queries:
-                rel_ids = [rid for rid in relevant_ids if rid in corpus_by_id]
-                if rel_ids:
-                    selected_queries = [(query_id, query_text, rel_ids)]
-                    selected_ids.update(rel_ids)
-                    break
+        # Apply query_limit after filtering
+        if query_limit:
+            filtered_queries = filtered_queries[:query_limit]
 
-        if not selected_queries:
-            print("  [WARN] No queries with relevant docs found; evaluation will be empty")
+        if not filtered_queries:
+            print(f"  [WARN] No queries have relevant docs in random sample of {corpus_limit}; try larger corpus_limit")
         else:
-            if len(selected_ids) > corpus_cap:
-                print(
-                    f"  [WARN] corpus-limit too small for selected queries; "
-                    f"expanding corpus to {len(selected_ids)}"
-                )
-                corpus_cap = None
-            elif skipped_queries or (query_limit and len(selected_queries) < len(desired_queries)):
-                print(
-                    f"  [WARN] corpus-limit active; selected {len(selected_queries)}/"
-                    f"{len(desired_queries)} queries to fit {len(selected_ids)} docs"
-                )
-            else:
-                print(
-                    f"  [WARN] corpus-limit active; selected {len(selected_queries)} queries "
-                    f"with {len(selected_ids)} relevant docs"
-                )
+            print(f"  [INFO] BEIR-style subset: {len(sampled_entries)} random corpus docs (seed={CORPUS_SEED})")
+            print(f"  [INFO] {len(filtered_queries)} queries have relevant docs in sample")
 
-        subset_entries = []
-        if selected_ids:
-            for entry in dataset.iter_corpus():
-                if entry.code_id in selected_ids:
-                    subset_entries.append(entry)
-        if corpus_cap:
-            for entry in dataset.iter_corpus():
-                if entry.code_id not in selected_ids:
-                    subset_entries.append(entry)
-                    if len(subset_entries) >= corpus_cap:
-                        break
-
-        corpus = [entry.to_index_payload() for entry in subset_entries]
-        queries = selected_queries
+        corpus = [entry.to_index_payload() for entry in sampled_entries]
+        queries = filtered_queries
     else:
+        # Full corpus evaluation (standard BEIR protocol)
         corpus = get_corpus_for_indexing(dataset)
-        queries = desired_queries
+        queries = all_queries[:query_limit] if query_limit else all_queries
 
     # Step 2: Index corpus
     print("\n▶ Step 2: Indexing corpus...")
-    if corpus_cap:
+    if corpus_limit:
         print(f"  Limited corpus to {len(corpus)} entries")
 
     # Check if already indexed (use fingerprint matching, not just points_count)

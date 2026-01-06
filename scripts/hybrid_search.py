@@ -819,6 +819,9 @@ def _run_hybrid_search_impl(
 
     # === Large codebase scaling (automatic) ===
     _coll_stats = _get_collection_stats(client, _collection(collection))
+    # IMPORTANT: Use actual Qdrant points_count, not corpus doc count.
+    # With chunked indexing (multiple points per doc), points_count >> doc_count.
+    # Fusion depth must scale with points_count to prevent recall collapse.
     _coll_size = _coll_stats.get("points_count", 0)
     _has_filters = bool(eff_language or eff_repo or eff_under or eff_kind or eff_symbol or eff_ext)
 
@@ -826,12 +829,28 @@ def _run_hybrid_search_impl(
     _scaled_rrf_k = _scale_rrf_k(RRF_K, _coll_size)
 
     # Adaptive per_query: retrieve more candidates from larger collections
-    # Use explicit per_query if provided, otherwise compute adaptively
-    _base_per_query = per_query if per_query is not None else max(24, limit)
-    _scaled_per_query = _adaptive_per_query(_base_per_query, _coll_size, _has_filters)
+    # Scales based on points_count (not doc count) to maintain recall with chunking.
+    # Use explicit per_query if provided, then check HYBRID_PER_QUERY env, otherwise compute adaptively
+    _per_query_env = os.environ.get("HYBRID_PER_QUERY", "").strip()
+    _per_query_env_int: int | None = None
+    if _per_query_env:
+        try:
+            _per_query_env_int = int(_per_query_env)
+        except ValueError:
+            _per_query_env_int = None
 
-    if os.environ.get("DEBUG_HYBRID_SEARCH") and _coll_size >= LARGE_COLLECTION_THRESHOLD:
-        logger.debug(f"Large collection scaling: size={_coll_size}, rrf_k={_scaled_rrf_k}, per_query={_scaled_per_query}")
+    if per_query is not None:
+        try:
+            _scaled_per_query = max(1, int(per_query))
+        except (TypeError, ValueError):
+            _scaled_per_query = _adaptive_per_query(max(24, limit), _coll_size, _has_filters)
+    elif _per_query_env_int is not None and _per_query_env_int > 0:
+        _scaled_per_query = _per_query_env_int
+    else:
+        _scaled_per_query = _adaptive_per_query(max(24, limit), _coll_size, _has_filters)
+
+    if os.environ.get("DEBUG_HYBRID_SEARCH"):
+        logger.debug(f"Hybrid search scaling: size={_coll_size}, rrf_k={_scaled_rrf_k}, per_query={_scaled_per_query}")
 
     # Local RRF function using scaled k
     def _scaled_rrf(rank: int) -> float:
@@ -907,7 +926,7 @@ def _run_hybrid_search_impl(
         # Dense vectors: use RRF rank (backwards compatible)
         if _used_sparse_lex:
             _lex_w = _AD_LEX_VEC_W if _USE_ADAPT else LEX_VECTOR_WEIGHT
-            lxs = sparse_lex_score(float(getattr(p, 'score', 0) or 0), weight=_lex_w)
+            lxs = sparse_lex_score(float(getattr(p, 'score', 0) or 0), weight=_lex_w, rrf_k=_scaled_rrf_k)
         else:
             lxs = (_AD_LEX_VEC_W * _scaled_rrf(rank)) if _USE_ADAPT else (LEX_VECTOR_WEIGHT * _scaled_rrf(rank))
         score_map[pid]["lx"] += lxs
@@ -1412,6 +1431,7 @@ def _run_hybrid_search_impl(
                 weight=_AD_LEX_TEXT_W,
                 token_weights=_bm25_tok_w,
                 bm25_weight=_BM25_W,
+                rrf_k=_scaled_rrf_k,
             )
         else:
             lx = lexical_text_score(
@@ -1420,6 +1440,7 @@ def _run_hybrid_search_impl(
                 weight=LEXICAL_WEIGHT,
                 token_weights=_bm25_tok_w,
                 bm25_weight=_BM25_W,
+                rrf_k=_scaled_rrf_k,
             )
         rec["lx"] += lx
         rec["s"] += lx
@@ -1846,6 +1867,86 @@ def _run_hybrid_search_impl(
     # ReFRAG-lite span compaction and budgeting is NOT applied here in run_hybrid_search
     # It's only applied in context_answer where token budgeting is needed for LLM context
     # Removing this to avoid over-filtering search results
+
+    # === Entity-level deduplication (anti-collapse) ===
+    # Deduplicate by entity (code_id/doc_id or path+symbol) BEFORE final limit slice.
+    # This prevents duplicate chunks from the same entity from wasting top-k slots.
+    # Critical for chunked indexing where multiple points per entity can saturate
+    # rankings with duplicates as corpus grows (Bruch et al. TOIS 2023).
+    _entity_dedup_enabled = os.environ.get("HYBRID_ENTITY_DEDUP", "1").strip().lower() not in {
+        "0", "false", "no", "off"
+    }
+
+    def _extract_entity_key(m: Dict[str, Any]) -> str:
+        """Extract entity identifier for deduplication.
+
+        Priority:
+        1. code_id (CoSQA/benchmarks)
+        2. doc_id or _id (CoIR/benchmarks)
+        3. path + symbol + kind (regular code - symbol-level entity)
+        4. path (file-level fallback)
+        """
+        try:
+            pt = m.get("pt")
+            if pt and pt.payload:
+                payload = pt.payload
+                # Check for benchmark entity IDs first
+                code_id = payload.get("code_id")
+                if code_id:
+                    return f"code_id:{code_id}"
+                doc_id = payload.get("doc_id") or payload.get("_id")
+                if doc_id:
+                    return f"doc_id:{doc_id}"
+                # Fall back to path+symbol for regular code
+                md = payload.get("metadata") or {}
+                path = str(md.get("path") or "")
+                symbol = str(md.get("symbol") or "")
+                kind = str(md.get("kind") or "")
+                if path and symbol and kind:
+                    # Symbol-level entity (preferred for code)
+                    return f"entity:{path}:{kind}:{symbol}"
+                elif path:
+                    # File-level entity (fallback when no symbol)
+                    return f"file:{path}"
+        except Exception:
+            pass
+        # Fallback: use point ID (no deduplication)
+        try:
+            pt_id = m.get("pt")
+            if pt_id and hasattr(pt_id, "id"):
+                return f"point:{pt_id.id}"
+        except Exception:
+            pass
+        return f"point:{id(m)}"
+
+    if _entity_dedup_enabled:
+        # Deduplicate ranked list, keeping first (highest-scoring) occurrence of each entity.
+        # Implements entity-level fusion (max-score aggregation) as recommended by
+        # Bruch et al. (TOIS 2023) for hybrid retrieval with chunked corpora.
+        # Early-stop once we have enough unique entities (more efficient than processing all).
+        seen_entities: set[str] = set()
+        deduped_ranked: List[Dict[str, Any]] = []
+        # Calculate how many unique entities we need (account for per_path limiting later)
+        # If per_path is set, we might need more candidates; otherwise stop at limit * safety_factor
+        target_entities = limit * 3 if (per_path and per_path > 0) else limit * 2
+        chunks_scanned = 0
+
+        for m in ranked:
+            chunks_scanned += 1
+            entity_key = _extract_entity_key(m)
+            if entity_key not in seen_entities:
+                seen_entities.add(entity_key)
+                deduped_ranked.append(m)
+                # Early stop once we have enough unique entities
+                if len(deduped_ranked) >= target_entities:
+                    break
+
+        if os.environ.get("DEBUG_HYBRID_SEARCH"):
+            logger.debug(
+                f"Entity deduplication: scanned {chunks_scanned}/{len(ranked)} chunks -> "
+                f"{len(deduped_ranked)} unique entities (removed {chunks_scanned - len(deduped_ranked)} duplicates)"
+            )
+        ranked = deduped_ranked
 
     if per_path and per_path > 0:
         counts: Dict[str, int] = {}

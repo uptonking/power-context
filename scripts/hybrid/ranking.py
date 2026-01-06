@@ -147,10 +147,16 @@ def _scale_rrf_k(base_k: int, collection_size: int) -> int:
     Uses logarithmic scaling: k_scaled = k * (1 + log10(size/threshold))
     Capped at MAX_RRF_K_SCALE * base_k.
     """
-    if collection_size < LARGE_COLLECTION_THRESHOLD:
+    # Smooth logarithmic scaling starting from 1000 docs.
+    # Prevents discontinuity at 10k threshold and provides better spread for mid-sized corpora.
+    SCALING_START = 1000
+    if collection_size < SCALING_START:
         return base_k
-    ratio = collection_size / LARGE_COLLECTION_THRESHOLD
+
+    ratio = collection_size / SCALING_START
     scale = 1.0 + math.log10(max(1, ratio))
+    
+    # Cap at configured max scale (default 3.0)
     scale = min(scale, MAX_RRF_K_SCALE)
     return int(base_k * scale)
 
@@ -158,17 +164,38 @@ def _scale_rrf_k(base_k: int, collection_size: int) -> int:
 def _adaptive_per_query(base_limit: int, collection_size: int, has_filters: bool) -> int:
     """Increase candidate retrieval for larger collections.
 
-    Uses sublinear sqrt scaling to avoid excessive retrieval.
+    Uses sublinear scaling to avoid excessive retrieval while preventing
+    recall collapse as collections grow.
     Filters reduce the need for extra candidates.
+
+    Args:
+        base_limit: Base per_query limit (typically max(24, limit))
+        collection_size: Actual Qdrant points_count (NOT corpus doc count).
+                        Critical for chunked indexing where multiple points per doc
+                        means we need deeper retrieval to maintain recall.
+        has_filters: Whether query has filters (reduces scaling need)
+
+    Returns:
+        Scaled per_query limit, capped at HYBRID_MAX_PER_QUERY (default 400)
     """
-    if collection_size < LARGE_COLLECTION_THRESHOLD:
+    if collection_size <= 0:
         return base_limit
-    ratio = collection_size / LARGE_COLLECTION_THRESHOLD
-    scale = math.sqrt(ratio)
+
+    # Start scaling earlier than LARGE_COLLECTION_THRESHOLD.
+    # LARGE_COLLECTION_THRESHOLD is tuned for score normalization/rrf_k, but candidate recall
+    # often needs more headroom at smaller sizes (e.g., benchmarks and medium repos).
+    base_size = max(1000, LARGE_COLLECTION_THRESHOLD // 10)
+    ratio = collection_size / base_size
+
+    # Smooth ramp: 1.0x at base_size, ~2.0x at 2*base_size, ~5.4x at 20*base_size.
+    scale = 1.0 if ratio <= 1.0 else (1.0 + math.sqrt(ratio - 1.0))
     if has_filters:
         scale = max(1.0, scale * 0.7)
-    scaled = int(base_limit * min(scale, 3.0))
-    return max(base_limit, min(scaled, 200))
+    scaled = int(base_limit * min(scale, 8.0))
+    # Cap at 400 (was 200) to support chunked indexing where multiple points per doc
+    # means we need more candidates to get adequate coverage after deduplication.
+    max_per_query = _safe_int(os.environ.get("HYBRID_MAX_PER_QUERY", "400"), 400)
+    return max(base_limit, min(scaled, max_per_query))
 
 
 def _normalize_scores(score_map: Dict[str, Dict[str, Any]], collection_size: int) -> None:
@@ -202,7 +229,7 @@ def _normalize_scores(score_map: Dict[str, Dict[str, Any]], collection_size: int
 # Sparse lexical scoring
 # ---------------------------------------------------------------------------
 
-def sparse_lex_score(raw_score: float, weight: float = LEX_VECTOR_WEIGHT) -> float:
+def sparse_lex_score(raw_score: float, weight: float = LEX_VECTOR_WEIGHT, rrf_k: int | None = None) -> float:
     """Normalize sparse lexical vector score to RRF-equivalent range.
 
     Maps sparse similarity scores to the same range as RRF(rank) scores,
@@ -212,12 +239,19 @@ def sparse_lex_score(raw_score: float, weight: float = LEX_VECTOR_WEIGHT) -> flo
     - Sparse score 0 maps to RRF_MIN (like worst rank)
     - Sparse score max maps to RRF_MAX (like rank 1)
     - Quality ordering preserved, but doesn't dominate dense embedding scores
+
+    If rrf_k provided, computes dynamic RRF bounds.
     """
     if raw_score <= 0:
         return 0.0
+    
+    k = rrf_k if rrf_k is not None else RRF_K
+    r_min = 1.0 / (k + 50)
+    r_max = 1.0 / (k + 1)
+    
     clamped = min(raw_score, SPARSE_LEX_MAX_SCORE)
     ratio = clamped / SPARSE_LEX_MAX_SCORE
-    rrf_equiv = SPARSE_RRF_MIN + ratio * (SPARSE_RRF_MAX - SPARSE_RRF_MIN)
+    rrf_equiv = r_min + ratio * (r_max - r_min)
     return weight * rrf_equiv
 
 
@@ -318,6 +352,7 @@ def lexical_text_score(
     weight: float = LEXICAL_WEIGHT,
     token_weights: Dict[str, float] | None = None,
     bm25_weight: float | None = None,
+    rrf_k: int | None = None,
 ) -> float:
     """Compute a *weighted* lexical text score suitable for fusion.
 
@@ -343,9 +378,14 @@ def lexical_text_score(
         # Default max chosen to cover typical 2–6 token matches.
         max_raw = _safe_float(os.environ.get("HYBRID_LEXICAL_TEXT_MAX", "20.0"), 20.0)
         max_raw = max(1e-6, max_raw)
+        
+        k = rrf_k if rrf_k is not None else RRF_K
+        r_min = 1.0 / (k + 50)
+        r_max = 1.0 / (k + 1)
+        
         clamped = min(float(raw), float(max_raw))
         ratio = clamped / float(max_raw)
-        rrf_equiv = SPARSE_RRF_MIN + ratio * (SPARSE_RRF_MAX - SPARSE_RRF_MIN)
+        rrf_equiv = r_min + ratio * (r_max - r_min)
         return float(weight) * float(rrf_equiv)
 
     # Default: tanh saturation (bounded in [0, weight])

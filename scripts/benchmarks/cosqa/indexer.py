@@ -7,6 +7,7 @@ to scripts/benchmarks/core_indexer.py for actual indexing.
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, List
@@ -96,6 +97,12 @@ def index_corpus(
     Returns:
         Stats dict with indexed count, time, errors, reused
     """
+    # CoSQA snippets are atomic units - disable chunking so 1 point = 1 snippet.
+    # This ensures points_count ≈ corpus_size for proper rerank/candidate scaling.
+    os.environ.setdefault("INDEX_SEMANTIC_CHUNKS", "0")
+    os.environ.setdefault("INDEX_CHUNK_LINES", "10000")
+    os.environ.setdefault("INDEX_CHUNK_OVERLAP", "0")
+
     # Convert CoSQA entries to generic BenchmarkDoc format
     docs = [cosqa_entry_to_doc(e) for e in corpus_entries]
 

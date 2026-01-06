@@ -300,15 +300,29 @@ def index_benchmark_corpus(
     vector_name = sanitize_vector_name(model_name)
     available_vectors = get_collection_vector_names(client, collection)
 
-    # Process documents in batches
-    points = []
-    indexed_count = 0
-
+    # Phase 1: Prepare all chunk metadata (CPU-bound, can parallelize)
     print(f"Indexing {len(docs)} documents into {collection}...")
+    print(f"  Phase 1: Preparing chunks (workers={max_workers})...")
 
-    for i, doc in enumerate(docs):
+    @dataclass
+    class ChunkMeta:
+        doc_id: str
+        chunk_idx: int
+        chunk_text: str
+        dense_text: str
+        payload: Dict[str, Any]
+        language: str
+
+    chunk_metas: List[ChunkMeta] = []
+
+    use_semantic = os.environ.get("INDEX_SEMANTIC_CHUNKS", "1") == "1"
+    chunk_lines_val = int(os.environ.get("INDEX_CHUNK_LINES", "120"))
+    chunk_overlap = int(os.environ.get("INDEX_CHUNK_OVERLAP", "20"))
+
+    def prepare_doc_chunks(doc: BenchmarkDoc) -> List[ChunkMeta]:
+        """Prepare chunk metadata for a single document."""
+        results = []
         try:
-            # Extract symbols if available
             symbols = []
             if _AST_AVAILABLE:
                 try:
@@ -316,21 +330,14 @@ def index_benchmark_corpus(
                 except Exception:
                     pass
 
-            # Chunk the document
-            use_semantic = os.environ.get("INDEX_SEMANTIC_CHUNKS", "1") == "1"
-            chunk_lines_val = int(os.environ.get("INDEX_CHUNK_LINES", "120"))
-            chunk_overlap = int(os.environ.get("INDEX_CHUNK_OVERLAP", "20"))
-
             if use_semantic:
                 try:
                     chunks = chunk_semantic(doc.text, doc.language, chunk_lines_val, chunk_overlap)
                 except Exception:
-                    # Fallback to line-based chunking
                     chunks = chunk_lines(doc.text, chunk_lines_val, chunk_overlap)
             else:
                 chunks = chunk_lines(doc.text, chunk_lines_val, chunk_overlap)
 
-            # Process each chunk (chunks are dicts with "text", "start", "end" keys)
             for chunk_idx, chunk in enumerate(chunks):
                 chunk_text = chunk.get("text", "")
                 start_line = chunk.get("start", 1)
@@ -338,19 +345,15 @@ def index_benchmark_corpus(
                 if not chunk_text.strip():
                     continue
 
-                # Choose symbol for chunk
                 symbol_name = chunk.get("symbol", "")
                 symbol_kind = chunk.get("kind", "")
                 if not symbol_name and symbols:
-                    # _choose_symbol_for_chunk returns (kind, name, path)
                     symbol_kind, symbol_name, _ = _choose_symbol_for_chunk(start_line, end_line, symbols)
 
-                # Build info string for dense embedding
                 path = doc.metadata.get("path", f"bench/{doc.doc_id}")
                 first_line = chunk_text.split("\n")[0] if chunk_text else ""
                 info = build_information(doc.language, Path(path), start_line, end_line, first_line)
 
-                # Build dense text using production helper
                 pseudo = doc.metadata.get("docstring", "") or doc.metadata.get("title", "")
                 tags = [symbol_name] if symbol_name else None
                 dense_text = _select_dense_text(
@@ -360,41 +363,6 @@ def index_benchmark_corpus(
                     tags=tags,
                 )
 
-                # Generate vectors
-                dense_vec = list(model.embed([dense_text]))[0].tolist()
-                lex_vec = create_lexical_vector(chunk_text)
-
-                vectors_dict = {
-                    vector_name: dense_vec,
-                    LEX_VECTOR_NAME: lex_vec,
-                }
-
-                # Optional mini vector
-                if MINI_VECTOR_NAME in available_vectors:
-                    try:
-                        mini_vec = project_mini(dense_vec)
-                        vectors_dict[MINI_VECTOR_NAME] = mini_vec
-                    except Exception:
-                        pass
-
-                # Optional pattern vector
-                if PATTERN_VECTOR_NAME in available_vectors:
-                    try:
-                        pattern_vec = extract_pattern_vector(chunk_text, doc.language)
-                        if pattern_vec:
-                            vectors_dict[PATTERN_VECTOR_NAME] = pattern_vec
-                    except Exception:
-                        pass
-
-                # Optional sparse vector
-                sparse_dict = None
-                if LEX_SPARSE_MODE and LEX_SPARSE_NAME in (available_vectors.get("sparse") or set()):
-                    try:
-                        sparse_dict = {LEX_SPARSE_NAME: _lex_sparse_vector_text(chunk_text)}
-                    except Exception:
-                        pass
-
-                # Build payload with nested metadata (required by hybrid_search)
                 synthetic_path = doc.metadata.get("path", f"bench/{doc.doc_id}.py")
                 payload = {
                     "doc_id": doc.doc_id,
@@ -404,8 +372,7 @@ def index_benchmark_corpus(
                     "end_line": end_line,
                     "symbol": symbol_name,
                     "symbol_kind": symbol_kind,
-                    **doc.metadata,  # Include all extra metadata
-                    # Nested metadata structure expected by hybrid_search
+                    **doc.metadata,
                     "metadata": {
                         "path": synthetic_path,
                         "path_prefix": str(Path(synthetic_path).parent),
@@ -420,30 +387,95 @@ def index_benchmark_corpus(
                     },
                 }
 
-                # Generate point ID
-                point_id = generate_point_id(f"{doc.doc_id}:{chunk_idx}")
-
-                point = models.PointStruct(
-                    id=point_id,
-                    vector=vectors_dict,
+                results.append(ChunkMeta(
+                    doc_id=doc.doc_id,
+                    chunk_idx=chunk_idx,
+                    chunk_text=chunk_text,
+                    dense_text=dense_text,
                     payload=payload,
-                )
-                if sparse_dict:
-                    point.vector.update(sparse_dict)  # type: ignore
-
-                points.append(point)
-
-                # Batch upsert
-                if len(points) >= batch_size:
-                    _upsert_points_with_retry(client, collection, points)
-                    indexed_count += len(points)
-                    points = []
-                    if (i + 1) % 50 == 0:
-                        print(f"  Processed {i + 1}/{len(docs)} documents...")
-
+                    language=doc.language,
+                ))
         except Exception as e:
-            print(f"  Warning: Failed to index doc {doc.doc_id}: {e}")
-            continue
+            print(f"  Warning: Failed to prepare doc {doc.doc_id}: {e}")
+        return results
+
+    # Parallel chunk preparation
+    if max_workers > 1:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(prepare_doc_chunks, doc): doc for doc in docs}
+            for future in as_completed(futures):
+                chunk_metas.extend(future.result())
+    else:
+        for doc in docs:
+            chunk_metas.extend(prepare_doc_chunks(doc))
+
+    print(f"  Prepared {len(chunk_metas)} chunks from {len(docs)} documents")
+
+    # Phase 2: Batch embedding (GPU/CPU intensive, batch for efficiency)
+    print(f"  Phase 2: Batch embedding {len(chunk_metas)} chunks...")
+    embed_batch_size = int(os.environ.get("EMBED_BATCH_SIZE", "64"))
+
+    dense_texts = [cm.dense_text for cm in chunk_metas]
+    all_dense_vecs: List[List[float]] = []
+
+    for i in range(0, len(dense_texts), embed_batch_size):
+        batch_texts = dense_texts[i:i + embed_batch_size]
+        batch_vecs = list(model.embed(batch_texts))
+        all_dense_vecs.extend([v.tolist() for v in batch_vecs])
+        if (i + embed_batch_size) % 500 == 0:
+            print(f"    Embedded {min(i + embed_batch_size, len(dense_texts))}/{len(dense_texts)} chunks...")
+
+    # Phase 3: Build points and upsert
+    print(f"  Phase 3: Building and upserting points...")
+    points = []
+    indexed_count = 0
+
+    for idx, cm in enumerate(chunk_metas):
+        dense_vec = all_dense_vecs[idx]
+        lex_vec = create_lexical_vector(cm.chunk_text)
+
+        vectors_dict = {
+            vector_name: dense_vec,
+            LEX_VECTOR_NAME: lex_vec,
+        }
+
+        if MINI_VECTOR_NAME in available_vectors:
+            try:
+                mini_vec = project_mini(dense_vec)
+                vectors_dict[MINI_VECTOR_NAME] = mini_vec
+            except Exception:
+                pass
+
+        if PATTERN_VECTOR_NAME in available_vectors:
+            try:
+                pattern_vec = extract_pattern_vector(cm.chunk_text, cm.language)
+                if pattern_vec:
+                    vectors_dict[PATTERN_VECTOR_NAME] = pattern_vec
+            except Exception:
+                pass
+
+        sparse_dict = None
+        if LEX_SPARSE_MODE and LEX_SPARSE_NAME in (available_vectors.get("sparse") or set()):
+            try:
+                sparse_dict = {LEX_SPARSE_NAME: _lex_sparse_vector_text(cm.chunk_text)}
+            except Exception:
+                pass
+
+        point_id = generate_point_id(f"{cm.doc_id}:{cm.chunk_idx}")
+        point = models.PointStruct(
+            id=point_id,
+            vector=vectors_dict,
+            payload=cm.payload,
+        )
+        if sparse_dict:
+            point.vector.update(sparse_dict)  # type: ignore
+
+        points.append(point)
+
+        if len(points) >= batch_size:
+            _upsert_points_with_retry(client, collection, points)
+            indexed_count += len(points)
+            points = []
 
     # Final batch
     if points:
