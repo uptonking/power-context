@@ -107,6 +107,7 @@ def _load_benchmark_env() -> None:
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 from scripts.benchmarks.common import percentile, get_runtime_info, save_run_meta
+from scripts.benchmarks.core_indexer import BenchmarkDoc, warn_config_mismatch
 
 # Collection name for CoSQA corpus
 DEFAULT_COLLECTION = "cosqa-corpus"
@@ -494,16 +495,41 @@ async def run_cosqa_benchmark(
         f"Running CoSQA benchmark: {len(queries)} queries, limit={limit}, "
         f"rerank={rerank_enabled}, rerank_top_n={scaled_top_n}"
     )
+    
+    # Warmup query to avoid cold-start latency in first real query
+    # This ensures embedding model and reranker are loaded before timing
+    if queries:
+        warmup_query = queries[0][1]  # Use first query text
+        try:
+            await search_cosqa_corpus(
+                query=warmup_query,
+                collection=collection,
+                limit=5,
+                rerank_enabled=rerank_enabled,
+                rerank_top_n=50 if rerank_enabled else None,
+            )
+            print("  [warmup] Completed warmup query")
+        except Exception as e:
+            print(f"  [warmup] Warning: warmup failed: {e}")
+    
+    error_count = 0  # Track silent failures
 
     for idx, (query_id, query_text, relevant_ids) in enumerate(queries):
         # Search
-        retrieved_ids, latency_ms = await search_cosqa_corpus(
-            query=query_text,
-            collection=collection,
-            limit=limit,
-            rerank_enabled=rerank_enabled,
-            rerank_top_n=scaled_top_n if rerank_enabled else None,
-        )
+        try:
+            retrieved_ids, latency_ms = await search_cosqa_corpus(
+                query=query_text,
+                collection=collection,
+                limit=limit,
+                rerank_enabled=rerank_enabled,
+                rerank_top_n=scaled_top_n if rerank_enabled else None,
+            )
+        except Exception as e:
+            # Log error but continue - empty results will hurt metrics
+            print(f"  [ERROR] Query {idx+1} failed: {e}")
+            retrieved_ids = []
+            latency_ms = 0.0
+            error_count += 1
         latencies.append(latency_ms)
 
         # Compute metrics
@@ -562,6 +588,11 @@ async def run_cosqa_benchmark(
             "delta": round(delta, 4),
             "improvement": f"{delta/mrr_b*100:+.1f}%" if mrr_b else "N/A",
         }
+
+    # Add error count to config for visibility in report
+    if error_count > 0:
+        config["error_count"] = error_count
+        config["error_rate"] = f"{error_count / n * 100:.1f}%" if n else "N/A"
 
     report = CoSQAReport(
         name=name,
@@ -646,6 +677,9 @@ async def run_full_benchmark(
     """
     # Load .env for benchmark config (only when actually running benchmark)
     _load_benchmark_env()
+    
+    # Set EMBEDDING_SEED for deterministic embeddings (like CoIR)
+    os.environ.setdefault("EMBEDDING_SEED", "42")
 
     # Keep search env aligned with the requested collection to avoid stale defaults
     os.environ["COLLECTION_NAME"] = collection
@@ -709,6 +743,11 @@ async def run_full_benchmark(
     result = index_corpus(corpus, collection=collection, recreate=recreate_index)
     if result.get("reused"):
         print(f"  Corpus already indexed (fingerprint match, {result.get('indexed', 0)} entries)")
+        # Warn if current config doesn't match how collection was indexed
+        docs = [BenchmarkDoc(doc_id=c.get("code_id", ""), text=c.get("code", ""), metadata=c) for c in corpus[:100]]
+        warning = warn_config_mismatch(None, collection, docs)  # Pass None to use default client
+        if warning:
+            print(f"\n{warning}\n")
     else:
         print(f"  Indexed {result.get('indexed', 0)} entries ({result.get('skipped', 0)} skipped, {result.get('errors', 0)} errors)")
 

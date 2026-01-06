@@ -160,7 +160,7 @@ def collection_matches_corpus(
 
 
 def warn_config_mismatch(
-    client: QdrantClient,
+    client: Optional[QdrantClient],
     collection: str,
     docs: List[BenchmarkDoc],
 ) -> Optional[str]:
@@ -169,10 +169,20 @@ def warn_config_mismatch(
     Call this when reusing a collection to detect stale configurations
     that might invalidate benchmark results.
     
+    Args:
+        client: QdrantClient instance, or None to create default client
+        collection: Collection name to check
+        docs: Sample of documents to fingerprint
+    
     Returns:
         Warning message if mismatch detected, None if config matches or check fails.
     """
     try:
+        # Create client if not provided
+        if client is None:
+            qdrant_url = os.environ.get("QDRANT_URL", "http://localhost:6333")
+            client = QdrantClient(url=qdrant_url)
+        
         stored_fp = get_collection_fingerprint(client, collection)
         if not stored_fp:
             return None
