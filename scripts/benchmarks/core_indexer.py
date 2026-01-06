@@ -98,7 +98,7 @@ def get_config_fingerprint() -> str:
         f"chunk_overlap:{os.environ.get('INDEX_CHUNK_OVERLAP', '20')}",
         f"use_tree_sitter:{os.environ.get('USE_TREE_SITTER', '1')}",
         f"enhanced_ast:{os.environ.get('INDEX_USE_ENHANCED_AST', '1')}",
-        f"dense_mode:{os.environ.get('INDEX_DENSE_MODE', 'code+info')}",
+        f"dense_mode:{os.environ.get('INDEX_DENSE_MODE', 'info+pseudo+tags')}",
         f"reranker:{os.environ.get('RERANKER_MODEL', '')}",
         f"ast_enriched:v3",
     ]

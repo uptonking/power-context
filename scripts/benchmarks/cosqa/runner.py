@@ -678,6 +678,10 @@ async def run_full_benchmark(
     # Load .env for benchmark config (only when actually running benchmark)
     _load_benchmark_env()
     
+    # HARDENING: Disable filename boost heuristic to measure pure semantic/lexical performance.
+    # We want to verify that our core architecture works without "boosts".
+    os.environ["FNAME_BOOST"] = "0"
+    
     # Set EMBEDDING_SEED for deterministic embeddings (like CoIR)
     os.environ.setdefault("EMBEDDING_SEED", "42")
 
