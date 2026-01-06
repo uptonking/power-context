@@ -99,6 +99,7 @@ def get_config_fingerprint() -> str:
         f"use_tree_sitter:{os.environ.get('USE_TREE_SITTER', '1')}",
         f"enhanced_ast:{os.environ.get('INDEX_USE_ENHANCED_AST', '1')}",
         f"dense_mode:{os.environ.get('INDEX_DENSE_MODE', 'code+info')}",
+        f"reranker:{os.environ.get('RERANKER_MODEL', '')}",
         f"ast_enriched:v3",
     ]
     return hashlib.sha256("|".join(config_parts).encode()).hexdigest()[:8]
@@ -156,6 +157,39 @@ def collection_matches_corpus(
         return False
     except Exception:
         return False
+
+
+def warn_config_mismatch(
+    client: QdrantClient,
+    collection: str,
+    docs: List[BenchmarkDoc],
+) -> Optional[str]:
+    """Check for config mismatch and return warning message if detected.
+    
+    Call this when reusing a collection to detect stale configurations
+    that might invalidate benchmark results.
+    
+    Returns:
+        Warning message if mismatch detected, None if config matches or check fails.
+    """
+    try:
+        stored_fp = get_collection_fingerprint(client, collection)
+        if not stored_fp:
+            return None
+        
+        current_fp = compute_corpus_fingerprint(docs)
+        if stored_fp != current_fp:
+            # Extract config parts for detailed warning
+            current_config_fp = get_config_fingerprint()
+            return (
+                f"[WARN] Collection '{collection}' was indexed with different config.\n"
+                f"  Stored fingerprint: {stored_fp[:8]}...\n"
+                f"  Current config fingerprint: {current_config_fp}\n"
+                f"  Consider using --recreate to ensure consistency."
+            )
+        return None
+    except Exception:
+        return None
 
 
 def create_collection(

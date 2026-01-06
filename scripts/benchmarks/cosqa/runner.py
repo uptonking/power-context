@@ -106,7 +106,7 @@ def _load_benchmark_env() -> None:
 # Avoid tokenizers fork warning in benchmark runs.
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
-from scripts.benchmarks.common import percentile, get_runtime_info
+from scripts.benchmarks.common import percentile, get_runtime_info, save_run_meta
 
 # Collection name for CoSQA corpus
 DEFAULT_COLLECTION = "cosqa-corpus"
@@ -825,6 +825,17 @@ def main():
         with open(args.output, "w") as f:
             json.dump(report.to_dict(), f, indent=2)
         print(f"\nSaved report to: {args.output}")
+        
+        # Save standalone metadata file for audit
+        output_dir = str(Path(args.output).parent)
+        run_id = f"cosqa_{report.config.get('collection', 'unknown')}_{Path(args.output).stem}"
+        meta_path = save_run_meta(
+            output_dir,
+            run_id,
+            report.config,
+            extra={"benchmark": "cosqa", "corpus_size": report.corpus_size, "queries": report.total_queries},
+        )
+        print(f"Saved metadata to: {meta_path}")
 
 
 if __name__ == "__main__":
