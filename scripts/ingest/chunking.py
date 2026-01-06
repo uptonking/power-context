@@ -22,6 +22,11 @@ except ImportError:
     _AST_ANALYZER_AVAILABLE = False
 
 
+# Cache tokenizers loaded from TOKENIZER_JSON (or default) to avoid repeatedly
+# re-reading tokenizer.json from disk during micro-chunking.
+_TOKENIZER_CACHE: dict[str, Any] = {}
+
+
 def chunk_lines(text: str, max_lines: int = 120, overlap: int = 20) -> List[Dict]:
     """Chunk text into overlapping line-based segments."""
     lines = text.splitlines()
@@ -203,7 +208,10 @@ def chunk_by_tokens(
     )
     if Tokenizer is not None:
         try:
-            tokenizer = Tokenizer.from_file(tok_path)
+            tokenizer = _TOKENIZER_CACHE.get(tok_path)
+            if tokenizer is None:
+                tokenizer = Tokenizer.from_file(tok_path)
+                _TOKENIZER_CACHE[tok_path] = tokenizer
             try:
                 enc = tokenizer.encode(text)
                 offsets = getattr(enc, "offsets", None) or []

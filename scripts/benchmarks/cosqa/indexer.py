@@ -39,6 +39,7 @@ from scripts.ingest.qdrant import (
     get_collection_vector_names,
     PATTERN_VECTOR_NAME,
     PATTERN_VECTOR_DIM,
+    upsert_points as _upsert_points_with_retry,
 )
 from scripts.utils import (
     lex_hash_vector_text as _lex_hash_vector_text,
@@ -311,6 +312,16 @@ def create_lexical_vector(text: str, dim: int | None = None) -> List[float]:
         return [v / norm for v in vec]
 
 
+def _upsert_points_batched(
+    client: Any,
+    collection: str,
+    points: List[Any],
+) -> int:
+    """Upsert points using the shared ingest batching+retry logic."""
+    _upsert_points_with_retry(client, collection, points)
+    return len(points)
+
+
 def index_corpus(
     corpus_entries: List[Dict[str, Any]],
     collection: str = DEFAULT_COLLECTION,
@@ -502,11 +513,6 @@ def index_corpus(
     # Parallel upsert workers (embedding is sequential, upsert is parallel)
     N_WORKERS = 10
 
-    def upsert_points(points_list, worker_client):
-        """Upsert pre-built points to Qdrant."""
-        worker_client.upsert(collection_name=collection, points=points_list)
-        return len(points_list)
-
     n_chunks = (len(batches) + N_WORKERS - 1) // N_WORKERS
     print(f"  Processing {len(batches)} batches in {n_chunks} chunks of {N_WORKERS}...")
 
@@ -618,8 +624,9 @@ def index_corpus(
                     })
 
             # Embed dense text (code+info default) instead of just info
+            print(f"  Embedding {len(chunk_records)} chunks...", end="", flush=True)
             embeddings = embed_batch(model, [r["dense_text"] for r in chunk_records])
-            print("done", flush=True)
+            print(" done", flush=True)
 
             points = []
             for rec, emb in zip(chunk_records, embeddings):
@@ -655,12 +662,16 @@ def index_corpus(
             chunk_points.append(points)
 
         # Upsert in parallel (Qdrant client is thread-safe with separate instances)
-        with ThreadPoolExecutor(max_workers=len(chunk_points)) as executor:
-            worker_clients = [get_qdrant_client() for _ in chunk_points]
-            futures = {
-                executor.submit(upsert_points, pts, wc): len(pts)
-                for pts, wc in zip(chunk_points, worker_clients)
-            }
+        total_points = sum(len(pts) for pts in chunk_points)
+        print(f"  Upserting {total_points} points...", end="", flush=True)
+        max_workers = min(len(chunk_points), int(os.environ.get("INDEX_UPSERT_WORKERS", "4") or 4))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            worker_clients = [get_qdrant_client() for _ in range(max_workers)]
+            futures = {}
+            for idx, pts in enumerate(chunk_points):
+                wc = worker_clients[idx % max_workers]
+                fut = executor.submit(_upsert_points_batched, wc, collection, pts)
+                futures[fut] = len(pts)
             for future in as_completed(futures):
                 batch_size = futures[future]
                 try:
@@ -670,6 +681,7 @@ def index_corpus(
                 except Exception as e:
                     print(f"  Batch error (size={batch_size}): {e}")
                     stats["errors"] += batch_size
+        print(" done", flush=True)
 
         # Progress after each chunk (always log)
         processed_entries += sum(len(b) for b in chunk)

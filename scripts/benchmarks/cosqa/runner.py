@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.11
 """
 CoSQA Evaluation Runner for Context-Engine Benchmarks.
 
@@ -264,12 +264,31 @@ def has_hit(relevant_ids: List[str], retrieved_ids: List[str], k: int) -> bool:
 # Search Interface
 # ---------------------------------------------------------------------------
 
+
+def _scaled_rerank_top_n(corpus_size: int) -> int:
+    """Return rerank_top_n scaled by corpus size for CoSQA benchmarks.
+
+    Heuristic:
+        - <= 10k docs: 100 candidates
+        - 10k–50k docs: 200 candidates
+        - > 50k docs: 400 candidates (cap to keep reranking tractable)
+    """
+    if corpus_size <= 0:
+        return 100
+    if corpus_size <= 10_000:
+        return 100
+    if corpus_size <= 50_000:
+        return 200
+    return 400
+
+
 async def search_cosqa_corpus(
     query: str,
     collection: str = DEFAULT_COLLECTION,
     limit: int = 10,
     rerank_enabled: bool = True,
     mode: str = "hybrid",
+    rerank_top_n: Optional[int] = None,
 ) -> Tuple[List[str], float]:
     """Search CoSQA corpus using Context-Engine's repo_search.
 
@@ -281,6 +300,7 @@ async def search_cosqa_corpus(
         limit: Maximum results to return
         rerank_enabled: Whether to use reranker
         mode: Search mode (passed to repo_search)
+        rerank_top_n: Optional candidate pool size for reranker
 
     Returns:
         Tuple of (list of code_ids, latency_ms)
@@ -289,14 +309,18 @@ async def search_cosqa_corpus(
 
     start = time.perf_counter()
 
-    # Use repo_search for consistency with CoIR and production
-    # Retrieve larger candidate pool for reranking (100 candidates -> top limit)
+    # Use repo_search for consistency with CoIR and production.
+    # If rerank_top_n is provided, use it; otherwise fall back to legacy default (100).
+    eff_rerank_top_n = None
+    if rerank_enabled:
+        eff_rerank_top_n = rerank_top_n if rerank_top_n is not None else 100
+
     result = await repo_search(
         query=query,
         limit=limit,
         collection=collection,
         rerank_enabled=rerank_enabled,
-        rerank_top_n=100 if rerank_enabled else None,  # Retrieve 100 candidates
+        rerank_top_n=eff_rerank_top_n,
         rerank_return_m=limit if rerank_enabled else None,  # Rerank down to limit
         mode=mode,
     )
@@ -307,6 +331,10 @@ async def search_cosqa_corpus(
         code_id = r.get("code_id") or r.get("doc_id") or (r.get("payload") or {}).get("code_id")
         if code_id:
             code_ids.append(code_id)
+
+    # Defensive: ensure we never return more than requested.
+    if limit is not None and limit > 0:
+        code_ids = code_ids[:limit]
 
     latency_ms = (time.perf_counter() - start) * 1000
     return code_ids, latency_ms
@@ -340,8 +368,12 @@ async def run_cosqa_benchmark(
     Returns:
         CoSQAReport with all metrics
     """
+
     # Load .env for benchmark config (only when actually running benchmark)
     _load_benchmark_env()
+
+    # Scale rerank_top_n with corpus size so relevant docs still reach reranker
+    scaled_top_n = _scaled_rerank_top_n(corpus_size)
 
     results: List[CoSQAQueryResult] = []
     latencies: List[float] = []
@@ -350,6 +382,7 @@ async def run_cosqa_benchmark(
         "collection": collection,
         "limit": limit,
         "rerank_enabled": rerank_enabled,
+        "rerank_top_n": scaled_top_n,
         "query_count": len(queries),
         # Capture reranker config for reproducibility
         "env": {
@@ -364,7 +397,10 @@ async def run_cosqa_benchmark(
     if subset_note:
         config["subset_note"] = subset_note
 
-    print(f"Running CoSQA benchmark: {len(queries)} queries, limit={limit}, rerank={rerank_enabled}")
+    print(
+        f"Running CoSQA benchmark: {len(queries)} queries, limit={limit}, "
+        f"rerank={rerank_enabled}, rerank_top_n={scaled_top_n}"
+    )
 
     for idx, (query_id, query_text, relevant_ids) in enumerate(queries):
         # Search
@@ -373,6 +409,7 @@ async def run_cosqa_benchmark(
             collection=collection,
             limit=limit,
             rerank_enabled=rerank_enabled,
+            rerank_top_n=scaled_top_n if rerank_enabled else None,
         )
         latencies.append(latency_ms)
 
@@ -391,7 +428,7 @@ async def run_cosqa_benchmark(
             query_id=query_id,
             query_text=query_text,
             relevant_code_ids=relevant_ids,
-            retrieved_code_ids=retrieved_ids[:10],
+            retrieved_code_ids=retrieved_ids[:limit],
             mrr=mrr,
             ndcg_5=ndcg_5,
             ndcg_10=ndcg_10,
