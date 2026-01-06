@@ -13,6 +13,7 @@ __all__ = [
     "_mmr_diversify", "_merge_and_budget_spans",
     "_get_collection_stats", "_COLL_STATS_CACHE", "_COLL_STATS_TTL",
     "_get_symbol_extent", "ADAPTIVE_SPAN_SIZING",
+    "_detect_implementation_intent", "_IMPL_INTENT_PATTERNS",
 ]
 
 import os
@@ -349,6 +350,30 @@ def lexical_text_score(
     # Default: tanh saturation (bounded in [0, weight])
     sat = max(1e-6, float(LEXICAL_TEXT_SAT))
     return float(weight) * float(math.tanh(float(raw) / sat))
+
+
+# ---------------------------------------------------------------------------
+# Implementation intent detection (for dynamic boost adjustment)
+# ---------------------------------------------------------------------------
+
+# Patterns that indicate user wants implementation code (not docs/tests)
+_IMPL_INTENT_PATTERNS = frozenset({
+    "implementation", "how does", "how is", "where is", "code for",
+    "function that", "method that", "class that", "implements",
+    "defined", "definition", "source", "logic", "algorithm",
+    "where", "find", "locate", "show me", "actual code",
+})
+
+
+def _detect_implementation_intent(queries: List[str]) -> bool:
+    """Detect if query signals user wants implementation code."""
+    if not queries:
+        return False
+    joined = " ".join(queries).lower()
+    for pattern in _IMPL_INTENT_PATTERNS:
+        if pattern in joined:
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
