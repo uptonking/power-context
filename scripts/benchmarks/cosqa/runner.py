@@ -84,11 +84,24 @@ def _load_benchmark_env() -> None:
         load_dotenv(Path(__file__).parent.parent.parent.parent / ".env")
     except ImportError:
         pass  # dotenv optional
+
+    # Disable repo auto-filter for benchmarks (benchmark docs don't have metadata.repo)
+    if "REPO_AUTO_FILTER" not in os.environ:
+        os.environ["REPO_AUTO_FILTER"] = "0"
     
     # Set defaults AFTER loading .env so .env takes priority
     os.environ.setdefault("RERANKER_MODEL", "BAAI/bge-reranker-base")
     os.environ.setdefault("RERANK_IN_PROCESS", "1")
-    os.environ.setdefault("RERANK_LEARNING", "0")  # Default off for benchmarks; CLI can override
+    # Hard-disable learning/recursive reranker for deterministic benchmarks
+    os.environ["RERANK_LEARNING"] = "0"
+    os.environ["RERANK_EVENTS_ENABLED"] = "0"
+    # Disable sparse vectors for CoSQA benchmarks to avoid missing lex-sparse dims
+    os.environ["LEX_SPARSE_MODE"] = "0"
+    # Benchmarks should not be scoped or cached by workspace repo state
+    os.environ["REPO_AUTO_FILTER"] = "0"          # search all repos (no auto-detected repo)
+    os.environ["CURRENT_REPO"] = ""               # clear any inherited repo name
+    os.environ.setdefault("HYBRID_RESULTS_CACHE_ENABLED", "0")
+    os.environ.setdefault("HYBRID_RESULTS_CACHE", "0")
 
 # Avoid tokenizers fork warning in benchmark runs.
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
@@ -325,10 +338,53 @@ async def search_cosqa_corpus(
         mode=mode,
     )
 
-    # Extract code_ids from results (same pattern as CoIR)
-    code_ids = []
-    for r in result.get("results", []):
-        code_id = r.get("code_id") or r.get("doc_id") or (r.get("payload") or {}).get("code_id")
+    def _coerce_id(val: Any) -> Optional[str]:
+        if val is None:
+            return None
+        try:
+            s = str(val).strip()
+        except Exception:
+            return None
+        return s or None
+
+    def _cosqa_id_from_path(p: str) -> Optional[str]:
+        if not p:
+            return None
+        s = str(p).strip().replace("\\", "/")
+        if not s:
+            return None
+        # Accept either "cosqa/<id>.py" or any path containing "/cosqa/<id>.py".
+        # If no cosqa segment is present, fall back to basename (still useful for synthetic paths).
+        if "/cosqa/" in s:
+            s = s.split("/cosqa/", 1)[1]
+        elif s.startswith("cosqa/"):
+            s = s[len("cosqa/") :]
+        # Use last path segment
+        name = s.rsplit("/", 1)[-1]
+        if name.endswith(".py"):
+            name = name[: -3]
+        return name.strip() or None
+
+    # Extract stable code_ids for evaluation.
+    # NOTE: rerank paths may not include payload; for CoSQA we can fall back to parsing
+    # the synthetic path "cosqa/<code_id>.py".
+    code_ids: List[str] = []
+    for r in result.get("results", []) or []:
+        if not isinstance(r, dict):
+            continue
+        payload = r.get("payload")
+        if not isinstance(payload, dict):
+            payload = {}
+        code_id = (
+            _coerce_id(r.get("code_id"))
+            or _coerce_id(r.get("doc_id"))
+            or _coerce_id(payload.get("code_id"))
+            or _coerce_id(payload.get("doc_id"))
+            or _coerce_id(payload.get("_id"))
+            or _coerce_id(payload.get("id"))
+        )
+        if not code_id:
+            code_id = _cosqa_id_from_path(str(r.get("path") or ""))
         if code_id:
             code_ids.append(code_id)
 
@@ -392,6 +448,9 @@ async def run_cosqa_benchmark(
             "HYBRID_IN_PROCESS": os.environ.get("HYBRID_IN_PROCESS", ""),
             "HYBRID_EXPAND": os.environ.get("HYBRID_EXPAND", ""),
             "SEMANTIC_EXPANSION_ENABLED": os.environ.get("SEMANTIC_EXPANSION_ENABLED", ""),
+            "HYBRID_LEXICAL_TEXT_MODE": os.environ.get("HYBRID_LEXICAL_TEXT_MODE", ""),
+            "EMBEDDING_MODEL": os.environ.get("EMBEDDING_MODEL", ""),
+            "QDRANT_TIMEOUT": os.environ.get("QDRANT_TIMEOUT", ""),
         },
     }
     if subset_note:
@@ -554,6 +613,9 @@ async def run_full_benchmark(
     # Load .env for benchmark config (only when actually running benchmark)
     _load_benchmark_env()
 
+    # Keep search env aligned with the requested collection to avoid stale defaults
+    os.environ["COLLECTION_NAME"] = collection
+
     from scripts.benchmarks.cosqa.dataset import load_cosqa, get_corpus_for_indexing, get_queries_for_evaluation
     from scripts.benchmarks.cosqa.indexer import index_corpus
 
@@ -636,7 +698,7 @@ async def run_full_benchmark(
 
     # Check if already indexed (use fingerprint matching, not just points_count)
     # The indexer handles fingerprint checking internally and will recreate if needed
-    result = index_corpus(corpus, collection=collection, recreate=recreate_index or bool(corpus_limit))
+    result = index_corpus(corpus, collection=collection, recreate=recreate_index)
     if result.get("reused"):
         print(f"  Corpus already indexed (fingerprint match, {result.get('indexed', 0)} entries)")
     else:
