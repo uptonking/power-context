@@ -240,7 +240,7 @@ def main():
                 args.recreate,
                 dedupe=(not args.no_dedupe),
                 skip_unchanged=(not args.no_skip_unchanged),
-                pseudo_mode="off" if (os.environ.get("PSEUDO_BACKFILL_ENABLED") or "").strip().lower() in {"1", "true", "yes", "on"} else "full",
+                pseudo_mode="off" if (os.environ.get("PSEUDO_DEFER_TO_WORKER") or "").strip().lower() in {"1", "true", "yes", "on"} else "full",
                 schema_mode=args.schema_mode,
             )
         return
@@ -257,7 +257,7 @@ def main():
             collection = os.environ.get("COLLECTION_NAME", "codebase")
         print(f"[single_repo] Single-repo mode enabled - using collection: {collection}")
 
-    flag = (os.environ.get("PSEUDO_BACKFILL_ENABLED") or "").strip().lower()
+    flag = (os.environ.get("PSEUDO_DEFER_TO_WORKER") or "").strip().lower()
     pseudo_mode = "off" if flag in {"1", "true", "yes", "on"} else "full"
 
     index_repo(
