@@ -343,50 +343,37 @@ class BenchmarkReport:
 # Helpers
 # ---------------------------------------------------------------------------
 
-# Environment variables to capture for reproducibility
-ENV_SNAPSHOT_KEYS = [
-    # Hybrid search weights
-    "HYBRID_RRF_K", "HYBRID_DENSE_WEIGHT", "HYBRID_LEXICAL_WEIGHT",
-    "HYBRID_LEX_VECTOR_WEIGHT", "HYBRID_LEXICAL_TEXT_MODE",
-    "HYBRID_SYMBOL_BOOST", "HYBRID_SYMBOL_EQUALITY_BOOST",
-    "HYBRID_SCORE_NORMALIZE",
-    # Caching and search scoping
-    "HYBRID_RESULTS_CACHE_ENABLED", "HYBRID_RESULTS_CACHE",
-    # Scoring
-    "RECENCY_WEIGHT", "CORE_FILE_BOOST", "VENDOR_PENALTY",
-    "TEST_FILE_PENALTY", "IMPLEMENTATION_BOOST",
-    # Query expansion
-    "HYBRID_EXPAND", "SEMANTIC_EXPANSION_ENABLED",
-    "SEMANTIC_EXPANSION_MAX_TERMS", "LLM_EXPAND_MAX",
-    # Indexing
-    "USE_TREE_SITTER", "INDEX_USE_ENHANCED_AST", "INDEX_SEMANTIC_CHUNKS",
-    "INDEX_CHUNK_LINES", "INDEX_CHUNK_OVERLAP",
-    "REFRAG_MODE", "INDEX_MICRO_CHUNKS",
-    "INDEX_UPSERT_BATCH", "INDEX_UPSERT_RETRIES",
-    "INDEX_UPSERT_BACKOFF", "INDEX_UPSERT_WORKERS",
-    # Reranking
-    "RERANK_ENABLED", "RERANKER_ENABLED", "RERANK_IN_PROCESS", "RERANKER_TOPN", "RERANKER_RETURN_M",
-    "RERANK_BLEND_WEIGHT", "RERANKER_MODEL", "RERANKER_ONNX_PATH", "RERANKER_TOKENIZER_PATH",
-    "FNAME_BOOST", "INDEX_DENSE_MODE",
-    # Model
-    "EMBEDDING_MODEL",
-    "EMBEDDING_SEED",
-    "PYTHONHASHSEED",
-    # Collection
-    "COLLECTION_NAME", "QDRANT_URL",
-    "QDRANT_EF_SEARCH", "QDRANT_TIMEOUT",
-    "QUERY_OPTIMIZER_MIN_EF", "QUERY_OPTIMIZER_MAX_EF",
-    # Repo scoping
-    "REPO_AUTO_FILTER", "CURRENT_REPO", "REPO_NAME",
-    # Telemetry
-    "OPENLIT_ENABLED", "OTEL_SDK_DISABLED",
-]
+# Sensitive patterns to EXCLUDE from env snapshot
+# Derived from .env.example: API keys, tokens, passwords, auth
+_ENV_SENSITIVE_SUFFIXES = frozenset({
+    "API_KEY", "SECRET", "PASSWORD", "CREDENTIAL", "_TOKEN",
+})
+_ENV_SENSITIVE_PREFIXES = frozenset({
+    "AUTH_",  # catches CTXCE_AUTH_USERNAME, AUTH_ADMIN, etc.
+})
+
+
+def _is_sensitive_key(key: str) -> bool:
+    """Check if key contains sensitive patterns (case-insensitive)."""
+    key_upper = key.upper()
+    # Suffix match for API_KEY, SECRET, PASSWORD, CREDENTIAL, _TOKEN
+    if any(key_upper.endswith(p) for p in _ENV_SENSITIVE_SUFFIXES):
+        return True
+    # Prefix match for AUTH_
+    return any(key_upper.startswith(p) for p in _ENV_SENSITIVE_PREFIXES)
 
 
 def get_env_snapshot() -> Dict[str, str]:
-    """Capture current environment config for reproducibility."""
+    """Capture current environment config for reproducibility.
+    
+    Dumps ALL env vars EXCEPT those matching sensitive patterns
+    (API_KEY, TOKEN, PASSWORD, SECRET, CREDENTIAL).
+    """
     import os
-    return {k: os.environ.get(k, "") for k in ENV_SNAPSHOT_KEYS if os.environ.get(k)}
+    return {
+        k: v for k, v in os.environ.items()
+        if v and not _is_sensitive_key(k)
+    }
 
 
 def get_git_sha() -> str:
