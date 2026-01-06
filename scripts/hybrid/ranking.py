@@ -52,7 +52,7 @@ def _safe_float(val: Any, default: float) -> float:
 
 RRF_K = _safe_int(os.environ.get("HYBRID_RRF_K", "30"), 30)
 DENSE_WEIGHT = _safe_float(os.environ.get("HYBRID_DENSE_WEIGHT", "1.5"), 1.5)
-LEXICAL_WEIGHT = _safe_float(os.environ.get("HYBRID_LEXICAL_WEIGHT", "0.20"), 0.20)
+LEXICAL_WEIGHT = _safe_float(os.environ.get("HYBRID_LEXICAL_WEIGHT", "0.25"), 0.25)
 LEX_VECTOR_WEIGHT = _safe_float(
     os.environ.get("HYBRID_LEX_VECTOR_WEIGHT", str(LEXICAL_WEIGHT)), LEXICAL_WEIGHT
 )
@@ -69,8 +69,9 @@ SPARSE_RRF_MAX = 1.0 / (RRF_K + 1)
 SPARSE_RRF_MIN = 1.0 / (RRF_K + 50)
 
 # Lexical text normalization (keeps lexical and dense on comparable scales)
-LEXICAL_TEXT_MODE = (os.environ.get("HYBRID_LEXICAL_TEXT_MODE", "tanh") or "").strip().lower()
+LEXICAL_TEXT_MODE = (os.environ.get("HYBRID_LEXICAL_TEXT_MODE", "rrf") or "").strip().lower()
 LEXICAL_TEXT_SAT = _safe_float(os.environ.get("HYBRID_LEXICAL_TEXT_SAT", "12.0"), 12.0)
+BM25_ENT_WEIGHT = _safe_float(os.environ.get("HYBRID_BM25_ENT_WEIGHT", "0.3"), 0.3)
 
 # Micro-span budgeting defaults
 def _get_micro_defaults() -> Tuple[int, int, int, int]:
@@ -442,13 +443,19 @@ def _adaptive_weights(stats: Dict[str, Any]) -> Tuple[float, float, float]:
     return base_d * dens_scale, base_lv * lv_scale, base_lx * lx_scale
 
 
-def _bm25_token_weights_from_results(phrases: List[str], results: List[Any]) -> Dict[str, float]:
+def _bm25_token_weights_from_results(
+    phrases: List[str],
+    results: List[Any],
+    *,
+    base_phrases: List[str] | None = None,
+) -> Dict[str, float]:
     """Compute lightweight per-token IDF-like weights from a small sample of lex results.
     
     Returns weights normalized to mean 1.0 over tokens present in phrases.
     """
     try:
-        tokens = [t for t in tokenize_queries(phrases) if t]
+        _phr = base_phrases if base_phrases is not None else phrases
+        tokens = [t for t in tokenize_queries(_phr) if t]
         if not tokens or not results:
             return {}
         tok_set = set(tokens)
@@ -473,7 +480,14 @@ def _bm25_token_weights_from_results(phrases: List[str], results: List[Any]) -> 
         mean = sum(idf.values()) / max(1, len(idf))
         if mean <= 0:
             return {t: 1.0 for t in tok_set}
-        return {t: (idf[t] / mean) for t in tok_set}
+        weights: Dict[str, float] = {}
+        for t in tok_set:
+            base = idf[t] / mean
+            # BMX-style entropy-ish boost: reward rarer tokens (lower df/N) gently and keep bounded.
+            p = (df[t] + 1.0) / (N + 1.0)
+            ent_boost = 1.0 + BM25_ENT_WEIGHT * (1.0 - p)
+            weights[t] = base * ent_boost
+        return weights
     except Exception:
         return {}
 
@@ -855,4 +869,3 @@ def _merge_and_budget_spans(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]
             m["_adaptive_expanded"] = True
         result.append(m)
     return result
-

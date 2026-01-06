@@ -727,6 +727,8 @@ def _run_hybrid_search_impl(
 
     # Build query list (LLM-assisted first, then synonym expansion)
     qlist = list(clean_queries)
+    # Preserve the original (pre-expansion) queries for IDF/BM25 weighting
+    base_queries = list(clean_queries)
 
     # Filter-only mode: derive implicit queries from DSL tokens
     # e.g., "lang:python" -> add "python" as a query term for ranking
@@ -1199,7 +1201,15 @@ def _run_hybrid_search_impl(
         _BM25_W = float(os.environ.get("HYBRID_BM25_WEIGHT", "0.2") or 0.2)
     except Exception:
         _BM25_W = 0.2
-    _bm25_tok_w = _bm25_token_weights_from_results(qlist, (lex_results or []) + (lex_results2 or [])) if _USE_BM25 else {}
+    _bm25_tok_w = (
+        _bm25_token_weights_from_results(
+            qlist,
+            (lex_results or []) + (lex_results2 or []),
+            base_phrases=base_queries,
+        )
+        if _USE_BM25
+        else {}
+    )
 
     if prf_enabled and score_map:
         try:
