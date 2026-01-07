@@ -60,6 +60,7 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from dotenv import load_dotenv
 
 from scripts.benchmarks.qdrant_utils import get_qdrant_client, probe_pseudo_tags
 
@@ -924,8 +925,10 @@ def _spawn_learning_worker(collection: str, project_root: Path) -> subprocess.Po
 
 def main():
     """CLI entrypoint for CoSQA benchmark."""
-    import argparse
-    import os
+
+    # Load .env explicitly so defaults don't override it
+    _project_root = Path(__file__).parent.parent.parent.parent
+    load_dotenv(_project_root / ".env")
 
     parser = argparse.ArgumentParser(description="CoSQA Benchmark for Context-Engine")
     parser.add_argument("--split", default="test", choices=["train", "validation", "test"],

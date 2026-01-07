@@ -280,30 +280,39 @@ def load_from_huggingface(
 
         print(f"Loaded mteb/cosqa: {len(queries_ds)} queries, {len(corpus_ds)} corpus, {len(qrels_ds)} qrels")
 
-        # Parse corpus with content-based deduplication
-        # MTEB format may have duplicate code snippets with different IDs
-        content_seen: set[str] = set()
+        # Map original IDs (d-xxxx) to our stable content-hash IDs
+        # This handles deduplication: multiple original IDs -> single content ID
+        id_map: Dict[str, str] = {}  # original_id -> stable_id
+
+        # Parse corpus
         for item in corpus_ds:
-            code_id = item["_id"]
+            original_id = item["_id"]
             code = item.get("text", "")
-            # Dedupe by content hash - skip if identical code already indexed
-            content_hash = hashlib.sha256(code.encode("utf-8", errors="ignore")).hexdigest()[:16]
-            if content_hash in content_seen:
+            
+            # Normalize and generate stable ID for deduplication
+            code_norm = normalize_code(code)
+            if not code_norm:
                 continue
-            content_seen.add(content_hash)
-            # Extract function name from code (mteb format doesn't provide it)
-            func_name = ""
-            import re as _re
-            match = _re.search(r"def\s+(\w+)\s*\(", code)
-            if match:
-                func_name = match.group(1)
-            corpus[code_id] = CoSQACorpusEntry(
-                code_id=code_id,
-                code=code,
-                docstring="",
-                func_name=func_name,
-                url="",
-            )
+                
+            # Use generate_code_id to get consistent cosqa-{hash} format
+            stable_id = generate_code_id(code_norm)
+            id_map[original_id] = stable_id
+
+            # Only add to corpus if not already present (first win / dedup)
+            if stable_id not in corpus:
+                # Extract function name
+                func_name = ""
+                match = re.search(r"def\s+(\w+)\s*\(", code)
+                if match:
+                    func_name = match.group(1)
+                
+                corpus[stable_id] = CoSQACorpusEntry(
+                    code_id=stable_id,
+                    code=code,
+                    docstring="",
+                    func_name=func_name,
+                    url="",
+                )
 
         # Parse queries
         for item in queries_ds:
@@ -318,11 +327,18 @@ def load_from_huggingface(
         # Parse qrels (relevance judgments)
         for item in qrels_ds:
             query_id = item["query-id"]
-            corpus_id = item["corpus-id"]
+            original_corpus_id = item["corpus-id"]
             score = item.get("score", 1)
+            
+            # Remap ID for deduped corpus
+            stable_corpus_id = id_map.get(original_corpus_id)
+            if not stable_corpus_id:
+                # ID referenced in qrels but not in corpus? Skip or warn.
+                continue
+                
             if query_id not in qrels:
                 qrels[query_id] = {}
-            qrels[query_id][corpus_id] = score
+            qrels[query_id][stable_corpus_id] = score
 
         # Update queries with relevant code IDs
         for query_id, rels in qrels.items():
