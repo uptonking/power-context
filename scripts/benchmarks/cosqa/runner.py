@@ -57,6 +57,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field, asdict
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -923,8 +924,10 @@ def main():
                         help="Spawn learning reranker worker during the run (enables learning + event logging)")
     parser.add_argument("--pure-semantic", action="store_true",
                         help="Disable FNAME_BOOST and other heuristics (old hardened mode)")
-    parser.add_argument("--output", type=str,
-                        help="Output JSON file")
+    # Generate default output filename with timestamp
+    default_output = f"cosqa_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    parser.add_argument("--output", type=str, default=default_output,
+                        help="Output JSON file (default: timestamped file in current directory)")
     parser.add_argument("--failures", action="store_true",
                         help="Show failed queries (recall@10 = 0)")
     parser.add_argument("--debug-failures", action="store_true",
