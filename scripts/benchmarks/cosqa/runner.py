@@ -90,11 +90,13 @@ def _load_benchmark_env() -> None:
         os.environ["REPO_AUTO_FILTER"] = "0"
     
     # Set defaults AFTER loading .env so .env takes priority
-    os.environ.setdefault("RERANKER_MODEL", "BAAI/bge-reranker-base")
+    os.environ.setdefault("RERANKER_MODEL", "jinaai/jina-reranker-v2-base-multilingual")
     os.environ.setdefault("RERANK_IN_PROCESS", "1")
     # Hard-disable learning/recursive reranker for deterministic benchmarks
-    os.environ["RERANK_LEARNING"] = "0"
-    os.environ["RERANK_EVENTS_ENABLED"] = "0"
+    # (unless explicitly enabled via --learning-worker flag or COSQA_ENABLE_LEARNING env var)
+    if not os.environ.get("COSQA_ENABLE_LEARNING") and os.environ.get("RERANK_LEARNING") != "1":
+        os.environ["RERANK_LEARNING"] = "0"
+        os.environ["RERANK_EVENTS_ENABLED"] = "0"
     # Disable sparse vectors for CoSQA benchmarks to avoid missing lex-sparse dims
     os.environ["LEX_SPARSE_MODE"] = "0"
     # Benchmarks should not be scoped or cached by workspace repo state
@@ -839,6 +841,16 @@ def main():
         if args.no_rerank:
             print("  [WARN] --learning-worker ignored because --no-rerank is set")
         else:
+            # Pre-compute PCA initialization for projection layer (cold-start fix)
+            print("  [learning] Pre-computing PCA initialization...")
+            from scripts.benchmarks.cosqa.pca_init import compute_pca_init_for_collection
+            pca_success = compute_pca_init_for_collection(
+                collection=args.collection,
+                sample_limit=1000,
+            )
+            if not pca_success:
+                print("  [WARN] PCA initialization failed, using random init")
+
             os.environ["RERANK_LEARNING"] = "1"
             os.environ["RERANK_EVENTS_ENABLED"] = "1"
             learning_proc = _spawn_learning_worker(args.collection, _project_root)

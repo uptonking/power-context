@@ -332,9 +332,15 @@ def index_benchmark_corpus(
 
     # Get model dimension
     try:
-        dim = model.model.get_sentence_embedding_dimension()
+        from scripts.embedder import get_model_dimension
+        model_name = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
+        dim = get_model_dimension(model_name)
     except Exception:
-        dim = 768  # Default BGE dimension
+        # Fallback: probe the model
+        try:
+            dim = model.model.get_sentence_embedding_dimension()
+        except Exception:
+            dim = 768  # Default BGE dimension
 
     # Create collection
     create_collection(client, collection, dim, recreate=recreate)

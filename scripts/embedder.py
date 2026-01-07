@@ -232,6 +232,17 @@ def get_model_dimension(model_name: Optional[str] = None) -> int:
     if "e5-base" in model_lower:
         return 768
 
+    # Snowflake Arctic models
+    if "snowflake" in model_lower or "arctic" in model_lower:
+        if "arctic-l" in model_lower or "embed-l" in model_lower:
+            return 1024
+        if "arctic-m" in model_lower or "embed-m" in model_lower:
+            return 768
+        if "arctic-s" in model_lower or "embed-s" in model_lower:
+            return 384
+        if "arctic-xs" in model_lower or "embed-xs" in model_lower:
+            return 384
+
     # Default: BGE-base and similar 768-dimension models
     return 768
 

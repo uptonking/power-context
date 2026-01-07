@@ -59,6 +59,48 @@ class LearnedProjection:
         self.W = (rng.randn(self.input_dim, self.output_dim) * scale).astype(np.float32)
         self._momentum_W = np.zeros_like(self.W)
 
+    def init_from_pca(self, embeddings: np.ndarray):
+        """Initialize projection using PCA on corpus embeddings.
+
+        Provides a much better cold-start than random initialization by using
+        the principal components of the actual data distribution.
+
+        Args:
+            embeddings: (n_samples, input_dim) array of corpus embeddings
+        """
+        if embeddings.shape[0] < self.output_dim:
+            from scripts.logger import get_logger
+            get_logger(__name__).warning(
+                f"LearnedProjection: {embeddings.shape[0]} samples < {self.output_dim} dims, using random init"
+            )
+            self._init_random_weights()
+            return
+
+        # Center the data
+        mean = embeddings.mean(axis=0, keepdims=True)
+        centered = embeddings - mean
+
+        # Use SVD for numerical stability
+        # X = U @ S @ Vt, where Vt rows are principal components
+        U, S, Vt = np.linalg.svd(centered, full_matrices=False)
+
+        # Take top output_dim principal components
+        # Vt is (min(n_samples, input_dim), input_dim)
+        components = Vt[:self.output_dim, :].T  # (input_dim, output_dim)
+
+        self.W = components.astype(np.float32)
+        self._momentum_W = np.zeros_like(self.W)
+
+        # Compute explained variance for logging
+        total_var = np.sum(S ** 2)
+        explained_var = np.sum(S[:self.output_dim] ** 2) / total_var if total_var > 0 else 0
+
+        from scripts.logger import get_logger
+        get_logger(__name__).info(
+            f"LearnedProjection: PCA init on {embeddings.shape[0]} samples "
+            f"({self.input_dim}→{self.output_dim}), explained variance: {explained_var:.1%}"
+        )
+
     def set_collection(self, collection: str):
         self._collection = collection
         self._weights_path = self._get_weights_path(collection)

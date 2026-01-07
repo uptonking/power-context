@@ -52,7 +52,7 @@ def _safe_float(val: Any, default: float) -> float:
 
 RRF_K = _safe_int(os.environ.get("HYBRID_RRF_K", "30"), 30)
 DENSE_WEIGHT = _safe_float(os.environ.get("HYBRID_DENSE_WEIGHT", "1.5"), 1.5)
-LEXICAL_WEIGHT = _safe_float(os.environ.get("HYBRID_LEXICAL_WEIGHT", "0.25"), 0.25)
+LEXICAL_WEIGHT = _safe_float(os.environ.get("HYBRID_LEXICAL_WEIGHT", "0.20"), 0.20)
 LEX_VECTOR_WEIGHT = _safe_float(
     os.environ.get("HYBRID_LEX_VECTOR_WEIGHT", str(LEXICAL_WEIGHT)), LEXICAL_WEIGHT
 )
@@ -69,9 +69,9 @@ SPARSE_RRF_MAX = 1.0 / (RRF_K + 1)
 SPARSE_RRF_MIN = 1.0 / (RRF_K + 50)
 
 # Lexical text normalization (keeps lexical and dense on comparable scales)
-LEXICAL_TEXT_MODE = (os.environ.get("HYBRID_LEXICAL_TEXT_MODE", "rrf") or "").strip().lower()
+LEXICAL_TEXT_MODE = (os.environ.get("HYBRID_LEXICAL_TEXT_MODE", "raw") or "").strip().lower()
 LEXICAL_TEXT_SAT = _safe_float(os.environ.get("HYBRID_LEXICAL_TEXT_SAT", "12.0"), 12.0)
-BM25_ENT_WEIGHT = _safe_float(os.environ.get("HYBRID_BM25_ENT_WEIGHT", "0.3"), 0.3)
+BM25_ENT_WEIGHT = _safe_float(os.environ.get("HYBRID_BM25_ENT_WEIGHT", "0.0"), 0.0)
 
 # Micro-span budgeting defaults
 def _get_micro_defaults() -> Tuple[int, int, int, int]:
@@ -147,16 +147,10 @@ def _scale_rrf_k(base_k: int, collection_size: int) -> int:
     Uses logarithmic scaling: k_scaled = k * (1 + log10(size/threshold))
     Capped at MAX_RRF_K_SCALE * base_k.
     """
-    # Smooth logarithmic scaling starting from 1000 docs.
-    # Prevents discontinuity at 10k threshold and provides better spread for mid-sized corpora.
-    SCALING_START = 1000
-    if collection_size < SCALING_START:
+    if collection_size < LARGE_COLLECTION_THRESHOLD:
         return base_k
-
-    ratio = collection_size / SCALING_START
+    ratio = collection_size / LARGE_COLLECTION_THRESHOLD
     scale = 1.0 + math.log10(max(1, ratio))
-    
-    # Cap at configured max scale (default 3.0)
     scale = min(scale, MAX_RRF_K_SCALE)
     return int(base_k * scale)
 
