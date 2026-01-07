@@ -58,6 +58,8 @@ async def _repo_search_impl(
     query: Any = None,
     queries: Any = None,  # Alias for query (many clients use this)
     limit: Any = None,
+    # DEBUG: remove after timing investigation
+    _debug_entry: bool = True,
     per_path: Any = None,
     include_snippet: Any = None,
     context_lines: Any = None,
@@ -540,6 +542,7 @@ async def _repo_search_impl(
                 if rt > eff_limit:
                     eff_limit = rt
             # In-process path_glob/not_glob accept a single string; reduce list inputs safely
+            print(f"[debug] DEBUG_SEARCH_TIMING={os.environ.get('DEBUG_SEARCH_TIMING', 'not set')}", flush=True)
             items = run_hybrid_search(
                 queries=queries,
                 limit=eff_limit,
@@ -570,6 +573,10 @@ async def _repo_search_impl(
         except Exception as e:
             # Fallback to subprocess path if in-process fails
             logger.debug(f"In-process hybrid search failed, falling back to subprocess: {type(e).__name__}: {e}")
+            # VISIBLE ERROR for debugging silent failures during benchmark runs
+            print(f"[ERROR] In-process hybrid failed: {type(e).__name__}: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
             use_hybrid_inproc = False
 
     if not use_hybrid_inproc:

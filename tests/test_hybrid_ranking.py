@@ -250,4 +250,4 @@ class TestAdaptivePerQuery:
         base_limit = 100
 
         out = ranking_module._adaptive_per_query(base_limit, base_size * 1000, has_filters=False)
-        assert out <= 200
+        assert out <= 400

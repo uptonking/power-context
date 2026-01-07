@@ -217,6 +217,7 @@ from scripts.hybrid_ranking import (
     # Lexical scoring
     lexical_score,
     lexical_text_score,
+    tokenize_queries,
     # Adaptive weights
     _compute_query_stats,
     _adaptive_weights,
@@ -424,6 +425,13 @@ def _run_hybrid_search_impl(
     per_query: int | None,
 ) -> List[Dict[str, Any]]:
     """Internal implementation of hybrid search with provided client."""
+    # FORCE timing on for debugging
+    import time as _t
+    _t0 = _t.perf_counter()
+    def _dt(label: str):
+        print(f"  [timing] {label}: {(_t.perf_counter() - _t0)*1000:.1f}ms", flush=True)
+    print("[timing] FORCED ON", flush=True)
+
     model_name = os.environ.get("EMBEDDING_MODEL", MODEL_NAME)
     if model:
         _model = model
@@ -856,6 +864,8 @@ def _run_hybrid_search_impl(
     def _scaled_rrf(rank: int) -> float:
         return 1.0 / (_scaled_rrf_k + rank)
 
+    _dt("setup+expand")
+
     # Lexical vector query (with scaled retrieval)
     # Use sparse vectors when LEX_SPARSE_MODE is enabled for lossless matching
     score_map: Dict[str, Dict[str, Any]] = {}
@@ -886,6 +896,8 @@ def _run_hybrid_search_impl(
                 lex_results = []
         else:
             lex_results = []
+
+    _dt("lex_query")
 
     # Per-query adaptive weights (default ON, gentle clamps)
     _USE_ADAPT = _env_truthy(os.environ.get("HYBRID_ADAPTIVE_WEIGHTS"), True)
@@ -932,9 +944,12 @@ def _run_hybrid_search_impl(
         score_map[pid]["lx"] += lxs
         score_map[pid]["s"] += lxs
 
+    _dt("lex_score_map")
+
     # Dense queries - filter out empty strings for filter-only mode (e.g., "lang:python")
     qlist_for_embed = [q for q in qlist if q and q.strip()]
     embedded = _embed_queries_cached(_model, qlist_for_embed) if qlist_for_embed else []
+    _dt("embed_queries")
     # Ensure collection schema is compatible with current search settings (named vectors)
     try:
         if embedded:
@@ -1072,7 +1087,7 @@ def _run_hybrid_search_impl(
                 flt_gated,
                 _scaled_per_query,
                 collection,
-                queries[i] if i < len(queries) else None,
+                query_text=queries[i] if i < len(queries) else None,
             )
             for i, v in enumerate(embedded)
         ]
@@ -1090,9 +1105,12 @@ def _run_hybrid_search_impl(
             )
             for i, v in enumerate(embedded)
         ]
+    _dt("dense_queries")
     if os.environ.get("DEBUG_HYBRID_SEARCH"):
         total_dense_results = sum(len(rs) for rs in result_sets)
         logger.debug(f"Dense query returned {total_dense_results} total results across {len(result_sets)} queries")
+
+    _dt("dense_score_map")
 
     # Optional ReFRAG-style mini-vector gating: add compact-vector RRF if enabled
     try:
@@ -1339,6 +1357,7 @@ def _run_hybrid_search_impl(
                         score_map[pid]["s"] += dens
             except Exception:
                 pass
+    _dt("prf_passes")
 
     # Add dense scores (with scaled RRF)
     for res in result_sets:
@@ -1413,6 +1432,10 @@ def _run_hybrid_search_impl(
     elif eff_mode in {"docs_first", "docs-first", "docs"}:
         impl_boost = IMPLEMENTATION_BOOST * 0.5
         doc_penalty = 0.0
+
+    # Precompute query tokens once for the boost loop (avoid re-tokenizing per item)
+    _precomp_tokens = tokenize_queries(qlist)
+
     for pid, rec in list(score_map.items()):
         payload = rec["pt"].payload or {}
         base_md = payload.get("metadata") or {}
@@ -1432,6 +1455,7 @@ def _run_hybrid_search_impl(
                 token_weights=_bm25_tok_w,
                 bm25_weight=_BM25_W,
                 rrf_k=_scaled_rrf_k,
+                _precomputed_tokens=_precomp_tokens,
             )
         else:
             lx = lexical_text_score(
@@ -1441,6 +1465,7 @@ def _run_hybrid_search_impl(
                 token_weights=_bm25_tok_w,
                 bm25_weight=_BM25_W,
                 rrf_k=_scaled_rrf_k,
+                _precomputed_tokens=_precomp_tokens,
             )
         rec["lx"] += lx
         rec["s"] += lx
@@ -1540,6 +1565,8 @@ def _run_hybrid_search_impl(
                 except Exception:
                     pass
 
+    _dt("boost_loop")
+
     if timestamps and RECENCY_WEIGHT > 0.0:
         tmin, tmax = min(timestamps), max(timestamps)
         span = max(1, tmax - tmin)
@@ -1563,6 +1590,7 @@ def _run_hybrid_search_impl(
         start_line = int(md.get("start_line") or 0)
         return (-float(m["s"]), len(sp), path, start_line)
 
+    _dt("scoring")
     if os.environ.get("DEBUG_HYBRID_SEARCH"):
         logger.debug(f"score_map has {len(score_map)} items before ranking (coll_size={_coll_size})")
     ranked = sorted(score_map.values(), key=_tie_key)
@@ -1819,6 +1847,7 @@ def _run_hybrid_search_impl(
             _mmr_lambda = 0.7
         if (limit or 0) >= 10 or (not per_path) or (per_path <= 0):
             ranked = _mmr_diversify(ranked, k=_mmr_k, lambda_=_mmr_lambda)
+            _dt("mmr_diversify")
 
     # Client-side filters and per-path diversification
     import re as _re, fnmatch as _fnm
@@ -2270,6 +2299,7 @@ def _run_hybrid_search_impl(
                     logger.debug("cache store for hybrid results")
                 while len(_RESULTS_CACHE) > MAX_RESULTS_CACHE:
                     _RESULTS_CACHE.popitem(last=False)
+    _dt("total")
     return items
 
 

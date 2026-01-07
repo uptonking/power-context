@@ -971,14 +971,15 @@ def main():
     os.environ["HYBRID_IN_PROCESS"] = "1"  # Use in-process hybrid search
     os.environ["RERANK_IN_PROCESS"] = "1"  # Use in-process reranker (required)
 
-    # --pure-semantic disables filename boost and other heuristics for "pure retrieval" measurement
+    # Disable all LLM calls by default for fast benchmarking
+    # Use heuristic tags instead of LLM-generated pseudo/tags
+    os.environ["REFRAG_PSEUDO_DESCRIBE"] = "0"
+    os.environ["LLM_EXPAND_MAX"] = "0"  # Disable LLM query expansion
+    os.environ["REFRAG_DECODER"] = "0"  # Disable decoder entirely
+    os.environ["REFRAG_RUNTIME"] = ""   # Clear runtime to prevent any LLM calls
+
     if args.pure_semantic:
-        os.environ["FNAME_BOOST"] = "0"
-        os.environ["REFRAG_PSEUDO_DESCRIBE"] = "0"  # Disable LLM pseudo in pure mode
-        print("  [pure-semantic] FNAME_BOOST and LLM Pseudo disabled")
-    else:
-        # Default: Enable LLM-based pseudo/tags generation (prioritized over docstring fallback)
-        os.environ.setdefault("REFRAG_PSEUDO_DESCRIBE", "1")
+        print("  [pure-semantic] LLM Pseudo disabled (already default)")
 
     # Set reranker model paths (relative to project root)
     _project_root = Path(__file__).parent.parent.parent.parent

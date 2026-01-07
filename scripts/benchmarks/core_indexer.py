@@ -73,6 +73,54 @@ except ImportError:
         return "", []
 
 
+def _generate_heuristic_tags(symbol_name: str, code_text: str, language: str = "python") -> List[str]:
+    """Generate rich tags from code without LLM using production heuristics.
+
+    Uses existing production components:
+    - _split_ident from hybrid/ranking.py for symbol tokenization
+    - _get_imports_calls from ingest/metadata.py for API extraction
+    """
+    tags: List[str] = []
+
+    # 1. Split symbol name into tokens using production tokenizer
+    if symbol_name:
+        try:
+            from scripts.hybrid.ranking import _split_ident
+            symbol_tokens = _split_ident(symbol_name)
+            tags.extend([t for t in symbol_tokens if len(t) > 1])
+        except ImportError:
+            # Fallback: simple split
+            import re
+            parts = re.split(r'[_\s]+', symbol_name.lower())
+            tags.extend([p for p in parts if len(p) > 1])
+
+    # 2. Extract imports and calls using production metadata extractor
+    if code_text and _AST_AVAILABLE:
+        try:
+            imports, calls = _get_imports_calls(language, code_text)
+            # Add top-level module names from imports (e.g., "os" from "os.path")
+            for imp in imports[:6]:
+                base_mod = imp.split('.')[0].lower()
+                if base_mod and len(base_mod) > 1 and base_mod not in tags:
+                    tags.append(base_mod)
+            # Add key function/method calls (limit to most common)
+            for call in calls[:4]:
+                call_lower = call.lower()
+                if len(call_lower) > 2 and call_lower not in tags:
+                    tags.append(call_lower)
+        except Exception:
+            pass
+
+    # Dedupe and limit
+    seen: set = set()
+    unique_tags: List[str] = []
+    for t in tags:
+        if t not in seen and len(t) > 1:
+            seen.add(t)
+            unique_tags.append(t)
+    return unique_tags[:10]
+
+
 CORPUS_FINGERPRINT_KEY = "_corpus_fingerprint"
 
 
@@ -466,8 +514,9 @@ def index_benchmark_corpus(
 
                 # Generate pseudo/tags via LLM if REFRAG_PSEUDO_DESCRIBE=1, else use fallback
                 fallback_pseudo = doc.metadata.get("docstring", "") or doc.metadata.get("title", "")
-                fallback_tags = [symbol_name] if symbol_name else []
-                
+                # Use rich heuristic tags from production components
+                fallback_tags = _generate_heuristic_tags(symbol_name, chunk_text, doc.language)
+
                 if _PSEUDO_AVAILABLE:
                     try:
                         pseudo, tags_list = _generate_pseudo_tags(chunk_text)
@@ -500,6 +549,7 @@ def index_benchmark_corpus(
                     "symbol": symbol_name,
                     "symbol_kind": symbol_kind,
                     "pseudo": pseudo,  # Store for reranker
+                    "tags": tags,  # Store for reranker/lexical boost
                     **doc.metadata,
                     "metadata": {
                         "path": synthetic_path,

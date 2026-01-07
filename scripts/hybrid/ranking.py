@@ -9,6 +9,7 @@ from hybrid_search.py for reuse and testing.
 __all__ = [
     "rrf", "_scale_rrf_k", "_adaptive_per_query", "_normalize_scores",
     "sparse_lex_score", "lexical_score", "lexical_text_score",
+    "tokenize_queries",
     "_compute_query_stats", "_adaptive_weights", "_bm25_token_weights_from_results",
     "_mmr_diversify", "_merge_and_budget_spans",
     "_get_collection_stats", "_COLL_STATS_CACHE", "_COLL_STATS_TTL",
@@ -293,14 +294,18 @@ def lexical_score(
     phrases: List[str],
     md: Dict[str, Any],
     token_weights: Dict[str, float] | None = None,
-    bm25_weight: float | None = None
+    bm25_weight: float | None = None,
+    *,
+    _precomputed_tokens: List[str] | None = None,
 ) -> float:
     """Smarter lexical: split identifiers, weight matches in symbol/path higher.
-    
+
     If token_weights provided, apply a small BM25-style multiplicative factor per token:
         factor = 1 + bm25_weight * (w - 1) where w are normalized around 1.0
+
+    Performance: pass _precomputed_tokens to avoid re-tokenizing queries on each call.
     """
-    tokens = tokenize_queries(phrases)
+    tokens = _precomputed_tokens if _precomputed_tokens is not None else tokenize_queries(phrases)
     if not tokens:
         return 0.0
     path = str(md.get("path", "")).lower()
@@ -347,6 +352,7 @@ def lexical_text_score(
     token_weights: Dict[str, float] | None = None,
     bm25_weight: float | None = None,
     rrf_k: int | None = None,
+    _precomputed_tokens: List[str] | None = None,
 ) -> float:
     """Compute a *weighted* lexical text score suitable for fusion.
 
@@ -358,8 +364,11 @@ def lexical_text_score(
       - "raw":  legacy behavior (weight * raw_score)
       - "tanh": default; saturating nonlinearity (weight * tanh(raw/sat))
       - "rrf":  map to RRF-equivalent range (weight * rrf_equiv)
+
+    Performance: pass _precomputed_tokens to avoid re-tokenizing queries on each call.
     """
-    raw = lexical_score(phrases, md, token_weights=token_weights, bm25_weight=bm25_weight)
+    raw = lexical_score(phrases, md, token_weights=token_weights, bm25_weight=bm25_weight,
+                        _precomputed_tokens=_precomputed_tokens)
     if raw <= 0 or weight <= 0:
         return 0.0
 
@@ -531,64 +540,83 @@ def _bm25_token_weights_from_results(
 # ---------------------------------------------------------------------------
 
 def _mmr_diversify(ranked: List[Dict[str, Any]], k: int = 60, lambda_: float = 0.7) -> List[Dict[str, Any]]:
-    """Maximal Marginal Relevance over fused list.
-    
-    Preserves top-1 by relevance, then balances relevance vs. diversity by path/symbol.
+    """Maximal Marginal Relevance via Lazy Greedy optimization.
+
+    Uses submodularity of MMR objective: marginal gain can only decrease as selected
+    set grows. This allows lazy evaluation with a priority queue - only recompute
+    scores when items reach the top with stale values.
+
+    Complexity: O(n log n) average case vs O(k * n * k) naive. Worst case still
+    O(k * n) recomputations but rarely triggered in practice.
+
     Returns a reordered list (top-k diversified, remainder appended in original order).
     """
+    import heapq
+
     if not ranked:
         return []
-    k = max(1, min(int(k or 1), len(ranked)))
+    n = len(ranked)
+    k = max(1, min(int(k or 1), n))
 
-    def _path(md: Dict[str, Any]) -> str:
-        return str(md.get("path") or "")
+    if n == 1:
+        return ranked[:]
 
-    def _symp(md: Dict[str, Any]) -> str:
-        return str(md.get("symbol_path") or md.get("symbol") or "")
+    # Precompute features once - path, symbol, path-parts for Jaccard
+    def _extract(m: Dict[str, Any]) -> tuple:
+        md = (m.get("pt", {}).payload or {}).get("metadata") or {}
+        path = str(md.get("path") or "")
+        sym = str(md.get("symbol_path") or md.get("symbol") or "")
+        parts = frozenset(p for p in re.split(r"[/\\]+", path.lower()) if p) if path else frozenset()
+        return (path, sym, parts)
 
-    def _sim(a: Dict[str, Any], b: Dict[str, Any]) -> float:
-        mda = (a["pt"].payload or {}).get("metadata") or {}
-        mdb = (b["pt"].payload or {}).get("metadata") or {}
-        pa, pb = _path(mda), _path(mdb)
+    features = [_extract(m) for m in ranked]
+    rel = [float(m.get("s", 0.0)) for m in ranked]
+
+    # Similarity function using precomputed features
+    def _sim(i: int, j: int) -> float:
+        pa, sa, ta = features[i]
+        pb, sb, tb = features[j]
         if pa and pb and pa == pb:
             return 1.0
-        sa, sb = _symp(mda), _symp(mdb)
         if sa and sb and sa == sb:
             return 0.8
-        if pa and pb:
-            ta = set(re.split(r"[/\\]+", pa.lower()))
-            tb = set(re.split(r"[/\\]+", pb.lower()))
-            ta.discard("")
-            tb.discard("")
-            if ta and tb:
-                inter = len(ta & tb)
-                union = max(1, len(ta | tb))
+        if ta and tb:
+            inter = len(ta & tb)
+            union = len(ta | tb)
+            if union > 0:
                 return 0.5 * (inter / union)
         return 0.0
 
-    rel = [float(m.get("s", 0.0)) for m in ranked]
-    selected_idx = [0]
-    candidates = list(range(1, len(ranked)))
-    while len(selected_idx) < k and candidates:
-        best_idx = None
-        best_score = -1e18
-        for i in candidates:
-            r = rel[i]
-            if selected_idx:
-                max_sim = max(_sim(ranked[i], ranked[j]) for j in selected_idx)
-            else:
-                max_sim = 0.0
-            mmr = lambda_ * r - (1.0 - lambda_) * max_sim
-            if mmr > best_score:
-                best_score = mmr
-                best_idx = i
-        selected_idx.append(best_idx)
-        candidates.remove(best_idx)
+    # Start with highest-relevance item
+    selected = [0]
 
-    sel_set = set(selected_idx)
-    diversified = [ranked[i] for i in selected_idx]
-    diversified.extend([ranked[i] for i in range(len(ranked)) if i not in sel_set])
-    return diversified
+    # Priority queue: (-score, staleness_marker, index)
+    # staleness_marker = len(selected) when score was computed
+    # Initialize: compute exact scores w.r.t. item 0
+    heap = []
+    for i in range(1, n):
+        sim_to_first = _sim(i, 0)
+        score = lambda_ * rel[i] - (1.0 - lambda_) * sim_to_first
+        heapq.heappush(heap, (-score, 1, i))  # computed when |selected|=1
+
+    # Lazy greedy selection
+    while len(selected) < k and heap:
+        neg_score, computed_at, i = heapq.heappop(heap)
+
+        if computed_at == len(selected):
+            # Score is fresh - this is the best candidate
+            selected.append(i)
+        else:
+            # Stale score - recompute with current selected set
+            max_sim = max(_sim(i, j) for j in selected)
+            new_score = lambda_ * rel[i] - (1.0 - lambda_) * max_sim
+            heapq.heappush(heap, (-new_score, len(selected), i))
+
+    # Build result: selected first, then remainder in original order
+    sel_set = set(selected)
+    result = [ranked[i] for i in selected]
+    result.extend(ranked[i] for i in range(n) if i not in sel_set)
+    return result
 
 
 # ---------------------------------------------------------------------------
