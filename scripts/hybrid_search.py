@@ -425,12 +425,16 @@ def _run_hybrid_search_impl(
     per_query: int | None,
 ) -> List[Dict[str, Any]]:
     """Internal implementation of hybrid search with provided client."""
-    # FORCE timing on for debugging
-    import time as _t
-    _t0 = _t.perf_counter()
-    def _dt(label: str):
-        print(f"  [timing] {label}: {(_t.perf_counter() - _t0)*1000:.1f}ms", flush=True)
-    print("[timing] FORCED ON", flush=True)
+    # Optional timing for debugging (set DEBUG_SEARCH_TIMING=1 to enable)
+    _timing_enabled = os.environ.get("DEBUG_SEARCH_TIMING", "").lower() in {"1", "true", "yes", "on"}
+    if _timing_enabled:
+        import time as _t
+        _t0 = _t.perf_counter()
+        def _dt(label: str):
+            print(f"  [timing] {label}: {(_t.perf_counter() - _t0)*1000:.1f}ms", flush=True)
+    else:
+        def _dt(label: str):
+            pass
 
     model_name = os.environ.get("EMBEDDING_MODEL", MODEL_NAME)
     if model:
