@@ -63,6 +63,15 @@ except ImportError:
     def _get_imports_calls(_lang, _text):
         return [], []
 
+# Optional LLM-based pseudo/tags generation (via GLM or llama.cpp)
+try:
+    from scripts.ingest.pseudo import generate_pseudo_tags as _generate_pseudo_tags
+    _PSEUDO_AVAILABLE = True
+except ImportError:
+    _PSEUDO_AVAILABLE = False
+    def _generate_pseudo_tags(_text):
+        return "", []
+
 
 CORPUS_FINGERPRINT_KEY = "_corpus_fingerprint"
 
@@ -455,8 +464,25 @@ def index_benchmark_corpus(
                 first_line = chunk_text.split("\n")[0] if chunk_text else ""
                 info = build_information(doc.language, Path(path), start_line, end_line, first_line)
 
-                pseudo = doc.metadata.get("docstring", "") or doc.metadata.get("title", "")
-                tags = [symbol_name] if symbol_name else None
+                # Generate pseudo/tags via LLM if REFRAG_PSEUDO_DESCRIBE=1, else use fallback
+                fallback_pseudo = doc.metadata.get("docstring", "") or doc.metadata.get("title", "")
+                fallback_tags = [symbol_name] if symbol_name else []
+                
+                if _PSEUDO_AVAILABLE:
+                    try:
+                        pseudo, tags_list = _generate_pseudo_tags(chunk_text)
+                        # If LLM returned empty, use fallback
+                        if not pseudo:
+                            pseudo = fallback_pseudo
+                        if not tags_list:
+                            tags_list = fallback_tags
+                        tags = tags_list if tags_list else None
+                    except Exception:
+                        pseudo = fallback_pseudo
+                        tags = fallback_tags if fallback_tags else None
+                else:
+                    pseudo = fallback_pseudo
+                    tags = fallback_tags if fallback_tags else None
                 dense_text = _select_dense_text(
                     info=info,
                     code_text=chunk_text,
