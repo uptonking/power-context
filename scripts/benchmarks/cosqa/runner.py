@@ -88,7 +88,13 @@ def _load_benchmark_env() -> None:
     # Disable repo auto-filter for benchmarks (benchmark docs don't have metadata.repo)
     if "REPO_AUTO_FILTER" not in os.environ:
         os.environ["REPO_AUTO_FILTER"] = "0"
-    
+
+    # Force localhost for Qdrant - benchmarks run outside Docker
+    # Override any .env setting that might use Docker hostname (e.g., "qdrant:6333")
+    qdrant_url = os.environ.get("QDRANT_URL", "")
+    if not qdrant_url or "qdrant:" in qdrant_url:
+        os.environ["QDRANT_URL"] = "http://localhost:6333"
+
     # Set defaults AFTER loading .env so .env takes priority
     os.environ.setdefault("RERANKER_MODEL", "jinaai/jina-reranker-v2-base-multilingual")
     os.environ.setdefault("RERANK_IN_PROCESS", "1")
@@ -109,7 +115,12 @@ def _load_benchmark_env() -> None:
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 from scripts.benchmarks.common import percentile, get_runtime_info, save_run_meta
-from scripts.benchmarks.core_indexer import BenchmarkDoc, warn_config_mismatch
+
+# NOTE: scripts.benchmarks.core_indexer imports scripts.ingest.config, which reads
+# env-derived constants (e.g. LEX_VECTOR_DIM) at import time. This runner
+# intentionally loads .env lazily in _load_benchmark_env(), so we must avoid
+# importing core_indexer at module import-time to prevent config drift when
+# LEX_VECTOR_DIM is not the default.
 
 # Collection name for CoSQA corpus
 DEFAULT_COLLECTION = "cosqa-corpus"
@@ -284,11 +295,20 @@ def has_hit(relevant_ids: List[str], retrieved_ids: List[str], k: int) -> bool:
 def _scaled_rerank_top_n(corpus_size: int) -> int:
     """Return rerank_top_n scaled by corpus size for CoSQA benchmarks.
 
-    Heuristic:
+    Respects RERANKER_TOPN env var if set, otherwise uses heuristic:
         - <= 10k docs: 100 candidates
         - 10k–50k docs: 200 candidates
         - > 50k docs: 400 candidates (cap to keep reranking tractable)
     """
+    # Respect env var if explicitly set
+    env_topn = os.environ.get("RERANKER_TOPN", "").strip()
+    if env_topn:
+        try:
+            return int(env_topn)
+        except ValueError:
+            pass
+
+    # Fallback to corpus-scaled heuristic
     if corpus_size <= 0:
         return 100
     if corpus_size <= 500:
@@ -311,6 +331,7 @@ async def search_cosqa_corpus(
     rerank_enabled: bool = True,
     mode: str = "hybrid",
     rerank_top_n: Optional[int] = None,
+    debug: bool = False,
 ) -> Tuple[List[str], float]:
     """Search CoSQA corpus using Context-Engine's repo_search.
 
@@ -323,6 +344,7 @@ async def search_cosqa_corpus(
         rerank_enabled: Whether to use reranker
         mode: Search mode (passed to repo_search)
         rerank_top_n: Optional candidate pool size for reranker
+        debug: If True, print detailed debug info
 
     Returns:
         Tuple of (list of code_ids, latency_ms)
@@ -353,6 +375,34 @@ async def search_cosqa_corpus(
         rerank_return_m=limit if rerank_enabled else None,  # Rerank down to limit
         mode=mode,
     )
+
+    # Debug: dump full result
+    if debug:
+        print(f"\n{'='*70}")
+        print(f"DEBUG SEARCH: {query[:80]}...")
+        print(f"{'='*70}")
+        for i, r in enumerate((result.get("results") or [])[:10]):
+            payload = r.get("payload") or {}
+            meta = payload.get("metadata") or {}
+            code_id = r.get("code_id") or r.get("doc_id") or payload.get("code_id") or payload.get("_id")
+            print(f"\n[{i+1}] code_id={code_id}")
+            print(f"    path: {(r.get('path') or meta.get('path', ''))[:60]}")
+            print(f"    score: {r.get('score', 0):.4f}")
+            print(f"    why: {r.get('why', [])}")
+            comps = r.get("components") or {}
+            print(f"    components: rerank={comps.get('rerank_onnx', 'N/A')}, blend={comps.get('blended', 'N/A')}")
+            # Show pseudo/tags if available
+            pseudo = payload.get("pseudo") or meta.get("pseudo") or ""
+            tags = payload.get("tags") or meta.get("tags") or ""
+            if pseudo:
+                print(f"    pseudo: {str(pseudo)[:100]}...")
+            if tags:
+                print(f"    tags: {str(tags)[:100]}...")
+            # Code snippet
+            code = payload.get("text") or payload.get("code") or ""
+            if code:
+                print(f"    code: {code[:120].replace(chr(10), ' ')}...")
+        print(f"{'='*70}\n")
 
     def _coerce_id(val: Any) -> Optional[str]:
         if val is None:
@@ -387,7 +437,7 @@ async def search_cosqa_corpus(
     # IMPORTANT: Deduplicate by code_id to avoid wasting top-k slots on chunks from same doc.
     code_ids: List[str] = []
     seen_ids: set[str] = set()
-    for r in result.get("results", []) or []:
+    for idx, r in enumerate(result.get("results", []) or []):
         if not isinstance(r, dict):
             continue
         payload = r.get("payload")
@@ -401,8 +451,13 @@ async def search_cosqa_corpus(
             or _coerce_id(payload.get("_id"))
             or _coerce_id(payload.get("id"))
         )
+        # DEBUG: Log extraction
+        if debug and idx < 5:
+            print(f"  [extract {idx}] r.code_id={r.get('code_id')}, payload.code_id={payload.get('code_id')}, final={code_id}")
         if not code_id:
             code_id = _cosqa_id_from_path(str(r.get("path") or ""))
+            if debug and idx < 5:
+                print(f"    -> fell back to path: {code_id}")
         if code_id and code_id not in seen_ids:
             code_ids.append(code_id)
             seen_ids.add(code_id)
@@ -545,6 +600,12 @@ async def run_cosqa_benchmark(
         hit_5 = has_hit(relevant_ids, retrieved_ids, 5)
         hit_10 = has_hit(relevant_ids, retrieved_ids, 10)
 
+        # DEBUG: Print miss details inline
+        if not hit_10:
+            print(f"\n  [MISS] q={query_id} expected={relevant_ids}")
+            print(f"         got={retrieved_ids[:5]}")
+            print(f"         query: {query_text[:60]}...")
+
         results.append(CoSQAQueryResult(
             query_id=query_id,
             query_text=query_text,
@@ -628,6 +689,7 @@ def print_report(report: CoSQAReport) -> None:
     print("\n" + "=" * 70)
     print(f"CoSQA BENCHMARK REPORT: {report.name}")
     print("=" * 70)
+
     print(f"Queries: {report.total_queries} | Corpus: {report.corpus_size}")
     print(f"Config: {report.config}")
     if report.config.get("subset_note"):
@@ -637,12 +699,18 @@ def print_report(report: CoSQAReport) -> None:
     print("METRICS:")
     print(f"  MRR:        {report.mrr:.4f}")
     print(f"  NDCG@5:     {report.ndcg_5:.4f}  |  NDCG@10:    {report.ndcg_10:.4f}")
-    print(f"  Recall@1:   {report.recall_1:.4f}  |  Recall@5:   {report.recall_5:.4f}  |  Recall@10:  {report.recall_10:.4f}")
-    print(f"  Hit@1:      {report.hit_rate_1:.4f}  |  Hit@5:      {report.hit_rate_5:.4f}  |  Hit@10:     {report.hit_rate_10:.4f}")
+    print(
+        f"  Recall@1:   {report.recall_1:.4f}  |  Recall@5:   {report.recall_5:.4f}  |  Recall@10:  {report.recall_10:.4f}"
+    )
+    print(
+        f"  Hit@1:      {report.hit_rate_1:.4f}  |  Hit@5:      {report.hit_rate_5:.4f}  |  Hit@10:     {report.hit_rate_10:.4f}"
+    )
 
     print("\n" + "-" * 70)
     print("LATENCY:")
-    print(f"  Avg: {report.avg_latency_ms:.1f}ms | P50: {report.p50_latency_ms:.1f}ms | P90: {report.p90_latency_ms:.1f}ms | P99: {report.p99_latency_ms:.1f}ms")
+    print(
+        f"  Avg: {report.avg_latency_ms:.1f}ms | P50: {report.p50_latency_ms:.1f}ms | P90: {report.p90_latency_ms:.1f}ms | P99: {report.p99_latency_ms:.1f}ms"
+    )
 
     print("\n" + "-" * 70)
     print("BASELINE COMPARISON (MRR):")
@@ -652,6 +720,73 @@ def print_report(report: CoSQAReport) -> None:
         print(f"  vs {name}: {comp['paper_mrr']:.3f} → {comp['our_mrr']:.3f} ({comp['improvement']})")
 
     print("=" * 70)
+
+
+def _prepare_cosqa_subset(
+    dataset: "CoSQADataset",
+    *,
+    query_limit: Optional[int],
+    corpus_limit: Optional[int],
+    corpus_seed: int = 42,
+) -> Tuple[List[Dict[str, Any]], List[Tuple[str, str, List[str]]]]:
+    """Prepare (corpus, queries) for a CoSQA run.
+
+    If corpus_limit is set, we build a qrels-covered subset:
+    - take the first `query_limit` evaluation queries (or all queries)
+    - include *all* their relevant docs in the corpus subset
+    - fill remaining slots with random distractors (seeded)
+
+    This is meant for tuning/smoke runs so the subset behaves like the full
+    benchmark (no missing-qrels collapse).
+    """
+    from scripts.benchmarks.cosqa.dataset import get_queries_for_evaluation
+
+    all_queries = get_queries_for_evaluation(dataset, limit=None)
+    queries = all_queries[:query_limit] if query_limit else all_queries
+
+    import random
+
+    all_corpus_entries = list(dataset.iter_corpus())
+
+    # Full corpus
+    if not corpus_limit:
+        corpus = [entry.to_index_payload() for entry in all_corpus_entries]
+        return corpus, queries
+
+    all_corpus_ids = {e.code_id for e in all_corpus_entries}
+
+    # Collect all relevant docs for the selected queries
+    required_ids: set[str] = set()
+    for _qid, _qtext, rel_ids in queries:
+        required_ids.update(rel_ids)
+
+    # Debug: check if required docs exist in corpus
+    missing_ids = required_ids - all_corpus_ids
+    if missing_ids:
+        print(f"  [WARN] {len(missing_ids)} required docs NOT in corpus: {list(missing_ids)[:5]}...")
+
+    # Preserve corpus order for required docs (deterministic)
+    required_entries = [e for e in all_corpus_entries if e.code_id in required_ids]
+    print(f"  [subset] {len(required_ids)} required docs, {len(required_entries)} found in corpus")
+
+    # If the limit is too small to include all required docs, expand it.
+    eff_corpus_limit = int(corpus_limit)
+    if len(required_entries) > eff_corpus_limit:
+        print(
+            f"  [WARN] corpus_limit={corpus_limit} is smaller than required relevant docs "
+            f"({len(required_entries)}). Expanding corpus to include all required docs."
+        )
+        eff_corpus_limit = len(required_entries)
+
+    # Fill remaining slots with random distractors
+    remaining = [e for e in all_corpus_entries if e.code_id not in required_ids]
+    rng = random.Random(int(corpus_seed))
+    extra_n = max(0, min(eff_corpus_limit - len(required_entries), len(remaining)))
+    extra_entries = rng.sample(remaining, extra_n) if extra_n else []
+
+    corpus_entries = required_entries + extra_entries
+    corpus = [entry.to_index_payload() for entry in corpus_entries]
+    return corpus, queries
 
 
 async def run_full_benchmark(
@@ -679,65 +814,31 @@ async def run_full_benchmark(
     """
     # Load .env for benchmark config (only when actually running benchmark)
     _load_benchmark_env()
-    
-    # HARDENING: Disable filename boost heuristic to measure pure semantic/lexical performance.
-    # We want to verify that our core architecture works without "boosts".
-    os.environ["FNAME_BOOST"] = "0"
-    
+
+    # NOTE: FNAME_BOOST is now controlled by .env (prod-like mode).
+    # Previously we forced FNAME_BOOST=0 to "measure pure semantic/lexical performance",
+    # but this made CoSQA diverge from real Context-Engine behavior.
+    # The synthetic paths in dataset.py now give FNAME_BOOST something to work with.
+
     # Set EMBEDDING_SEED for deterministic embeddings (like CoIR)
     os.environ.setdefault("EMBEDDING_SEED", "42")
 
     # Keep search env aligned with the requested collection to avoid stale defaults
     os.environ["COLLECTION_NAME"] = collection
 
-    from scripts.benchmarks.cosqa.dataset import load_cosqa, get_corpus_for_indexing, get_queries_for_evaluation
+    from scripts.benchmarks.cosqa.dataset import load_cosqa
     from scripts.benchmarks.cosqa.indexer import index_corpus
 
     # Step 1: Load dataset
     print("\n▶ Step 1: Loading CoSQA dataset...")
     dataset = load_cosqa(split=split)
 
-    # Prepare queries and corpus using BEIR-style protocol:
-    # 1. Sample corpus INDEPENDENTLY of qrels (fixed random seed for reproducibility)
-    # 2. Then filter queries to those whose relevant docs are in the sample
-    # This avoids artificially inflating metrics by biasing corpus toward relevant docs.
-    import random
-    CORPUS_SEED = 42  # Fixed seed for reproducible subsets
-
-    all_queries = get_queries_for_evaluation(dataset, limit=None)
-    all_corpus_entries = list(dataset.iter_corpus())
-    corpus_by_id = {entry.code_id: entry for entry in all_corpus_entries}
-
-    if corpus_limit:
-        # BEIR-style: random sample of corpus, independent of qrels
-        rng = random.Random(CORPUS_SEED)
-        sampled_entries = rng.sample(all_corpus_entries, min(corpus_limit, len(all_corpus_entries)))
-        sampled_ids = {entry.code_id for entry in sampled_entries}
-
-        # Filter queries to those with at least one relevant doc in sampled corpus
-        filtered_queries = []
-        for query_id, query_text, relevant_ids in all_queries:
-            # Keep only relevant IDs that are in our sample
-            valid_rel_ids = [rid for rid in relevant_ids if rid in sampled_ids]
-            if valid_rel_ids:
-                filtered_queries.append((query_id, query_text, valid_rel_ids))
-
-        # Apply query_limit after filtering
-        if query_limit:
-            filtered_queries = filtered_queries[:query_limit]
-
-        if not filtered_queries:
-            print(f"  [WARN] No queries have relevant docs in random sample of {corpus_limit}; try larger corpus_limit")
-        else:
-            print(f"  [INFO] BEIR-style subset: {len(sampled_entries)} random corpus docs (seed={CORPUS_SEED})")
-            print(f"  [INFO] {len(filtered_queries)} queries have relevant docs in sample")
-
-        corpus = [entry.to_index_payload() for entry in sampled_entries]
-        queries = filtered_queries
-    else:
-        # Full corpus evaluation (standard BEIR protocol)
-        corpus = get_corpus_for_indexing(dataset)
-        queries = all_queries[:query_limit] if query_limit else all_queries
+    corpus, queries = _prepare_cosqa_subset(
+        dataset,
+        query_limit=query_limit,
+        corpus_limit=corpus_limit,
+        corpus_seed=42,
+    )
 
     # Step 2: Index corpus
     print("\n▶ Step 2: Indexing corpus...")
@@ -750,6 +851,7 @@ async def run_full_benchmark(
     if result.get("reused"):
         print(f"  Corpus already indexed (fingerprint match, {result.get('indexed', 0)} entries)")
         # Warn if current config doesn't match how collection was indexed
+        from scripts.benchmarks.core_indexer import BenchmarkDoc, warn_config_mismatch
         docs = [BenchmarkDoc(doc_id=c.get("code_id", ""), text=c.get("code", ""), metadata=c) for c in corpus[:100]]
         warning = warn_config_mismatch(None, collection, docs)  # Pass None to use default client
         if warning:
@@ -819,22 +921,36 @@ def main():
                         help="Recreate index from scratch")
     parser.add_argument("--learning-worker", action="store_true",
                         help="Spawn learning reranker worker during the run (enables learning + event logging)")
+    parser.add_argument("--pure-semantic", action="store_true",
+                        help="Disable FNAME_BOOST and other heuristics (old hardened mode)")
     parser.add_argument("--output", type=str,
                         help="Output JSON file")
+    parser.add_argument("--failures", action="store_true",
+                        help="Show failed queries (recall@10 = 0)")
+    parser.add_argument("--debug-failures", action="store_true",
+                        help="Re-run failed queries with detailed debug output")
     args = parser.parse_args()
 
-    # Enable Context-Engine features for accurate benchmarking
-    # These are the features that differentiate us from basic embedding search
+    # Enable Context-Engine features for accurate benchmarking.
+    # Semantic expansion is always enabled (it may still be a no-op if query expansion is disabled).
+    os.environ["SEMANTIC_EXPANSION_ENABLED"] = "1"
     if not args.no_expand:
-        os.environ.setdefault("HYBRID_EXPAND", "1")
-        os.environ.setdefault("SEMANTIC_EXPANSION_ENABLED", "1")
-    os.environ.setdefault("HYBRID_IN_PROCESS", "1")  # Use in-process hybrid search
-    os.environ.setdefault("RERANK_IN_PROCESS", "1")  # Use in-process reranker (required)
+        os.environ["HYBRID_EXPAND"] = "1"
+    else:
+        # Avoid env drift from shell/.env: explicitly disable query expansion when requested.
+        os.environ["HYBRID_EXPAND"] = "0"
+    os.environ["HYBRID_IN_PROCESS"] = "1"  # Use in-process hybrid search
+    os.environ["RERANK_IN_PROCESS"] = "1"  # Use in-process reranker (required)
+
+    # --pure-semantic disables filename boost and other heuristics for "pure retrieval" measurement
+    if args.pure_semantic:
+        os.environ["FNAME_BOOST"] = "0"
+        print("  [pure-semantic] FNAME_BOOST disabled")
 
     # Set reranker model paths (relative to project root)
     _project_root = Path(__file__).parent.parent.parent.parent
-    os.environ.setdefault("RERANKER_ONNX_PATH", str(_project_root / "models" / "model_qint8_avx512_vnni.onnx"))
-    os.environ.setdefault("RERANKER_TOKENIZER_PATH", str(_project_root / "models" / "tokenizer.json"))
+    os.environ["RERANKER_ONNX_PATH"] = str(_project_root / "models" / "model_qint8_avx512_vnni.onnx")
+    os.environ["RERANKER_TOKENIZER_PATH"] = str(_project_root / "models" / "tokenizer.json")
 
     learning_proc = None
     if args.learning_worker:
@@ -875,6 +991,36 @@ def main():
                 learning_proc.kill()
 
     print_report(report)
+
+    # Show failures if requested
+    if args.failures:
+        failures = [r for r in report.results if not r.hit_at_10]
+        if failures:
+            print("\n" + "=" * 70)
+            print(f"FAILED QUERIES ({len(failures)} with recall@10 = 0):")
+            print("=" * 70)
+            for f in failures:
+                print(f"\n[{f.query_id}] {f.query_text[:100]}...")
+                print(f"  Expected: {f.relevant_code_ids}")
+                print(f"  Got top 5: {f.retrieved_code_ids[:5]}")
+
+            # Re-run failed queries with debug output
+            if args.debug_failures:
+                print("\n" + "=" * 70)
+                print("DEBUG OUTPUT FOR FAILED QUERIES:")
+                print("=" * 70)
+                debug_top_n = report.config.get("rerank_top_n")
+                for f in failures:
+                    asyncio.run(search_cosqa_corpus(
+                        query=f.query_text,
+                        collection=args.collection,
+                        limit=args.limit,
+                        rerank_enabled=not args.no_rerank,
+                        rerank_top_n=debug_top_n,
+                        debug=True,
+                    ))
+        else:
+            print("\n✓ No failures - all queries have recall@10 > 0")
 
     if args.output:
         with open(args.output, "w") as f:

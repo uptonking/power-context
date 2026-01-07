@@ -15,9 +15,9 @@ from qdrant_client import QdrantClient
 
 def get_qdrant_client() -> QdrantClient:
     """Get Qdrant client with standard configuration."""
-    url = os.environ.get("QDRANT_URL", "http://localhost:6333")
+    url = os.environ.get("QDRANT_URL") or "http://localhost:6333"
     api_key = os.environ.get("QDRANT_API_KEY")
-    timeout = int(os.environ.get("QDRANT_TIMEOUT", "60"))
+    timeout = int(os.environ.get("QDRANT_TIMEOUT") or "60")
     return QdrantClient(url=url, api_key=api_key or None, timeout=timeout)
 
 

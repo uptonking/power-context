@@ -49,7 +49,12 @@ except ImportError:
     _sanitize_vector_name = None
 
 # Configuration defaults
-SEMANTIC_EXPANSION_ENABLED = os.environ.get("SEMANTIC_EXPANSION_ENABLED", "1").lower() in {"1", "true", "yes", "on"}
+# NOTE: SEMANTIC_EXPANSION_ENABLED is intentionally *not* a module-level constant.
+# Tests and callers may toggle SEMANTIC_EXPANSION_ENABLED at runtime; reading the
+# env var at import-time makes that unreliable.
+def _semantic_expansion_enabled() -> bool:
+    v = (os.environ.get("SEMANTIC_EXPANSION_ENABLED", "1") or "1").strip().lower()
+    return v in {"1", "true", "yes", "on"}
 SEMANTIC_EXPANSION_TOP_K = int(os.environ.get("SEMANTIC_EXPANSION_TOP_K", "5") or "5")
 SEMANTIC_EXPANSION_SIMILARITY_THRESHOLD = float(os.environ.get("SEMANTIC_EXPANSION_SIMILARITY_THRESHOLD", "0.7") or "0.7")
 SEMANTIC_EXPANSION_MAX_TERMS = int(os.environ.get("SEMANTIC_EXPANSION_MAX_TERMS", "3") or "3")
@@ -110,23 +115,34 @@ def _coerce_embedding_vector(raw: Any) -> Optional[List[float]]:
 def _select_vector_name(
     client: Any,
     collection: str,
-    model_dim: int,
+    model_dim: Optional[int] = None,
     model_name: Optional[str] = None,
 ) -> Optional[str]:
-    """Pick a dense vector name by matching embedding dimension when possible."""
+    """Pick a dense vector name by matching embedding dimension or model name."""
     try:
         info = client.get_collection(collection)
         cfg = info.config.params.vectors
         if isinstance(cfg, dict) and cfg:
-            for name, params in cfg.items():
-                psize = getattr(params, "size", None) or getattr(params, "dim", None)
-                if psize and int(psize) == int(model_dim):
-                    return name
-            lex_name = os.environ.get("LEX_VECTOR_NAME", "lex")
-            if lex_name in cfg:
-                for name in cfg.keys():
-                    if name != lex_name:
+            # Try dimension match first
+            if model_dim:
+                for name, params in cfg.items():
+                    psize = getattr(params, "size", None) or getattr(params, "dim", None)
+                    if psize and int(psize) == int(model_dim):
                         return name
+
+            # Try matching by sanitized model name
+            if model_name:
+                sanitized = str(model_name).replace("/", "-").replace("_", "-").lower()
+                for name in cfg.keys():
+                    if sanitized in name.lower() or name.lower() in sanitized:
+                        return name
+
+            # Fallback: return first non-lex vector
+            lex_name = os.environ.get("LEX_VECTOR_NAME", "lex")
+            mini_name = os.environ.get("MINI_VECTOR_NAME", "mini")
+            for name in cfg.keys():
+                if name not in (lex_name, mini_name):
+                    return name
         return None
     except Exception:
         return None
@@ -274,7 +290,7 @@ def expand_queries_semantically(
     Returns:
         List of semantically related expansion terms
     """
-    if not SEMANTIC_EXPANSION_ENABLED or not queries:
+    if not _semantic_expansion_enabled() or not queries:
         return []
     
     max_expansions = max_expansions or SEMANTIC_EXPANSION_MAX_TERMS
@@ -308,22 +324,13 @@ def expand_queries_semantically(
             collection = os.environ.get("COLLECTION_NAME", "codebase")
 
         model_dim = getattr(model, "dim", None) if model is not None else None
-        if client and model and model_dim and collection:
+        if client and collection:
             vector_name = _select_vector_name(
                 client,
                 collection,
-                model_dim,
+                model_dim=model_dim,
                 model_name=model_name,
             )
-
-        # Fallback to sanitized model name if auto-detection fails
-        if not vector_name and model_name:
-            try:
-                vector_name = _sanitize_vector_name(model_name) if _sanitize_vector_name else None
-            except Exception:
-                vector_name = None
-            if not vector_name:
-                vector_name = str(model_name).replace("/", "-").replace("_", "-")[:64]
 
         # If we don't have the required components, fall back to lexical expansion
         if not (client and model):

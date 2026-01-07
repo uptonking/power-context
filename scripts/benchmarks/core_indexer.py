@@ -64,8 +64,16 @@ except ImportError:
         return [], []
 
 
-EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
 CORPUS_FINGERPRINT_KEY = "_corpus_fingerprint"
+
+
+def _get_cosqa_cache_version() -> int:
+    """Get CACHE_VERSION from cosqa dataset module (lazy import to avoid circular deps)."""
+    try:
+        from scripts.benchmarks.cosqa.dataset import CACHE_VERSION
+        return CACHE_VERSION
+    except ImportError:
+        return 0
 
 
 @dataclass
@@ -82,8 +90,10 @@ def get_config_fingerprint() -> str:
     
     Includes all settings that would require reindexing if changed.
     """
+    # Read env at call-time (bench runners may mutate os.environ before indexing)
+    model_name = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
     config_parts = [
-        f"model:{EMBEDDING_MODEL}",
+        f"model:{model_name}",
         f"lex_dim:{LEX_VECTOR_DIM}",
         f"refrag_mode:{os.environ.get('REFRAG_MODE', '0')}",
         f"mini_dim:{MINI_VEC_DIM}",
@@ -101,6 +111,7 @@ def get_config_fingerprint() -> str:
         f"dense_mode:{os.environ.get('INDEX_DENSE_MODE', 'info+pseudo+tags')}",
         f"reranker:{os.environ.get('RERANKER_MODEL', '')}",
         f"ast_enriched:v3",
+        f"cosqa_payload:v{_get_cosqa_cache_version()}",
     ]
     return hashlib.sha256("|".join(config_parts).encode()).hexdigest()[:8]
 
@@ -214,21 +225,6 @@ def create_collection(
     model_name = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
     vector_name = sanitize_vector_name(model_name)
 
-    if recreate:
-        try:
-            client.delete_collection(collection)
-            print(f"Deleted existing collection: {collection}")
-        except Exception:
-            pass
-
-    # Check if exists
-    try:
-        info = client.get_collection(collection)
-        print(f"Collection {collection} exists with {info.points_count} points")
-        return
-    except Exception:
-        pass
-
     # Create with named vectors
     vectors_config = {
         vector_name: models.VectorParams(size=dim, distance=models.Distance.COSINE),
@@ -254,6 +250,61 @@ def create_collection(
                 index=models.SparseIndexParams(full_scan_threshold=5000)
             )
         }
+
+    def _extract_dense_vector_sizes(info: Any) -> dict[str, int]:
+        """Best-effort extraction of named dense vectors -> size from Qdrant collection info."""
+        try:
+            vectors = info.config.params.vectors
+        except Exception:
+            return {}
+
+        # qdrant-client may wrap named vectors in __root__
+        if hasattr(vectors, "__root__"):
+            vectors = getattr(vectors, "__root__")
+
+        if not isinstance(vectors, dict):
+            return {}
+
+        out: dict[str, int] = {}
+        for name, params in vectors.items():
+            size = None
+            if isinstance(params, dict):
+                size = params.get("size") or params.get("dim")
+            else:
+                size = getattr(params, "size", None) or getattr(params, "dim", None)
+            if size is None:
+                continue
+            try:
+                out[str(name)] = int(size)
+            except Exception:
+                pass
+        return out
+
+    # If collection exists but the embedding model/dimension changed, auto-recreate.
+    # (Qdrant vector sizes are immutable; keeping the old collection leads to HTTP 400 on upsert.)
+    try:
+        info = client.get_collection(collection)
+        existing_sizes = _extract_dense_vector_sizes(info)
+        expected_sizes = {name: int(cfg.size) for name, cfg in vectors_config.items()}
+        schema_mismatch = any(existing_sizes.get(name) != size for name, size in expected_sizes.items())
+        if recreate or schema_mismatch:
+            if schema_mismatch and not recreate:
+                print(
+                    f"[bench] Collection '{collection}' exists but vector schema changed; recreating automatically.\n"
+                    f"  expected: {expected_sizes}\n"
+                    f"  existing: {existing_sizes}"
+                )
+            try:
+                client.delete_collection(collection)
+                print(f"Deleted existing collection: {collection}")
+            except Exception:
+                pass
+        else:
+            print(f"Collection {collection} exists with {info.points_count} points")
+            return
+    except Exception:
+        # Does not exist
+        pass
 
     client.create_collection(
         collection_name=collection,
@@ -422,6 +473,7 @@ def index_benchmark_corpus(
                     "end_line": end_line,
                     "symbol": symbol_name,
                     "symbol_kind": symbol_kind,
+                    "pseudo": pseudo,  # Store for reranker
                     **doc.metadata,
                     "metadata": {
                         "path": synthetic_path,

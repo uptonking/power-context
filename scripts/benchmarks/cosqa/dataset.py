@@ -30,7 +30,9 @@ CACHE_DIR = Path(os.environ.get("COSQA_CACHE_DIR", Path.home() / ".cache" / "cos
 # Cache version - increment when ID generation scheme changes
 # v1: Initial version with positional IDs
 # v2: Content-hash based IDs for proper query aggregation
-CACHE_VERSION = 2
+# v3: Enhanced synthetic paths for prod-like FNAME_BOOST testing
+# v5: Recouple filename to func_name to exercise FNAME_BOOST like production
+CACHE_VERSION = 5
 
 
 @dataclass
@@ -61,22 +63,62 @@ class CoSQACorpusEntry:
     language: str = "python"
 
     def to_index_payload(self) -> Dict[str, Any]:
-        """Convert to payload suitable for Qdrant indexing."""
+        """Convert to payload suitable for Qdrant indexing.
+
+        Creates synthetic but realistic file paths and metadata so Context-Engine's
+        full pipeline (FNAME_BOOST, symbol boost, path filters) is properly exercised.
+        """
         # NOTE: Context-Engine's retrieval stack (`hybrid_search` / `repo_search`) expects
         # codebase-like points that carry `payload["metadata"]["path"]` + line bounds.
-        # For the CoSQA corpus (which is not a real filesystem), we synthesize minimal
-        # metadata so we can evaluate retrieval using the same tools.
+        # For the CoSQA corpus (which is not a real filesystem), we synthesize realistic
+        # metadata so we can evaluate retrieval using the FULL production pipeline.
         #
         # This keeps the canonical identifier in `code_id` for MRR computations.
-        _synthetic_path = f"cosqa/{self.code_id}.py"
+
+        # Build realistic synthetic path from function name
+        # e.g., func_name="parse_json_config" -> "cosqa/parse/parse_json_config.py"
+        module_hint = ""
+        func_name = self.func_name or ""
+        filename = ""
+        if func_name:
+            # Extract module hint from function name (first word before underscore)
+            parts = func_name.split("_")
+            if len(parts) >= 2:
+                module_hint = parts[0]
+            symbol_name = func_name
+            filename = f"{func_name}.py"
+        else:
+            # Fallback: extract potential function name from code
+            import re as _re
+            match = _re.search(r"def\s+(\w+)\s*\(", self.code)
+            if match:
+                extracted_name = match.group(1)
+                parts = extracted_name.split("_")
+                if len(parts) >= 2:
+                    module_hint = parts[0]
+                symbol_name = extracted_name
+                filename = f"{extracted_name}.py"
+            else:
+                symbol_name = self.code_id
+                filename = f"{self.code_id}.py"
+
+        if module_hint:
+            _synthetic_path = f"cosqa/{module_hint}/{filename}"
+        else:
+            _synthetic_path = f"cosqa/{filename}"
+
         rerank_text = self.code
         if self.docstring and self.docstring.strip():
             rerank_text = f"{self.docstring.strip()}\n\n{self.code}"
+
+        # Count lines for realistic line bounds
+        code_lines = self.code.count("\n") + 1
+
         return {
             "code_id": self.code_id,
             "text": self.code,
             "docstring": self.docstring,
-            "func_name": self.func_name,
+            "func_name": func_name or symbol_name,
             "url": self.url,
             "language": self.language,
             "kind": "function",
@@ -84,13 +126,13 @@ class CoSQACorpusEntry:
             "metadata": {
                 "path": _synthetic_path,
                 "path_prefix": "cosqa",
-                "symbol": self.func_name or self.code_id,
-                "symbol_path": self.func_name or self.code_id,
+                "symbol": symbol_name,
+                "symbol_path": f"{_synthetic_path}::{symbol_name}",
                 "kind": "function",
                 "language": self.language,
-                # No real line info for corpus docs; keep stable sentinel bounds.
+                # Realistic line bounds based on code length
                 "start_line": 1,
-                "end_line": 1,
+                "end_line": code_lines,
                 # Provide text inline so snippet/keyword bump doesn't try to read files.
                 "text": self.code,
                 # Reranker expects metadata.code for cross-encoder scoring (include docstring).
@@ -242,11 +284,17 @@ def load_from_huggingface(
         for item in corpus_ds:
             code_id = item["_id"]
             code = item.get("text", "")
+            # Extract function name from code (mteb format doesn't provide it)
+            func_name = ""
+            import re as _re
+            match = _re.search(r"def\s+(\w+)\s*\(", code)
+            if match:
+                func_name = match.group(1)
             corpus[code_id] = CoSQACorpusEntry(
                 code_id=code_id,
                 code=code,
                 docstring="",
-                func_name="",
+                func_name=func_name,
                 url="",
             )
 

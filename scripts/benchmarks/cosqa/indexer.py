@@ -32,25 +32,55 @@ DEFAULT_COLLECTION = "cosqa-corpus"
 DEFAULT_BATCH_SIZE = 100
 
 
+def _extract_docstring(code: str) -> str:
+    """Extract docstring from Python code using AST (mirrors production pipeline)."""
+    import ast
+    try:
+        tree = ast.parse(code)
+        # Look for first function or class definition
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                docstring = ast.get_docstring(node)
+                if docstring:
+                    return docstring
+        # Also check module-level docstring
+        return ast.get_docstring(tree) or ""
+    except Exception:
+        return ""
+
+
 def cosqa_entry_to_doc(entry: Dict[str, Any]) -> BenchmarkDoc:
-    """Convert CoSQA entry to BenchmarkDoc."""
+    """Convert CoSQA entry (from to_index_payload) to BenchmarkDoc.
+
+    Expects entry from CoSQACorpusEntry.to_index_payload() which includes
+    realistic paths, symbol_path, and rerank_text for proper Context-Engine
+    pipeline evaluation.
+    """
     code_id = entry.get("code_id", "")
     text = entry.get("text", "")
-    docstring = entry.get("docstring", "")
     func_name = entry.get("func_name", "")
+    docstring = entry.get("docstring", "")
 
-    # Combine docstring + code for embedding (matches original indexer)
-    full_text = f"{docstring}\n{text}".strip() if docstring else text
+    # Extract docstring from code if not provided
+    if not docstring and text:
+        docstring = _extract_docstring(text)
+
+    # Pass through the rich metadata from to_index_payload() - includes path,
+    # symbol_path, rerank_text for FNAME_BOOST and symbol boost testing
+    inner_metadata = entry.get("metadata", {})
 
     return BenchmarkDoc(
         doc_id=code_id,
-        text=full_text,
-        language="python",
+        text=text,
+        language=entry.get("language", "python"),
         metadata={
             "code_id": code_id,
             "func_name": func_name,
             "docstring": docstring,
-            "source": "cosqa",
+            "source": entry.get("source", "cosqa"),
+            "path": inner_metadata.get("path", f"cosqa/{code_id}.py"),
+            "symbol": inner_metadata.get("symbol", ""),
+            "symbol_path": inner_metadata.get("symbol_path", ""),
         },
     )
 
