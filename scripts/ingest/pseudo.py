@@ -19,15 +19,8 @@ from scripts.ingest.config import (
 
 def _pseudo_describe_enabled() -> bool:
     """Check if pseudo description generation is enabled."""
-    try:
-        return str(os.environ.get("REFRAG_PSEUDO_DESCRIBE", "0")).strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
-    except Exception:
-        return False
+    val = str(os.environ.get("REFRAG_PSEUDO_DESCRIBE", "0")).strip().lower()
+    return val in {"1", "true", "yes", "on"}
 
 
 def _smart_symbol_reindexing_enabled() -> bool:
