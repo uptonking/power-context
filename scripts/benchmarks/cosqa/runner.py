@@ -57,6 +57,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field, asdict
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -819,8 +820,10 @@ def main():
                         help="Recreate index from scratch")
     parser.add_argument("--learning-worker", action="store_true",
                         help="Spawn learning reranker worker during the run (enables learning + event logging)")
-    parser.add_argument("--output", type=str,
-                        help="Output JSON file")
+    # Generate default output filename with timestamp
+    default_output = f"cosqa_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    parser.add_argument("--output", type=str, default=default_output,
+                        help="Output JSON file (default: timestamped file in current directory)")
     args = parser.parse_args()
 
     # Enable Context-Engine features for accurate benchmarking
