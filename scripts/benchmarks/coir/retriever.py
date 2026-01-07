@@ -32,6 +32,9 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
+# Shared utilities
+from scripts.benchmarks.qdrant_utils import probe_pseudo_tags
+
 # Ensure project root is in path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
@@ -270,6 +273,12 @@ class ContextEngineRetriever:
         index_result = await asyncio.to_thread(index_coir_corpus, corpus_list, collection)
         if index_result.get("reused"):
             pass  # Collection reused, no indexing needed
+
+        # Probe collection for pseudo/tags presence (validation)
+        try:
+            await asyncio.to_thread(probe_pseudo_tags, collection)
+        except Exception as e:
+            print(f"  [warn] Probe failed: {e}")
 
         # Search queries in parallel batches using Context-Engine
         # Use larger candidate pool for reranking (100 candidates -> top_k)

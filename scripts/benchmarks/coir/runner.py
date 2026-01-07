@@ -520,6 +520,9 @@ def main() -> None:
         os.environ.setdefault("HYBRID_EXPAND", "1")
         os.environ.setdefault("SEMANTIC_EXPANSION_ENABLED", "1")
     os.environ.setdefault("HYBRID_IN_PROCESS", "1")
+    
+    # Default: Enable LLM-based pseudo/tags generation
+    os.environ.setdefault("REFRAG_PSEUDO_DESCRIBE", "1")
 
     report = run_coir_benchmark_sync(
         tasks=args.tasks,

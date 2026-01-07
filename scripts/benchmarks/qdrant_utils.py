@@ -45,3 +45,44 @@ def get_model_dimension(model: Any) -> int:
         vec = list(model.embed(["test"]))[0]
         return len(vec)
 
+
+def probe_pseudo_tags(collection: str, limit: int = 5) -> None:
+    """Probe collection to verify LLM pseudo/tags presence."""
+    # Only probe if feature is enabled
+    if os.environ.get("REFRAG_PSEUDO_DESCRIBE", "0") != "1":
+        return
+
+    try:
+        print("  [probe] Verifying LLM pseudo/tags presence...")
+        client = get_qdrant_client()
+        scroll_res = client.scroll(
+            collection_name=collection,
+            limit=limit,
+            with_payload=["pseudo", "tags", "docstring", "symbol"],
+        )
+        points, _ = scroll_res
+        valid_pseudo = 0
+        valid_tags = 0
+        
+        for p in points:
+            payload = p.payload or {}
+            # Check pseudo (should exist and be non-empty)
+            if payload.get("pseudo"):
+                valid_pseudo += 1
+            # Check tags (should exist and be list)
+            if isinstance(payload.get("tags"), list) and payload["tags"]:
+                valid_tags += 1
+        
+        print(f"  [probe] Checked {len(points)} docs: {valid_pseudo} have pseudo, {valid_tags} have tags")
+        
+        if len(points) > 0 and (valid_pseudo < len(points) or valid_tags < len(points)):
+            print("  [WARN] Some documents missing pseudo/tags! Check ingestion logs.")
+            if points:
+                from dataclasses import asdict
+                p0 = points[0]
+                # Safe payload print
+                safe_payload = {k: v for k, v in (p0.payload or {}).items() if k in ["pseudo", "tags", "symbol"]}
+                print(f"  Sample id={p0.id} payload: {safe_payload}")
+
+    except Exception as e:
+        print(f"  [probe] Failed to probe collection: {e}")

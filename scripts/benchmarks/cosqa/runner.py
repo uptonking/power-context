@@ -61,6 +61,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from scripts.benchmarks.qdrant_utils import get_qdrant_client, probe_pseudo_tags
+
 # Force-disable OpenLit/OTel for benchmarks so they never try to talk to openlit-dashboard
 os.environ["OPENLIT_ENABLED"] = "0"
 os.environ["OTEL_SDK_DISABLED"] = "true"
@@ -814,6 +816,7 @@ async def run_full_benchmark(
     corpus_limit: Optional[int] = None,
     rerank_enabled: bool = True,
     recreate_index: bool = False,
+    index_only: bool = False,
 ) -> CoSQAReport:
     """Run complete CoSQA benchmark: download, index, evaluate.
 
@@ -876,7 +879,12 @@ async def run_full_benchmark(
     else:
         print(f"  Indexed {result.get('indexed', 0)} entries ({result.get('skipped', 0)} skipped, {result.get('errors', 0)} errors)")
 
-    # Step 3: Get queries
+    # Probe collection for pseudo/tags presence (validation)
+    probe_pseudo_tags(collection)
+
+    if index_only:
+        print("\n[index-only] Ingestion complete. Exiting.")
+        return None  # Early exit, no report
     print("\n▶ Step 3: Preparing queries...")
     print(f"  {len(queries)} queries with relevance judgments")
 
@@ -948,6 +956,8 @@ def main():
                         help="Show failed queries (recall@10 = 0)")
     parser.add_argument("--debug-failures", action="store_true",
                         help="Re-run failed queries with detailed debug output")
+    parser.add_argument("--index-only", action="store_true",
+                        help="Run ingestion only and exit")
     args = parser.parse_args()
 
     # Enable Context-Engine features for accurate benchmarking.
@@ -964,7 +974,11 @@ def main():
     # --pure-semantic disables filename boost and other heuristics for "pure retrieval" measurement
     if args.pure_semantic:
         os.environ["FNAME_BOOST"] = "0"
-        print("  [pure-semantic] FNAME_BOOST disabled")
+        os.environ["REFRAG_PSEUDO_DESCRIBE"] = "0"  # Disable LLM pseudo in pure mode
+        print("  [pure-semantic] FNAME_BOOST and LLM Pseudo disabled")
+    else:
+        # Default: Enable LLM-based pseudo/tags generation (prioritized over docstring fallback)
+        os.environ.setdefault("REFRAG_PSEUDO_DESCRIBE", "1")
 
     # Set reranker model paths (relative to project root)
     _project_root = Path(__file__).parent.parent.parent.parent
@@ -1000,6 +1014,7 @@ def main():
             corpus_limit=args.corpus_limit,
             rerank_enabled=not args.no_rerank,
             recreate_index=args.recreate,
+            index_only=args.index_only,
         ))
     finally:
         if learning_proc and learning_proc.poll() is None:
@@ -1009,53 +1024,54 @@ def main():
             except subprocess.TimeoutExpired:
                 learning_proc.kill()
 
-    print_report(report)
+    if report:
+        print_report(report)
 
-    # Show failures if requested
-    if args.failures:
-        failures = [r for r in report.results if not r.hit_at_10]
-        if failures:
-            print("\n" + "=" * 70)
-            print(f"FAILED QUERIES ({len(failures)} with recall@10 = 0):")
-            print("=" * 70)
-            for f in failures:
-                print(f"\n[{f.query_id}] {f.query_text[:100]}...")
-                print(f"  Expected: {f.relevant_code_ids}")
-                print(f"  Got top 5: {f.retrieved_code_ids[:5]}")
-
-            # Re-run failed queries with debug output
-            if args.debug_failures:
+        # Show failures if requested
+        if args.failures:
+            failures = [r for r in report.results if not r.hit_at_10]
+            if failures:
                 print("\n" + "=" * 70)
-                print("DEBUG OUTPUT FOR FAILED QUERIES:")
+                print(f"FAILED QUERIES ({len(failures)} with recall@10 = 0):")
                 print("=" * 70)
-                debug_top_n = report.config.get("rerank_top_n")
                 for f in failures:
-                    asyncio.run(search_cosqa_corpus(
-                        query=f.query_text,
-                        collection=args.collection,
-                        limit=args.limit,
-                        rerank_enabled=not args.no_rerank,
-                        rerank_top_n=debug_top_n,
-                        debug=True,
-                    ))
-        else:
-            print("\n✓ No failures - all queries have recall@10 > 0")
+                    print(f"\n[{f.query_id}] {f.query_text[:100]}...")
+                    print(f"  Expected: {f.relevant_code_ids}")
+                    print(f"  Got top 5: {f.retrieved_code_ids[:5]}")
 
-    if args.output:
-        with open(args.output, "w") as f:
-            json.dump(report.to_dict(), f, indent=2)
-        print(f"\nSaved report to: {args.output}")
-        
-        # Save standalone metadata file for audit
-        output_dir = str(Path(args.output).parent)
-        run_id = f"cosqa_{report.config.get('collection', 'unknown')}_{Path(args.output).stem}"
-        meta_path = save_run_meta(
-            output_dir,
-            run_id,
-            report.config,
-            extra={"benchmark": "cosqa", "corpus_size": report.corpus_size, "queries": report.total_queries},
-        )
-        print(f"Saved metadata to: {meta_path}")
+                # Re-run failed queries with debug output
+                if args.debug_failures:
+                    print("\n" + "=" * 70)
+                    print("DEBUG OUTPUT FOR FAILED QUERIES:")
+                    print("=" * 70)
+                    debug_top_n = report.config.get("rerank_top_n")
+                    for f in failures:
+                        asyncio.run(search_cosqa_corpus(
+                            query=f.query_text,
+                            collection=args.collection,
+                            limit=args.limit,
+                            rerank_enabled=not args.no_rerank,
+                            rerank_top_n=debug_top_n,
+                            debug=True,
+                        ))
+            else:
+                print("\n✓ No failures - all queries have recall@10 > 0")
+
+        if args.output:
+            with open(args.output, "w") as f:
+                json.dump(report.to_dict(), f, indent=2)
+            print(f"\nSaved report to: {args.output}")
+            
+            # Save standalone metadata file for audit
+            output_dir = str(Path(args.output).parent)
+            run_id = f"cosqa_{report.config.get('collection', 'unknown')}_{Path(args.output).stem}"
+            meta_path = save_run_meta(
+                output_dir,
+                run_id,
+                report.config,
+                extra={"benchmark": "cosqa", "corpus_size": report.corpus_size, "queries": report.total_queries},
+            )
+            print(f"Saved metadata to: {meta_path}")
 
 
 if __name__ == "__main__":
