@@ -456,23 +456,32 @@ def index_benchmark_corpus(
     print(f"  Prepared {len(chunk_metas)} chunks from {len(docs)} documents")
 
     # Phase 2: Batch embedding (GPU/CPU intensive, batch for efficiency)
-    print(f"  Phase 2: Batch embedding {len(chunk_metas)} chunks...")
+    print(f"  Phase 2: Batch embedding {len(chunk_metas)} chunks...", flush=True)
     embed_batch_size = int(os.environ.get("EMBED_BATCH_SIZE", "64"))
 
     dense_texts = [cm.dense_text for cm in chunk_metas]
     all_dense_vecs: List[List[float]] = []
+    total_chunks = len(dense_texts)
+    last_progress = 0
 
-    for i in range(0, len(dense_texts), embed_batch_size):
+    for i in range(0, total_chunks, embed_batch_size):
         batch_texts = dense_texts[i:i + embed_batch_size]
         batch_vecs = list(model.embed(batch_texts))
         all_dense_vecs.extend([v.tolist() for v in batch_vecs])
-        if (i + embed_batch_size) % 500 == 0:
-            print(f"    Embedded {min(i + embed_batch_size, len(dense_texts))}/{len(dense_texts)} chunks...")
+
+        # Progress update every ~10% or 1000 chunks
+        progress = min(i + embed_batch_size, total_chunks)
+        progress_pct = int(progress * 100 / total_chunks)
+        if progress_pct >= last_progress + 10 or progress - (i - embed_batch_size + embed_batch_size) >= 1000:
+            print(f"    Embedded {progress}/{total_chunks} ({progress_pct}%)", flush=True)
+            last_progress = progress_pct
 
     # Phase 3: Build points and upsert
-    print(f"  Phase 3: Building and upserting points...")
+    print(f"  Phase 3: Building and upserting points...", flush=True)
     points = []
     indexed_count = 0
+    total_points = len(chunk_metas)
+    last_upsert_progress = 0
 
     for idx, cm in enumerate(chunk_metas):
         dense_vec = all_dense_vecs[idx]
@@ -520,6 +529,12 @@ def index_benchmark_corpus(
             _upsert_points_with_retry(client, collection, points)
             indexed_count += len(points)
             points = []
+
+            # Progress update every ~10%
+            progress_pct = int(indexed_count * 100 / total_points)
+            if progress_pct >= last_upsert_progress + 10:
+                print(f"    Upserted {indexed_count}/{total_points} ({progress_pct}%)", flush=True)
+                last_upsert_progress = progress_pct
 
     # Final batch
     if points:
