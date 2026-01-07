@@ -572,21 +572,38 @@ async def run_cosqa_benchmark(
     
     error_count = 0  # Track silent failures
 
-    for idx, (query_id, query_text, relevant_ids) in enumerate(queries):
-        # Search
-        try:
-            retrieved_ids, latency_ms = await search_cosqa_corpus(
-                query=query_text,
-                collection=collection,
-                limit=limit,
-                rerank_enabled=rerank_enabled,
-                rerank_top_n=scaled_top_n if rerank_enabled else None,
-            )
-        except Exception as e:
-            # Log error but continue - empty results will hurt metrics
-            print(f"  [ERROR] Query {idx+1} failed: {e}")
-            retrieved_ids = []
-            latency_ms = 0.0
+    # Parallel query evaluation with controlled concurrency
+    concurrency = int(os.environ.get("COSQA_QUERY_CONCURRENCY", "16"))
+    semaphore = asyncio.Semaphore(concurrency)
+
+    async def eval_single_query(idx: int, query_id: str, query_text: str, relevant_ids: List[str]):
+        """Evaluate a single query with semaphore-controlled concurrency."""
+        async with semaphore:
+            try:
+                retrieved_ids, latency_ms = await search_cosqa_corpus(
+                    query=query_text,
+                    collection=collection,
+                    limit=limit,
+                    rerank_enabled=rerank_enabled,
+                    rerank_top_n=scaled_top_n if rerank_enabled else None,
+                )
+            except Exception as e:
+                print(f"  [ERROR] Query {idx+1} failed: {e}")
+                retrieved_ids = []
+                latency_ms = 0.0
+                return (idx, query_id, query_text, relevant_ids, retrieved_ids, latency_ms, True)
+            return (idx, query_id, query_text, relevant_ids, retrieved_ids, latency_ms, False)
+
+    # Launch all queries in parallel
+    tasks = [
+        eval_single_query(idx, query_id, query_text, relevant_ids)
+        for idx, (query_id, query_text, relevant_ids) in enumerate(queries)
+    ]
+    query_results = await asyncio.gather(*tasks)
+
+    # Process results in order
+    for idx, query_id, query_text, relevant_ids, retrieved_ids, latency_ms, had_error in query_results:
+        if had_error:
             error_count += 1
         latencies.append(latency_ms)
 
@@ -624,11 +641,10 @@ async def run_cosqa_benchmark(
             hit_at_10=hit_10,
         ))
 
-        # Progress
-        if progress_callback:
-            progress_callback(idx + 1, len(queries))
-        elif (idx + 1) % 50 == 0:
-            print(f"  Evaluated {idx + 1}/{len(queries)} queries")
+    # Progress (after parallel completion)
+    if progress_callback:
+        progress_callback(len(queries), len(queries))
+    print(f"  Evaluated {len(queries)}/{len(queries)} queries (parallel, concurrency={concurrency})")
 
     # Aggregate metrics
     n = len(results)

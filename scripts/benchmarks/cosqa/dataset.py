@@ -280,10 +280,17 @@ def load_from_huggingface(
 
         print(f"Loaded mteb/cosqa: {len(queries_ds)} queries, {len(corpus_ds)} corpus, {len(qrels_ds)} qrels")
 
-        # Parse corpus
+        # Parse corpus with content-based deduplication
+        # MTEB format may have duplicate code snippets with different IDs
+        content_seen: set[str] = set()
         for item in corpus_ds:
             code_id = item["_id"]
             code = item.get("text", "")
+            # Dedupe by content hash - skip if identical code already indexed
+            content_hash = hashlib.sha256(code.encode("utf-8", errors="ignore")).hexdigest()[:16]
+            if content_hash in content_seen:
+                continue
+            content_seen.add(content_hash)
             # Extract function name from code (mteb format doesn't provide it)
             func_name = ""
             import re as _re
