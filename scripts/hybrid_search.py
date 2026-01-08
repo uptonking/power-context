@@ -244,6 +244,7 @@ from scripts.hybrid_expand import (
     # Expansion functions
     expand_queries,
     expand_queries_enhanced,
+    expand_queries_weighted,
     _llm_expand_queries,
     _prf_terms_from_results,
     # Availability flag
@@ -768,10 +769,13 @@ def _run_hybrid_search_impl(
         for s in _llm_more:
             if s and s not in qlist:
                 qlist.append(s)
+    # Query weights for fusion (higher weight = more influence on final ranking)
+    _query_weights: List[float] = [1.0] * len(qlist)  # Default weight 1.0 for originals
+
     if expand:
-        # Use enhanced expansion with semantic similarity if available
+        # Use weighted expansion to track query quality tiers
         if SEMANTIC_EXPANSION_AVAILABLE:
-            qlist = expand_queries_enhanced(
+            qlist, _query_weights = expand_queries_weighted(
                 qlist, eff_language,
                 max_extra=max(2, _semantic_max_terms),
                 client=client,
@@ -780,6 +784,7 @@ def _run_hybrid_search_impl(
             )
         else:
             qlist = expand_queries(qlist, eff_language)
+            _query_weights = [1.0] * len(qlist)  # Uniform weights for non-semantic
 
     # Query sharpening: derive basename tokens from path_glob to steer retrieval/gating
     try:
@@ -1363,8 +1368,15 @@ def _run_hybrid_search_impl(
                 pass
     _dt("prf_passes")
 
-    # Add dense scores (with scaled RRF)
-    for res in result_sets:
+    # Add dense scores (with scaled RRF and tier-based query weighting)
+    # Query weights reflect expansion quality tiers:
+    # - Tier 1 (1.0): Phrase-expanded queries
+    # - Tier 2 (0.85): Original queries
+    # - Tier 3 (0.6): Word-substituted queries
+    # - Tier 4 (0.4): Semantic expansion queries
+    for query_idx, res in enumerate(result_sets):
+        # Get query weight (default 1.0 if not available)
+        _qw = _query_weights[query_idx] if query_idx < len(_query_weights) else 0.5
         for rank, p in enumerate(res, 1):
             pid = str(p.id)
             score_map.setdefault(
@@ -1384,7 +1396,8 @@ def _run_hybrid_search_impl(
                     "test": 0.0,
                 },
             )
-            dens = (_AD_DENSE_W * _scaled_rrf(rank)) if _USE_ADAPT else (DENSE_WEIGHT * _scaled_rrf(rank))
+            base_dens = (_AD_DENSE_W * _scaled_rrf(rank)) if _USE_ADAPT else (DENSE_WEIGHT * _scaled_rrf(rank))
+            dens = base_dens * _qw
             score_map[pid]["d"] += dens
             score_map[pid]["s"] += dens
 
