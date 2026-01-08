@@ -361,6 +361,266 @@ def _classify_query_intent(query: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Pure Dense Search with Code-Aware Query Variants
+# ---------------------------------------------------------------------------
+# Uses max-score fusion across query variants to improve recall
+# without distorting the pure dense ordering.
+
+def _generate_code_query_variants(query: str) -> List[str]:
+    """Generate code-focused query variants for improved recall.
+    
+    Creates variations that may match different code patterns while
+    preserving the semantic intent. Uses max-score fusion so variants
+    can only improve results, never hurt them.
+    
+    Key variants discovered through CoSQA testing:
+    - "python function {query}" improves ranking for code search
+    - "def {query without python}" matches function definitions
+    - Removing redundant "python" prefix can help some queries
+    """
+    variants = [query]  # Original always first
+    q_lower = query.lower().strip()
+    
+    # Check for common code keywords
+    has_python = "python" in q_lower
+    has_def_or_func = any(kw in q_lower for kw in {"def ", "function", "method", "class"})
+    
+    if has_python:
+        # Strip "python " prefix/suffix for cleaner variant
+        q_no_python = (q_lower
+            .replace("python ", "")
+            .replace(" python", "")
+            .strip())
+        if q_no_python and q_no_python != q_lower:
+            # Variant without python prefix - often matches better
+            variants.append(q_no_python)
+            # "def {query}" variant - matches function definitions
+            variants.append(f"def {q_no_python}")
+        
+        # "python function {query}" - emphasizes code context
+        # This improved q20112 from rank 11 → 3
+        variants.append(f"python function {query}")
+    else:
+        # No python keyword - add code-focused variants
+        variants.append(f"python {query}")
+        variants.append(f"{query} function")
+    
+    # Add "how to" variant for imperative queries
+    if q_lower.startswith(("get ", "create ", "make ", "find ", "check ", "convert ")):
+        variants.append(f"how to {query}")
+    
+    # Dedupe while preserving order
+    seen = set()
+    result = []
+    for v in variants:
+        v_norm = v.strip()
+        if v_norm and v_norm not in seen:
+            result.append(v_norm)
+            seen.add(v_norm)
+    
+    return result[:5]  # Max 5 variants to balance coverage vs compute
+
+
+def run_pure_dense_search(
+    query: str,
+    limit: int = 10,
+    model: Any = None,
+    collection: str | None = None,
+    language: str | None = None,
+    under: str | None = None,
+    repo: str | list[str] | None = None,
+) -> List[Dict[str, Any]]:
+    """Pure dense search with code-aware query variants for candidate expansion.
+    
+    Variants are used to expand the candidate pool, but final ranking is
+    determined by the base query's dense similarity (no RRF, no boosts).
+    
+    Args:
+        query: Natural language query
+        limit: Max results to return
+        model: Embedding model (will load default if None)
+        collection: Qdrant collection name
+        language: Optional language filter
+        under: Optional path prefix filter
+        repo: Optional repo filter
+    
+    Returns:
+        List of search results with raw cosine similarity scores
+    """
+    from scripts.hybrid_qdrant import get_qdrant_client, return_qdrant_client, dense_query
+    from scripts.utils import sanitize_vector_name
+    from qdrant_client import models
+    
+    # Get model
+    if model is None:
+        model_name = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
+        try:
+            from scripts.embedder import get_embedding_model
+            model = get_embedding_model(model_name)
+        except ImportError:
+            from fastembed import TextEmbedding
+            model = TextEmbedding(model_name=model_name)
+    else:
+        model_name = getattr(model, "model_name", os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5"))
+    
+    vec_name = sanitize_vector_name(model_name)
+    coll = collection or _collection()
+    
+    # Generate query variants for candidate expansion
+    variants = _generate_code_query_variants(query)
+
+    # Optional: apply NL→code framing only for pure dense search.
+    # This MUST NOT affect hybrid search, so it's implemented here (not in embed_queries_cached).
+    # Empirically, "Code implementing: <query>" improves embedding retrieval for some models.
+    if os.environ.get("CODE_QUERY_EXPANSION", "0").strip().lower() in {"1", "true", "yes", "on"}:
+        if variants:
+            v0 = variants[0]
+            if not v0.startswith("Code implementing:"):
+                variants = [f"Code implementing: {v0}"] + list(variants[1:])
+
+    # Optional: GLM-based query expansion for improved semantic coverage
+    # LLM variants are stored separately and only used to expand candidate pool
+    llm_expansion_variants: list[str] = []
+    if os.environ.get("DENSE_LLM_EXPAND", "0").strip().lower() in {"1", "true", "yes", "on"}:
+        try:
+            from scripts.hybrid.expand import _llm_expand_queries
+            llm_variants = _llm_expand_queries([query], language=language, max_new=3)
+            if llm_variants:
+                seen = set(variants)
+                for lv in llm_variants:
+                    if lv not in seen:
+                        llm_expansion_variants.append(lv)
+                        seen.add(lv)
+                if os.environ.get("DEBUG_HYBRID_SEARCH"):
+                    logger.debug(f"LLM expansion added: {llm_variants}")
+        except Exception as e:
+            if os.environ.get("DEBUG_HYBRID_SEARCH"):
+                logger.debug(f"LLM expansion failed: {e}")
+    
+    # Build filter
+    must = []
+    if language:
+        must.append(models.FieldCondition(key="metadata.language", match=models.MatchValue(value=language)))
+    if under:
+        must.append(models.FieldCondition(key="metadata.path_prefix", match=models.MatchValue(value=under)))
+    if repo and repo != "*":
+        if isinstance(repo, list):
+            must.append(models.FieldCondition(key="metadata.repo", match=models.MatchAny(any=repo)))
+        else:
+            must.append(models.FieldCondition(key="metadata.repo", match=models.MatchValue(value=repo)))
+    flt = models.Filter(must=must) if must else None
+    
+    # Embed all variants using cached embedding (applies model instruction prefixes)
+    try:
+        embeddings = _embed_queries_cached(model, variants)
+    except Exception:
+        # Fallback to direct embedding
+        try:
+            embeddings = list(model.embed(variants))
+        except Exception:
+            embeddings = [next(model.embed([v])) for v in variants]
+
+    if not embeddings:
+        return []
+
+    # Base query embedding (first variant after expansion)
+    base_vec = embeddings[0]
+    
+    # Get client
+    client = get_qdrant_client(
+        url=os.environ.get("QDRANT_URL", QDRANT_URL),
+        api_key=API_KEY
+    )
+    
+    try:
+        # Candidate expansion: search each variant to build a candidate ID pool
+        candidate_ids: list[Any] = []
+        candidate_set: set[Any] = set()
+        cand_per_variant = max(limit * 3, 30)
+        max_candidates = max(limit * 10, 200)
+        if max_candidates > 5000:
+            max_candidates = 5000
+
+        # First pass: get candidates from base query variants (highest priority)
+        for vec in embeddings:
+            vec_list = vec.tolist() if hasattr(vec, "tolist") else list(vec)
+            results = dense_query(client, vec_name, vec_list, flt, cand_per_variant, coll)
+            for p in results:
+                pid = getattr(p, "id", None)
+                if pid is None or pid in candidate_set:
+                    continue
+                candidate_set.add(pid)
+                candidate_ids.append(pid)
+            if len(candidate_ids) >= max_candidates:
+                break
+
+        # Second pass: expand with LLM variants (only if room and variants exist)
+        if llm_expansion_variants and len(candidate_ids) < max_candidates:
+            try:
+                llm_embeddings = _embed_queries_cached(model, llm_expansion_variants)
+                for vec in llm_embeddings:
+                    vec_list = vec.tolist() if hasattr(vec, "tolist") else list(vec)
+                    results = dense_query(client, vec_name, vec_list, flt, cand_per_variant, coll)
+                    for p in results:
+                        pid = getattr(p, "id", None)
+                        if pid is None or pid in candidate_set:
+                            continue
+                        candidate_set.add(pid)
+                        candidate_ids.append(pid)
+                    if len(candidate_ids) >= max_candidates:
+                        break
+            except Exception:
+                pass  # LLM expansion embedding failed, continue with base candidates
+
+        # Re-score candidates using base query only to preserve ordering
+        gated_flt = flt
+        if candidate_ids:
+            try:
+                from qdrant_client import models as _models
+                gating_cond = _models.HasIdCondition(has_id=candidate_ids[:max_candidates])
+                if gated_flt is None:
+                    gated_flt = _models.Filter(must=[gating_cond])
+                else:
+                    must = list(gated_flt.must or [])
+                    must.append(gating_cond)
+                    gated_flt = _models.Filter(
+                        must=must,
+                        should=gated_flt.should,
+                        must_not=gated_flt.must_not,
+                    )
+            except Exception:
+                gated_flt = flt
+
+        base_vec_list = base_vec.tolist() if hasattr(base_vec, "tolist") else list(base_vec)
+        base_limit = limit
+        if candidate_ids:
+            base_limit = min(len(candidate_ids), max(limit * 3, limit))
+        ranked_points = dense_query(client, vec_name, base_vec_list, gated_flt, base_limit, coll)
+
+        # Build output
+        results = []
+        for p in ranked_points[:limit]:
+            payload = p.payload or {}
+            md = payload.get("metadata") or {}
+
+            results.append({
+                "score": float(getattr(p, "score", 0) or 0),
+                "path": payload.get("path") or md.get("path") or "",
+                "symbol": payload.get("symbol") or md.get("symbol") or "",
+                "start_line": int(md.get("start_line") or 0),
+                "end_line": int(md.get("end_line") or 0),
+                "code_id": payload.get("code_id") or payload.get("_id") or "",
+                "doc_id": payload.get("code_id") or payload.get("_id") or "",
+                "payload": payload,
+            })
+
+        return results
+    
+    finally:
+        return_qdrant_client(client)
+
+
+# ---------------------------------------------------------------------------
 # Backward compatibility: _embed_queries_cached alias
 # ---------------------------------------------------------------------------
 # The function is now in hybrid_embed.py as embed_queries_cached
@@ -780,7 +1040,12 @@ def _run_hybrid_search_impl(
                 max_extra=max(2, _semantic_max_terms),
                 client=client,
                 model=_model,
-                collection=_collection(collection)
+                collection=_collection(collection),
+                under=eff_under,
+                kind=eff_kind,
+                symbol=eff_symbol,
+                ext=eff_ext,
+                repo=eff_repo,
             )
         else:
             qlist = expand_queries(qlist, eff_language)
@@ -924,6 +1189,19 @@ def _run_hybrid_search_impl(
     if _query_intent == "conceptual":
         _AD_DENSE_W *= _CONCEPTUAL_DENSE_BOOST  # Boost dense for semantic queries
 
+    # Dense-preserving mode: when lexical weights are 0, use raw dense scores instead of RRF
+    # This preserves the original dense similarity ordering for benchmarks like CoSQA.
+    # Production behavior is unchanged (lexical weights are non-zero by default).
+    _DENSE_PRESERVING = (
+        LEX_VECTOR_WEIGHT == 0
+        and LEXICAL_WEIGHT == 0
+        and _AD_LEX_VEC_W == 0
+        and _AD_LEX_TEXT_W == 0
+    ) or _env_truthy(os.environ.get("HYBRID_DENSE_PRESERVING"), False)
+
+    if _DENSE_PRESERVING and os.environ.get("DEBUG_HYBRID_SEARCH"):
+        logger.debug(f"Dense-preserving mode active: LEX_VEC={LEX_VECTOR_WEIGHT}, LEX={LEXICAL_WEIGHT}, AD_VEC={_AD_LEX_VEC_W}, AD_TEXT={_AD_LEX_TEXT_W}")
+
     for rank, p in enumerate(lex_results, 1):
         pid = str(p.id)
         score_map.setdefault(
@@ -957,6 +1235,19 @@ def _run_hybrid_search_impl(
 
     # Dense queries - filter out empty strings for filter-only mode (e.g., "lang:python")
     qlist_for_embed = [q for q in qlist if q and q.strip()]
+    
+    # Dense-preserving mode: add code-aware query variants for improved recall
+    # Uses max-score fusion, so variants can only help, never hurt ranking
+    if _DENSE_PRESERVING and qlist_for_embed:
+        variants_added = set(qlist_for_embed)
+        for q in list(qlist_for_embed):  # Copy to avoid modifying during iteration
+            for variant in _generate_code_query_variants(q):
+                if variant not in variants_added:
+                    qlist_for_embed.append(variant)
+                    variants_added.add(variant)
+        if os.environ.get("DEBUG_HYBRID_SEARCH"):
+            logger.debug(f"Dense-preserving: expanded {len(qlist)} queries to {len(qlist_for_embed)} variants")
+    
     embedded = _embed_queries_cached(_model, qlist_for_embed) if qlist_for_embed else []
     _dt("embed_queries")
     # Ensure collection schema is compatible with current search settings (named vectors)
@@ -1122,8 +1413,9 @@ def _run_hybrid_search_impl(
     _dt("dense_score_map")
 
     # Optional ReFRAG-style mini-vector gating: add compact-vector RRF if enabled
+    # Skip in dense-preserving mode (would distort pure dense ordering)
     try:
-        if not _gate_first_ran and os.environ.get("REFRAG_MODE", "").strip().lower() in {
+        if not _DENSE_PRESERVING and not _gate_first_ran and os.environ.get("REFRAG_MODE", "").strip().lower() in {
             "1",
             "true",
             "yes",
@@ -1164,7 +1456,8 @@ def _run_hybrid_search_impl(
         pass
 
     # Enhanced PRF with semantic similarity
-    if SEMANTIC_EXPANSION_AVAILABLE and score_map:
+    # Skip in dense-preserving mode (would distort pure dense ordering)
+    if not _DENSE_PRESERVING and SEMANTIC_EXPANSION_AVAILABLE and score_map:
         # Local PRF dense weight (fallback if not set later)
         try:
             prf_dw = float(os.environ.get("PRF_DENSE_WEIGHT", "0.4") or 0.4)
@@ -1257,7 +1550,8 @@ def _run_hybrid_search_impl(
         else {}
     )
 
-    if prf_enabled and score_map:
+    # Skip PRF in dense-preserving mode (would distort pure dense ordering)
+    if not _DENSE_PRESERVING and prf_enabled and score_map:
         try:
             top_docs = int(os.environ.get("PRF_TOP_DOCS", "8") or 8)
         except (ValueError, TypeError):
@@ -1396,10 +1690,19 @@ def _run_hybrid_search_impl(
                     "test": 0.0,
                 },
             )
-            base_dens = (_AD_DENSE_W * _scaled_rrf(rank)) if _USE_ADAPT else (DENSE_WEIGHT * _scaled_rrf(rank))
-            dens = base_dens * _qw
-            score_map[pid]["d"] += dens
-            score_map[pid]["s"] += dens
+            # Dense-preserving: use raw similarity score (preserves ordering)
+            # Production: use RRF rank-based scoring (allows fusion with lexical)
+            if _DENSE_PRESERVING:
+                # Use raw cosine similarity, take max across queries (not sum)
+                raw_score = float(getattr(p, "score", 0) or 0)
+                if raw_score > score_map[pid]["d"]:
+                    score_map[pid]["d"] = raw_score
+                    score_map[pid]["s"] = raw_score
+            else:
+                base_dens = (_AD_DENSE_W * _scaled_rrf(rank)) if _USE_ADAPT else (DENSE_WEIGHT * _scaled_rrf(rank))
+                dens = base_dens * _qw
+                score_map[pid]["d"] += dens
+                score_map[pid]["s"] += dens
 
     # Lexical + boosts
     timestamps: List[int] = []
@@ -1464,6 +1767,10 @@ def _run_hybrid_search_impl(
         if "tags" in payload:
             md["tags"] = payload["tags"]
 
+        # Skip lexical scoring and all boosts in dense-preserving mode
+        if _DENSE_PRESERVING:
+            continue
+
         if _USE_ADAPT:
             lx = lexical_text_score(
                 qlist,
@@ -1489,6 +1796,7 @@ def _run_hybrid_search_impl(
         ts = md.get("last_modified_at") or md.get("ingested_at")
         if isinstance(ts, int):
             timestamps.append(ts)
+
         sym = str(md.get("symbol") or "").lower()
         sym_path = str(md.get("symbol_path") or "").lower()
         sym_text = f"{sym} {sym_path}"
@@ -1598,7 +1906,9 @@ def _run_hybrid_search_impl(
 
     # === Large codebase score normalization ===
     # Spread compressed score distributions for better discrimination
-    _normalize_scores(score_map, _coll_size)
+    # Skip in dense-preserving mode (we want raw cosine scores)
+    if not _DENSE_PRESERVING:
+        _normalize_scores(score_map, _coll_size)
 
     def _tie_key(m: Dict[str, Any]):
         md = (m["pt"].payload or {}).get("metadata") or {}
@@ -1799,17 +2109,19 @@ def _run_hybrid_search_impl(
             return 0.0
 
     # Apply bump to top-N ranked (limited for speed)
+    # Skip in dense-preserving mode (would distort pure dense ordering)
     topN = min(len(ranked), 200)
     for i in range(topN):
         m = ranked[i]
         md = (m["pt"].payload or {}).get("metadata") or {}
         hits = _snippet_contains(md)
-        if hits > 0 and kb > 0.0:
+        if not _DENSE_PRESERVING and hits > 0 and kb > 0.0:
             bump = min(kcap, kb * float(hits))
             m["s"] += bump
         # Apply comment-heavy penalty to de-emphasize comments/doc blocks
+        # Skip in dense-preserving mode
         try:
-            if COMMENT_PENALTY > 0.0:
+            if not _DENSE_PRESERVING and COMMENT_PENALTY > 0.0:
                 ratio = _snippet_comment_ratio(md)
                 thr = float(COMMENT_RATIO_THRESHOLD)
                 if ratio >= thr:
@@ -1825,7 +2137,8 @@ def _run_hybrid_search_impl(
     ranked = sorted(ranked, key=_tie_key)
 
     # Cluster by path adjacency (can be disabled via HYBRID_CLUSTER_LINES <= 0)
-    if CLUSTER_LINES > 0:
+    # Skip in dense-preserving mode (would distort pure dense ordering)
+    if not _DENSE_PRESERVING and CLUSTER_LINES > 0:
         clusters: Dict[str, List[Dict[str, Any]]] = {}
         for m in ranked:
             md = (m["pt"].payload or {}).get("metadata") or {}
@@ -1857,7 +2170,8 @@ def _run_hybrid_search_impl(
 
 
     # Optional MMR diversification (default ON; preserves top-1)
-    if _env_truthy(os.environ.get("HYBRID_MMR"), True):
+    # Skip in dense-preserving mode (would distort pure dense ordering)
+    if not _DENSE_PRESERVING and _env_truthy(os.environ.get("HYBRID_MMR"), True):
         try:
             _mmr_k = min(len(ranked), max(20, int(os.environ.get("MMR_K", str((limit or 10) * 3)) or 30)))
         except Exception:

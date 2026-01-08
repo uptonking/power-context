@@ -982,13 +982,21 @@ async def _repo_search_impl(
                     # This ensures exact symbol matches rank higher even when reranker disagrees
                     _post_symbol_boost = float(os.environ.get("POST_RERANK_SYMBOL_BOOST", "1.0") or 1.0)
                     blended = []
+                    # Detect reranker score range for proper normalization
+                    # FastEmbed rerankers return 0-1, raw ONNX can return -12 to +12
+                    rr_min, rr_max = min(scores), max(scores)
+                    rr_range = rr_max - rr_min if rr_max > rr_min else 1.0
+                    # Fusion scores are typically 0-3
+                    fus_scores = [float(o.get("score", 0.0) or 0.0) for o in cand_objs]
+                    fus_max = max(fus_scores) if fus_scores else 3.0
+                    fus_max = max(fus_max, 1.0)  # Avoid div by zero
+
                     for rr_score, obj in zip(scores, cand_objs):
                         fusion_score = float(obj.get("score", 0.0) or 0.0)
-                        # Normalize fusion_score to similar scale as rerank (rough heuristic)
-                        # Fusion scores are typically 0-3, rerank scores are -12 to 0
-                        # Shift fusion to negative range: fusion=2 -> -1, fusion=0 -> -3
-                        norm_fusion = fusion_score - 3.0
-                        blended_score = _rerank_blend * rr_score + (1.0 - _rerank_blend) * norm_fusion
+                        # Normalize both to 0-1 range for fair blending
+                        norm_rerank = (rr_score - rr_min) / rr_range if rr_range > 0 else 0.5
+                        norm_fusion = fusion_score / fus_max
+                        blended_score = _rerank_blend * norm_rerank + (1.0 - _rerank_blend) * norm_fusion
                         # Apply post-rerank symbol boost: extract symbol boosts from components
                         # and add them directly to blended score (not diluted by blend weight)
                         comps = obj.get("components") or {}
