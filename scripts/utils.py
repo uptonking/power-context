@@ -19,6 +19,17 @@ def sanitize_vector_name(model_name: str) -> str:
     # Qwen3-Embedding ONNX model
     if "qwen3-embedding" in name:
         return "fast-qwen3-embedding-0.6b"
+    # Snowflake Arctic models
+    if "arctic-embed" in name or "snowflake-arctic" in name:
+        if "arctic-xs" in name or "embed-xs" in name:
+            return "fast-snowflake-arctic-embed-xs"
+        if "arctic-s" in name or "embed-s" in name:
+            return "fast-snowflake-arctic-embed-s"
+        if "arctic-m" in name or "embed-m" in name:
+            return "fast-snowflake-arctic-embed-m"
+        if "arctic-l" in name or "embed-l" in name:
+            return "fast-snowflake-arctic-embed-l"
+        return "fast-snowflake-arctic-embed"
     # Fallback: compact name
     return name.replace("/", "-").replace("_", "-")[:64]
 
