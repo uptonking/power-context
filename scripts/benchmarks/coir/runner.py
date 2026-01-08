@@ -51,6 +51,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from dotenv import load_dotenv
+load_dotenv()
 
 from scripts.benchmarks.coir import DEFAULT_TASKS, COIR_TASKS
 from scripts.benchmarks.coir.retriever import ContextEngineRetriever
@@ -499,10 +500,6 @@ async def run_coir_benchmark(
 
 
 def main() -> None:
-    # Load .env explicitly so defaults don't override it
-    _project_root = Path(__file__).parent.parent.parent.parent
-    load_dotenv(_project_root / ".env")
-
     parser = argparse.ArgumentParser(description="CoIR Benchmark Runner (Context-Engine)")
     parser.add_argument(
         "--tasks",
