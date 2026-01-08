@@ -41,6 +41,7 @@ jobs:
       - name: Build landing page
         env:
           NODE_ENV: production
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: npm run build
 
       - name: Upload artifact
