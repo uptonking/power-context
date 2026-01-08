@@ -507,6 +507,10 @@ def index_benchmark_corpus(
                 symbol_kind = chunk.get("kind", "")
                 if not symbol_name and symbols:
                     symbol_kind, symbol_name, _ = _choose_symbol_for_chunk(start_line, end_line, symbols)
+                # Fallback to doc.metadata["symbol"] if still empty (e.g., CoSQA provides it there)
+                if not symbol_name:
+                    symbol_name = doc.metadata.get("symbol", "")
+                    symbol_kind = doc.metadata.get("kind", symbol_kind)
 
                 path = doc.metadata.get("path", f"bench/{doc.doc_id}")
                 first_line = chunk_text.split("\n")[0] if chunk_text else ""

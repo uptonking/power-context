@@ -76,7 +76,9 @@ class CoSQACorpusEntry:
         # This keeps the canonical identifier in `code_id` for MRR computations.
 
         # Build realistic synthetic path from function name
-        # e.g., func_name="parse_json_config" -> "cosqa/parse/parse_json_config.py"
+        # e.g., func_name="parse_json_config" -> "cosqa/parse/parse_json_config__d123.py"
+        # NOTE: Include code_id in filename to avoid path collisions (CoSQA has duplicate func_names)
+        # This prevents per_path limiting from dropping the expected doc
         module_hint = ""
         func_name = self.func_name or ""
         filename = ""
@@ -86,7 +88,8 @@ class CoSQACorpusEntry:
             if len(parts) >= 2:
                 module_hint = parts[0]
             symbol_name = func_name
-            filename = f"{func_name}.py"
+            # Include code_id to ensure unique paths for duplicate func_names
+            filename = f"{func_name}__{self.code_id}.py"
         else:
             # Fallback: extract potential function name from code
             import re as _re
@@ -97,7 +100,7 @@ class CoSQACorpusEntry:
                 if len(parts) >= 2:
                     module_hint = parts[0]
                 symbol_name = extracted_name
-                filename = f"{extracted_name}.py"
+                filename = f"{extracted_name}__{self.code_id}.py"
             else:
                 symbol_name = self.code_id
                 filename = f"{self.code_id}.py"
@@ -137,6 +140,8 @@ class CoSQACorpusEntry:
                 "text": self.code,
                 # Reranker expects metadata.code for cross-encoder scoring (include docstring).
                 "code": rerank_text,
+                # Docstring for pseudo fallback in core_indexer
+                "docstring": self.docstring or "",
             },
         }
 
