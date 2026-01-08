@@ -931,10 +931,6 @@ def _spawn_learning_worker(collection: str, project_root: Path) -> subprocess.Po
 def main():
     """CLI entrypoint for CoSQA benchmark."""
 
-    # Load .env explicitly so defaults don't override it
-    _project_root = Path(__file__).parent.parent.parent.parent
-    load_dotenv(_project_root / ".env")
-
     parser = argparse.ArgumentParser(description="CoSQA Benchmark for Context-Engine")
     parser.add_argument("--split", default="test", choices=["train", "validation", "test"],
                         help="Dataset split to use")
