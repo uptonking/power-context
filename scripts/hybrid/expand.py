@@ -6,6 +6,7 @@ This module provides query expansion functionality including:
 - Synonym-based expansion (CODE_SYNONYMS)
 - Basic expansion (expand_queries)
 - Enhanced semantic expansion (expand_queries_enhanced)
+- Embedding-based dynamic expansion (expand_via_embeddings)
 - LLM-assisted expansion (_llm_expand_queries)
 - Pseudo-relevance feedback (PRF) terms extraction (_prf_terms_from_results)
 """
@@ -13,8 +14,9 @@ This module provides query expansion functionality including:
 __all__ = [
     "CODE_SYNONYMS", "tokenize_queries",
     "expand_queries", "expand_queries_enhanced", "expand_queries_weighted",
+    "expand_via_embeddings",
     "_llm_expand_queries", "_prf_terms_from_results",
-    "SEMANTIC_EXPANSION_AVAILABLE",
+    "SEMANTIC_EXPANSION_AVAILABLE", "EMBEDDING_EXPANSION_ENABLED",
     "expand_queries_semantically", "expand_queries_with_prf",
     "get_expansion_stats", "clear_expansion_cache",
 ]
@@ -48,6 +50,11 @@ except ImportError:
     expand_queries_with_prf = None
     get_expansion_stats = None
     clear_expansion_cache = None
+
+
+# Feature flag for embedding-based dynamic expansion
+# Set EMBEDDING_QUERY_EXPANSION=1 to enable
+EMBEDDING_EXPANSION_ENABLED = os.environ.get("EMBEDDING_QUERY_EXPANSION", "0") == "1"
 
 
 # Stop words for tokenization
@@ -386,9 +393,122 @@ def expand_queries_weighted(
             if os.environ.get("DEBUG_HYBRID_SEARCH"):
                 logger.debug(f"Semantic expansion failed: {e}")
 
+    # 5. Embedding-based dynamic expansion (Tier 5 - weight 0.5)
+    if EMBEDDING_EXPANSION_ENABLED and client and model and collection:
+        try:
+            embed_terms = expand_via_embeddings(
+                queries, client, model, collection, max_terms=max_extra
+            )
+            for term in embed_terms:
+                if term not in seen:
+                    seen.add(term)
+                    out.append(term)
+                    weights.append(0.5)
+            if os.environ.get("DEBUG_HYBRID_SEARCH"):
+                logger.debug(f"Embedding expansion added {len(embed_terms)} terms: {embed_terms}")
+        except Exception as e:
+            if os.environ.get("DEBUG_HYBRID_SEARCH"):
+                logger.debug(f"Embedding expansion failed: {e}")
+
     # Limit total queries
     max_queries = max(12, len(queries) * 4)
     return out[:max_queries], weights[:max_queries]
+
+
+def expand_via_embeddings(
+    queries: List[str],
+    client: "QdrantClient",
+    model: Any,
+    collection: str,
+    max_terms: int = 4,
+) -> List[str]:
+    """
+    Embedding-based dynamic expansion: query the vector space for semantically
+    similar terms rather than relying on static synonym lists.
+
+    Process:
+    1. Embed the query
+    2. Search the collection for soft matches (top-k neighbors)
+    3. Extract unique symbols/terms from those neighbors
+    4. Return as expansion candidates
+
+    Args:
+        queries: Original query strings
+        client: QdrantClient instance
+        model: Embedding model (FastEmbed TextEmbedding)
+        collection: Collection name to search
+        max_terms: Maximum expansion terms to return
+
+    Returns:
+        List of semantically related terms extracted from nearest neighbors
+    """
+    if not queries or not client or not model or not collection:
+        return []
+
+    # Combine queries for a single embedding
+    combined_query = " ".join(queries[:3])  # Use first 3 queries max
+
+    # Embed the query
+    try:
+        query_vectors = list(model.embed([combined_query]))
+        if not query_vectors:
+            return []
+        query_vector = query_vectors[0].tolist()
+    except Exception:
+        return []
+
+    # Search for soft matches (we want semantically similar docs, not exact matches)
+    try:
+        results = client.search(
+            collection_name=collection,
+            query_vector=("code", query_vector),
+            limit=8,  # Get top 8 neighbors
+            with_payload=True,
+            score_threshold=0.3,  # Lower threshold to get more diverse results
+        )
+    except Exception:
+        return []
+
+    if not results:
+        return []
+
+    # Extract unique terms from neighbors
+    extracted_terms: set[str] = set()
+    query_tokens = set(combined_query.lower().split())
+
+    for hit in results:
+        payload = hit.payload or {}
+
+        # Extract symbol names
+        symbol = payload.get("symbol", "")
+        if symbol and len(symbol) > 2:
+            # Split camelCase/snake_case
+            parts = re.split(r"[_\s]+|(?<=[a-z])(?=[A-Z])", symbol)
+            for part in parts:
+                part_lower = part.lower()
+                if len(part_lower) > 2 and part_lower not in query_tokens:
+                    extracted_terms.add(part_lower)
+
+        # Extract tags if available
+        tags = payload.get("tags", [])
+        if isinstance(tags, list):
+            for tag in tags[:5]:
+                if isinstance(tag, str) and len(tag) > 2:
+                    tag_lower = tag.lower()
+                    if tag_lower not in query_tokens:
+                        extracted_terms.add(tag_lower)
+
+        # Extract terms from pseudo description
+        pseudo = payload.get("pseudo", "")
+        if pseudo and isinstance(pseudo, str):
+            words = re.findall(r"\b[a-z]{3,}\b", pseudo.lower())
+            for word in words[:5]:
+                if word not in query_tokens and word not in _STOP:
+                    extracted_terms.add(word)
+
+    # Return top terms (prioritize shorter, more specific terms)
+    sorted_terms = sorted(extracted_terms, key=lambda t: (len(t), t))
+    return sorted_terms[:max_terms]
 
 
 def expand_queries_enhanced(
