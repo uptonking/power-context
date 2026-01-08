@@ -51,10 +51,15 @@ def _safe_float(val: Any, default: float) -> float:
 
 
 def _env_truthy(val: str | None, default: bool) -> bool:
-    """Check if an environment variable value is truthy."""
+    """Check if an environment variable value is truthy or falsy."""
     if val is None:
         return default
-    return val.strip().lower() in {"1", "true", "yes", "on"}
+    v = val.strip().lower()
+    if v in {"1", "true", "yes", "on"}:
+        return True
+    if v in {"0", "false", "no", "off"}:
+        return False
+    return default
 
 
 # ---------------------------------------------------------------------------

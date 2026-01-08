@@ -74,6 +74,25 @@ LEX_SPARSE_MODE = os.environ.get("LEX_SPARSE_MODE", "0").strip().lower() in ("1"
 
 EF_SEARCH = _safe_int(os.environ.get("QDRANT_EF_SEARCH", "128"), 128)
 
+# Quantization search params (for faster search with quantized collections)
+QDRANT_QUANTIZATION = os.environ.get("QDRANT_QUANTIZATION", "none").strip().lower()
+QDRANT_QUANTIZATION_RESCORE = os.environ.get("QDRANT_QUANTIZATION_RESCORE", "1").strip().lower() in ("1", "true", "yes", "on")
+QDRANT_QUANTIZATION_OVERSAMPLING = float(os.environ.get("QDRANT_QUANTIZATION_OVERSAMPLING", "2.0") or 2.0)
+
+
+def _get_search_params(ef: int) -> models.SearchParams:
+    """Build SearchParams with optional quantization settings."""
+    if QDRANT_QUANTIZATION in {"scalar", "binary"}:
+        return models.SearchParams(
+            hnsw_ef=ef,
+            quantization=models.QuantizationSearchParams(
+                rescore=QDRANT_QUANTIZATION_RESCORE,
+                oversampling=QDRANT_QUANTIZATION_OVERSAMPLING,
+            )
+        )
+    return models.SearchParams(hnsw_ef=ef)
+
+
 # ---------------------------------------------------------------------------
 # Connection pooling setup
 # ---------------------------------------------------------------------------
@@ -453,7 +472,7 @@ def lex_query(
             query=v,
             using=LEX_VECTOR_NAME,
             query_filter=flt,
-            search_params=models.SearchParams(hnsw_ef=ef),
+            search_params=_get_search_params(ef),
             limit=per_query,
             with_payload=True,
         )
@@ -466,7 +485,7 @@ def lex_query(
             query=v,
             using=LEX_VECTOR_NAME,
             filter=flt,
-            search_params=models.SearchParams(hnsw_ef=ef),
+            search_params=_get_search_params(ef),
             limit=per_query,
             with_payload=True,
         )
@@ -485,7 +504,7 @@ def lex_query(
                 query=v,
                 using=LEX_VECTOR_NAME,
                 query_filter=None,
-                search_params=models.SearchParams(hnsw_ef=ef),
+                search_params=_get_search_params(ef),
                 limit=per_query,
                 with_payload=True,
             )
@@ -496,7 +515,7 @@ def lex_query(
                 query=v,
                 using=LEX_VECTOR_NAME,
                 filter=None,
-                search_params=models.SearchParams(hnsw_ef=ef),
+                search_params=_get_search_params(ef),
                 limit=per_query,
                 with_payload=True,
             )
@@ -605,7 +624,7 @@ def dense_query(
             query=v,
             using=vec_name,
             query_filter=flt,
-            search_params=models.SearchParams(hnsw_ef=ef),
+            search_params=_get_search_params(ef),
             limit=per_query,
             with_payload=True,
         )
@@ -618,7 +637,7 @@ def dense_query(
             query=v,
             using=vec_name,
             filter=flt,
-            search_params=models.SearchParams(hnsw_ef=ef),
+            search_params=_get_search_params(ef),
             limit=per_query,
             with_payload=True,
         )
@@ -637,7 +656,7 @@ def dense_query(
                 query=v,
                 using=vec_name,
                 query_filter=None,
-                search_params=models.SearchParams(hnsw_ef=ef),
+                search_params=_get_search_params(ef),
                 limit=per_query,
                 with_payload=True,
             )
@@ -649,7 +668,7 @@ def dense_query(
                     query=v,
                     using=vec_name,
                     filter=None,
-                    search_params=models.SearchParams(hnsw_ef=ef),
+                    search_params=_get_search_params(ef),
                     limit=per_query,
                     with_payload=True,
                 )

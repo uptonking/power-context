@@ -362,7 +362,8 @@ def lexical_text_score(
 
     Modes (HYBRID_LEXICAL_TEXT_MODE):
       - "raw":  legacy behavior (weight * raw_score)
-      - "tanh": default; saturating nonlinearity (weight * tanh(raw/sat))
+      - "tanh": fixed saturating nonlinearity (weight * tanh(raw/sat))
+      - "tanh_adaptive": query-adaptive saturation; scales by token count
       - "rrf":  map to RRF-equivalent range (weight * rrf_equiv)
 
     Performance: pass _precomputed_tokens to avoid re-tokenizing queries on each call.
@@ -390,6 +391,16 @@ def lexical_text_score(
         ratio = clamped / float(max_raw)
         rrf_equiv = r_min + ratio * (r_max - r_min)
         return float(weight) * float(rrf_equiv)
+
+    if mode == "tanh_adaptive":
+        # Query-adaptive tanh saturation: scale by token count
+        # Principle: saturation ∝ expected max score ∝ token count
+        # Per-token max contrib ~4.1 (sym:2 + path:1.1 + code:1), so base_sat ~4
+        tokens = _precomputed_tokens if _precomputed_tokens is not None else tokenize_queries(phrases)
+        n_tokens = max(1, len(tokens))
+        base_sat = 4.0  # ~1 token's perfect match score
+        adaptive_sat = base_sat * n_tokens
+        return float(weight) * float(math.tanh(float(raw) / adaptive_sat))
 
     # Default: tanh saturation (bounded in [0, weight])
     sat = max(1e-6, float(LEXICAL_TEXT_SAT))
