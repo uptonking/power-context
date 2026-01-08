@@ -2,6 +2,8 @@ import { error } from '@sveltejs/kit';
 import { marked } from 'marked';
 import hljs from 'highlight.js';
 
+export const prerender = true;
+
 // Configure marked with syntax highlighting
 marked.setOptions({
 	breaks: true,
@@ -76,4 +78,9 @@ export async function load({ params }) {
 		console.error(`Error processing ${slug}:`, err);
 		throw error(500, 'Failed to load documentation');
 	}
+}
+
+// Export entries for prerendering
+export function entries() {
+	return Object.keys(docMap).map(slug => ({ slug }));
 }
