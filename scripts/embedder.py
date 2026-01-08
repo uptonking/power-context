@@ -37,14 +37,27 @@ DEFAULT_INSTRUCTION = (
     "Instruct: Given a code search query, retrieve relevant code snippets\nQuery:"
 )
 
-# BGE instruction prefix support (recommended by BGE authors for retrieval)
+# BGE instruction prefix support - DISABLED for code search
+# Testing showed prefix hurts code retrieval (reduces ranking gap by ~10%)
 # See: https://huggingface.co/BAAI/bge-base-en-v1.5
 BGE_QUERY_INSTRUCTION_ENABLED = (
-    str(os.environ.get("BGE_QUERY_INSTRUCTION", "1")).strip().lower()
+    str(os.environ.get("BGE_QUERY_INSTRUCTION", "0")).strip().lower()
     in {"1", "true", "yes", "on"}
 )
 BGE_QUERY_INSTRUCTION_TEXT = os.environ.get(
     "BGE_QUERY_INSTRUCTION_TEXT",
+    "Represent this sentence for searching relevant passages:"
+)
+
+# Snowflake Arctic instruction prefix support - DISABLED for code search
+# Testing showed prefix hurts code retrieval
+# See: https://huggingface.co/Snowflake/snowflake-arctic-embed-m
+ARCTIC_QUERY_INSTRUCTION_ENABLED = (
+    str(os.environ.get("ARCTIC_QUERY_INSTRUCTION", "0")).strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+ARCTIC_QUERY_INSTRUCTION_TEXT = os.environ.get(
+    "ARCTIC_QUERY_INSTRUCTION_TEXT",
     "Represent this sentence for searching relevant passages:"
 )
 
@@ -175,8 +188,16 @@ def is_bge_model(model_name: Optional[str] = None) -> bool:
     return "bge" in model_name.lower()
 
 
+def is_arctic_model(model_name: Optional[str] = None) -> bool:
+    """Check if the model is a Snowflake Arctic model."""
+    if model_name is None:
+        model_name = os.environ.get("EMBEDDING_MODEL", DEFAULT_MODEL)
+    model_lower = model_name.lower()
+    return "arctic" in model_lower or "snowflake" in model_lower
+
+
 def prefix_query(query: str, model_name: Optional[str] = None) -> str:
-    """Add instruction prefix to query if using Qwen3 or BGE with instructions enabled.
+    """Add instruction prefix to query if using Qwen3, BGE, or Arctic with instructions enabled.
 
     Args:
         query: The search query text.
@@ -189,16 +210,20 @@ def prefix_query(query: str, model_name: Optional[str] = None) -> str:
     if QWEN3_QUERY_INSTRUCTION and is_qwen3_model(model_name):
         instruction = get_query_instruction()
         return f"{instruction} {query}"
-    
+
     # BGE instruction prefix (recommended by BGE authors for retrieval)
     if BGE_QUERY_INSTRUCTION_ENABLED and is_bge_model(model_name):
         return f"{BGE_QUERY_INSTRUCTION_TEXT} {query}"
-    
+
+    # Snowflake Arctic instruction prefix
+    if ARCTIC_QUERY_INSTRUCTION_ENABLED and is_arctic_model(model_name):
+        return f"{ARCTIC_QUERY_INSTRUCTION_TEXT} {query}"
+
     return query
 
 
 def prefix_queries(queries: List[str], model_name: Optional[str] = None) -> List[str]:
-    """Add instruction prefix to multiple queries if using Qwen3 or BGE.
+    """Add instruction prefix to multiple queries if using Qwen3, BGE, or Arctic.
 
     Args:
         queries: List of search query texts.
@@ -211,11 +236,15 @@ def prefix_queries(queries: List[str], model_name: Optional[str] = None) -> List
     if QWEN3_QUERY_INSTRUCTION and is_qwen3_model(model_name):
         instruction = get_query_instruction()
         return [f"{instruction} {q}" for q in queries]
-    
+
     # BGE instruction prefix
     if BGE_QUERY_INSTRUCTION_ENABLED and is_bge_model(model_name):
         return [f"{BGE_QUERY_INSTRUCTION_TEXT} {q}" for q in queries]
-    
+
+    # Snowflake Arctic instruction prefix
+    if ARCTIC_QUERY_INSTRUCTION_ENABLED and is_arctic_model(model_name):
+        return [f"{ARCTIC_QUERY_INSTRUCTION_TEXT} {q}" for q in queries]
+
     return queries
 
 
