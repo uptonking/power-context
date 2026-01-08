@@ -12,7 +12,7 @@ This module provides query expansion functionality including:
 """
 
 __all__ = [
-    "CODE_SYNONYMS", "tokenize_queries",
+    "CODE_SYNONYMS", "PHRASE_SYNONYMS", "tokenize_queries",
     "expand_queries", "expand_queries_enhanced", "expand_queries_weighted",
     "expand_via_embeddings",
     "_llm_expand_queries", "_prf_terms_from_results",
@@ -55,7 +55,6 @@ except ImportError:
 # Feature flag for embedding-based dynamic expansion
 # Set EMBEDDING_QUERY_EXPANSION=1 to enable
 EMBEDDING_EXPANSION_ENABLED = os.environ.get("EMBEDDING_QUERY_EXPANSION", "0") == "1"
-
 
 # Stop words for tokenization
 _STOP = {
@@ -133,6 +132,15 @@ PHRASE_SYNONYMS: Dict[str, List[str]] = {
     "while loop": ["loop", "iteration"],
     "if else": ["conditional", "branch"],
     "switch case": ["match", "conditional", "branch"],
+    # Data structures
+    "data frame": ["dataframe", "df", "pandas"],
+    "data set": ["dataset", "data"],
+    # Function arguments
+    "default args": ["default arguments", "default parameters", "optional arguments"],
+    "default arguments": ["default args", "optional parameters", "kwargs"],
+    # Serialization
+    "protocol buffer": ["protobuf", "proto", "pb"],
+    "protocol buffers": ["protobuf", "proto", "pb"],
 }
 
 # Cross-language code-aware query expansion synonyms
@@ -249,6 +257,29 @@ CODE_SYNONYMS: Dict[str, List[str]] = {
     "test": ["spec", "assert", "verify", "check", "unit"],
     "mock": ["stub", "fake", "spy", "double"],
     "assert": ["expect", "should", "verify", "check"],
+    # === Arguments & Parameters ===
+    "args": ["arguments", "parameters", "params", "kwargs"],
+    "arg": ["argument", "parameter", "param"],
+    "arguments": ["args", "parameters", "params"],
+    "parameters": ["params", "arguments", "args"],
+    "kwargs": ["keyword arguments", "named arguments", "options"],
+    # === Data Structures (pandas/dataframes) ===
+    "dataframe": ["df", "table", "dataset", "frame"],
+    "columns": ["cols", "fields", "attributes", "headers"],
+    "column": ["col", "field", "attribute"],
+    "rows": ["records", "entries", "lines", "tuples"],
+    "row": ["record", "entry", "line", "tuple"],
+    # === Serialization Formats ===
+    "protobuf": ["proto", "pb", "protocol buffer"],
+    "json": ["dict", "object", "serialize"],
+    "yaml": ["yml", "config"],
+    "xml": ["markup", "document"],
+    "csv": ["comma separated", "delimited", "tabular"],
+    # === Common Typo Corrections (fuzzy matching) ===
+    # These help when users make common spelling mistakes
+    "unzip": ["extract", "decompress", "gunzip", "unpack"],
+    "datetime": ["date time", "timestamp", "time"],
+    "milliseconds": ["ms", "millis", "millisecond"],
 }
 
 

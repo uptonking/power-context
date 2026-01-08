@@ -1824,32 +1824,36 @@ def _run_hybrid_search_impl(
     # Re-sort after bump
     ranked = sorted(ranked, key=_tie_key)
 
-    # Cluster by path adjacency
-    clusters: Dict[str, List[Dict[str, Any]]] = {}
-    for m in ranked:
-        md = (m["pt"].payload or {}).get("metadata") or {}
-        path = str(md.get("path") or "")
-        start_line = int(md.get("start_line") or 0)
-        end_line = int(md.get("end_line") or 0)
-        lst = clusters.setdefault(path, [])
-        merged_flag = False
-        for c in lst:
-            if (
-                start_line <= c["end"] + CLUSTER_LINES
-                and end_line >= c["start"] - CLUSTER_LINES
-            ):
-                if float(m["s"]) > float(c["m"]["s"]):
-                    c["m"] = m
-                c["start"] = min(c["start"], start_line)
-                c["end"] = max(c["end"], end_line)
-                merged_flag = True
-                break
-        if not merged_flag:
-            lst.append({"start": start_line, "end": end_line, "m": m})
+    # Cluster by path adjacency (can be disabled via HYBRID_CLUSTER_LINES <= 0)
+    if CLUSTER_LINES > 0:
+        clusters: Dict[str, List[Dict[str, Any]]] = {}
+        for m in ranked:
+            md = (m["pt"].payload or {}).get("metadata") or {}
+            path = str(md.get("path") or "")
+            start_line = int(md.get("start_line") or 0)
+            end_line = int(md.get("end_line") or 0)
+            lst = clusters.setdefault(path, [])
+            merged_flag = False
+            for c in lst:
+                if (
+                    start_line <= c["end"] + CLUSTER_LINES
+                    and end_line >= c["start"] - CLUSTER_LINES
+                ):
+                    if float(m["s"]) > float(c["m"]["s"]):
+                        c["m"] = m
+                    c["start"] = min(c["start"], start_line)
+                    c["end"] = max(c["end"], end_line)
+                    merged_flag = True
+                    break
+            if not merged_flag:
+                lst.append({"start": start_line, "end": end_line, "m": m})
 
-    ranked = sorted([c["m"] for lst in clusters.values() for c in lst], key=_tie_key)
-    if os.environ.get("DEBUG_HYBRID_SEARCH"):
-        logger.debug(f"ranked has {len(ranked)} items after clustering")
+        ranked = sorted([c["m"] for lst in clusters.values() for c in lst], key=_tie_key)
+        if os.environ.get("DEBUG_HYBRID_SEARCH"):
+            logger.debug(f"ranked has {len(ranked)} items after clustering")
+    else:
+        if os.environ.get("DEBUG_HYBRID_SEARCH"):
+            logger.debug("Clustering disabled (HYBRID_CLUSTER_LINES <= 0)")
 
 
     # Optional MMR diversification (default ON; preserves top-1)
