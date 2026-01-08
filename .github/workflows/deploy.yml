@@ -1,0 +1,58 @@
+name: Deploy Context Engine Landing Page
+
+on:
+  push:
+    branches:
+      - test  # Trigger on test branch (their default)
+  workflow_dispatch: # Allow manual triggers
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow only one concurrent deployment
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:# filepath: /Users/cstine/src/Repos/Context-Engine/.github/workflows/deploy.yml
+name: Deploy Context Engine Landing Page
+
+on:
+  push:
+    branches:
+      - test  # Trigger on test branch (their default)
+  workflow_dispatch: # Allow manual triggers
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow only one concurrent deployment
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
