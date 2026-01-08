@@ -489,6 +489,7 @@ async def run_cosqa_benchmark(
     corpus_size: int = 0,
     limit: int = 10,
     rerank_enabled: bool = True,
+    mode: str = "hybrid",
     name: str = "cosqa",
     subset_note: Optional[str] = None,
     progress_callback: Optional[callable] = None,
@@ -501,6 +502,7 @@ async def run_cosqa_benchmark(
         corpus_size: Size of indexed corpus
         limit: Max results per query
         rerank_enabled: Whether to use reranker
+        mode: Search mode passed to repo_search ("hybrid" or "dense")
         name: Benchmark run name
         progress_callback: Optional callback(completed, total)
 
@@ -540,6 +542,7 @@ async def run_cosqa_benchmark(
         "rerank_enabled": rerank_enabled,
         "rerank_top_n": scaled_top_n,
         "query_count": len(queries),
+        "mode": mode,
         # Capture reranker config for reproducibility
         "env": {
             "RERANKER_MODEL": os.environ.get("RERANKER_MODEL", ""),
@@ -559,7 +562,7 @@ async def run_cosqa_benchmark(
 
     print(
         f"Running CoSQA benchmark: {len(queries)} queries, limit={limit}, "
-        f"rerank={rerank_enabled}, rerank_top_n={scaled_top_n}"
+        f"mode={mode}, rerank={rerank_enabled}, rerank_top_n={scaled_top_n}"
     )
     
     # Warmup query to avoid cold-start latency in first real query
@@ -573,6 +576,7 @@ async def run_cosqa_benchmark(
                 limit=5,
                 rerank_enabled=rerank_enabled,
                 rerank_top_n=50 if rerank_enabled else None,
+                mode=mode,
             )
             print("  [warmup] Completed warmup query")
         except Exception as e:
@@ -594,6 +598,7 @@ async def run_cosqa_benchmark(
                     limit=limit,
                     rerank_enabled=rerank_enabled,
                     rerank_top_n=scaled_top_n if rerank_enabled else None,
+                    mode=mode,
                 )
             except Exception as e:
                 print(f"  [ERROR] Query {idx+1} failed: {e}")
@@ -821,6 +826,7 @@ async def run_full_benchmark(
     query_limit: Optional[int] = None,
     corpus_limit: Optional[int] = None,
     rerank_enabled: bool = True,
+    mode: str = "hybrid",
     recreate_index: bool = False,
     index_only: bool = False,
 ) -> CoSQAReport:
@@ -833,6 +839,7 @@ async def run_full_benchmark(
         query_limit: Limit number of queries (for quick testing)
         corpus_limit: Limit corpus size (for quick testing)
         rerank_enabled: Whether to use reranker
+        mode: Search mode passed to repo_search ("hybrid" or "dense")
         recreate_index: Whether to recreate the index
 
     Returns:
@@ -910,6 +917,7 @@ async def run_full_benchmark(
         corpus_size=len(corpus),
         limit=limit,
         rerank_enabled=rerank_enabled,
+        mode=mode,
         name=f"cosqa-{split}",
         subset_note=subset_note,
     )
@@ -962,6 +970,8 @@ def main():
                         help="Re-run failed queries with detailed debug output")
     parser.add_argument("--index-only", action="store_true",
                         help="Run ingestion only and exit")
+    parser.add_argument("--mode", type=str, default="hybrid", choices=["hybrid", "dense"],
+                        help="Search mode: 'hybrid' (default) or 'dense' (pure semantic, no lexical)")
     args = parser.parse_args()
 
     # Enable Context-Engine features for accurate benchmarking.
@@ -974,6 +984,16 @@ def main():
         os.environ["HYBRID_EXPAND"] = "0"
     os.environ["HYBRID_IN_PROCESS"] = "1"  # Use in-process hybrid search
     os.environ["RERANK_IN_PROCESS"] = "1"  # Use in-process reranker (required)
+
+    # Handle --mode dense: pure semantic search without lexical components
+    if args.mode == "dense":
+        os.environ["HYBRID_LEXICAL_WEIGHT"] = "0"
+        os.environ["HYBRID_LEX_VECTOR_WEIGHT"] = "0"
+        os.environ["HYBRID_EXPAND"] = "0"
+        os.environ["SEMANTIC_EXPANSION_ENABLED"] = "0"
+        print("  [mode=dense] Pure semantic search enabled (no lexical, no expansion)")
+        # NOTE: Previously auto-disabled rerank for dense mode, but we want to test dense+rerank
+        # Use --no-rerank explicitly if you want dense without reranking
 
     # Disable all LLM calls by default for fast benchmarking
     # Use heuristic tags instead of LLM-generated pseudo/tags
@@ -1029,6 +1049,7 @@ def main():
             query_limit=args.query_limit,
             corpus_limit=args.corpus_limit,
             rerank_enabled=not args.no_rerank,
+            mode=args.mode,
             recreate_index=args.recreate,
             index_only=args.index_only,
         ))
@@ -1068,6 +1089,7 @@ def main():
                             limit=args.limit,
                             rerank_enabled=not args.no_rerank,
                             rerank_top_n=debug_top_n,
+                            mode=args.mode,
                             debug=True,
                         ))
             else:
