@@ -86,3 +86,49 @@ def probe_pseudo_tags(collection: str, limit: int = 5) -> None:
 
     except Exception as e:
         print(f"  [probe] Failed to probe collection: {e}")
+
+
+def verify_config_compatibility(client: Any, collection_name: str) -> None:
+    """Verify that Qdrant collection schema matches current environment configuration.
+    
+    Raises:
+        ValueError: If a critical configuration mismatch is detected (e.g., vector dimensions).
+    """
+    print(f"  [verify] Checking schema for '{collection_name}'...")
+    try:
+        info = client.get_collection(collection_name)
+    except Exception:
+        print(f"  [verify] Collection {collection_name} does not exist. Will be created/verified by indexer.")
+        return
+
+    vectors = info.config.params.vectors
+    
+    # Check Lexical Vector Dimension
+    lex_name = os.environ.get("LEX_VECTOR_NAME", "lex")
+    expected_dim = int(os.environ.get("LEX_VECTOR_DIM", "4096"))
+    
+    # Handle dict-style vector config (named vectors)
+    if isinstance(vectors, dict):
+        if lex_name in vectors:
+            actual_dim = vectors[lex_name].size
+            if actual_dim != expected_dim:
+                raise ValueError(
+                    f"CRITICAL CONFIG MISMATCH: Lexical vector '{lex_name}' dimension mismatch! "
+                    f"Env={expected_dim}, Qdrant={actual_dim}. "
+                    f"Use --recreate to fix."
+                )
+        elif hasattr(vectors, lex_name): # Handle object access if wrapper
+             actual_dim = getattr(vectors, lex_name).size
+             if actual_dim != expected_dim:
+                raise ValueError(
+                    f"CRITICAL CONFIG MISMATCH: Lexical vector '{lex_name}' dimension mismatch! "
+                    f"Env={expected_dim}, Qdrant={actual_dim}."
+                )
+        else:
+            # If expected but missing, that's also a fail
+            raise ValueError(f"CRITICAL CONFIG MISMATCH: Vector '{lex_name}' missing in collection.")
+            
+        print("  [verify] Schema matches environment configuration.")
+    else:
+        # Fallback for single unnamed vector (shouldn't happen in this pipeline)
+        print("  [verify] Single vector configuration detected (skipping deep verification).")

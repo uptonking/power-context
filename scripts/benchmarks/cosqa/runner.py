@@ -63,7 +63,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from dotenv import load_dotenv
 
-from scripts.benchmarks.qdrant_utils import get_qdrant_client, probe_pseudo_tags
+from scripts.benchmarks.qdrant_utils import (
+    get_qdrant_client, 
+    probe_pseudo_tags, 
+    verify_config_compatibility
+)
 
 # Force-disable OpenLit/OTel for benchmarks so they never try to talk to openlit-dashboard
 os.environ["OPENLIT_ENABLED"] = "0"
@@ -1009,6 +1013,17 @@ def main():
             os.environ["RERANK_EVENTS_ENABLED"] = "1"
             learning_proc = _spawn_learning_worker(args.collection, _project_root)
             print(f"  [learning-worker] Started (pid {learning_proc.pid}) for {args.collection}")
+
+    # Verify config compatibility BEFORE running anything
+    if not args.recreate:
+        try:
+            # We use get_qdrant_client() which is already imported
+            verify_config_compatibility(get_qdrant_client(), args.collection)
+        except Exception as e:
+            print(f"\nCONFIGURATION ERROR: {e}")
+            if learning_proc and learning_proc.poll() is None:
+                learning_proc.kill()
+            sys.exit(1)
 
     try:
         report = asyncio.run(run_full_benchmark(

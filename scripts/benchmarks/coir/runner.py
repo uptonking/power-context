@@ -55,6 +55,7 @@ from dotenv import load_dotenv
 from scripts.benchmarks.coir import DEFAULT_TASKS, COIR_TASKS
 from scripts.benchmarks.coir.retriever import ContextEngineRetriever
 from scripts.benchmarks.common import get_runtime_info, save_run_meta
+from scripts.benchmarks.qdrant_utils import get_qdrant_client, probe_pseudo_tags
 
 
 @dataclass
@@ -525,6 +526,7 @@ def main() -> None:
         os.environ.setdefault("HYBRID_EXPAND", "1")
         os.environ.setdefault("SEMANTIC_EXPANSION_ENABLED", "1")
     os.environ.setdefault("HYBRID_IN_PROCESS", "1")
+    
     
     # Default: Enable LLM-based pseudo/tags generation
     os.environ.setdefault("REFRAG_PSEUDO_DESCRIBE", "1")

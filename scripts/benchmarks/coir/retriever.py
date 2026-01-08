@@ -33,7 +33,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 
 # Shared utilities
-from scripts.benchmarks.qdrant_utils import probe_pseudo_tags
+from scripts.benchmarks.qdrant_utils import probe_pseudo_tags, verify_config_compatibility, get_qdrant_client
 
 # Ensure project root is in path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
@@ -273,6 +273,16 @@ class ContextEngineRetriever:
         index_result = await asyncio.to_thread(index_coir_corpus, corpus_list, collection)
         if index_result.get("reused"):
             pass  # Collection reused, no indexing needed
+
+        # Verify config compatibility (Fail-Fast)
+        # Checks that the collection we are about to search matches our current env config
+        try:
+            # Create a throwaway client if needed, or use a shared one if available. 
+            # get_qdrant_client creates a new one, which is fine for a one-off check.
+            verify_config_compatibility(get_qdrant_client(), collection)
+        except Exception as e:
+            print(f"  [error] Configuration mismatch for {collection}: {e}")
+            raise
 
         # Probe collection for pseudo/tags presence (validation)
         try:
