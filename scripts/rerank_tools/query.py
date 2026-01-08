@@ -1,11 +1,19 @@
 #!/usr/bin/env python3
 import os
 import argparse
+import sys
 from collections import defaultdict
 from typing import List, Dict, Any
+from pathlib import Path
 
 from qdrant_client import QdrantClient, models
 import re
+
+ROOT_DIR = Path(__file__).resolve().parents[2]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from scripts.utils import sanitize_vector_name
 
 # Use embedder factory for Qwen3 support; fallback to direct fastembed
 try:
@@ -55,17 +63,7 @@ def _env_truthy(val: str | None, default: bool) -> bool:
 
 
 def derive_vector_name(model_name: str) -> str:
-    name = model_name.strip().lower()
-    if "bge-base-en-v1.5" in name:
-        return "fast-bge-base-en-v1.5"
-    if "minilm" in name:
-        return "fast-all-minilm-l6-v2"
-    # fallback sanitize
-    for ch in ["/", ".", " ", "_"]:
-        name = name.replace(ch, "-")
-    while "--" in name:
-        name = name.replace("--", "-")
-    return name
+    return sanitize_vector_name(model_name)
 
 
 def score_candidate(
