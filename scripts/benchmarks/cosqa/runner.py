@@ -848,10 +848,27 @@ async def run_full_benchmark(
     # Load .env for benchmark config (only when actually running benchmark)
     _load_benchmark_env()
 
-    # NOTE: FNAME_BOOST is now controlled by .env (prod-like mode).
-    # Previously we forced FNAME_BOOST=0 to "measure pure semantic/lexical performance",
-    # but this made CoSQA diverge from real Context-Engine behavior.
-    # The synthetic paths in dataset.py now give FNAME_BOOST something to work with.
+    # Disable ALL artificial boosts/penalties for pure semantic/lexical benchmarking.
+    # These heuristics inflate/deflate scores based on file type, path, symbol matches etc.,
+    # obscuring the true retrieval quality of the embedding + lexical pipeline.
+    # Use --pure-semantic=false if you want prod-like behavior with heuristics enabled.
+    
+    # Filename/symbol match boosts
+    os.environ["FNAME_BOOST"] = "0"
+    os.environ["HYBRID_SYMBOL_BOOST"] = "0"
+    os.environ["HYBRID_SYMBOL_EQUALITY_BOOST"] = "0"
+    os.environ["POST_RERANK_SYMBOL_BOOST"] = "1.0"  # Neutral (no boost)
+    
+    # File-type boosts/penalties
+    os.environ["HYBRID_CORE_FILE_BOOST"] = "0"
+    os.environ["HYBRID_IMPLEMENTATION_BOOST"] = "0"
+    os.environ["HYBRID_TEST_FILE_PENALTY"] = "0"
+    os.environ["HYBRID_CONFIG_FILE_PENALTY"] = "0"
+    os.environ["HYBRID_DOCUMENTATION_PENALTY"] = "0"
+    os.environ["HYBRID_VENDOR_PENALTY"] = "0"
+    os.environ["HYBRID_INTENT_IMPL_BOOST"] = "0"
+    os.environ["HYBRID_LANG_MATCH_BOOST"] = "0"
+    os.environ["HYBRID_RECENCY_WEIGHT"] = "0"
 
     # Set EMBEDDING_SEED for deterministic embeddings (like CoIR)
     os.environ.setdefault("EMBEDDING_SEED", "42")
