@@ -54,7 +54,12 @@ except ImportError:
 
 # Feature flag for embedding-based dynamic expansion
 # Set EMBEDDING_QUERY_EXPANSION=1 to enable
-EMBEDDING_EXPANSION_ENABLED = os.environ.get("EMBEDDING_QUERY_EXPANSION", "0") == "1"
+def _embedding_expansion_enabled() -> bool:
+    v = (os.environ.get("EMBEDDING_QUERY_EXPANSION", "0") or "0").strip().lower()
+    return v in {"1", "true", "yes", "on"}
+
+
+EMBEDDING_EXPANSION_ENABLED = _embedding_expansion_enabled()
 
 # Stop words for tokenization
 _STOP = {
@@ -189,6 +194,7 @@ CODE_SYNONYMS: Dict[str, List[str]] = {
     "integer": ["int", "number", "whole", "long"],
     "float": ["double", "decimal", "real", "number"],
     # === Strings & Text ===
+    "str": ["string", "text", "char"],
     "string": ["str", "text", "char", "varchar"],
     "text": ["string", "content", "message", "data"],
     "concat": ["join", "append", "combine", "merge"],
@@ -357,6 +363,12 @@ def expand_queries_weighted(
     client: "QdrantClient | None" = None,
     model: Any = None,
     collection: str | None = None,
+    *,
+    under: str | None = None,
+    kind: str | None = None,
+    symbol: str | None = None,
+    ext: str | None = None,
+    repo: str | list[str] | None = None,
 ) -> tuple[List[str], List[float]]:
     """
     Enhanced query expansion returning queries with fusion weights.
@@ -425,10 +437,20 @@ def expand_queries_weighted(
                 logger.debug(f"Semantic expansion failed: {e}")
 
     # 5. Embedding-based dynamic expansion (Tier 5 - weight 0.5)
-    if EMBEDDING_EXPANSION_ENABLED and client and model and collection:
+    if _embedding_expansion_enabled() and client and model and collection:
         try:
             embed_terms = expand_via_embeddings(
-                queries, client, model, collection, max_terms=max_extra
+                queries,
+                client,
+                model,
+                collection,
+                max_terms=max_extra,
+                language=language,
+                under=under,
+                kind=kind,
+                symbol=symbol,
+                ext=ext,
+                repo=repo,
             )
             for term in embed_terms:
                 if term not in seen:
@@ -452,6 +474,13 @@ def expand_via_embeddings(
     model: Any,
     collection: str,
     max_terms: int = 4,
+    *,
+    language: str | None = None,
+    under: str | None = None,
+    kind: str | None = None,
+    symbol: str | None = None,
+    ext: str | None = None,
+    repo: str | list[str] | None = None,
 ) -> List[str]:
     """
     Embedding-based dynamic expansion: query the vector space for semantically
@@ -479,6 +508,11 @@ def expand_via_embeddings(
     # Combine queries for a single embedding
     combined_query = " ".join(queries[:3])  # Use first 3 queries max
 
+    model_name = getattr(
+        model, "model_name", os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
+    )
+    model_dim = getattr(model, "dim", None)
+
     # Embed the query
     try:
         query_vectors = list(model.embed([combined_query]))
@@ -488,15 +522,115 @@ def expand_via_embeddings(
     except Exception:
         return []
 
+    vec_name = None
+    try:
+        from scripts.semantic_expansion import _select_vector_name as _select_vec_name
+    except Exception:
+        _select_vec_name = None
+    if _select_vec_name:
+        try:
+            vec_name = _select_vec_name(
+                client, collection, model_dim=model_dim, model_name=model_name
+            )
+        except Exception:
+            vec_name = None
+    if not vec_name:
+        try:
+            from scripts.utils import sanitize_vector_name as _sanitize_vector_name
+
+            vec_name = _sanitize_vector_name(model_name)
+        except Exception:
+            vec_name = None
+
+    def _norm_under(u: str | None) -> str | None:
+        if not u:
+            return None
+        u = str(u).strip().replace("\\", "/")
+        u = "/".join([p for p in u.split("/") if p])
+        if not u:
+            return None
+        if u.startswith("/work/"):
+            return u
+        if not u.startswith("/"):
+            return "/work/" + u
+        return "/work/" + u.lstrip("/")
+
+    flt = None
+    try:
+        from qdrant_client import models
+
+        must = []
+        if language:
+            must.append(
+                models.FieldCondition(
+                    key="metadata.language",
+                    match=models.MatchValue(value=language),
+                )
+            )
+        if under:
+            eff_under = _norm_under(under)
+            if eff_under:
+                must.append(
+                    models.FieldCondition(
+                        key="metadata.path_prefix",
+                        match=models.MatchValue(value=eff_under),
+                    )
+                )
+        if kind:
+            must.append(
+                models.FieldCondition(
+                    key="metadata.kind",
+                    match=models.MatchValue(value=kind),
+                )
+            )
+        if symbol:
+            must.append(
+                models.FieldCondition(
+                    key="metadata.symbol",
+                    match=models.MatchValue(value=symbol),
+                )
+            )
+        if ext:
+            ext_clean = str(ext).lower().lstrip(".")
+            if ext_clean:
+                must.append(
+                    models.FieldCondition(
+                        key="metadata.ext",
+                        match=models.MatchValue(value=ext_clean),
+                    )
+                )
+        if repo and repo != "*":
+            if isinstance(repo, list):
+                must.append(
+                    models.FieldCondition(
+                        key="metadata.repo",
+                        match=models.MatchAny(any=repo),
+                    )
+                )
+            else:
+                must.append(
+                    models.FieldCondition(
+                        key="metadata.repo",
+                        match=models.MatchValue(value=repo),
+                    )
+                )
+        if must:
+            flt = models.Filter(must=must)
+    except Exception:
+        flt = None
+
     # Search for soft matches (we want semantically similar docs, not exact matches)
     try:
-        results = client.search(
-            collection_name=collection,
-            query_vector=("code", query_vector),
-            limit=8,  # Get top 8 neighbors
-            with_payload=True,
-            score_threshold=0.3,  # Lower threshold to get more diverse results
-        )
+        search_kwargs = {
+            "collection_name": collection,
+            "query_vector": (vec_name, query_vector) if vec_name else query_vector,
+            "limit": 8,  # Get top 8 neighbors
+            "with_payload": True,
+            "score_threshold": 0.3,  # Lower threshold to get more diverse results
+        }
+        if flt is not None:
+            search_kwargs["query_filter"] = flt
+        results = client.search(**search_kwargs)
     except Exception:
         return []
 
@@ -511,7 +645,8 @@ def expand_via_embeddings(
         payload = hit.payload or {}
 
         # Extract symbol names
-        symbol = payload.get("symbol", "")
+        md = payload.get("metadata") or {}
+        symbol = payload.get("symbol") or md.get("symbol") or ""
         if symbol and len(symbol) > 2:
             # Split camelCase/snake_case
             parts = re.split(r"[_\s]+|(?<=[a-z])(?=[A-Z])", symbol)
@@ -521,7 +656,7 @@ def expand_via_embeddings(
                     extracted_terms.add(part_lower)
 
         # Extract tags if available
-        tags = payload.get("tags", [])
+        tags = payload.get("tags") or md.get("tags") or []
         if isinstance(tags, list):
             for tag in tags[:5]:
                 if isinstance(tag, str) and len(tag) > 2:
@@ -530,7 +665,7 @@ def expand_via_embeddings(
                         extracted_terms.add(tag_lower)
 
         # Extract terms from pseudo description
-        pseudo = payload.get("pseudo", "")
+        pseudo = payload.get("pseudo") or md.get("pseudo") or ""
         if pseudo and isinstance(pseudo, str):
             words = re.findall(r"\b[a-z]{3,}\b", pseudo.lower())
             for word in words[:5]:
@@ -687,4 +822,3 @@ def _prf_terms_from_results(
     # sort by frequency desc
     terms = sorted(freq.items(), key=lambda kv: kv[1], reverse=True)
     return [t for t, _ in terms[: max(1, max_terms)]]
-

@@ -1000,7 +1000,7 @@ def main():
     os.environ["REFRAG_PSEUDO_DESCRIBE"] = "0"
     os.environ["LLM_EXPAND_MAX"] = "0"  # Disable LLM query expansion
     os.environ["REFRAG_DECODER"] = "0"  # Disable decoder entirely
-    os.environ["REFRAG_RUNTIME"] = ""   # Clear runtime to prevent any LLM calls
+    # Note: REFRAG_RUNTIME is NOT cleared here to allow DENSE_LLM_EXPAND to work
 
     if args.pure_semantic:
         print("  [pure-semantic] LLM Pseudo disabled (already default)")
