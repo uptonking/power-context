@@ -129,7 +129,7 @@ def _select_dense_text(
     Dense captures the "what" (intent), lexical handles the "how" (code body).
     """
     mode = (
-        (str(mode) if mode is not None else str(os.environ.get("INDEX_DENSE_MODE", "code+info") or ""))
+        (str(mode) if mode is not None else str(os.environ.get("INDEX_DENSE_MODE", "info+pseudo+tags") or ""))
         .strip()
         .lower()
     )
@@ -1224,10 +1224,10 @@ def process_file_with_smart_reindexing(
 
         code_text = ch.get("text") or ""
         dense_mode = (
-            str(os.environ.get("INDEX_DENSE_MODE", "code+info") or "")
+            str(os.environ.get("INDEX_DENSE_MODE", "info+pseudo+tags") or "")
             .strip()
             .lower()
-            or "code+info"
+            or "info+pseudo+tags"
         )
         payload["dense_mode"] = dense_mode
         dense_text = _select_dense_text(
