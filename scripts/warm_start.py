@@ -1,26 +1,22 @@
 #!/usr/bin/env python3
 import os
 import argparse
+import sys
+from pathlib import Path
 from qdrant_client import QdrantClient, models
+
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from scripts.utils import sanitize_vector_name
 
 # Warm start: load embedding model and warm Qdrant HNSW search path with a small query
 # Useful to reduce first-query latency and set a higher runtime ef for quality
 
 
 def derive_vector_name(model_name: str) -> str:
-    name = model_name.strip().lower()
-    if "bge-base-en-v1.5" in name:
-        return "fast-bge-base-en-v1.5"
-    if "minilm" in name:
-        return "fast-all-minilm-l6-v2"
-    # Qwen3-Embedding ONNX model
-    if "qwen3-embedding" in name:
-        return "fast-qwen3-embedding-0.6b"
-    for ch in ["/", ".", " ", "_"]:
-        name = name.replace(ch, "-")
-    while "--" in name:
-        name = name.replace("--", "-")
-    return name
+    return sanitize_vector_name(model_name)
 
 
 def get_embedding_model(model_name: str):
