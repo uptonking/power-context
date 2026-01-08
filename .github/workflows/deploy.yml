@@ -3,7 +3,7 @@ name: Deploy Context Engine Landing Page
 on:
   push:
     branches:
-      - docs-site  # Only trigger on docs-site branch
+      - main  # Trigger on main branch
   workflow_dispatch: # Allow manual triggers
 
 permissions:
