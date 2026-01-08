@@ -37,6 +37,17 @@ DEFAULT_INSTRUCTION = (
     "Instruct: Given a code search query, retrieve relevant code snippets\nQuery:"
 )
 
+# BGE instruction prefix support (recommended by BGE authors for retrieval)
+# See: https://huggingface.co/BAAI/bge-base-en-v1.5
+BGE_QUERY_INSTRUCTION_ENABLED = (
+    str(os.environ.get("BGE_QUERY_INSTRUCTION", "1")).strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+BGE_QUERY_INSTRUCTION_TEXT = os.environ.get(
+    "BGE_QUERY_INSTRUCTION_TEXT",
+    "Represent this sentence for searching relevant passages:"
+)
+
 # Model cache and locks
 _EMBED_MODEL_CACHE: Dict[str, Any] = {}
 _EMBED_MODEL_LOCKS: Dict[str, threading.Lock] = {}
@@ -157,8 +168,15 @@ def get_query_instruction() -> str:
     return os.environ.get("QWEN3_INSTRUCTION_TEXT", DEFAULT_INSTRUCTION)
 
 
+def is_bge_model(model_name: Optional[str] = None) -> bool:
+    """Check if the model is a BGE model."""
+    if model_name is None:
+        model_name = os.environ.get("EMBEDDING_MODEL", DEFAULT_MODEL)
+    return "bge" in model_name.lower()
+
+
 def prefix_query(query: str, model_name: Optional[str] = None) -> str:
-    """Add instruction prefix to query if using Qwen3 with instructions enabled.
+    """Add instruction prefix to query if using Qwen3 or BGE with instructions enabled.
 
     Args:
         query: The search query text.
@@ -167,16 +185,20 @@ def prefix_query(query: str, model_name: Optional[str] = None) -> str:
     Returns:
         Query with instruction prefix (if applicable) or original query.
     """
-    if not QWEN3_QUERY_INSTRUCTION:
-        return query
-    if not is_qwen3_model(model_name):
-        return query
-    instruction = get_query_instruction()
-    return f"{instruction} {query}"
+    # Qwen3 instruction prefix
+    if QWEN3_QUERY_INSTRUCTION and is_qwen3_model(model_name):
+        instruction = get_query_instruction()
+        return f"{instruction} {query}"
+    
+    # BGE instruction prefix (recommended by BGE authors for retrieval)
+    if BGE_QUERY_INSTRUCTION_ENABLED and is_bge_model(model_name):
+        return f"{BGE_QUERY_INSTRUCTION_TEXT} {query}"
+    
+    return query
 
 
 def prefix_queries(queries: List[str], model_name: Optional[str] = None) -> List[str]:
-    """Add instruction prefix to multiple queries if using Qwen3.
+    """Add instruction prefix to multiple queries if using Qwen3 or BGE.
 
     Args:
         queries: List of search query texts.
@@ -185,12 +207,16 @@ def prefix_queries(queries: List[str], model_name: Optional[str] = None) -> List
     Returns:
         List of queries with instruction prefixes (if applicable).
     """
-    if not QWEN3_QUERY_INSTRUCTION:
-        return queries
-    if not is_qwen3_model(model_name):
-        return queries
-    instruction = get_query_instruction()
-    return [f"{instruction} {q}" for q in queries]
+    # Qwen3 instruction prefix
+    if QWEN3_QUERY_INSTRUCTION and is_qwen3_model(model_name):
+        instruction = get_query_instruction()
+        return [f"{instruction} {q}" for q in queries]
+    
+    # BGE instruction prefix
+    if BGE_QUERY_INSTRUCTION_ENABLED and is_bge_model(model_name):
+        return [f"{BGE_QUERY_INSTRUCTION_TEXT} {q}" for q in queries]
+    
+    return queries
 
 
 def get_model_dimension(model_name: Optional[str] = None) -> int:
