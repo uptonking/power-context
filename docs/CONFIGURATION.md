@@ -266,6 +266,21 @@ Set `REFRAG_RUNTIME` explicitly to choose a decoder backend:
 
 No auto-detection is performed to avoid surprise API calls. If `REFRAG_RUNTIME` is unset, it defaults to `llamacpp`.
 
+## Git History & Commit Indexing
+
+Settings for indexing git commit history and enabling commit-aware search.
+
+| Name | Description | Default |
+|------|-------------|---------|
+| REFRAG_COMMIT_DESCRIBE | Enable commit lineage goals for indexing | 1 (enabled) |
+| COMMIT_VECTOR_SEARCH | Enable vector search over commit messages | 0 (disabled) |
+| REMOTE_UPLOAD_GIT_MAX_COMMITS | Max commits per upload bundle (0 = no git history) | 500 |
+| GIT_HISTORY_PRUNE | Prune old git_message points on manifest ingest | 1 (enabled) |
+| GIT_HISTORY_DELETE_MANIFEST | Delete manifest files after successful ingest | 1 (enabled) |
+| GIT_HISTORY_MANIFEST_MAX_FILES | Cap manifest files per .remote-git dir (0 = unlimited) | 50 |
+
+**Note:** Git history indexing stores commit messages and metadata as searchable points. Use `search_commits_for` MCP tool to query.
+
 ## ReFRAG (Micro-Chunking & Retrieval)
 
 | Name | Description | Default |
