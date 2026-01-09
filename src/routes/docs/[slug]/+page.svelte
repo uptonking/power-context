@@ -61,6 +61,10 @@
 		margin-bottom: var(--spacing-lg);
 		text-align: center;
 		position: relative;
+		// Enhanced readability with darker background
+		background: rgba(0, 0, 0, 0.3);
+		border: 1px solid rgba(255, 255, 255, 0.15);
+		backdrop-filter: blur(30px);
 	}
 
 	.doc-badge {
@@ -87,12 +91,13 @@
 	}
 
 	.doc-description {
-		color: var(--text-secondary);
+		color: rgba(255, 255, 255, 0.85);
 		font-size: 1.1rem;
 		margin-bottom: var(--spacing-lg);
 		max-width: 600px;
 		margin-left: auto;
 		margin-right: auto;
+		text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
 	}
 
 	.doc-actions {
@@ -104,6 +109,10 @@
 	.doc-content {
 		padding: var(--spacing-xl);
 		line-height: 1.7;
+		// Enhanced readability with darker background
+		background: rgba(0, 0, 0, 0.4);
+		border: 1px solid rgba(255, 255, 255, 0.15);
+		backdrop-filter: blur(30px);
 
 		// Markdown content styling
 		:global(h1),
@@ -112,10 +121,11 @@
 		:global(h4),
 		:global(h5),
 		:global(h6) {
-			color: var(--text-primary);
+			color: rgba(255, 255, 255, 0.95);
 			margin-top: var(--spacing-xl);
 			margin-bottom: var(--spacing-md);
 			font-weight: 600;
+			text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
 		}
 
 		:global(h1) {
@@ -134,9 +144,10 @@
 		}
 
 		:global(p) {
-			color: var(--text-secondary);
+			color: rgba(255, 255, 255, 0.85);
 			margin-bottom: var(--spacing-md);
 			font-size: 1rem;
+			text-shadow: 0 1px 1px rgba(0, 0, 0, 0.2);
 		}
 
 		:global(ul),
@@ -146,33 +157,37 @@
 		}
 
 		:global(li) {
-			color: var(--text-secondary);
+			color: rgba(255, 255, 255, 0.85);
 			margin-bottom: var(--spacing-xs);
+			text-shadow: 0 1px 1px rgba(0, 0, 0, 0.2);
 		}
 
 		:global(code) {
-			background: rgba(0, 0, 0, 0.4);
-			padding: 2px 6px;
+			background: rgba(0, 0, 0, 0.6);
+			padding: 3px 8px;
 			border-radius: var(--radius-xs);
 			font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
 			font-size: 0.9rem;
-			color: #10b981;
-			border: 1px solid rgba(255, 255, 255, 0.1);
+			color: #22d3ee;
+			border: 1px solid rgba(34, 211, 238, 0.3);
+			text-shadow: 0 1px 1px rgba(0, 0, 0, 0.5);
 		}
 
 		:global(pre) {
-			background: rgba(0, 0, 0, 0.6) !important;
+			background: rgba(0, 0, 0, 0.8) !important;
 			padding: var(--spacing-md);
 			border-radius: var(--radius-sm);
 			overflow-x: auto;
 			margin: var(--spacing-md) 0;
-			border: 1px solid rgba(255, 255, 255, 0.1);
+			border: 1px solid rgba(255, 255, 255, 0.2);
+			box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.3);
 
 			:global(code) {
 				background: none !important;
 				padding: 0;
 				border: none;
 				color: inherit;
+				text-shadow: none;
 			}
 		}
 
@@ -191,26 +206,29 @@
 			width: 100%;
 			border-collapse: collapse;
 			margin: var(--spacing-md) 0;
-			background: rgba(255, 255, 255, 0.02);
+			background: rgba(0, 0, 0, 0.4);
 			border-radius: var(--radius-sm);
 			overflow: hidden;
+			border: 1px solid rgba(255, 255, 255, 0.15);
 		}
 
 		:global(th),
 		:global(td) {
 			padding: var(--spacing-sm);
 			text-align: left;
-			border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+			border-bottom: 1px solid rgba(255, 255, 255, 0.15);
 		}
 
 		:global(th) {
-			background: rgba(255, 255, 255, 0.05);
-			color: var(--text-primary);
+			background: rgba(0, 0, 0, 0.4);
+			color: rgba(255, 255, 255, 0.95);
 			font-weight: 600;
+			text-shadow: 0 1px 1px rgba(0, 0, 0, 0.3);
 		}
 
 		:global(td) {
-			color: var(--text-secondary);
+			color: rgba(255, 255, 255, 0.85);
+			text-shadow: 0 1px 1px rgba(0, 0, 0, 0.2);
 		}
 
 		:global(a) {
