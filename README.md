@@ -213,11 +213,11 @@ Python, TypeScript/JavaScript, Go, Java, Rust, C#, PHP, Shell, Terraform, YAML, 
 
 ## Benchmarks
 
-### CoSQA (Dense Retrieval)
+### CoSQA (Dense Retrieval, No Rerank)
 
 | Method | MRR | R@1 | R@5 | R@10 | NDCG@10 |
 |--------|-----|-----|-----|------|---------|
-| **Context-Engine (BGE-base)** | **0.245** | 0.136 | 0.408 | 0.566 | 0.320 |
+| **Context-Engine (BGE-base)** | **0.253** | 0.150 | 0.374 | 0.550 | 0.322 |
 | CodeT5+ embedding | 0.266 | - | - | - | - |
 | BM25 (Lucene) | 0.167 | - | - | - | - |
 | BoW | 0.065 | - | - | - | - |

@@ -196,6 +196,14 @@ def is_arctic_model(model_name: Optional[str] = None) -> bool:
     return "arctic" in model_lower or "snowflake" in model_lower
 
 
+def is_jina_code_model(model_name: Optional[str] = None) -> bool:
+    """Check if the model is Jina's code-specific embedding model."""
+    if model_name is None:
+        model_name = os.environ.get("EMBEDDING_MODEL", DEFAULT_MODEL)
+    model_lower = model_name.lower()
+    return "jina" in model_lower and "code" in model_lower
+
+
 def prefix_query(query: str, model_name: Optional[str] = None) -> str:
     """Add instruction prefix to query if using Qwen3, BGE, or Arctic with instructions enabled.
 
