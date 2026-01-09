@@ -543,18 +543,32 @@ async def run_cosqa_benchmark(
         "rerank_top_n": scaled_top_n,
         "query_count": len(queries),
         "mode": mode,
-        # Capture reranker config for reproducibility
+        # Capture full config for reproducibility and auditability
         "env": {
+            # Embedding & Model
+            "EMBEDDING_MODEL": os.environ.get("EMBEDDING_MODEL", ""),
+            "INDEX_DENSE_MODE": os.environ.get("INDEX_DENSE_MODE", ""),
+            # Reranker
             "RERANKER_MODEL": os.environ.get("RERANKER_MODEL", ""),
             "RERANK_IN_PROCESS": os.environ.get("RERANK_IN_PROCESS", ""),
             "RERANK_LEARNING": os.environ.get("RERANK_LEARNING", ""),
+            # Hybrid search
             "HYBRID_IN_PROCESS": os.environ.get("HYBRID_IN_PROCESS", ""),
             "HYBRID_EXPAND": os.environ.get("HYBRID_EXPAND", ""),
             "HYBRID_PER_QUERY": os.environ.get("HYBRID_PER_QUERY", ""),
             "SEMANTIC_EXPANSION_ENABLED": os.environ.get("SEMANTIC_EXPANSION_ENABLED", ""),
             "HYBRID_LEXICAL_TEXT_MODE": os.environ.get("HYBRID_LEXICAL_TEXT_MODE", ""),
-            "EMBEDDING_MODEL": os.environ.get("EMBEDDING_MODEL", ""),
             "QDRANT_TIMEOUT": os.environ.get("QDRANT_TIMEOUT", ""),
+            # Boost/penalty settings (should all be "0" for fair benchmarks)
+            "FNAME_BOOST": os.environ.get("FNAME_BOOST", ""),
+            "HYBRID_SYMBOL_BOOST": os.environ.get("HYBRID_SYMBOL_BOOST", ""),
+            "HYBRID_IMPLEMENTATION_BOOST": os.environ.get("HYBRID_IMPLEMENTATION_BOOST", ""),
+            "HYBRID_TEST_FILE_PENALTY": os.environ.get("HYBRID_TEST_FILE_PENALTY", ""),
+            "POST_RERANK_SYMBOL_BOOST": os.environ.get("POST_RERANK_SYMBOL_BOOST", ""),
+            # LLM features (should be "0" for baseline benchmarks)
+            "REFRAG_PSEUDO_DESCRIBE": os.environ.get("REFRAG_PSEUDO_DESCRIBE", ""),
+            "LLM_EXPAND_MAX": os.environ.get("LLM_EXPAND_MAX", ""),
+            "DENSE_LLM_EXPAND": os.environ.get("DENSE_LLM_EXPAND", ""),
         },
     }
     if subset_note:
@@ -982,6 +996,8 @@ def main():
                         help="Spawn learning reranker worker during the run (enables learning + event logging)")
     parser.add_argument("--pure-semantic", action="store_true",
                         help="Disable FNAME_BOOST and other heuristics (old hardened mode)")
+    parser.add_argument("--enable-llm", action="store_true",
+                        help="Enable search-time LLM query expansion (for semantic-rich eval)")
     # Generate default output filename with timestamp
     default_output = f"cosqa_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
     parser.add_argument("--output", type=str, default=default_output,
@@ -1029,14 +1045,18 @@ def main():
         print("  [mode=lexical] Pure lexical search enabled (no dense embeddings)")
 
     # Disable all LLM calls by default for fast benchmarking
-    # Use heuristic tags instead of LLM-generated pseudo/tags
-    os.environ["REFRAG_PSEUDO_DESCRIBE"] = "0"
-    os.environ["LLM_EXPAND_MAX"] = "0"  # Disable LLM query expansion
-    os.environ["REFRAG_DECODER"] = "0"  # Disable decoder entirely
-    # Note: REFRAG_RUNTIME is NOT cleared here to allow DENSE_LLM_EXPAND to work
+    # Use --enable-llm to enable search-time LLM query expansion
+    # Note: GLM pseudo/tags at index time is controlled by .env (REFRAG_PSEUDO_DESCRIBE=1) + reindex
+    if not args.enable_llm:
+        os.environ["LLM_EXPAND_MAX"] = "0"  # Disable LLM query expansion
+        os.environ["REFRAG_DECODER"] = "0"  # Disable decoder entirely
+    else:
+        # Enable search-time LLM query expansion
+        os.environ.setdefault("LLM_EXPAND_MAX", "3")
+        print("  [enable-llm] LLM query expansion ENABLED (search-time)")
 
     if args.pure_semantic:
-        print("  [pure-semantic] LLM Pseudo disabled (already default)")
+        print("  [pure-semantic] Boosts disabled (now default behavior)")
 
     # Set reranker model paths (relative to project root)
     _project_root = Path(__file__).parent.parent.parent.parent
