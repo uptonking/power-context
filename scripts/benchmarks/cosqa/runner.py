@@ -829,6 +829,7 @@ async def run_full_benchmark(
     mode: str = "hybrid",
     recreate_index: bool = False,
     index_only: bool = False,
+    skip_index: bool = False,
 ) -> CoSQAReport:
     """Run complete CoSQA benchmark: download, index, evaluate.
 
@@ -895,9 +896,13 @@ async def run_full_benchmark(
     if corpus_limit:
         print(f"  Limited corpus to {len(corpus)} entries")
 
-    # Check if already indexed (use fingerprint matching, not just points_count)
-    # The indexer handles fingerprint checking internally and will recreate if needed
-    result = index_corpus(corpus, collection=collection, recreate=recreate_index)
+    if skip_index:
+        print("  [skip-index] Skipping indexing...")
+        result = {"reused": True, "indexed": len(corpus), "skipped": 0, "errors": 0}
+    else:
+        # Check if already indexed (use fingerprint matching, not just points_count)
+        # The indexer handles fingerprint checking internally and will recreate if needed
+        result = index_corpus(corpus, collection=collection, recreate=recreate_index)
     if result.get("reused"):
         print(f"  Corpus already indexed (fingerprint match, {result.get('indexed', 0)} entries)")
         # Warn if current config doesn't match how collection was indexed
@@ -987,8 +992,10 @@ def main():
                         help="Re-run failed queries with detailed debug output")
     parser.add_argument("--index-only", action="store_true",
                         help="Run ingestion only and exit")
-    parser.add_argument("--mode", type=str, default="hybrid", choices=["hybrid", "dense"],
-                        help="Search mode: 'hybrid' (default) or 'dense' (pure semantic, no lexical)")
+    parser.add_argument("--skip-index", action="store_true",
+                        help="Skip indexing if collection already exists")
+    parser.add_argument("--mode", type=str, default="hybrid", choices=["hybrid", "dense", "lexical"],
+                        help="Search mode: 'hybrid' (default), 'dense' (pure semantic), or 'lexical' (pure BM25-style)")
     args = parser.parse_args()
 
     # Enable Context-Engine features for accurate benchmarking.
@@ -1011,6 +1018,15 @@ def main():
         print("  [mode=dense] Pure semantic search enabled (no lexical, no expansion)")
         # NOTE: Previously auto-disabled rerank for dense mode, but we want to test dense+rerank
         # Use --no-rerank explicitly if you want dense without reranking
+
+    # Handle --mode lexical: pure lexical search without dense components
+    elif args.mode == "lexical":
+        os.environ["HYBRID_DENSE_WEIGHT"] = "0"
+        os.environ["HYBRID_LEXICAL_WEIGHT"] = "1.0"
+        os.environ["HYBRID_LEX_VECTOR_WEIGHT"] = "1.0"
+        os.environ["HYBRID_EXPAND"] = "0"
+        os.environ["SEMANTIC_EXPANSION_ENABLED"] = "0"
+        print("  [mode=lexical] Pure lexical search enabled (no dense embeddings)")
 
     # Disable all LLM calls by default for fast benchmarking
     # Use heuristic tags instead of LLM-generated pseudo/tags
@@ -1069,6 +1085,7 @@ def main():
             mode=args.mode,
             recreate_index=args.recreate,
             index_only=args.index_only,
+            skip_index=args.skip_index,
         ))
     finally:
         if learning_proc and learning_proc.poll() is None:
