@@ -233,6 +233,9 @@ RERANK_EVENTS_ENABLED=0
 | RERANK_LEARNING_BATCH_SIZE | Number of events per training batch | 32 |
 | RERANK_LEARNING_POLL_INTERVAL | Seconds between checking for new events | 30 |
 | RERANK_LEARNING_RATE | Initial learning rate for TinyScorer | 0.001 |
+| RERANK_LLM_TEACHER | Enable LLM-teacher guided learning | 1 (enabled) |
+| RERANK_LLM_SAMPLE_RATE | Fraction of queries to evaluate with LLM teacher | 1.0 |
+| RERANK_VICREG_WEIGHT | Weight for VICReg consistency loss | 0.1 |
 
 ## Decoder (llama.cpp / OpenAI / GLM / MiniMax)
 
@@ -311,6 +314,34 @@ REFRAG_RUNTIME=glm  # or openai, minimax, llamacpp
 
 **Note:** This significantly increases indexing time and API costs. Best used with batch concurrency (`PSEUDO_BATCH_CONCURRENCY=4`).
 
+### Pseudo Backfill Worker
+
+Deferred pseudo/tag generation runs asynchronously after initial indexing.
+
+| Name | Description | Default |
+|------|-------------|---------|
+| PSEUDO_BACKFILL_ENABLED | Enable async pseudo/tag backfill worker | 0 (disabled) |
+| PSEUDO_DEFER_TO_WORKER | Skip inline pseudo, defer to backfill worker | 0 (disabled) |
+
+### Adaptive Span Sizing
+
+Expand search hits to full symbol boundaries for better context.
+
+| Name | Description | Default |
+|------|-------------|---------|
+| ADAPTIVE_SPAN_SIZING | Expand hits to encompassing symbol boundaries | 1 (enabled) |
+| DEBUG_ADAPTIVE_SPAN | Enable debug logging for span expansion | 0 (disabled) |
+
+### Context Answer Shaping
+
+Controls output formatting for `context_answer` responses.
+
+| Name | Description | Default |
+|------|-------------|---------|
+| CTX_SUMMARY_CHARS | Max chars for summary (0 = disabled) | 0 |
+| CTX_SNIPPET_CHARS | Max chars per code snippet | 400 |
+| DEBUG_CONTEXT_ANSWER | Enable debug logging for context_answer | 0 (disabled) |
+
 ### Mini Vector Gating
 
 Compact 64-dim vectors for fast candidate filtering before full dense search.
@@ -388,8 +419,23 @@ To use legacy settings (pre-v2): `LEX_VECTOR_DIM=4096 LEX_MULTI_HASH=1 LEX_BIGRA
 | RERANK_IN_PROCESS | Run reranker in-process (faster, falls back to subprocess) | 1 (enabled) |
 | PARALLEL_DENSE_QUERIES | Enable parallel dense query execution | 1 (enabled) |
 | PARALLEL_DENSE_THRESHOLD | Min queries to trigger parallelization | 4 |
+| HYBRID_SYMBOL_BOOST | Score boost for exact symbol matches | 0.35 |
+| HYBRID_RECENCY_WEIGHT | Weight for recently modified files | 0.1 |
+| HYBRID_PER_PATH | Max results per file path | 2 |
+| HYBRID_SNIPPET_DISK_READ | Allow snippet scoring to read file contents | 1 (enabled) |
+| PRF_ENABLED | Enable Pseudo-Relevance Feedback (refined second pass) | 1 (enabled) |
+| RERANK_EXPAND | Expand candidates before reranking | 1 (enabled) |
+| REPO_SEARCH_DEFAULT_LIMIT | Default result limit for repo_search | 10 |
 
 **Note:** `REPO_AUTO_FILTER=0` disables automatic repo scoping, useful for benchmarks or cross-repo searches.
+
+### Caching
+
+| Name | Description | Default |
+|------|-------------|---------|
+| MAX_EMBED_CACHE | Max cached embeddings | 16384 |
+| HYBRID_RESULTS_CACHE | Max cached search results | 128 |
+| HYBRID_RESULTS_CACHE_ENABLED | Enable search result caching | 1 (enabled) |
 
 ### Semantic Expansion
 
@@ -457,6 +503,18 @@ Simplified codebase retrieval with optional explanation mode.
 |------|-------------|---------|
 | INFO_REQUEST_LIMIT | Default result limit for info_request queries | 10 |
 | INFO_REQUEST_CONTEXT_LINES | Context lines in snippets (richer than repo_search) | 5 |
+
+## Output Formatting
+
+### TOON (Token-Oriented Object Notation)
+
+Compact output format that reduces token usage by 40-60%.
+
+| Name | Description | Default |
+|------|-------------|---------|
+| TOON_ENABLED | Enable TOON format by default for all search output | 0 (disabled) |
+
+Set `output_format="toon"` per-call, or enable globally via `TOON_ENABLED=1`.
 
 ## Memory Blending
 
