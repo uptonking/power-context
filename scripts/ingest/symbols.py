@@ -33,7 +33,7 @@ class _Sym(dict):
 # Python symbol extraction (using built-in ast)
 # ---------------------------------------------------------------------------
 def _extract_symbols_python(text: str) -> List[_Sym]:
-    """Extract symbols from Python code using the ast module."""
+    """Extract symbols from Python code using the ast module (fallback for tree-sitter)."""
     try:
         tree = ast.parse(text)
     except Exception:

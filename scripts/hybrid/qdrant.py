@@ -595,21 +595,24 @@ def dense_query(
     query_text: str | None = None
 ) -> List[Any]:
     """Query using dense embedding vector."""
+    # Default EF: scale with per_query for adequate recall
     ef = max(EF_SEARCH, 32 + 4 * int(per_query))
 
     # Apply dynamic EF optimization if query text provided
-    try:
-        from scripts.query_optimizer import optimize_query
-        if query_text and os.environ.get("QUERY_OPTIMIZER_ADAPTIVE", "1") == "1":
+    if query_text:
+        try:
+            from scripts.query_optimizer import optimize_query
             result = optimize_query(query_text)
-            ef = result["recommended_ef"]
+            # Only override EF when adaptive optimization is enabled
+            if result.get("adaptive_enabled", False):
+                ef = result["recommended_ef"]
+                if os.environ.get("DEBUG_HYBRID_SEARCH"):
+                    logger.debug(f"Dynamic EF: {ef} (complexity={result['complexity']}, type={result['query_type']})")
+        except ImportError:
+            pass
+        except Exception as e:
             if os.environ.get("DEBUG_HYBRID_SEARCH"):
-                logger.debug(f"Dynamic EF: {ef} (complexity={result['complexity']}, type={result['query_type']})")
-    except ImportError:
-        pass
-    except Exception as e:
-        if os.environ.get("DEBUG_HYBRID_SEARCH"):
-            logger.debug(f"Query optimizer failed, using default EF: {e}")
+                logger.debug(f"Query optimizer failed, using default EF: {e}")
 
     flt = _sanitize_filter_obj(flt)
     collection = _collection(collection_name)

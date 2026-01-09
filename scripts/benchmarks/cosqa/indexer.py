@@ -32,21 +32,77 @@ DEFAULT_COLLECTION = "cosqa-corpus"
 DEFAULT_BATCH_SIZE = 100
 
 
-def _extract_docstring(code: str) -> str:
-    """Extract docstring from Python code using AST (mirrors production pipeline)."""
+def _extract_docstring_treesitter(code: str) -> str:
+    """Extract docstring from Python code using tree-sitter (preferred)."""
+    try:
+        from scripts.ingest.tree_sitter import _ts_parser
+        
+        parser = _ts_parser("python")
+        if parser is None:
+            return ""
+        
+        tree = parser.parse(code.encode("utf-8"))
+        root = tree.root_node
+        
+        # Find first function_definition or class_definition
+        def find_first_def(node):
+            if node.type in ("function_definition", "class_definition"):
+                return node
+            for child in node.children:
+                result = find_first_def(child)
+                if result:
+                    return result
+            return None
+        
+        def_node = find_first_def(root)
+        if def_node is None:
+            return ""
+        
+        # Look for expression_statement with string as first child of block/body
+        for child in def_node.children:
+            if child.type == "block":
+                for stmt in child.children:
+                    if stmt.type == "expression_statement":
+                        for expr in stmt.children:
+                            if expr.type == "string":
+                                # Extract string content, strip quotes
+                                text = code[expr.start_byte:expr.end_byte]
+                                # Remove triple quotes
+                                if text.startswith('"""') and text.endswith('"""'):
+                                    return text[3:-3].strip()
+                                if text.startswith("'''") and text.endswith("'''"):
+                                    return text[3:-3].strip()
+                                return text.strip('"\'').strip()
+                        break  # Only check first statement
+                break
+        return ""
+    except Exception:
+        return ""
+
+
+def _extract_docstring_ast(code: str) -> str:
+    """Extract docstring from Python code using ast (fallback, may emit SyntaxWarnings)."""
     import ast
     try:
         tree = ast.parse(code)
-        # Look for first function or class definition
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 docstring = ast.get_docstring(node)
                 if docstring:
                     return docstring
-        # Also check module-level docstring
         return ast.get_docstring(tree) or ""
     except Exception:
         return ""
+
+
+def _extract_docstring(code: str) -> str:
+    """Extract docstring from Python code. Uses tree-sitter (no warnings), falls back to ast."""
+    # Try tree-sitter first (handles invalid escape sequences gracefully)
+    result = _extract_docstring_treesitter(code)
+    if result:
+        return result
+    # Fallback to ast with warning suppression
+    return _extract_docstring_ast(code)
 
 
 def cosqa_entry_to_doc(entry: Dict[str, Any]) -> BenchmarkDoc:

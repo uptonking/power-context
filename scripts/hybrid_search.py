@@ -501,7 +501,7 @@ def run_pure_dense_search(
 
     try:
         # Single dense query - no pooling, no re-scoring
-        ranked_points = dense_query(client, vec_name, vec_list, flt, limit, coll)
+        ranked_points = dense_query(client, vec_name, vec_list, flt, limit, coll, query_text=query)
 
         # Build output
         results = []
@@ -509,9 +509,12 @@ def run_pure_dense_search(
             payload = p.payload or {}
             md = payload.get("metadata") or {}
 
+            # Prefer host_path when available (consistent with hybrid search)
+            _path = md.get("host_path") or payload.get("path") or md.get("path") or ""
+
             results.append({
                 "score": float(getattr(p, "score", 0) or 0),
-                "path": payload.get("path") or md.get("path") or "",
+                "path": _path,
                 "symbol": payload.get("symbol") or md.get("symbol") or "",
                 "start_line": int(md.get("start_line") or 0),
                 "end_line": int(md.get("end_line") or 0),
@@ -1293,7 +1296,7 @@ def _run_hybrid_search_impl(
                 flt_gated,
                 _scaled_per_query,
                 collection,
-                query_text=queries[i] if i < len(queries) else None,
+                query_text=qlist_for_embed[i] if i < len(qlist_for_embed) else None,
             )
             for i, v in enumerate(embedded)
         ]
@@ -1307,7 +1310,7 @@ def _run_hybrid_search_impl(
                 flt_gated,
                 _scaled_per_query,
                 collection,
-                query_text=queries[i] if i < len(queries) else None,
+                query_text=qlist_for_embed[i] if i < len(qlist_for_embed) else None,
             )
             for i, v in enumerate(embedded)
         ]

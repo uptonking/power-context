@@ -394,7 +394,12 @@ class ASTAnalyzer:
     # ---- Python-specific analysis (using ast module) ----
 
     def _analyze_python(self, content: str, file_path: str) -> Dict[str, Any]:
-        """Analyze Python code using ast module, with tree-sitter fallback for Python 2."""
+        """Analyze Python code. Prefers tree-sitter, falls back to ast module."""
+        # Prefer tree-sitter: handles Python 2/3, no SyntaxWarnings for escape sequences
+        if self.use_tree_sitter and "python" in _TS_LANGUAGES:
+            return self._analyze_python_treesitter(content, file_path)
+        
+        # Fallback to ast module (may emit SyntaxWarnings on Python 3.12+ for invalid escapes)
         try:
             tree = ast.parse(content)
         except SyntaxError as e:
