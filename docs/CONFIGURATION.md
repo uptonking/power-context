@@ -15,6 +15,7 @@ Complete environment variable reference for Context Engine.
 - [Reranker](#reranker)
 - [Learning Reranker](#learning-reranker)
 - [Decoder (llama.cpp / OpenAI / GLM / MiniMax)](#decoder-llamacpp--openai--glm--minimax)
+- [Git History & Commit Indexing](#git-history--commit-indexing)
 - [ReFRAG](#refrag)
 - [Pattern Search](#pattern-search)
 - [Lexical Vector Settings](#lexical-vector-settings)
@@ -97,6 +98,8 @@ make reset-dev-dual  # Recreates collection and reindexes
 | INDEX_CHUNK_OVERLAP | Overlap lines between chunks | 20 |
 | INDEX_BATCH_SIZE | Upsert batch size | 64 |
 | INDEX_PROGRESS_EVERY | Log progress every N files | 200 |
+| SMART_SYMBOL_REINDEXING | Reuse embeddings when only symbols change | 1 (enabled) |
+| MAX_CHANGED_SYMBOLS_RATIO | Threshold for full reindex vs smart update | 0.6 |
 
 ## Query Optimization
 
