@@ -300,14 +300,15 @@ async def _repo_search_impl(
         os.environ.get("RERANKER_ENABLED", "1")
     ).strip().lower() in {"1", "true", "yes", "on"}
     rerank_enabled = _to_bool(rerank_enabled, rerank_env_default)
+    # Default rerank_top_n=20 balances quality vs latency; increase for benchmarks
     rerank_top_n = _to_int(
-        rerank_top_n, int(os.environ.get("RERANKER_TOPN", "50") or 50)
+        rerank_top_n, int(os.environ.get("RERANKER_TOPN", "20") or 20)
     )
     rerank_return_m = _to_int(
-        rerank_return_m, int(os.environ.get("RERANKER_RETURN_M", "12") or 12)
+        rerank_return_m, int(os.environ.get("RERANKER_RETURN_M", "20") or 20)
     )
     rerank_timeout_ms = _to_int(
-        rerank_timeout_ms, int(os.environ.get("RERANKER_TIMEOUT_MS", "120") or 120)
+        rerank_timeout_ms, int(os.environ.get("RERANKER_TIMEOUT_MS", "3000") or 3000)
     )
     highlight_snippet = _to_bool(highlight_snippet, True)
 
