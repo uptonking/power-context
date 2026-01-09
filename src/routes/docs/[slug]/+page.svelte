@@ -218,16 +218,17 @@
 			border-radius: var(--radius-sm);
 			overflow: hidden;
 			border: 1px solid rgba(255, 255, 255, 0.15);
-			// Mobile responsiveness for tables
-			display: block;
-			overflow-x: auto;
-			white-space: nowrap;
 		}
 
 		// Mobile table optimizations
 		@media (max-width: 768px) {
 			:global(table) {
 				font-size: 0.85rem;
+				// Enable horizontal scrolling only on tablets and smaller
+				display: block;
+				overflow-x: auto;
+				white-space: nowrap;
+				-webkit-overflow-scrolling: touch;
 			}
 		}
 
