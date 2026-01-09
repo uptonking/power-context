@@ -430,9 +430,16 @@ async def _fallback_semantic_search(
             limit=limit,
             language=language,
             session=session,
+            output_format="json",  # Avoid TOON encoding for internal calls
         )
 
-        return search_result.get("results", [])
+        # Handle case where results might be TOON-encoded string (shouldn't happen with output_format="json")
+        results = search_result.get("results", [])
+        if isinstance(results, str):
+            # If somehow still a string, return empty - TOON decoding is not worth it here
+            logger.debug("Fallback search returned TOON-encoded results, skipping")
+            return []
+        return results
 
     except Exception as e:
         logger.warning(f"Fallback semantic search failed: {e}")
