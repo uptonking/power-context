@@ -185,6 +185,8 @@
 			margin: var(--spacing-md) 0;
 			border: 1px solid rgba(255, 255, 255, 0.2);
 			box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.3);
+			// Improve mobile scrolling
+			-webkit-overflow-scrolling: touch;
 
 			:global(code) {
 				background: none !important;
@@ -192,6 +194,8 @@
 				border: none;
 				color: inherit;
 				text-shadow: none;
+				// Better mobile text size
+				font-size: 0.85rem;
 			}
 		}
 
@@ -214,6 +218,75 @@
 			border-radius: var(--radius-sm);
 			overflow: hidden;
 			border: 1px solid rgba(255, 255, 255, 0.15);
+			// Mobile responsiveness for tables
+			display: block;
+			overflow-x: auto;
+			white-space: nowrap;
+		}
+
+		// Mobile table optimizations
+		@media (max-width: 768px) {
+			:global(table) {
+				font-size: 0.85rem;
+			}
+		}
+
+		@media (max-width: 480px) {
+			:global(table) {
+				font-size: 0.8rem;
+			}
+
+			// Convert tables to cards on very small screens
+			:global(table tbody),
+			:global(table thead),
+			:global(table tr),
+			:global(table td),
+			:global(table th) {
+				display: block;
+				white-space: normal;
+			}
+
+			:global(table thead tr) {
+				position: absolute;
+				top: -9999px;
+				left: -9999px;
+			}
+
+			:global(table tr) {
+				border: 1px solid rgba(255, 255, 255, 0.1);
+				margin-bottom: var(--spacing-sm);
+				padding: var(--spacing-sm);
+				border-radius: var(--radius-sm);
+				background: rgba(0, 0, 0, 0.2);
+			}
+
+			:global(table td) {
+				border: none;
+				border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+				position: relative;
+				padding: var(--spacing-xs) var(--spacing-sm) var(--spacing-xs) 35%;
+
+				&:before {
+					position: absolute;
+					left: var(--spacing-sm);
+					top: var(--spacing-xs);
+					width: 30%;
+					white-space: nowrap;
+					font-weight: bold;
+					color: rgba(255, 255, 255, 0.9);
+				}
+			}
+
+			// Add labels for common table structures
+			:global(table td:nth-child(1):before) {
+				content: 'Name: ';
+			}
+			:global(table td:nth-child(2):before) {
+				content: 'Description: ';
+			}
+			:global(table td:nth-child(3):before) {
+				content: 'Default: ';
+			}
 		}
 
 		:global(th),
@@ -267,6 +340,50 @@
 
 		.doc-content {
 			padding: var(--spacing-lg);
+			// Better mobile text sizing
+			font-size: 0.95rem;
+			line-height: 1.6;
+		}
+
+		.doc-header {
+			padding: var(--spacing-md);
+			margin-bottom: var(--spacing-md);
+		}
+	}
+
+	@media (max-width: 480px) {
+		.container {
+			padding: 0 var(--spacing-sm);
+		}
+
+		.doc-title {
+			font-size: 1.75rem;
+		}
+
+		.doc-content {
+			padding: var(--spacing-md);
+			font-size: 0.9rem;
+
+			// Better spacing for mobile
+			:global(h1) {
+				font-size: 1.75rem;
+			}
+
+			:global(h2) {
+				font-size: 1.5rem;
+			}
+
+			:global(h3) {
+				font-size: 1.25rem;
+			}
+		}
+
+		.doc-header {
+			padding: var(--spacing-sm);
+
+			.doc-badge {
+				font-size: 0.8rem;
+			}
 		}
 	}
 </style>
