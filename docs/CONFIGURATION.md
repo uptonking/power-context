@@ -17,8 +17,10 @@ Complete environment variable reference for Context Engine.
 - [Decoder (llama.cpp / OpenAI / GLM / MiniMax)](#decoder-llamacpp--openai--glm--minimax)
 - [ReFRAG](#refrag)
 - [Pattern Search](#pattern-search)
+- [Lexical Vector Settings](#lexical-vector-settings)
 - [Ports](#ports)
 - [Search & Expansion](#search--expansion)
+- [info_request Tool](#info_request-tool)
 - [Memory Blending](#memory-blending)
 
 ---
@@ -31,6 +33,8 @@ Complete environment variable reference for Context Engine.
 | REPO_NAME | Logical repo tag stored in payload for filtering | auto-detect from git/folder |
 | HOST_INDEX_PATH | Host path mounted at /work in containers | current repo (.) |
 | QDRANT_URL | Qdrant base URL | container: http://qdrant:6333; local: http://localhost:6333 |
+| MULTI_REPO_MODE | Enable multi-repo collections (each subdir gets own collection) | 0 (disabled) |
+| LOG_LEVEL | Logging verbosity: DEBUG, INFO, WARNING, ERROR, CRITICAL | INFO |
 
 ## Embedding Models
 
@@ -44,6 +48,7 @@ The default configuration uses `BAAI/bge-base-en-v1.5` via fastembed:
 |------|-------------|---------|
 | EMBEDDING_MODEL | Model name for dense embeddings | BAAI/bge-base-en-v1.5 |
 | EMBEDDING_PROVIDER | Backend provider | fastembed |
+| EMBEDDING_SEED | Seed for deterministic embeddings (used in benchmarks) | unset |
 
 ### Qwen3-Embedding (Experimental)
 
@@ -158,6 +163,19 @@ For custom models or explicit control, set both ONNX path and tokenizer:
 
 **Note:** If both `RERANKER_MODEL` and `RERANKER_ONNX_PATH` are set, `RERANKER_MODEL` takes priority.
 
+### Reranker Tuning
+
+| Name | Description | Default |
+|------|-------------|---------|
+| RERANKER_TOPN | Candidates to retrieve before reranking | 50 |
+| RERANKER_RETURN_M | Final results after reranking | 12 |
+| RERANKER_TIMEOUT_MS | Rerank timeout in milliseconds | 2000 |
+| RERANK_BLEND_WEIGHT | Ratio of rerank vs fusion score (0.0-1.0) | 0.6 |
+| RERANK_TIMEOUT_FLOOR_MS | Min timeout to avoid cold-start failures | 1000 |
+| POST_RERANK_SYMBOL_BOOST | Score boost for exact symbol matches after rerank | 1.0 |
+| EMBEDDING_WARMUP | Warm up embedding model on startup | 0 (disabled) |
+| RERANK_WARMUP | Warm up reranker model on startup | 0 (disabled) |
+
 ## Learning Reranker
 
 The learning reranker trains a lightweight neural network (TinyScorer) to improve search rankings over time. See [Architecture](ARCHITECTURE.md#5-learning-reranker-system) for details.
@@ -255,12 +273,36 @@ No auto-detection is performed to avoid surprise API calls. If `REFRAG_RUNTIME` 
 | REFRAG_MODE | Enable micro-chunking and span budgeting | 1 (enabled) |
 | REFRAG_GATE_FIRST | Enable mini-vector gating | 1 (enabled) |
 | REFRAG_CANDIDATES | Candidates for gate-first filtering | 200 |
+| REFRAG_PSEUDO_DESCRIBE | Enable LLM-based pseudo/tags generation during indexing | 0 (disabled) |
 | MICRO_BUDGET_TOKENS | Token budget for context_answer | 5000 (GLM: 6000-8192) |
 | MICRO_OUT_MAX_SPANS | Max spans returned per query | 8 (GLM: 24) |
 | MICRO_CHUNK_TOKENS | Tokens per micro-chunk window | 16 |
 | MICRO_CHUNK_STRIDE | Stride between windows | 8 |
 | MICRO_MERGE_LINES | Lines to merge adjacent spans | 4 |
 | MICRO_TOKENS_PER_LINE | Estimated tokens per line | 32 |
+
+**LLM-Based Pseudo/Tags (`REFRAG_PSEUDO_DESCRIBE`):**
+
+When enabled, the indexer uses the configured decoder (via `REFRAG_RUNTIME`) to generate semantic descriptions and tags for each code chunk. This enriches the lexical vectors with natural language terms, improving NL→code retrieval.
+
+```bash
+# Enable LLM pseudo/tags generation (requires decoder configured)
+REFRAG_PSEUDO_DESCRIBE=1
+REFRAG_RUNTIME=glm  # or openai, minimax, llamacpp
+```
+
+**Note:** This significantly increases indexing time and API costs. Best used with batch concurrency (`PSEUDO_BATCH_CONCURRENCY=4`).
+
+### Mini Vector Gating
+
+Compact 64-dim vectors for fast candidate filtering before full dense search.
+
+| Name | Description | Default |
+|------|-------------|---------|
+| MINI_VECTOR_NAME | Name of mini vector index | mini |
+| MINI_VEC_DIM | Dimension of mini vectors | 64 |
+| MINI_VEC_SEED | Random projection seed (for reproducibility) | 1337 |
+| HYBRID_MINI_WEIGHT | Weight of mini vectors in hybrid scoring | 0.5 |
 
 ## Pattern Search
 
@@ -323,6 +365,26 @@ To use legacy settings (pre-v2): `LEX_VECTOR_DIM=4096 LEX_MULTI_HASH=1 LEX_BIGRA
 | HYBRID_EXPAND | Enable heuristic multi-query expansion | 0 (off) |
 | LLM_EXPAND_MAX | Max number of alternate queries to generate via LLM (0 = disabled) | 0 |
 | EXPAND_MAX_TOKENS | Max tokens for LLM query expansion response | 512 |
+| REPO_AUTO_FILTER | Auto-detect and filter to current repo in searches | 1 (enabled) |
+| HYBRID_IN_PROCESS | Run hybrid search in-process (faster, falls back to subprocess) | 1 (enabled) |
+| RERANK_IN_PROCESS | Run reranker in-process (faster, falls back to subprocess) | 1 (enabled) |
+| PARALLEL_DENSE_QUERIES | Enable parallel dense query execution | 1 (enabled) |
+| PARALLEL_DENSE_THRESHOLD | Min queries to trigger parallelization | 4 |
+
+**Note:** `REPO_AUTO_FILTER=0` disables automatic repo scoping, useful for benchmarks or cross-repo searches.
+
+### Semantic Expansion
+
+Synonym/related term expansion for improved recall on natural language queries.
+
+| Name | Description | Default |
+|------|-------------|---------|
+| SEMANTIC_EXPANSION_ENABLED | Enable semantic term expansion | 1 (enabled) |
+| SEMANTIC_EXPANSION_TOP_K | Number of similar terms to consider | 5 |
+| SEMANTIC_EXPANSION_SIMILARITY_THRESHOLD | Min similarity for expansion terms | 0.7 |
+| SEMANTIC_EXPANSION_MAX_TERMS | Max expansion terms added per query | 3 |
+| SEMANTIC_EXPANSION_CACHE_SIZE | Cache size for expansion lookups | 1000 |
+| SEMANTIC_EXPANSION_CACHE_TTL | Cache TTL in seconds | 3600 |
 
 ### LLM Query Expansion
 
@@ -368,6 +430,15 @@ The search engine can boost files whose paths match query terms—production-gra
 - Total: 4.2 × 0.15 = 0.63 boost
 
 Set `FNAME_BOOST=0` to disable, or increase (e.g., `0.25`) for stronger path weighting.
+
+## info_request Tool
+
+Simplified codebase retrieval with optional explanation mode.
+
+| Name | Description | Default |
+|------|-------------|---------|
+| INFO_REQUEST_LIMIT | Default result limit for info_request queries | 10 |
+| INFO_REQUEST_CONTEXT_LINES | Context lines in snippets (richer than repo_search) | 5 |
 
 ## Memory Blending
 
