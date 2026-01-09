@@ -430,11 +430,10 @@ def run_pure_dense_search(
     under: str | None = None,
     repo: str | list[str] | None = None,
 ) -> List[Dict[str, Any]]:
-    """Pure dense search with code-aware query variants for candidate expansion.
-    
-    Variants are used to expand the candidate pool, but final ranking is
-    determined by the base query's dense similarity (no RRF, no boosts).
-    
+    """Pure dense search - single query embedding, single vector search.
+
+    No expansion, no candidate pooling, no boosts. Just raw cosine similarity.
+
     Args:
         query: Natural language query
         limit: Max results to return
@@ -443,14 +442,14 @@ def run_pure_dense_search(
         language: Optional language filter
         under: Optional path prefix filter
         repo: Optional repo filter
-    
+
     Returns:
         List of search results with raw cosine similarity scores
     """
     from scripts.hybrid_qdrant import get_qdrant_client, return_qdrant_client, dense_query
     from scripts.utils import sanitize_vector_name
     from qdrant_client import models
-    
+
     # Get model
     if model is None:
         model_name = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
@@ -462,41 +461,10 @@ def run_pure_dense_search(
             model = TextEmbedding(model_name=model_name)
     else:
         model_name = getattr(model, "model_name", os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5"))
-    
+
     vec_name = sanitize_vector_name(model_name)
     coll = collection or _collection()
-    
-    # Generate query variants for candidate expansion
-    variants = _generate_code_query_variants(query)
 
-    # Optional: apply NL→code framing only for pure dense search.
-    # This MUST NOT affect hybrid search, so it's implemented here (not in embed_queries_cached).
-    # Empirically, "Code implementing: <query>" improves embedding retrieval for some models.
-    if os.environ.get("CODE_QUERY_EXPANSION", "0").strip().lower() in {"1", "true", "yes", "on"}:
-        if variants:
-            v0 = variants[0]
-            if not v0.startswith("Code implementing:"):
-                variants = [f"Code implementing: {v0}"] + list(variants[1:])
-
-    # Optional: GLM-based query expansion for improved semantic coverage
-    # LLM variants are stored separately and only used to expand candidate pool
-    llm_expansion_variants: list[str] = []
-    if os.environ.get("DENSE_LLM_EXPAND", "0").strip().lower() in {"1", "true", "yes", "on"}:
-        try:
-            from scripts.hybrid.expand import _llm_expand_queries
-            llm_variants = _llm_expand_queries([query], language=language, max_new=3)
-            if llm_variants:
-                seen = set(variants)
-                for lv in llm_variants:
-                    if lv not in seen:
-                        llm_expansion_variants.append(lv)
-                        seen.add(lv)
-                if os.environ.get("DEBUG_HYBRID_SEARCH"):
-                    logger.debug(f"LLM expansion added: {llm_variants}")
-        except Exception as e:
-            if os.environ.get("DEBUG_HYBRID_SEARCH"):
-                logger.debug(f"LLM expansion failed: {e}")
-    
     # Build filter
     must = []
     if language:
@@ -509,97 +477,35 @@ def run_pure_dense_search(
         else:
             must.append(models.FieldCondition(key="metadata.repo", match=models.MatchValue(value=repo)))
     flt = models.Filter(must=must) if must else None
-    
-    # Embed all variants using cached embedding (applies model instruction prefixes)
+
+    # Single query embedding - no variants, no expansion
     try:
-        embeddings = _embed_queries_cached(model, variants)
+        embeddings = _embed_queries_cached(model, [query])
     except Exception:
-        # Fallback to direct embedding
         try:
-            embeddings = list(model.embed(variants))
+            embeddings = list(model.embed([query]))
         except Exception:
-            embeddings = [next(model.embed([v])) for v in variants]
+            embeddings = [next(model.embed([query]))]
 
     if not embeddings:
         return []
 
-    # Base query embedding (first variant after expansion)
-    base_vec = embeddings[0]
-    
+    query_vec = embeddings[0]
+    vec_list = query_vec.tolist() if hasattr(query_vec, "tolist") else list(query_vec)
+
     # Get client
     client = get_qdrant_client(
         url=os.environ.get("QDRANT_URL", QDRANT_URL),
         api_key=API_KEY
     )
-    
+
     try:
-        # Candidate expansion: search each variant to build a candidate ID pool
-        candidate_ids: list[Any] = []
-        candidate_set: set[Any] = set()
-        cand_per_variant = max(limit * 3, 30)
-        max_candidates = max(limit * 10, 200)
-        if max_candidates > 5000:
-            max_candidates = 5000
-
-        # First pass: get candidates from base query variants (highest priority)
-        for vec in embeddings:
-            vec_list = vec.tolist() if hasattr(vec, "tolist") else list(vec)
-            results = dense_query(client, vec_name, vec_list, flt, cand_per_variant, coll)
-            for p in results:
-                pid = getattr(p, "id", None)
-                if pid is None or pid in candidate_set:
-                    continue
-                candidate_set.add(pid)
-                candidate_ids.append(pid)
-            if len(candidate_ids) >= max_candidates:
-                break
-
-        # Second pass: expand with LLM variants (only if room and variants exist)
-        if llm_expansion_variants and len(candidate_ids) < max_candidates:
-            try:
-                llm_embeddings = _embed_queries_cached(model, llm_expansion_variants)
-                for vec in llm_embeddings:
-                    vec_list = vec.tolist() if hasattr(vec, "tolist") else list(vec)
-                    results = dense_query(client, vec_name, vec_list, flt, cand_per_variant, coll)
-                    for p in results:
-                        pid = getattr(p, "id", None)
-                        if pid is None or pid in candidate_set:
-                            continue
-                        candidate_set.add(pid)
-                        candidate_ids.append(pid)
-                    if len(candidate_ids) >= max_candidates:
-                        break
-            except Exception:
-                pass  # LLM expansion embedding failed, continue with base candidates
-
-        # Re-score candidates using base query only to preserve ordering
-        gated_flt = flt
-        if candidate_ids:
-            try:
-                from qdrant_client import models as _models
-                gating_cond = _models.HasIdCondition(has_id=candidate_ids[:max_candidates])
-                if gated_flt is None:
-                    gated_flt = _models.Filter(must=[gating_cond])
-                else:
-                    must = list(gated_flt.must or [])
-                    must.append(gating_cond)
-                    gated_flt = _models.Filter(
-                        must=must,
-                        should=gated_flt.should,
-                        must_not=gated_flt.must_not,
-                    )
-            except Exception:
-                gated_flt = flt
-
-        base_vec_list = base_vec.tolist() if hasattr(base_vec, "tolist") else list(base_vec)
-        base_limit = limit
-        if candidate_ids:
-            base_limit = min(len(candidate_ids), max(limit * 3, limit))
-        ranked_points = dense_query(client, vec_name, base_vec_list, gated_flt, base_limit, coll)
+        # Single dense query - no pooling, no re-scoring
+        ranked_points = dense_query(client, vec_name, vec_list, flt, limit, coll)
 
         # Build output
         results = []
-        for p in ranked_points[:limit]:
+        for p in ranked_points:
             payload = p.payload or {}
             md = payload.get("metadata") or {}
 
@@ -615,7 +521,7 @@ def run_pure_dense_search(
             })
 
         return results
-    
+
     finally:
         return_qdrant_client(client)
 
