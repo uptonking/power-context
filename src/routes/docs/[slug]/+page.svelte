@@ -113,6 +113,8 @@
 		background: rgba(0, 0, 0, 0.4);
 		border: 1px solid rgba(255, 255, 255, 0.15);
 		backdrop-filter: blur(30px);
+		// Add scroll padding to account for navigation bar
+		scroll-padding-top: 100px;
 
 		// Markdown content styling
 		:global(h1),
@@ -126,6 +128,8 @@
 			margin-bottom: var(--spacing-md);
 			font-weight: 600;
 			text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+			// Add scroll margin to headings to account for fixed nav
+			scroll-margin-top: 100px;
 		}
 
 		:global(h1) {
