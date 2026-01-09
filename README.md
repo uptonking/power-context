@@ -217,12 +217,14 @@ Python, TypeScript/JavaScript, Go, Java, Rust, C#, PHP, Shell, Terraform, YAML, 
 
 | Method | MRR | R@1 | R@5 | R@10 | NDCG@10 |
 |--------|-----|-----|-----|------|---------|
-| **Context-Engine (BGE-base)** | **0.253** | 0.150 | 0.374 | 0.550 | 0.322 |
+| **Context-Engine (Jina-Code)** | **0.276** | 0.146 | 0.448 | 0.658 | 0.365 |
+| Context-Engine (BGE-base) | 0.253 | 0.150 | 0.374 | 0.550 | 0.322 |
 | CodeT5+ embedding | 0.266 | - | - | - | - |
 | BM25 (Lucene) | 0.167 | - | - | - | - |
 | BoW | 0.065 | - | - | - | - |
 
 *Corpus: 20,604 code snippets | 500 queries | Pure dense retrieval, no reranking*
+*Jina-Code: jinaai/jina-embeddings-v2-base-code (code-specific, 8k context)*
 
 ---
 
