@@ -36,6 +36,17 @@ Complete environment variable reference for Context Engine.
 | QDRANT_URL | Qdrant base URL | container: http://qdrant:6333; local: http://localhost:6333 |
 | MULTI_REPO_MODE | Enable multi-repo collections (each subdir gets own collection) | 0 (disabled) |
 | LOG_LEVEL | Logging verbosity: DEBUG, INFO, WARNING, ERROR, CRITICAL | INFO |
+| CTXCE_AUTH_ENABLED | Enable API authentication (requires token header) | 0 (disabled) |
+| CTXCE_AUTH_ADMIN_TOKEN | Admin token for authenticated requests | unset |
+
+### Tool Description Customization
+
+Override default MCP tool descriptions (useful for agent tuning).
+
+| Name | Description | Default |
+|------|-------------|---------|
+| TOOL_STORE_DESCRIPTION | Custom description for memory_store tool | built-in |
+| TOOL_FIND_DESCRIPTION | Custom description for memory_find tool | built-in |
 
 ## Embedding Models
 
