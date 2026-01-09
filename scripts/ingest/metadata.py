@@ -224,31 +224,392 @@ def _extract_calls(language: str, text: str) -> List[str]:
 
 # Languages that have tree-sitter call extraction support
 _TS_CALL_LANGUAGES = {
-    "python", "javascript", "typescript", "go", "rust", "java", "c", "cpp", "ruby"
+    "python", "javascript", "typescript", "tsx", "jsx",
+    "go", "rust", "java", "c", "cpp", "ruby",
+    "c_sharp", "csharp", "bash", "shell", "sh",
 }
 
-# Call expression node types per language for tree-sitter
-_TS_CALL_NODE_TYPES = {
-    "python": ["call"],
-    "javascript": ["call_expression"],
-    "typescript": ["call_expression"],
-    "go": ["call_expression"],
-    "rust": ["call_expression", "macro_invocation"],
-    "java": ["method_invocation"],
-    "c": ["call_expression"],
-    "cpp": ["call_expression"],
-    "ruby": ["call", "method_call"],
+# Tree-sitter node type mappings per language
+# Maps language -> (call_types, member_field_map)
+# member_field_map: node_type -> (object_field, property_field)
+_TS_LANG_CONFIG = {
+    "python": {
+        "calls": ["call"],
+        "constructors": [],
+        "member": {"attribute": ("object", "attribute")},
+    },
+    "javascript": {
+        "calls": ["call_expression"],
+        "constructors": ["new_expression"],
+        "member": {"member_expression": ("object", "property")},
+    },
+    "typescript": {
+        "calls": ["call_expression"],
+        "constructors": ["new_expression"],
+        "member": {"member_expression": ("object", "property")},
+    },
+    "tsx": {
+        "calls": ["call_expression"],
+        "constructors": ["new_expression"],
+        "member": {"member_expression": ("object", "property")},
+    },
+    "jsx": {
+        "calls": ["call_expression"],
+        "constructors": ["new_expression"],
+        "member": {"member_expression": ("object", "property")},
+    },
+    "go": {
+        "calls": ["call_expression"],
+        "constructors": [],
+        "member": {"selector_expression": ("operand", "field")},
+    },
+    "rust": {
+        "calls": ["call_expression", "macro_invocation"],
+        "constructors": [],
+        "member": {"field_expression": ("value", "field")},
+    },
+    "java": {
+        "calls": ["method_invocation"],
+        "constructors": ["object_creation_expression"],
+        "member": {"method_invocation": ("object", "name")},
+    },
+    "c": {
+        "calls": ["call_expression"],
+        "constructors": [],
+        "member": {"field_expression": ("argument", "field")},
+    },
+    "cpp": {
+        "calls": ["call_expression"],
+        "constructors": ["new_expression"],
+        "member": {
+            "field_expression": ("argument", "field"),
+            "qualified_identifier": ("scope", "name"),
+        },
+    },
+    "ruby": {
+        "calls": ["call", "method_call"],
+        "constructors": [],
+        "member": {"call": ("receiver", "method")},
+    },
+    "c_sharp": {
+        "calls": ["invocation_expression"],
+        "constructors": ["object_creation_expression"],
+        "member": {"member_access_expression": ("expression", "name")},
+    },
+    "csharp": {
+        "calls": ["invocation_expression"],
+        "constructors": ["object_creation_expression"],
+        "member": {"member_access_expression": ("expression", "name")},
+    },
+    "bash": {
+        "calls": ["command"],
+        "constructors": [],
+        "member": {},
+    },
+    "shell": {
+        "calls": ["command"],
+        "constructors": [],
+        "member": {},
+    },
+    "sh": {
+        "calls": ["command"],
+        "constructors": [],
+        "member": {},
+    },
 }
+
+# Default config for unknown languages
+_TS_DEFAULT_CONFIG = {
+    "calls": ["call_expression"],
+    "constructors": ["new_expression"],
+    "member": {"member_expression": ("object", "property")},
+}
+
+# Import node types per language for tree-sitter
+_TS_IMPORT_CONFIG = {
+    "python": {
+        "nodes": ["import_statement", "import_from_statement"],
+    },
+    "javascript": {
+        "nodes": ["import_statement"],
+        "source_field": "source",
+    },
+    "typescript": {
+        "nodes": ["import_statement"],
+        "source_field": "source",
+    },
+    "tsx": {
+        "nodes": ["import_statement"],
+        "source_field": "source",
+    },
+    "go": {
+        "nodes": ["import_declaration"],
+    },
+    "rust": {
+        "nodes": ["use_declaration"],
+    },
+    "java": {
+        "nodes": ["import_declaration"],
+    },
+    "c": {
+        "nodes": ["preproc_include"],
+    },
+    "cpp": {
+        "nodes": ["preproc_include"],
+    },
+    "c_sharp": {
+        "nodes": ["using_directive"],
+    },
+    "csharp": {
+        "nodes": ["using_directive"],
+    },
+    "ruby": {
+        "nodes": ["call"],  # require/require_relative are method calls
+    },
+    "kotlin": {
+        "nodes": ["import_header"],
+    },
+    "swift": {
+        "nodes": ["import_declaration"],
+    },
+    "scala": {
+        "nodes": ["import_declaration"],
+    },
+    "php": {
+        "nodes": ["namespace_use_declaration"],
+    },
+}
+
+
+def _ts_extract_imports(language: str, text: str) -> List[str]:
+    """Extract imports using tree-sitter AST traversal.
+
+    Uses proper AST node structure instead of regex.
+    """
+    from scripts.ingest.tree_sitter import _ts_parser
+
+    if language not in _TS_IMPORT_CONFIG:
+        return _extract_imports(language, text)
+
+    parser = _ts_parser(language)
+    if not parser:
+        return _extract_imports(language, text)
+
+    data = text.encode("utf-8")
+    try:
+        tree = parser.parse(data)
+        if tree is None:
+            return _extract_imports(language, text)
+        root = tree.root_node
+    except Exception:
+        return _extract_imports(language, text)
+
+    config = _TS_IMPORT_CONFIG[language]
+    import_nodes = set(config["nodes"])
+
+    def node_text(n):
+        return data[n.start_byte:n.end_byte].decode("utf-8", errors="ignore")
+
+    def find_string_content(node) -> str:
+        """Find string literal content from a node."""
+        # Try to find string/string_literal child
+        for child in node.children:
+            if child.type in ("string", "string_literal", "interpreted_string_literal"):
+                # Get the content without quotes
+                text = node_text(child)
+                # Strip quotes
+                if len(text) >= 2 and text[0] in ('"', "'", "`"):
+                    return text[1:-1]
+                return text
+            # Recurse for nested structures
+            if child.type in ("import_spec", "import_clause"):
+                result = find_string_content(child)
+                if result:
+                    return result
+        return ""
+
+    def extract_scoped_path(node) -> str:
+        """Extract path from scoped_identifier (Rust: std::io)."""
+        parts = []
+        def collect(n):
+            if n.type == "identifier":
+                parts.append(node_text(n))
+            elif n.type in ("crate", "self", "super"):
+                parts.append(node_text(n))
+            for c in n.children:
+                if c.type not in ("::", ".", ";"):
+                    collect(c)
+        collect(node)
+        return "::".join(parts) if parts else node_text(node)
+
+    imports: List[str] = []
+
+    def walk(n):
+        ntype = n.type
+
+        if ntype in import_nodes:
+            if language == "python":
+                # Python: import X or from X import Y
+                if ntype == "import_statement":
+                    # Look for dotted_name
+                    for child in n.children:
+                        if child.type == "dotted_name":
+                            imports.append(node_text(child))
+                        elif child.type == "aliased_import":
+                            name = child.child_by_field_name("name")
+                            if name:
+                                imports.append(node_text(name))
+                elif ntype == "import_from_statement":
+                    module = n.child_by_field_name("module_name")
+                    if module:
+                        imports.append(node_text(module))
+                    else:
+                        for child in n.children:
+                            if child.type == "dotted_name":
+                                imports.append(node_text(child))
+                                break
+
+            elif language in ("javascript", "typescript", "tsx"):
+                # JS/TS: import ... from "source"
+                source = n.child_by_field_name("source")
+                if source:
+                    text = node_text(source)
+                    # Strip quotes
+                    if len(text) >= 2:
+                        imports.append(text[1:-1])
+                else:
+                    # Fallback: find string child
+                    result = find_string_content(n)
+                    if result:
+                        imports.append(result)
+
+            elif language == "go":
+                # Go: import "path" or import ( "path1" "path2" )
+                for child in n.children:
+                    if child.type == "import_spec":
+                        result = find_string_content(child)
+                        if result:
+                            imports.append(result)
+                    elif child.type == "import_spec_list":
+                        for spec in child.children:
+                            if spec.type == "import_spec":
+                                result = find_string_content(spec)
+                                if result:
+                                    imports.append(result)
+                    elif child.type == "interpreted_string_literal":
+                        text = node_text(child)
+                        if len(text) >= 2:
+                            imports.append(text[1:-1])
+
+            elif language == "rust":
+                # Rust: use std::io;
+                for child in n.children:
+                    if child.type in ("scoped_identifier", "identifier", "use_wildcard"):
+                        imports.append(extract_scoped_path(child))
+                    elif child.type == "use_list":
+                        # use std::{io, fs}
+                        imports.append(node_text(child))
+
+            elif language == "java":
+                # Java: import java.util.List;
+                for child in n.children:
+                    if child.type == "scoped_identifier":
+                        imports.append(node_text(child).replace(" ", ""))
+
+            elif language in ("c", "cpp"):
+                # C/C++: #include <file> or #include "file"
+                path = n.child_by_field_name("path")
+                if path:
+                    text = node_text(path)
+                    # Strip < > or " "
+                    if len(text) >= 2:
+                        imports.append(text[1:-1])
+                else:
+                    # Find string_literal or system_lib_string
+                    for child in n.children:
+                        if child.type in ("string_literal", "system_lib_string"):
+                            text = node_text(child)
+                            if len(text) >= 2:
+                                imports.append(text[1:-1])
+
+            elif language in ("c_sharp", "csharp"):
+                # C#: using System.Text;
+                for child in n.children:
+                    if child.type in ("identifier", "qualified_name"):
+                        imports.append(node_text(child))
+
+            elif language == "ruby":
+                # Ruby: require is a method call
+                if ntype == "call":
+                    # Check if it's require/require_relative
+                    method = n.child_by_field_name("method")
+                    if method and node_text(method) in ("require", "require_relative", "load"):
+                        args = n.child_by_field_name("arguments")
+                        if args:
+                            result = find_string_content(args)
+                            if result:
+                                imports.append(result)
+
+            elif language == "kotlin":
+                # Kotlin: import java.util.List
+                for child in n.children:
+                    if child.type == "identifier":
+                        imports.append(node_text(child))
+                    elif child.type == "import_alias":
+                        # import foo.Bar as Baz - get foo.Bar
+                        continue
+                # Try to get the full path from the node text
+                full = node_text(n).replace("import ", "").strip()
+                if full and not full.startswith("import"):
+                    imports.append(full.split(" as ")[0].strip())
+
+            elif language == "swift":
+                # Swift: import Foundation
+                for child in n.children:
+                    if child.type == "identifier":
+                        imports.append(node_text(child))
+
+            elif language == "scala":
+                # Scala: import java.util.List or import java.util._
+                full = node_text(n).replace("import ", "").strip()
+                if full:
+                    imports.append(full)
+
+            elif language == "php":
+                # PHP: use Namespace\ClassName;
+                for child in n.children:
+                    if child.type == "namespace_name":
+                        imports.append(node_text(child).replace("\\\\", "\\"))
+                    elif child.type == "qualified_name":
+                        imports.append(node_text(child).replace("\\\\", "\\"))
+
+        for c in n.children:
+            walk(c)
+
+    walk(root)
+
+    # Deduplicate
+    seen = set()
+    result = []
+    for x in imports:
+        if x and x not in seen:
+            seen.add(x)
+            result.append(x)
+    return result[:200]
 
 
 def _ts_extract_calls_generic(language: str, text: str) -> List[str]:
-    """Extract function/method calls using tree-sitter for any supported language."""
+    """Extract function/method calls using tree-sitter AST traversal.
+
+    Uses proper AST node structure - no regex parsing of code text.
+    Captures both base names (method) and qualified names (obj.method).
+    """
     from scripts.ingest.tree_sitter import _ts_parser
-    
+
     parser = _ts_parser(language)
     if not parser:
         return _extract_calls(language, text)
-    
+
     data = text.encode("utf-8")
     try:
         tree = parser.parse(data)
@@ -257,71 +618,244 @@ def _ts_extract_calls_generic(language: str, text: str) -> List[str]:
         root = tree.root_node
     except Exception:
         return _extract_calls(language, text)
-    
+
+    # Get language config
+    config = _TS_LANG_CONFIG.get(language, _TS_DEFAULT_CONFIG)
+    call_types = set(config["calls"])
+    constructor_types = set(config["constructors"])
+    member_map = config["member"]  # node_type -> (object_field, property_field)
+
     def node_text(n):
         return data[n.start_byte:n.end_byte].decode("utf-8", errors="ignore")
-    
-    calls: List[str] = []
-    call_types = set(_TS_CALL_NODE_TYPES.get(language, ["call_expression"]))
-    
-    def walk(n):
-        if n.type in call_types:
-            # Try to get function name from various field names
-            func = (
-                n.child_by_field_name("function") or
-                n.child_by_field_name("method") or
-                n.child_by_field_name("name")
+
+    def is_valid_identifier(name: str) -> bool:
+        """Check if name is a valid identifier (no operators, keywords check skipped for speed)."""
+        if not name or len(name) > 100:
+            return False
+        first = name[0]
+        if not (first.isalpha() or first == "_"):
+            return False
+        return all(c.isalnum() or c == "_" for c in name)
+
+    def extract_from_member(node) -> List[str]:
+        """Extract method name and qualified name from member access node using AST structure."""
+        names = []
+        node_type = node.type
+
+        if node_type not in member_map:
+            # Unknown member type - try common field names
+            prop = (
+                node.child_by_field_name("property") or
+                node.child_by_field_name("field") or
+                node.child_by_field_name("name") or
+                node.child_by_field_name("attribute") or
+                node.child_by_field_name("method")
             )
-            if func:
-                name = node_text(func)
-                # Extract just the function/method name, not object.method chains
-                # Split on . : -> and take the last part
-                base = re.split(r"[\.:>\-]+", name)[-1].strip()
-                if base and re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", base):
-                    calls.append(base)
+            if prop and prop.type == "identifier":
+                method = node_text(prop)
+                if is_valid_identifier(method):
+                    names.append(method)
+            return names
+
+        obj_field, prop_field = member_map[node_type]
+        prop_node = node.child_by_field_name(prop_field)
+        obj_node = node.child_by_field_name(obj_field)
+
+        # Get method/property name
+        method = ""
+        if prop_node:
+            if prop_node.type in ("identifier", "property_identifier", "field_identifier"):
+                method = node_text(prop_node)
             else:
-                # Fallback: try first child for languages like Ruby
-                for child in n.children:
-                    if child.type in ("identifier", "constant"):
-                        name = node_text(child)
-                        if name and re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", name):
-                            calls.append(name)
-                        break
+                # Nested - recurse
+                nested = extract_from_member(prop_node)
+                if nested:
+                    method = nested[0]
+
+        if method and is_valid_identifier(method):
+            names.append(method)
+
+            # Get object name for qualified form (skip self/this/cls)
+            if obj_node:
+                obj_name = ""
+                if obj_node.type in ("identifier", "this", "self"):
+                    obj_name = node_text(obj_node)
+                elif obj_node.type in member_map:
+                    # Chained: a.b.c -> get "b" from a.b
+                    nested = extract_from_member(obj_node)
+                    if nested:
+                        obj_name = nested[0]
+
+                # Add qualified if object isn't self/this/cls
+                if obj_name and obj_name not in ("self", "this", "cls", "super"):
+                    if is_valid_identifier(obj_name):
+                        names.append(f"{obj_name}.{method}")
+
+        return names
+
+    def extract_function_name(func_node) -> List[str]:
+        """Extract function name(s) from the function part of a call expression."""
+        if func_node is None:
+            return []
+
+        node_type = func_node.type
+
+        # Simple identifier: foo()
+        if node_type in ("identifier", "constant", "method_identifier"):
+            name = node_text(func_node)
+            if is_valid_identifier(name):
+                return [name]
+            return []
+
+        # Member access: obj.method()
+        if node_type in member_map:
+            return extract_from_member(func_node)
+
+        # Try common field names for unknown node types
+        prop = (
+            func_node.child_by_field_name("property") or
+            func_node.child_by_field_name("field") or
+            func_node.child_by_field_name("name")
+        )
+        if prop:
+            name = node_text(prop)
+            if is_valid_identifier(name):
+                return [name]
+
+        return []
+
+    def extract_constructor_type(node) -> List[str]:
+        """Extract class name from constructor call (new Foo())."""
+        type_node = (
+            node.child_by_field_name("constructor") or
+            node.child_by_field_name("type") or
+            node.child_by_field_name("name")
+        )
+        if not type_node:
+            return []
+
+        # Handle generic types: get the base identifier
+        if type_node.type in ("identifier", "type_identifier"):
+            name = node_text(type_node)
+            if is_valid_identifier(name):
+                return [name]
+
+        # Generic type: ArrayList<String> - find the identifier child
+        if type_node.type in ("generic_type", "parameterized_type"):
+            for child in type_node.children:
+                if child.type in ("identifier", "type_identifier"):
+                    name = node_text(child)
+                    if is_valid_identifier(name):
+                        return [name]
+                    break
+
+        return []
+
+    calls: List[str] = []
+
+    def walk(n):
+        ntype = n.type
+
+        # Regular function/method calls
+        if ntype in call_types:
+            # Java/Kotlin: method_invocation has object+name directly on the node
+            if ntype == "method_invocation":
+                name_node = n.child_by_field_name("name")
+                obj_node = n.child_by_field_name("object")
+                if name_node and name_node.type == "identifier":
+                    method = node_text(name_node)
+                    if is_valid_identifier(method):
+                        calls.append(method)
+                        # Add qualified name
+                        if obj_node and obj_node.type == "identifier":
+                            obj = node_text(obj_node)
+                            if is_valid_identifier(obj):
+                                calls.append(f"{obj}.{method}")
+            else:
+                # Try standard field names for the function part
+                func = (
+                    n.child_by_field_name("function") or
+                    n.child_by_field_name("method") or
+                    n.child_by_field_name("name") or
+                    n.child_by_field_name("callee") or
+                    n.child_by_field_name("receiver")
+                )
+                if func:
+                    calls.extend(extract_function_name(func))
+                else:
+                    # Ruby/other: first relevant child
+                    for child in n.children:
+                        if child.type in ("identifier", "constant", "method_identifier"):
+                            name = node_text(child)
+                            if is_valid_identifier(name):
+                                calls.append(name)
+                            break
+                        elif child.type in member_map:
+                            calls.extend(extract_from_member(child))
+                            break
+
+        # Constructor calls
+        elif ntype in constructor_types:
+            calls.extend(extract_constructor_type(n))
+
+        # Rust macros
+        elif ntype == "macro_invocation":
+            macro = n.child_by_field_name("macro")
+            if macro:
+                name = node_text(macro)
+                # Strip trailing ! if present in text
+                name = name.rstrip("!")
+                if is_valid_identifier(name):
+                    calls.append(name)
+
+        # Bash commands
+        elif ntype == "command":
+            cmd = n.child_by_field_name("name")
+            if cmd:
+                name = node_text(cmd)
+                # Allow hyphens in command names
+                if name and all(c.isalnum() or c in "_-" for c in name):
+                    calls.append(name)
+
         for c in n.children:
             walk(c)
-    
+
     walk(root)
-    
+
     # Deduplicate preserving order
     seen = set()
-    calls_dedup = []
+    result = []
     for x in calls:
         if x not in seen:
-            calls_dedup.append(x)
             seen.add(x)
-    return calls_dedup[:200]
+            result.append(x)
+    return result[:200]
 
 
 def _get_imports_calls(language: str, text: str) -> Tuple[List[str], List[str]]:
     """Get imports and calls for a file, using tree-sitter when available."""
-    from scripts.ingest.tree_sitter import _use_tree_sitter, _ts_parser
-    
+    from scripts.ingest.tree_sitter import _use_tree_sitter
+
     # Use tree-sitter for Python (specialized) or generic for other supported languages
     if _use_tree_sitter():
         if language == "python":
             return _ts_extract_imports_calls_python(text)
         elif language in _TS_CALL_LANGUAGES:
-            imports = _extract_imports(language, text)
+            # Use tree-sitter for both imports and calls
+            imports = _ts_extract_imports(language, text)
             calls = _ts_extract_calls_generic(language, text)
             return imports, calls
-    
+
     return _extract_imports(language, text), _extract_calls(language, text)
 
 
 def _ts_extract_imports_calls_python(text: str) -> Tuple[List[str], List[str]]:
-    """Extract imports and calls from Python using tree-sitter."""
+    """Extract imports and calls from Python using tree-sitter AST traversal.
+
+    Uses proper AST node structure - no regex parsing of code text for calls.
+    """
     from scripts.ingest.tree_sitter import _ts_parser
-    
+
     parser = _ts_parser("python")
     if not parser:
         return [], []
@@ -335,41 +869,114 @@ def _ts_extract_imports_calls_python(text: str) -> Tuple[List[str], List[str]]:
         return [], []
 
     def node_text(n):
-        return data[n.start_byte : n.end_byte].decode("utf-8", errors="ignore")
+        return data[n.start_byte:n.end_byte].decode("utf-8", errors="ignore")
+
+    def is_valid_identifier(name: str) -> bool:
+        if not name or len(name) > 100:
+            return False
+        first = name[0]
+        if not (first.isalpha() or first == "_"):
+            return False
+        return all(c.isalnum() or c == "_" for c in name)
 
     imports: List[str] = []
     calls: List[str] = []
 
+    def extract_python_call(func_node) -> List[str]:
+        """Extract call names from Python function node using AST structure."""
+        if func_node is None:
+            return []
+
+        # Simple identifier: foo()
+        if func_node.type == "identifier":
+            name = node_text(func_node)
+            if is_valid_identifier(name):
+                return [name]
+            return []
+
+        # Attribute access: obj.method()
+        if func_node.type == "attribute":
+            names = []
+            # Python attribute node has: object and attribute fields
+            attr_node = func_node.child_by_field_name("attribute")
+            value_node = func_node.child_by_field_name("object")
+
+            method = ""
+            if attr_node and attr_node.type == "identifier":
+                method = node_text(attr_node)
+
+            if method and is_valid_identifier(method):
+                names.append(method)
+
+                # Get object for qualified name
+                if value_node:
+                    obj_name = ""
+                    if value_node.type == "identifier":
+                        obj_name = node_text(value_node)
+                    elif value_node.type == "attribute":
+                        # Chained: a.b.method - get "b" from a.b
+                        nested_attr = value_node.child_by_field_name("attribute")
+                        if nested_attr and nested_attr.type == "identifier":
+                            obj_name = node_text(nested_attr)
+
+                    # Add qualified if not self/cls/super
+                    if obj_name and obj_name not in ("self", "cls", "super"):
+                        if is_valid_identifier(obj_name):
+                            names.append(f"{obj_name}.{method}")
+
+            return names
+
+        return []
+
+    def extract_import_module(node) -> str:
+        """Extract module name from import node using AST structure."""
+        # For import_statement: import foo.bar
+        # For import_from_statement: from foo.bar import baz
+        # Look for dotted_name or aliased_import children
+        for child in node.children:
+            if child.type == "dotted_name":
+                return node_text(child)
+            elif child.type == "aliased_import":
+                # import foo as f -> get "foo"
+                name_child = child.child_by_field_name("name")
+                if name_child:
+                    return node_text(name_child)
+        return ""
+
     def walk(n):
         t = n.type
         if t == "import_statement":
-            s = node_text(n)
-            m = re.search(r"\bimport\s+([\w\.]+)", s)
-            if m:
-                imports.append(m.group(1))
+            mod = extract_import_module(n)
+            if mod:
+                imports.append(mod)
         elif t == "import_from_statement":
-            s = node_text(n)
-            m = re.search(r"\bfrom\s+([\w\.]+)\s+import\b", s)
-            if m:
-                imports.append(m.group(1))
+            # from X import Y -> get X
+            module_node = n.child_by_field_name("module_name")
+            if module_node:
+                imports.append(node_text(module_node))
+            else:
+                # Fallback: look for dotted_name
+                for child in n.children:
+                    if child.type == "dotted_name":
+                        imports.append(node_text(child))
+                        break
         elif t == "call":
             func = n.child_by_field_name("function")
             if func:
-                name = node_text(func)
-                base = re.split(r"[\.:]", name)[-1]
-                if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", base):
-                    calls.append(base)
+                calls.extend(extract_python_call(func))
+
         for c in n.children:
             walk(c)
 
     walk(root)
+
     # Deduplicate preserving order
     seen = set()
     calls_dedup = []
     for x in calls:
         if x not in seen:
-            calls_dedup.append(x)
             seen.add(x)
+            calls_dedup.append(x)
     return imports[:200], calls_dedup[:200]
 
 
