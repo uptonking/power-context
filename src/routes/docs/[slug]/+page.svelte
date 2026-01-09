@@ -51,7 +51,7 @@
 	}
 
 	.container {
-		max-width: 900px;
+		max-width: 1200px;
 		margin: 0 auto;
 		padding: 0 var(--spacing-md);
 	}
@@ -94,7 +94,7 @@
 		color: rgba(255, 255, 255, 0.85);
 		font-size: 1.1rem;
 		margin-bottom: var(--spacing-lg);
-		max-width: 600px;
+		max-width: 800px;
 		margin-left: auto;
 		margin-right: auto;
 		text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
