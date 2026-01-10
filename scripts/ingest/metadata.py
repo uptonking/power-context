@@ -223,11 +223,8 @@ def _extract_calls(language: str, text: str) -> List[str]:
 
 
 # Languages that have tree-sitter call extraction support
-_TS_CALL_LANGUAGES = {
-    "python", "javascript", "typescript", "tsx", "jsx",
-    "go", "rust", "java", "c", "cpp", "ruby",
-    "c_sharp", "csharp", "bash", "shell", "sh",
-}
+# Derived set of languages that support tree-sitter call extraction
+_TS_CALL_LANGUAGES = set(_TS_LANG_CONFIG.keys())
 
 # Tree-sitter node type mappings per language
 # Maps language -> (call_types, member_field_map)
