@@ -16,11 +16,12 @@ try:
 except ImportError:
     _EMBEDDER_FACTORY = False
     from fastembed import TextEmbedding
+from scripts.utils import sanitize_vector_name
 
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
 COLLECTION = os.environ.get("COLLECTION_NAME", "codebase")
 MODEL = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
-VEC_NAME = "fast-bge-base-en-v1.5"
+VEC_NAME = os.environ.get("VECTOR_NAME") or sanitize_vector_name(MODEL)
 
 client = QdrantClient(url=QDRANT_URL)
 if _EMBEDDER_FACTORY:

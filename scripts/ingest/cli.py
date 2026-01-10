@@ -112,6 +112,13 @@ def parse_args():
 
 def main():
     """Main entry point for the CLI."""
+    # Load .env file for REFRAG_*, GLM_*, and other settings
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(Path(__file__).parent.parent.parent / ".env")
+    except ImportError:
+        pass  # python-dotenv not installed, rely on exported env vars
+    
     args = parse_args()
 
     # Map CLI overrides to env so downstream helpers pick them up
@@ -233,7 +240,7 @@ def main():
                 args.recreate,
                 dedupe=(not args.no_dedupe),
                 skip_unchanged=(not args.no_skip_unchanged),
-                pseudo_mode="off" if (os.environ.get("PSEUDO_BACKFILL_ENABLED") or "").strip().lower() in {"1", "true", "yes", "on"} else "full",
+                pseudo_mode="off" if (os.environ.get("PSEUDO_DEFER_TO_WORKER") or "").strip().lower() in {"1", "true", "yes", "on"} else "full",
                 schema_mode=args.schema_mode,
             )
         return
@@ -250,7 +257,7 @@ def main():
             collection = os.environ.get("COLLECTION_NAME", "codebase")
         print(f"[single_repo] Single-repo mode enabled - using collection: {collection}")
 
-    flag = (os.environ.get("PSEUDO_BACKFILL_ENABLED") or "").strip().lower()
+    flag = (os.environ.get("PSEUDO_DEFER_TO_WORKER") or "").strip().lower()
     pseudo_mode = "off" if flag in {"1", "true", "yes", "on"} else "full"
 
     index_repo(

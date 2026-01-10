@@ -410,9 +410,9 @@ def _run_indexing_strategy(
                     f"[SMART_REINDEX][watcher] Using full reindexing for {path} ({smart_reason})"
                 )
                 # Fallback: full single-file reindex. Pseudo/tags are inlined by default;
-                # when PSEUDO_BACKFILL_ENABLED=1 we run base-only and rely on backfill.
+                # when PSEUDO_DEFER_TO_WORKER=1 we run base-only and rely on backfill.
     if not ok:
-        pseudo_mode = "full" if get_boolean_env("PSEUDO_BACKFILL_ENABLED") else "off"
+        pseudo_mode = "off" if get_boolean_env("PSEUDO_DEFER_TO_WORKER") else "full"
         ok = idx.index_single_file(
             client,
             model,

@@ -37,6 +37,30 @@ DEFAULT_INSTRUCTION = (
     "Instruct: Given a code search query, retrieve relevant code snippets\nQuery:"
 )
 
+# BGE instruction prefix support - DISABLED for code search
+# Testing showed prefix hurts code retrieval (reduces ranking gap by ~10%)
+# See: https://huggingface.co/BAAI/bge-base-en-v1.5
+BGE_QUERY_INSTRUCTION_ENABLED = (
+    str(os.environ.get("BGE_QUERY_INSTRUCTION", "0")).strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+BGE_QUERY_INSTRUCTION_TEXT = os.environ.get(
+    "BGE_QUERY_INSTRUCTION_TEXT",
+    "Represent this sentence for searching relevant passages:"
+)
+
+# Snowflake Arctic instruction prefix support - DISABLED for code search
+# Testing showed prefix hurts code retrieval
+# See: https://huggingface.co/Snowflake/snowflake-arctic-embed-m
+ARCTIC_QUERY_INSTRUCTION_ENABLED = (
+    str(os.environ.get("ARCTIC_QUERY_INSTRUCTION", "0")).strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+ARCTIC_QUERY_INSTRUCTION_TEXT = os.environ.get(
+    "ARCTIC_QUERY_INSTRUCTION_TEXT",
+    "Represent this sentence for searching relevant passages:"
+)
+
 # Model cache and locks
 _EMBED_MODEL_CACHE: Dict[str, Any] = {}
 _EMBED_MODEL_LOCKS: Dict[str, threading.Lock] = {}
@@ -157,8 +181,31 @@ def get_query_instruction() -> str:
     return os.environ.get("QWEN3_INSTRUCTION_TEXT", DEFAULT_INSTRUCTION)
 
 
+def is_bge_model(model_name: Optional[str] = None) -> bool:
+    """Check if the model is a BGE model."""
+    if model_name is None:
+        model_name = os.environ.get("EMBEDDING_MODEL", DEFAULT_MODEL)
+    return "bge" in model_name.lower()
+
+
+def is_arctic_model(model_name: Optional[str] = None) -> bool:
+    """Check if the model is a Snowflake Arctic model."""
+    if model_name is None:
+        model_name = os.environ.get("EMBEDDING_MODEL", DEFAULT_MODEL)
+    model_lower = model_name.lower()
+    return "arctic" in model_lower or "snowflake" in model_lower
+
+
+def is_jina_code_model(model_name: Optional[str] = None) -> bool:
+    """Check if the model is Jina's code-specific embedding model."""
+    if model_name is None:
+        model_name = os.environ.get("EMBEDDING_MODEL", DEFAULT_MODEL)
+    model_lower = model_name.lower()
+    return "jina" in model_lower and "code" in model_lower
+
+
 def prefix_query(query: str, model_name: Optional[str] = None) -> str:
-    """Add instruction prefix to query if using Qwen3 with instructions enabled.
+    """Add instruction prefix to query if using Qwen3, BGE, or Arctic with instructions enabled.
 
     Args:
         query: The search query text.
@@ -167,16 +214,24 @@ def prefix_query(query: str, model_name: Optional[str] = None) -> str:
     Returns:
         Query with instruction prefix (if applicable) or original query.
     """
-    if not QWEN3_QUERY_INSTRUCTION:
-        return query
-    if not is_qwen3_model(model_name):
-        return query
-    instruction = get_query_instruction()
-    return f"{instruction} {query}"
+    # Qwen3 instruction prefix
+    if QWEN3_QUERY_INSTRUCTION and is_qwen3_model(model_name):
+        instruction = get_query_instruction()
+        return f"{instruction} {query}"
+
+    # BGE instruction prefix (recommended by BGE authors for retrieval)
+    if BGE_QUERY_INSTRUCTION_ENABLED and is_bge_model(model_name):
+        return f"{BGE_QUERY_INSTRUCTION_TEXT} {query}"
+
+    # Snowflake Arctic instruction prefix
+    if ARCTIC_QUERY_INSTRUCTION_ENABLED and is_arctic_model(model_name):
+        return f"{ARCTIC_QUERY_INSTRUCTION_TEXT} {query}"
+
+    return query
 
 
 def prefix_queries(queries: List[str], model_name: Optional[str] = None) -> List[str]:
-    """Add instruction prefix to multiple queries if using Qwen3.
+    """Add instruction prefix to multiple queries if using Qwen3, BGE, or Arctic.
 
     Args:
         queries: List of search query texts.
@@ -185,12 +240,20 @@ def prefix_queries(queries: List[str], model_name: Optional[str] = None) -> List
     Returns:
         List of queries with instruction prefixes (if applicable).
     """
-    if not QWEN3_QUERY_INSTRUCTION:
-        return queries
-    if not is_qwen3_model(model_name):
-        return queries
-    instruction = get_query_instruction()
-    return [f"{instruction} {q}" for q in queries]
+    # Qwen3 instruction prefix
+    if QWEN3_QUERY_INSTRUCTION and is_qwen3_model(model_name):
+        instruction = get_query_instruction()
+        return [f"{instruction} {q}" for q in queries]
+
+    # BGE instruction prefix
+    if BGE_QUERY_INSTRUCTION_ENABLED and is_bge_model(model_name):
+        return [f"{BGE_QUERY_INSTRUCTION_TEXT} {q}" for q in queries]
+
+    # Snowflake Arctic instruction prefix
+    if ARCTIC_QUERY_INSTRUCTION_ENABLED and is_arctic_model(model_name):
+        return [f"{ARCTIC_QUERY_INSTRUCTION_TEXT} {q}" for q in queries]
+
+    return queries
 
 
 def get_model_dimension(model_name: Optional[str] = None) -> int:
@@ -231,6 +294,17 @@ def get_model_dimension(model_name: Optional[str] = None) -> int:
         return 1024
     if "e5-base" in model_lower:
         return 768
+
+    # Snowflake Arctic models
+    if "snowflake" in model_lower or "arctic" in model_lower:
+        if "arctic-l" in model_lower or "embed-l" in model_lower:
+            return 1024
+        if "arctic-m" in model_lower or "embed-m" in model_lower:
+            return 768
+        if "arctic-s" in model_lower or "embed-s" in model_lower:
+            return 384
+        if "arctic-xs" in model_lower or "embed-xs" in model_lower:
+            return 384
 
     # Default: BGE-base and similar 768-dimension models
     return 768

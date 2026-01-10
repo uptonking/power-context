@@ -62,7 +62,26 @@ CoSQA evaluates natural language to code retrieval using web search queries pair
 ```bash
 # Full benchmark (comparable to paper baselines)
 python -m scripts.benchmarks.cosqa.runner --limit 500
+
+# Dense-only mode (pure vector search, no hybrid scoring)
+python -m scripts.benchmarks.cosqa.runner --limit 500 --dense-mode
+
+# Enable LLM-based pseudo/tags generation during indexing
+python -m scripts.benchmarks.cosqa.runner --limit 500 --enable-llm
 ```
+
+#### CLI Flags
+
+| Flag | Description |
+|------|-------------|
+| `--limit N` | Max results per query (default: 10) |
+| `--corpus-limit N` | Index only N docs (0 = full corpus) |
+| `--query-limit N` | Evaluate only N queries (0 = all) |
+| `--no-rerank` | Disable cross-encoder reranking |
+| `--dense-mode` | Pure vector search (disables lexical, symbol boosts, heuristics) |
+| `--enable-llm` | Enable LLM pseudo/tags generation during indexing |
+| `--debug` | Print detailed per-query debug output |
+| `--output FILE` | Output JSON report path |
 
 #### CoSQA ablation runs (refrag/mini, rerank, learning)
 
@@ -82,11 +101,14 @@ CORPUS_LIMIT=0 QUERY_LIMIT=0 RUN_TAG=full \
 
 Outputs:
 - JSON reports: `bench_results/cosqa/<RUN_TAG>/cosqa_<label>.json`
+- Metadata: `bench_results/cosqa/<RUN_TAG>/cosqa_<label>_meta.json` (env snapshot, git sha, platform)
 - Logs: `bench_results/cosqa/<RUN_TAG>/cosqa_<label>.log` (override with `LOG_DIR=...`)
 
 Useful knobs (env):
 - `QDRANT_URL`, `LEX_VECTOR_DIM`, `HYBRID_EXPAND`, `SEMANTIC_EXPANSION_ENABLED`
 - `RUN_TAG`, `COLL_PREFIX`, `OUT_DIR`, `LOG_DIR`
+- `COSQA_ENABLE_LEARNING` - Enable learning reranker (default: off for determinism)
+- `EMBEDDING_SEED` - Seed for deterministic embeddings
 
 #### Quick subset runs (smoke tests)
 
@@ -104,6 +126,17 @@ QDRANT_URL=http://localhost:6333 python3.11 -m scripts.benchmarks.cosqa.runner \
 QDRANT_URL=http://localhost:6333 python3.11 -m scripts.benchmarks.cosqa.runner \
     --limit 500 --corpus-limit 500 --query-limit 500 --output cosqa_rerank.json
 ```
+
+#### Determinism & Reproducibility
+
+CoSQA benchmarks are hardened for reproducibility:
+
+- **Learning reranker disabled** by default (`RERANK_LEARNING=0`) to avoid score drift
+- **Content-hash deduplication** prevents duplicate corpus entries across runs
+- **Schema validation** fails fast on LEX_DIM mismatches (avoids silent scoring bugs)
+- **Warmup query** runs before timing loop to exclude cold-start latency
+- **Config fingerprinting** auto-detects stale collections when settings change
+- **Metadata audit** saves full env snapshot, git sha, and platform info per run
 
 ---
 

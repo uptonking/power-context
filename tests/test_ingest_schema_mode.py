@@ -30,13 +30,14 @@ class FakeClient:
             payload_schema=self.payload_schema,
         )
 
-    def create_collection(self, collection_name, vectors_config, sparse_vectors_config=None, hnsw_config=None):
+    def create_collection(self, collection_name, vectors_config, sparse_vectors_config=None, hnsw_config=None, quantization_config=None):
         self.create_calls.append(
             {
                 "collection_name": collection_name,
                 "vectors_config": vectors_config,
                 "sparse_vectors_config": sparse_vectors_config,
                 "hnsw_config": hnsw_config,
+                "quantization_config": quantization_config,
             }
         )
         self.collection_exists = True

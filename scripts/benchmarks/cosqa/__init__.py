@@ -43,7 +43,7 @@ Paper Baselines (MRR):
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, TYPE_CHECKING
 
 # Re-export main classes and functions
 from scripts.benchmarks.cosqa.dataset import (
@@ -55,20 +55,11 @@ from scripts.benchmarks.cosqa.dataset import (
     get_queries_for_evaluation,
 )
 
-from scripts.benchmarks.cosqa.indexer import (
-    index_corpus,
-    verify_collection,
-    DEFAULT_COLLECTION,
-)
+# Keep a stable default without importing indexer at module import time.
+DEFAULT_COLLECTION = "cosqa-corpus"
 
-from scripts.benchmarks.cosqa.runner import (
-    CoSQAReport,
-    CoSQAQueryResult,
-    run_cosqa_benchmark,
-    run_full_benchmark,
-    print_report,
-    PAPER_BASELINES,
-)
+if TYPE_CHECKING:
+    from scripts.benchmarks.cosqa.runner import CoSQAReport, CoSQAQueryResult
 
 __all__ = [
     # Dataset
@@ -94,6 +85,25 @@ __all__ = [
     "run_cosqa_benchmark_sync",
 ]
 
+def __getattr__(name: str) -> Any:  # PEP 562
+    # Lazy-load indexer/runner so importing the package has no side effects.
+    # This prevents env-based config (e.g., LEX_SPARSE_MODE) from getting frozen
+    # before `scripts.benchmarks.cosqa.runner` loads .env when running via `-m`.
+    if name in {"index_corpus", "verify_collection"}:
+        from scripts.benchmarks.cosqa import indexer as _indexer
+        return getattr(_indexer, name)
+    if name in {
+        "CoSQAReport",
+        "CoSQAQueryResult",
+        "run_cosqa_benchmark",
+        "run_full_benchmark",
+        "print_report",
+        "PAPER_BASELINES",
+    }:
+        from scripts.benchmarks.cosqa import runner as _runner
+        return getattr(_runner, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 async def run_cosqa_benchmark_async(
     split: str = "test",
@@ -102,7 +112,7 @@ async def run_cosqa_benchmark_async(
     query_limit: Optional[int] = None,
     rerank_enabled: bool = True,
     recreate_index: bool = False,
-) -> CoSQAReport:
+) -> "CoSQAReport":
     """Run CoSQA benchmark (async).
     
     This is the main entry point for programmatic use.
@@ -118,6 +128,7 @@ async def run_cosqa_benchmark_async(
     Returns:
         CoSQAReport with all metrics and per-query results
     """
+    from scripts.benchmarks.cosqa.runner import run_full_benchmark
     return await run_full_benchmark(
         split=split,
         collection=collection,
@@ -135,7 +146,7 @@ def run_cosqa_benchmark_sync(
     query_limit: Optional[int] = None,
     rerank_enabled: bool = True,
     recreate_index: bool = False,
-) -> CoSQAReport:
+) -> "CoSQAReport":
     """Run CoSQA benchmark (sync wrapper).
     
     Convenience wrapper for non-async contexts.
@@ -148,4 +159,3 @@ def run_cosqa_benchmark_sync(
         rerank_enabled=rerank_enabled,
         recreate_index=recreate_index,
     ))
-

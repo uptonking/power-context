@@ -236,16 +236,30 @@ def dense_results(
 def prepare_pairs(query: str, points: List[Any]) -> List[tuple[str, str]]:
     pairs: List[tuple[str, str]] = []
     for p in points:
-        md = (p.payload or {}).get("metadata") or {}
+        payload = p.payload or {}
+        md = payload.get("metadata") or {}
         path = md.get("path") or ""
         lang = md.get("language") or ""
         kind = md.get("kind") or ""
         symp = md.get("symbol_path") or md.get("symbol") or ""
         code = (md.get("code") or "")[:600]
+        # Include docstring/pseudo for better query matching
+        docstring = (
+            payload.get("docstring")
+            or payload.get("pseudo")
+            or md.get("docstring")
+            or ""
+        )
         header = f"[{lang}/{kind}] {symp} — {path}".strip()
-        doc = (header + ("\n" + code if code else "")).strip()
+        # Prepend docstring before code for reranker visibility
+        doc_parts = [header]
+        if docstring:
+            doc_parts.append(docstring[:200])
+        if code:
+            doc_parts.append(code)
+        doc = "\n".join(doc_parts).strip()
         if not doc:
-            doc = (p.payload or {}).get("information") or ""
+            doc = payload.get("information") or ""
         pairs.append((query, doc))
     return pairs
 
@@ -373,7 +387,19 @@ def rerank_in_process(
     ranked.sort(key=lambda x: x[0], reverse=True)
     items: List[Dict[str, Any]] = []
     for s, p in ranked[: max(0, int(limit))]:
-        md = (p.payload or {}).get("metadata") or {}
+        payload = p.payload or {}
+        md = payload.get("metadata") or {}
+        code_id = payload.get("code_id")
+        doc_id = payload.get("doc_id") or payload.get("_id") or payload.get("id")
+        payload_out: Dict[str, Any] = {}
+        if code_id is not None:
+            payload_out["code_id"] = code_id
+        if doc_id is not None:
+            payload_out["doc_id"] = doc_id
+        if "_id" in payload:
+            payload_out["_id"] = payload.get("_id")
+        if "id" in payload:
+            payload_out["id"] = payload.get("id")
         items.append(
             {
                 "score": float(s),
@@ -382,6 +408,9 @@ def rerank_in_process(
                 "start_line": md.get("start_line"),
                 "end_line": md.get("end_line"),
                 "components": {"rerank_onnx": float(s)},
+                "code_id": str(code_id) if code_id is not None else None,
+                "doc_id": str(doc_id) if doc_id is not None else None,
+                "payload": payload_out if payload_out else None,
             }
         )
     return items

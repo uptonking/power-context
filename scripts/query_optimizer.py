@@ -455,13 +455,18 @@ def get_query_optimizer(
             max_ef = int(os.environ.get("QUERY_OPTIMIZER_MAX_EF", "512") or 512)
             
             size = collection_size or int(os.environ.get("QUERY_OPTIMIZER_COLLECTION_SIZE", "10000") or 10000)
-            
+
+            # Read adaptive flag from environment
+            enable_adaptive = os.environ.get("QUERY_OPTIMIZER_ADAPTIVE", "1").lower() in {
+                "1", "true", "yes", "on"
+            }
+
             _optimizer = QueryOptimizer(
                 base_ef=base_ef,
                 min_ef=min_ef,
                 max_ef=max_ef,
                 collection_size=size,
-                enable_adaptive=True
+                enable_adaptive=enable_adaptive
             )
         
         return _optimizer
@@ -485,13 +490,14 @@ def optimize_query(
     """
     optimizer = get_query_optimizer(collection_size)
     profile = optimizer.analyze_query(query, language)
-    
+
     return {
         "recommended_ef": profile.recommended_ef,
         "use_dense_only": profile.use_dense_only,
         "query_type": profile.query_type.value,
         "complexity": round(profile.complexity_score, 3),
-        "estimated_latency_ms": round(profile.estimated_latency_ms, 2)
+        "estimated_latency_ms": round(profile.estimated_latency_ms, 2),
+        "adaptive_enabled": optimizer.enable_adaptive,
     }
 
 

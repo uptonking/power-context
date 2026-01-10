@@ -15,10 +15,13 @@ Complete environment variable reference for Context Engine.
 - [Reranker](#reranker)
 - [Learning Reranker](#learning-reranker)
 - [Decoder (llama.cpp / OpenAI / GLM / MiniMax)](#decoder-llamacpp--openai--glm--minimax)
+- [Git History & Commit Indexing](#git-history--commit-indexing)
 - [ReFRAG](#refrag)
 - [Pattern Search](#pattern-search)
+- [Lexical Vector Settings](#lexical-vector-settings)
 - [Ports](#ports)
 - [Search & Expansion](#search--expansion)
+- [info_request Tool](#info_request-tool)
 - [Memory Blending](#memory-blending)
 
 ---
@@ -31,6 +34,19 @@ Complete environment variable reference for Context Engine.
 | REPO_NAME | Logical repo tag stored in payload for filtering | auto-detect from git/folder |
 | HOST_INDEX_PATH | Host path mounted at /work in containers | current repo (.) |
 | QDRANT_URL | Qdrant base URL | container: http://qdrant:6333; local: http://localhost:6333 |
+| MULTI_REPO_MODE | Enable multi-repo collections (each subdir gets own collection) | 0 (disabled) |
+| LOG_LEVEL | Logging verbosity: DEBUG, INFO, WARNING, ERROR, CRITICAL | INFO |
+| CTXCE_AUTH_ENABLED | Enable API authentication (requires token header) | 0 (disabled) |
+| CTXCE_AUTH_ADMIN_TOKEN | Admin token for authenticated requests | unset |
+
+### Tool Description Customization
+
+Override default MCP tool descriptions (useful for agent tuning).
+
+| Name | Description | Default |
+|------|-------------|---------|
+| TOOL_STORE_DESCRIPTION | Custom description for memory_store tool | built-in |
+| TOOL_FIND_DESCRIPTION | Custom description for memory_find tool | built-in |
 
 ## Embedding Models
 
@@ -44,6 +60,7 @@ The default configuration uses `BAAI/bge-base-en-v1.5` via fastembed:
 |------|-------------|---------|
 | EMBEDDING_MODEL | Model name for dense embeddings | BAAI/bge-base-en-v1.5 |
 | EMBEDDING_PROVIDER | Backend provider | fastembed |
+| EMBEDDING_SEED | Seed for deterministic embeddings (used in benchmarks) | unset |
 
 ### Qwen3-Embedding (Experimental)
 
@@ -92,6 +109,8 @@ make reset-dev-dual  # Recreates collection and reindexes
 | INDEX_CHUNK_OVERLAP | Overlap lines between chunks | 20 |
 | INDEX_BATCH_SIZE | Upsert batch size | 64 |
 | INDEX_PROGRESS_EVERY | Log progress every N files | 200 |
+| SMART_SYMBOL_REINDEXING | Reuse embeddings when only symbols change | 1 (enabled) |
+| MAX_CHANGED_SYMBOLS_RATIO | Threshold for full reindex vs smart update | 0.6 |
 
 ## Query Optimization
 
@@ -158,6 +177,19 @@ For custom models or explicit control, set both ONNX path and tokenizer:
 
 **Note:** If both `RERANKER_MODEL` and `RERANKER_ONNX_PATH` are set, `RERANKER_MODEL` takes priority.
 
+### Reranker Tuning
+
+| Name | Description | Default |
+|------|-------------|---------|
+| RERANKER_TOPN | Candidates to retrieve before reranking | 50 |
+| RERANKER_RETURN_M | Final results after reranking | 12 |
+| RERANKER_TIMEOUT_MS | Rerank timeout in milliseconds | 2000 |
+| RERANK_BLEND_WEIGHT | Ratio of rerank vs fusion score (0.0-1.0) | 0.6 |
+| RERANK_TIMEOUT_FLOOR_MS | Min timeout to avoid cold-start failures | 1000 |
+| POST_RERANK_SYMBOL_BOOST | Score boost for exact symbol matches after rerank | 1.0 |
+| EMBEDDING_WARMUP | Warm up embedding model on startup | 0 (disabled) |
+| RERANK_WARMUP | Warm up reranker model on startup | 0 (disabled) |
+
 ## Learning Reranker
 
 The learning reranker trains a lightweight neural network (TinyScorer) to improve search rankings over time. See [Architecture](ARCHITECTURE.md#5-learning-reranker-system) for details.
@@ -212,6 +244,9 @@ RERANK_EVENTS_ENABLED=0
 | RERANK_LEARNING_BATCH_SIZE | Number of events per training batch | 32 |
 | RERANK_LEARNING_POLL_INTERVAL | Seconds between checking for new events | 30 |
 | RERANK_LEARNING_RATE | Initial learning rate for TinyScorer | 0.001 |
+| RERANK_LLM_TEACHER | Enable LLM-teacher guided learning | 1 (enabled) |
+| RERANK_LLM_SAMPLE_RATE | Fraction of queries to evaluate with LLM teacher | 1.0 |
+| RERANK_VICREG_WEIGHT | Weight for VICReg consistency loss | 0.1 |
 
 ## Decoder (llama.cpp / OpenAI / GLM / MiniMax)
 
@@ -248,6 +283,21 @@ Set `REFRAG_RUNTIME` explicitly to choose a decoder backend:
 
 No auto-detection is performed to avoid surprise API calls. If `REFRAG_RUNTIME` is unset, it defaults to `llamacpp`.
 
+## Git History & Commit Indexing
+
+Settings for indexing git commit history and enabling commit-aware search.
+
+| Name | Description | Default |
+|------|-------------|---------|
+| REFRAG_COMMIT_DESCRIBE | Enable commit lineage goals for indexing | 1 (enabled) |
+| COMMIT_VECTOR_SEARCH | Enable vector search over commit messages | 0 (disabled) |
+| REMOTE_UPLOAD_GIT_MAX_COMMITS | Max commits per upload bundle (0 = no git history) | 500 |
+| GIT_HISTORY_PRUNE | Prune old git_message points on manifest ingest | 1 (enabled) |
+| GIT_HISTORY_DELETE_MANIFEST | Delete manifest files after successful ingest | 1 (enabled) |
+| GIT_HISTORY_MANIFEST_MAX_FILES | Cap manifest files per .remote-git dir (0 = unlimited) | 50 |
+
+**Note:** Git history indexing stores commit messages and metadata as searchable points. Use `search_commits_for` MCP tool to query.
+
 ## ReFRAG (Micro-Chunking & Retrieval)
 
 | Name | Description | Default |
@@ -255,12 +305,64 @@ No auto-detection is performed to avoid surprise API calls. If `REFRAG_RUNTIME` 
 | REFRAG_MODE | Enable micro-chunking and span budgeting | 1 (enabled) |
 | REFRAG_GATE_FIRST | Enable mini-vector gating | 1 (enabled) |
 | REFRAG_CANDIDATES | Candidates for gate-first filtering | 200 |
+| REFRAG_PSEUDO_DESCRIBE | Enable LLM-based pseudo/tags generation during indexing | 0 (disabled) |
 | MICRO_BUDGET_TOKENS | Token budget for context_answer | 5000 (GLM: 6000-8192) |
 | MICRO_OUT_MAX_SPANS | Max spans returned per query | 8 (GLM: 24) |
 | MICRO_CHUNK_TOKENS | Tokens per micro-chunk window | 16 |
 | MICRO_CHUNK_STRIDE | Stride between windows | 8 |
 | MICRO_MERGE_LINES | Lines to merge adjacent spans | 4 |
 | MICRO_TOKENS_PER_LINE | Estimated tokens per line | 32 |
+
+**LLM-Based Pseudo/Tags (`REFRAG_PSEUDO_DESCRIBE`):**
+
+When enabled, the indexer uses the configured decoder (via `REFRAG_RUNTIME`) to generate semantic descriptions and tags for each code chunk. This enriches the lexical vectors with natural language terms, improving NL→code retrieval.
+
+```bash
+# Enable LLM pseudo/tags generation (requires decoder configured)
+REFRAG_PSEUDO_DESCRIBE=1
+REFRAG_RUNTIME=glm  # or openai, minimax, llamacpp
+```
+
+**Note:** This significantly increases indexing time and API costs. Best used with batch concurrency (`PSEUDO_BATCH_CONCURRENCY=4`).
+
+### Pseudo Backfill Worker
+
+Deferred pseudo/tag generation runs asynchronously after initial indexing.
+
+| Name | Description | Default |
+|------|-------------|---------|
+| PSEUDO_BACKFILL_ENABLED | Enable async pseudo/tag backfill worker | 0 (disabled) |
+| PSEUDO_DEFER_TO_WORKER | Skip inline pseudo, defer to backfill worker | 0 (disabled) |
+
+### Adaptive Span Sizing
+
+Expand search hits to full symbol boundaries for better context.
+
+| Name | Description | Default |
+|------|-------------|---------|
+| ADAPTIVE_SPAN_SIZING | Expand hits to encompassing symbol boundaries | 1 (enabled) |
+| DEBUG_ADAPTIVE_SPAN | Enable debug logging for span expansion | 0 (disabled) |
+
+### Context Answer Shaping
+
+Controls output formatting for `context_answer` responses.
+
+| Name | Description | Default |
+|------|-------------|---------|
+| CTX_SUMMARY_CHARS | Max chars for summary (0 = disabled) | 0 |
+| CTX_SNIPPET_CHARS | Max chars per code snippet | 400 |
+| DEBUG_CONTEXT_ANSWER | Enable debug logging for context_answer | 0 (disabled) |
+
+### Mini Vector Gating
+
+Compact 64-dim vectors for fast candidate filtering before full dense search.
+
+| Name | Description | Default |
+|------|-------------|---------|
+| MINI_VECTOR_NAME | Name of mini vector index | mini |
+| MINI_VEC_DIM | Dimension of mini vectors | 64 |
+| MINI_VEC_SEED | Random projection seed (for reproducibility) | 1337 |
+| HYBRID_MINI_WEIGHT | Weight of mini vectors in hybrid scoring | 0.5 |
 
 ## Pattern Search
 
@@ -323,6 +425,41 @@ To use legacy settings (pre-v2): `LEX_VECTOR_DIM=4096 LEX_MULTI_HASH=1 LEX_BIGRA
 | HYBRID_EXPAND | Enable heuristic multi-query expansion | 0 (off) |
 | LLM_EXPAND_MAX | Max number of alternate queries to generate via LLM (0 = disabled) | 0 |
 | EXPAND_MAX_TOKENS | Max tokens for LLM query expansion response | 512 |
+| REPO_AUTO_FILTER | Auto-detect and filter to current repo in searches | 1 (enabled) |
+| HYBRID_IN_PROCESS | Run hybrid search in-process (faster, falls back to subprocess) | 1 (enabled) |
+| RERANK_IN_PROCESS | Run reranker in-process (faster, falls back to subprocess) | 1 (enabled) |
+| PARALLEL_DENSE_QUERIES | Enable parallel dense query execution | 1 (enabled) |
+| PARALLEL_DENSE_THRESHOLD | Min queries to trigger parallelization | 4 |
+| HYBRID_SYMBOL_BOOST | Score boost for exact symbol matches | 0.35 |
+| HYBRID_RECENCY_WEIGHT | Weight for recently modified files | 0.1 |
+| HYBRID_PER_PATH | Max results per file path | 2 |
+| HYBRID_SNIPPET_DISK_READ | Allow snippet scoring to read file contents | 1 (enabled) |
+| PRF_ENABLED | Enable Pseudo-Relevance Feedback (refined second pass) | 1 (enabled) |
+| RERANK_EXPAND | Expand candidates before reranking | 1 (enabled) |
+| REPO_SEARCH_DEFAULT_LIMIT | Default result limit for repo_search | 10 |
+
+**Note:** `REPO_AUTO_FILTER=0` disables automatic repo scoping, useful for benchmarks or cross-repo searches.
+
+### Caching
+
+| Name | Description | Default |
+|------|-------------|---------|
+| MAX_EMBED_CACHE | Max cached embeddings | 16384 |
+| HYBRID_RESULTS_CACHE | Max cached search results | 128 |
+| HYBRID_RESULTS_CACHE_ENABLED | Enable search result caching | 1 (enabled) |
+
+### Semantic Expansion
+
+Synonym/related term expansion for improved recall on natural language queries.
+
+| Name | Description | Default |
+|------|-------------|---------|
+| SEMANTIC_EXPANSION_ENABLED | Enable semantic term expansion | 1 (enabled) |
+| SEMANTIC_EXPANSION_TOP_K | Number of similar terms to consider | 5 |
+| SEMANTIC_EXPANSION_SIMILARITY_THRESHOLD | Min similarity for expansion terms | 0.7 |
+| SEMANTIC_EXPANSION_MAX_TERMS | Max expansion terms added per query | 3 |
+| SEMANTIC_EXPANSION_CACHE_SIZE | Cache size for expansion lookups | 1000 |
+| SEMANTIC_EXPANSION_CACHE_TTL | Cache TTL in seconds | 3600 |
 
 ### LLM Query Expansion
 
@@ -368,6 +505,27 @@ The search engine can boost files whose paths match query terms—production-gra
 - Total: 4.2 × 0.15 = 0.63 boost
 
 Set `FNAME_BOOST=0` to disable, or increase (e.g., `0.25`) for stronger path weighting.
+
+## info_request Tool
+
+Simplified codebase retrieval with optional explanation mode.
+
+| Name | Description | Default |
+|------|-------------|---------|
+| INFO_REQUEST_LIMIT | Default result limit for info_request queries | 10 |
+| INFO_REQUEST_CONTEXT_LINES | Context lines in snippets (richer than repo_search) | 5 |
+
+## Output Formatting
+
+### TOON (Token-Oriented Object Notation)
+
+Compact output format that reduces token usage by 40-60%.
+
+| Name | Description | Default |
+|------|-------------|---------|
+| TOON_ENABLED | Enable TOON format by default for all search output | 0 (disabled) |
+
+Set `output_format="toon"` per-call, or enable globally via `TOON_ENABLED=1`.
 
 ## Memory Blending
 

@@ -87,7 +87,11 @@ def test_smart_reindex_refreshes_lex_vector_for_reused_chunks(tmp_path, monkeypa
     monkeypatch.setattr(ingest_code, "upsert_points", fake_upsert_points)
     monkeypatch.setattr(ingest_code, "delete_points_by_path", lambda *a, **k: None)
 
-    # Model is unused in reuse-only path.
+    # Mock embed_batch since dense enrichment may trigger re-embedding
+    reused_dense = [0.1, 0.2, 0.3]
+    monkeypatch.setattr(ingest_code, "embed_batch", lambda _model, texts: [reused_dense for _ in texts])
+
+    # Model is unused when embeddings are mocked.
     dummy_model = object()
 
     status = ingest_code.process_file_with_smart_reindexing(

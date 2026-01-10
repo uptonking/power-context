@@ -1,10 +1,11 @@
 """Tests for symbol and filename boosting logic in hybrid_search.
 
-Tests the new token-level matching for symbols (camelCase/snake_case splitting)
-and filename stem matching added in commit 0a8a896.
+Tests token-level matching for symbols (camelCase/snake_case splitting) and the
+filename boost helper used by hybrid_search.
 """
 import pytest
 from scripts.hybrid_search import _split_ident
+from scripts.rerank_recursive.utils import _compute_fname_boost
 
 
 class TestSplitIdent:
@@ -66,53 +67,19 @@ class TestSymbolPartMatching:
 
 
 class TestFilenameBoostLogic:
-    """Test filename/stem matching boost logic."""
+    """Test filename boost behavior."""
 
-    def test_stem_extraction(self):
-        """Verify stem is correctly extracted from path."""
-        path = "scripts/hybrid_search.py"
-        basename = path.rsplit("/", 1)[-1].lower()
-        stem = basename.rsplit(".", 1)[0] if "." in basename else basename
-        assert basename == "hybrid_search.py"
-        assert stem == "hybrid_search"
+    def test_fname_boost_matches_filename_tokens(self):
+        """Two token matches should trigger a boost."""
+        q = "authentication service"
+        cand = {"path": "services/AuthenticationService.ts"}
+        assert _compute_fname_boost(q, cand, 0.1) > 0
 
-    def test_stem_parts_extracted(self):
-        """Verify stem parts match query tokens."""
-        stem = "hybrid_search"
-        stem_parts = set(p.lower() for p in _split_ident(stem) if len(p) >= 2)
-        assert "hybrid" in stem_parts
-        assert "search" in stem_parts
-
-    def test_camelcase_filename_parts(self):
-        """CamelCase filenames should be tokenized."""
-        stem = "UserAuthService"
-        stem_parts = set(p.lower() for p in _split_ident(stem) if len(p) >= 2)
-        assert "user" in stem_parts
-        assert "auth" in stem_parts
-        assert "service" in stem_parts
-
-    def test_query_matches_stem(self):
-        """Direct stem match should work."""
-        path = "utils/config_manager.py"
-        basename = path.rsplit("/", 1)[-1].lower()
-        stem = basename.rsplit(".", 1)[0]
-        stem_parts = set(p.lower() for p in _split_ident(stem) if len(p) >= 2)
-        
-        # Query "config" should match
-        query = "config"
-        assert query == stem or query in stem_parts or query in basename
-
-    def test_query_matches_stem_part(self):
-        """Query matching a stem part should boost."""
-        stem = "DatabaseConnection"
-        stem_parts = set(p.lower() for p in _split_ident(stem) if len(p) >= 2)
-        assert "database" in stem_parts
-        assert "connection" in stem_parts
-
-    def test_short_query_filtered(self):
-        """Queries < 3 chars should not trigger filename boost."""
-        query = "db"
-        assert len(query) < 3  # Should be filtered in boost logic
+    def test_fname_boost_requires_two_matches(self):
+        """Single-token queries should not trigger (noise control)."""
+        q = "db"
+        cand = {"path": "lib/db.py"}
+        assert _compute_fname_boost(q, cand, 0.1) == 0.0
 
 
 class TestBoostIntegration:
@@ -131,34 +98,7 @@ class TestBoostIntegration:
         assert matches, "Query 'user' should match symbol part"
 
     def test_pattern_filename_boost(self):
-        """Test the pattern used in hybrid_search for filename boost."""
-        path = "services/AuthenticationService.ts"
-        basename = path.rsplit("/", 1)[-1].lower()
-        stem = basename.rsplit(".", 1)[0] if "." in basename else basename
-        stem_parts = set(p.lower() for p in _split_ident(stem) if len(p) >= 2)
-        
-        # Query "authentication" should trigger boost
-        query = "authentication"
-        ql = query.lower()
-        matches = (
-            len(ql) >= 3 and 
-            (ql == stem or ql in stem_parts or ql in basename)
-        )
-        assert matches, "Query 'authentication' should match filename"
-
-    def test_pattern_no_boost_short_query(self):
-        """Short queries should not get filename boost."""
-        path = "lib/db.py"
-        basename = path.rsplit("/", 1)[-1].lower()
-        stem = basename.rsplit(".", 1)[0]
-        stem_parts = set(p.lower() for p in _split_ident(stem) if len(p) >= 2)
-        
-        query = "db"
-        ql = query.lower()
-        # This should NOT match due to len(ql) < 3 check
-        matches = (
-            len(ql) >= 3 and 
-            (ql == stem or ql in stem_parts or ql in basename)
-        )
-        assert not matches, "Short query should not trigger boost"
-
+        """Filename boost uses the production-grade matcher."""
+        q = "authentication service"
+        cand = {"path": "services/AuthenticationService.ts"}
+        assert _compute_fname_boost(q, cand, 0.1) > 0

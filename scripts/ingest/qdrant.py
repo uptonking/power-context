@@ -62,6 +62,41 @@ PAYLOAD_INDEX_FIELDS = (
 
 _SCHEMA_MODES = {"legacy", "validate", "create", "migrate"}
 
+# ---------------------------------------------------------------------------
+# Quantization configuration
+# ---------------------------------------------------------------------------
+def _get_quantization_config() -> models.QuantizationConfig | None:
+    """Get quantization config based on QDRANT_QUANTIZATION env var.
+
+    Options:
+        - none: No quantization (default)
+        - scalar: INT8 scalar quantization (4x smaller, 2-4x faster)
+        - binary: Binary quantization (32x smaller, very fast but less accurate)
+    """
+    quant_mode = os.environ.get("QDRANT_QUANTIZATION", "none").strip().lower()
+
+    if quant_mode in {"none", "", "0", "false", "off"}:
+        return None
+
+    if quant_mode == "scalar":
+        return models.ScalarQuantization(
+            scalar=models.ScalarQuantizationConfig(
+                type=models.ScalarType.INT8,
+                quantile=0.99,  # Clip outliers for better distribution
+                always_ram=True,  # Keep quantized vectors in RAM for speed
+            )
+        )
+
+    if quant_mode == "binary":
+        return models.BinaryQuantization(
+            binary=models.BinaryQuantizationConfig(
+                always_ram=True,
+            )
+        )
+
+    print(f"[COLLECTION_WARNING] Unknown QDRANT_QUANTIZATION={quant_mode!r}; using none")
+    return None
+
 
 def _normalize_schema_mode(schema_mode: str | None) -> str:
     mode = (schema_mode or "").strip().lower()
@@ -196,16 +231,19 @@ def _ensure_collection_with_mode(
                 f"Collection {name} does not exist; run with --schema-mode create "
                 "or --recreate to create it."
             ) from e
+        quant_cfg = _get_quantization_config()
         client.create_collection(
             collection_name=name,
             vectors_config=vectors_cfg,
             sparse_vectors_config=sparse_cfg,
             hnsw_config=models.HnswConfigDiff(m=16, ef_construct=256),
+            quantization_config=quant_cfg,
         )
         sparse_info = f", sparse: [{LEX_SPARSE_NAME}]" if sparse_cfg else ""
+        quant_info = f", quantization: {os.environ.get('QDRANT_QUANTIZATION', 'none')}" if quant_cfg else ""
         print(
             f"[COLLECTION_INFO] Successfully created new collection {name} with vectors: "
-            f"{list(vectors_cfg.keys())}{sparse_info}"
+            f"{list(vectors_cfg.keys())}{sparse_info}{quant_info}"
         )
         ensure_payload_indexes(client, name)
         return
@@ -394,14 +432,17 @@ def ensure_collection(
                 index=models.SparseIndexParams(full_scan_threshold=5000)
             )
         }
+    quant_cfg = _get_quantization_config()
     client.create_collection(
         collection_name=name,
         vectors_config=vectors_cfg,
         sparse_vectors_config=sparse_cfg,
         hnsw_config=models.HnswConfigDiff(m=16, ef_construct=256),
+        quantization_config=quant_cfg,
     )
     sparse_info = f", sparse: [{LEX_SPARSE_NAME}]" if sparse_cfg else ""
-    print(f"[COLLECTION_INFO] Successfully created new collection {name} with vectors: {list(vectors_cfg.keys())}{sparse_info}")
+    quant_info = f", quantization: {os.environ.get('QDRANT_QUANTIZATION', 'none')}" if quant_cfg else ""
+    print(f"[COLLECTION_INFO] Successfully created new collection {name} with vectors: {list(vectors_cfg.keys())}{sparse_info}{quant_info}")
 
     _restore_memories_after_recreate(name, backup_file)
 
@@ -527,11 +568,13 @@ def recreate_collection(client: QdrantClient, name: str, dim: int, vector_name: 
                 index=models.SparseIndexParams(full_scan_threshold=5000)
             )
         }
+    quant_cfg = _get_quantization_config()
     client.create_collection(
         collection_name=name,
         vectors_config=vectors_cfg,
         sparse_vectors_config=sparse_cfg,
         hnsw_config=models.HnswConfigDiff(m=16, ef_construct=256),
+        quantization_config=quant_cfg,
     )
 
 

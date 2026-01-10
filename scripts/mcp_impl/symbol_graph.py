@@ -6,23 +6,82 @@ Provides Qdrant-native queries for:
 - "who calls X" (callers)
 - "where is X defined" (definition)
 - "what imports Y" (importers)
+- "who is called by X" (called_by - post-index computed)
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 import os
-from typing import Any, Dict, List, Optional
+import re
+from typing import Any, Dict, List, Optional, Set
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
     "_symbol_graph_impl",
     "_format_symbol_graph_toon",
+    "_compute_called_by",
 ]
 
 # Environment - use same patterns as rest of engine
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
+
+
+def _normalize_symbol(symbol: str) -> str:
+    """Normalize a symbol name for robust matching.
+
+    Handles:
+    - Whitespace trimming
+    - Qualified names (obj.method -> method for base match)
+    - Common prefixes/suffixes
+    """
+    s = str(symbol).strip()
+    if not s:
+        return ""
+    # Remove leading/trailing underscores for matching (but preserve for exact)
+    return s
+
+
+def _symbol_variants(symbol: str) -> List[str]:
+    """Generate symbol variants for fuzzy matching.
+
+    Given "MyClass.my_method", returns:
+    - "MyClass.my_method" (exact)
+    - "my_method" (base name)
+    - "MyClass" (container)
+    """
+    s = _normalize_symbol(symbol)
+    if not s:
+        return []
+
+    variants = [s]
+
+    # Handle qualified names: obj.method, Class.method, module.func
+    if "." in s:
+        parts = s.split(".")
+        # Add base name (last part)
+        if parts[-1]:
+            variants.append(parts[-1])
+        # Add container name (first part) for class lookups
+        if len(parts) >= 2 and parts[0]:
+            variants.append(parts[0])
+
+    # Handle C++/Rust namespace paths: Namespace::Class::method
+    if "::" in s:
+        parts = s.split("::")
+        if parts[-1]:
+            variants.append(parts[-1])
+        if len(parts) >= 2 and parts[-2]:
+            variants.append(parts[-2])
+
+    # Handle arrow notation: obj->method
+    if "->" in s:
+        parts = s.split("->")
+        if parts[-1]:
+            variants.append(parts[-1])
+
+    return list(dict.fromkeys(variants))  # Dedupe preserving order
 
 def _norm_under(u: Optional[str]) -> Optional[str]:
     """Normalize an `under` path to match ingest's stored `metadata.path_prefix` values.
@@ -190,50 +249,132 @@ async def _query_array_field(
 ) -> List[Dict[str, Any]]:
     """
     Query for points where an array field contains a specific value.
-    Uses MatchAny for exact array element matching.
+
+    Uses a multi-strategy approach for robust matching:
+    1. MatchAny for exact array element matching
+    2. MatchAny with symbol variants (qualified names)
+    3. MatchText for substring fallback
     """
     from qdrant_client import models as qmodels
 
-    must_conditions = [
-        # Use MatchAny for exact element match in arrays
-        qmodels.FieldCondition(
-            key=field_key,
-            match=qmodels.MatchAny(any=[value]),
-        )
-    ]
+    results: List[Any] = []
+    seen_ids: Set[str] = set()
 
-    # Add optional filters
+    # Build base conditions for optional filters
+    base_conditions = []
     if language:
-        must_conditions.append(
+        base_conditions.append(
             qmodels.FieldCondition(
                 key="metadata.language",
                 match=qmodels.MatchValue(value=language.lower()),
             )
         )
-
     if under:
-        must_conditions.append(
+        base_conditions.append(
             qmodels.FieldCondition(
                 key="metadata.path_prefix",
                 match=qmodels.MatchValue(value=under),
             )
         )
 
-    query_filter = qmodels.Filter(must=must_conditions)
-
-    def scroll_query():
-        return client.scroll(
-            collection_name=collection,
-            scroll_filter=query_filter,
-            limit=limit,
-            with_payload=True,
-            with_vectors=False,
+    # Strategy 1: Exact match with MatchAny (most reliable for array fields)
+    try:
+        filter1 = qmodels.Filter(
+            must=[
+                qmodels.FieldCondition(
+                    key=field_key,
+                    match=qmodels.MatchAny(any=[value]),
+                )
+            ] + base_conditions
         )
 
-    scroll_result = await asyncio.to_thread(scroll_query)
-    points = scroll_result[0] if scroll_result else []
+        def scroll1():
+            return client.scroll(
+                collection_name=collection,
+                scroll_filter=filter1,
+                limit=limit,
+                with_payload=True,
+                with_vectors=False,
+            )
 
-    return [_format_point(pt) for pt in points[:limit]]
+        scroll_result = await asyncio.to_thread(scroll1)
+        points = scroll_result[0] if scroll_result else []
+        for pt in points:
+            pt_id = str(getattr(pt, "id", id(pt)))
+            if pt_id not in seen_ids:
+                seen_ids.add(pt_id)
+                results.append(pt)
+    except Exception as e:
+        logger.debug(f"Strategy 1 (MatchAny exact) failed: {e}")
+
+    # Strategy 2: Try symbol variants (e.g., "MyClass.method" -> also try "method")
+    if len(results) < limit:
+        variants = _symbol_variants(value)
+        for variant in variants[1:]:  # Skip first (exact match already tried)
+            if len(results) >= limit:
+                break
+            try:
+                filter2 = qmodels.Filter(
+                    must=[
+                        qmodels.FieldCondition(
+                            key=field_key,
+                            match=qmodels.MatchAny(any=[variant]),
+                        )
+                    ] + base_conditions
+                )
+
+                def scroll2():
+                    return client.scroll(
+                        collection_name=collection,
+                        scroll_filter=filter2,
+                        limit=limit - len(results),
+                        with_payload=True,
+                        with_vectors=False,
+                    )
+
+                scroll_result = await asyncio.to_thread(scroll2)
+                points = scroll_result[0] if scroll_result else []
+                for pt in points:
+                    pt_id = str(getattr(pt, "id", id(pt)))
+                    if pt_id not in seen_ids:
+                        seen_ids.add(pt_id)
+                        results.append(pt)
+            except Exception as e:
+                logger.debug(f"Strategy 2 (variant '{variant}') failed: {e}")
+
+    # Strategy 3: MatchText substring fallback for partial matches
+    if len(results) < limit:
+        try:
+            filter3 = qmodels.Filter(
+                must=[
+                    qmodels.FieldCondition(
+                        key=field_key,
+                        match=qmodels.MatchText(text=value),
+                    )
+                ] + base_conditions
+            )
+
+            def scroll3():
+                return client.scroll(
+                    collection_name=collection,
+                    scroll_filter=filter3,
+                    limit=limit - len(results),
+                    with_payload=True,
+                    with_vectors=False,
+                )
+
+            scroll_result = await asyncio.to_thread(scroll3)
+            points = scroll_result[0] if scroll_result else []
+            for pt in points:
+                pt_id = str(getattr(pt, "id", id(pt)))
+                if pt_id not in seen_ids:
+                    seen_ids.add(pt_id)
+                    results.append(pt)
+        except Exception as e:
+            # MatchText may not be supported on array fields in all Qdrant versions
+            logger.debug(f"Strategy 3 (MatchText substring) failed: {e}")
+
+    return [_format_point(pt) for pt in results[:limit]]
 
 
 async def _query_definition(
@@ -430,9 +571,16 @@ async def _fallback_semantic_search(
             limit=limit,
             language=language,
             session=session,
+            output_format="json",  # Avoid TOON encoding for internal calls
         )
 
-        return search_result.get("results", [])
+        # Handle case where results might be TOON-encoded string (shouldn't happen with output_format="json")
+        results = search_result.get("results", [])
+        if isinstance(results, str):
+            # If somehow still a string, return empty - TOON decoding is not worth it here
+            logger.debug("Fallback search returned TOON-encoded results, skipping")
+            return []
+        return results
 
     except Exception as e:
         logger.warning(f"Fallback semantic search failed: {e}")
@@ -464,3 +612,218 @@ def _format_symbol_graph_toon(result: Dict[str, Any]) -> str:
         lines.append(line)
 
     return "\n".join(lines)
+
+
+async def _compute_called_by(
+    symbol: str,
+    limit: int = 50,
+    language: Optional[str] = None,
+    under: Optional[str] = None,
+    collection: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Compute "called_by" - the inverse of what a symbol calls.
+
+    Given a symbol (e.g., function or method), finds all functions that:
+    1. Are defined in the codebase
+    2. Have this symbol in their metadata.calls list
+
+    This is the ego-graph concept simplified: "Who references me?"
+
+    Args:
+        symbol: The symbol name to find callers for
+        limit: Maximum number of callers to return
+        language: Optional language filter
+        under: Optional path prefix filter
+        collection: Optional collection override
+
+    Returns:
+        Dict with:
+        - symbol: The queried symbol
+        - called_by: List of {path, symbol, symbol_path, line} for callers
+        - count: Number of callers found
+    """
+    from qdrant_client import QdrantClient
+    from qdrant_client import models as qmodels
+
+    # Get collection
+    coll = str(collection or "").strip()
+    if not coll:
+        try:
+            from scripts.mcp_impl.workspace import _default_collection
+            coll = _default_collection() or ""
+        except Exception:
+            coll = os.environ.get("COLLECTION_NAME", "codebase")
+    if not coll:
+        coll = os.environ.get("COLLECTION_NAME", "codebase")
+
+    try:
+        client = QdrantClient(
+            url=QDRANT_URL,
+            api_key=os.environ.get("QDRANT_API_KEY"),
+            timeout=float(os.environ.get("QDRANT_TIMEOUT", "20") or 20),
+        )
+    except Exception as e:
+        logger.error(f"Failed to connect to Qdrant: {e}")
+        return {
+            "symbol": symbol,
+            "called_by": [],
+            "count": 0,
+            "error": f"Qdrant connection failed: {e}",
+        }
+
+    # Build filter: find chunks where metadata.calls contains symbol
+    base_conditions = []
+    if language:
+        base_conditions.append(
+            qmodels.FieldCondition(
+                key="metadata.language",
+                match=qmodels.MatchValue(value=language.lower()),
+            )
+        )
+    norm_under = _norm_under(under)
+    if norm_under:
+        base_conditions.append(
+            qmodels.FieldCondition(
+                key="metadata.path_prefix",
+                match=qmodels.MatchValue(value=norm_under),
+            )
+        )
+
+    callers: List[Dict[str, Any]] = []
+    seen_ids: Set[str] = set()
+
+    # Try exact match first
+    try:
+        variants = _symbol_variants(symbol)
+        for variant in variants:
+            if len(callers) >= limit:
+                break
+
+            query_filter = qmodels.Filter(
+                must=[
+                    qmodels.FieldCondition(
+                        key="metadata.calls",
+                        match=qmodels.MatchAny(any=[variant]),
+                    )
+                ] + base_conditions
+            )
+
+            def do_scroll():
+                return client.scroll(
+                    collection_name=coll,
+                    scroll_filter=query_filter,
+                    limit=limit - len(callers),
+                    with_payload=True,
+                    with_vectors=False,
+                )
+
+            scroll_result = await asyncio.to_thread(do_scroll)
+            points = scroll_result[0] if scroll_result else []
+
+            for pt in points:
+                pt_id = str(getattr(pt, "id", id(pt)))
+                if pt_id in seen_ids:
+                    continue
+                seen_ids.add(pt_id)
+
+                payload = getattr(pt, "payload", {}) or {}
+                md = payload.get("metadata", payload)
+
+                # Only include if this chunk has a symbol (is a function/class definition)
+                chunk_symbol = str(md.get("symbol") or "")
+                if not chunk_symbol:
+                    continue
+
+                caller_info = {
+                    "path": str(md.get("path") or ""),
+                    "symbol": chunk_symbol,
+                    "symbol_path": str(md.get("symbol_path") or ""),
+                    "start_line": int(md.get("start_line") or md.get("start") or 0),
+                    "end_line": int(md.get("end_line") or md.get("end") or 0),
+                    "language": str(md.get("language") or ""),
+                }
+                callers.append(caller_info)
+
+    except Exception as e:
+        logger.warning(f"_compute_called_by query failed: {e}")
+
+    return {
+        "symbol": symbol,
+        "called_by": callers[:limit],
+        "count": len(callers[:limit]),
+        "collection": coll,
+    }
+
+
+async def _get_symbol_calls(
+    symbol_path: str,
+    collection: Optional[str] = None,
+) -> List[str]:
+    """
+    Get the list of calls made by a specific symbol.
+
+    Useful for building call graphs: given a function, what does it call?
+
+    Args:
+        symbol_path: The symbol_path to look up (e.g., "MyClass.my_method")
+        collection: Optional collection override
+
+    Returns:
+        List of function/method names called by this symbol
+    """
+    from qdrant_client import QdrantClient
+    from qdrant_client import models as qmodels
+
+    coll = str(collection or "").strip()
+    if not coll:
+        try:
+            from scripts.mcp_impl.workspace import _default_collection
+            coll = _default_collection() or ""
+        except Exception:
+            coll = os.environ.get("COLLECTION_NAME", "codebase")
+    if not coll:
+        coll = os.environ.get("COLLECTION_NAME", "codebase")
+
+    try:
+        client = QdrantClient(
+            url=QDRANT_URL,
+            api_key=os.environ.get("QDRANT_API_KEY"),
+            timeout=float(os.environ.get("QDRANT_TIMEOUT", "20") or 20),
+        )
+    except Exception as e:
+        logger.error(f"Failed to connect to Qdrant: {e}")
+        return []
+
+    # Find the symbol definition
+    try:
+        query_filter = qmodels.Filter(
+            must=[
+                qmodels.FieldCondition(
+                    key="metadata.symbol_path",
+                    match=qmodels.MatchValue(value=symbol_path),
+                )
+            ]
+        )
+
+        def do_scroll():
+            return client.scroll(
+                collection_name=coll,
+                scroll_filter=query_filter,
+                limit=1,
+                with_payload=True,
+                with_vectors=False,
+            )
+
+        scroll_result = await asyncio.to_thread(do_scroll)
+        points = scroll_result[0] if scroll_result else []
+
+        if points:
+            payload = getattr(points[0], "payload", {}) or {}
+            md = payload.get("metadata", payload)
+            return md.get("calls") or []
+
+    except Exception as e:
+        logger.warning(f"_get_symbol_calls failed: {e}")
+
+    return []

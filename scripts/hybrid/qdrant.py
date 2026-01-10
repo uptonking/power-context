@@ -67,12 +67,35 @@ def _safe_float(val: Any, default: float) -> float:
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
 API_KEY = os.environ.get("QDRANT_API_KEY")
 
-LEX_VECTOR_NAME = os.environ.get("LEX_VECTOR_NAME", "lex")
-LEX_VECTOR_DIM = _safe_int(os.environ.get("LEX_VECTOR_DIM"), 4096)
-LEX_SPARSE_NAME = os.environ.get("LEX_SPARSE_NAME", "lex_sparse")
-LEX_SPARSE_MODE = os.environ.get("LEX_SPARSE_MODE", "0").strip().lower() in ("1", "true", "yes", "on")
+# Lexical vector configuration
+# Imported from ingest config to ensure Single Source of Truth
+from scripts.ingest.config import (
+    LEX_VECTOR_NAME,
+    LEX_VECTOR_DIM,
+    LEX_SPARSE_NAME,
+    LEX_SPARSE_MODE,
+)
 
 EF_SEARCH = _safe_int(os.environ.get("QDRANT_EF_SEARCH", "128"), 128)
+
+# Quantization search params (for faster search with quantized collections)
+QDRANT_QUANTIZATION = os.environ.get("QDRANT_QUANTIZATION", "none").strip().lower()
+QDRANT_QUANTIZATION_RESCORE = os.environ.get("QDRANT_QUANTIZATION_RESCORE", "1").strip().lower() in ("1", "true", "yes", "on")
+QDRANT_QUANTIZATION_OVERSAMPLING = float(os.environ.get("QDRANT_QUANTIZATION_OVERSAMPLING", "2.0") or 2.0)
+
+
+def _get_search_params(ef: int) -> models.SearchParams:
+    """Build SearchParams with optional quantization settings."""
+    if QDRANT_QUANTIZATION in {"scalar", "binary"}:
+        return models.SearchParams(
+            hnsw_ef=ef,
+            quantization=models.QuantizationSearchParams(
+                rescore=QDRANT_QUANTIZATION_RESCORE,
+                oversampling=QDRANT_QUANTIZATION_OVERSAMPLING,
+            )
+        )
+    return models.SearchParams(hnsw_ef=ef)
+
 
 # ---------------------------------------------------------------------------
 # Connection pooling setup
@@ -453,7 +476,7 @@ def lex_query(
             query=v,
             using=LEX_VECTOR_NAME,
             query_filter=flt,
-            search_params=models.SearchParams(hnsw_ef=ef),
+            search_params=_get_search_params(ef),
             limit=per_query,
             with_payload=True,
         )
@@ -466,7 +489,7 @@ def lex_query(
             query=v,
             using=LEX_VECTOR_NAME,
             filter=flt,
-            search_params=models.SearchParams(hnsw_ef=ef),
+            search_params=_get_search_params(ef),
             limit=per_query,
             with_payload=True,
         )
@@ -485,7 +508,7 @@ def lex_query(
                 query=v,
                 using=LEX_VECTOR_NAME,
                 query_filter=None,
-                search_params=models.SearchParams(hnsw_ef=ef),
+                search_params=_get_search_params(ef),
                 limit=per_query,
                 with_payload=True,
             )
@@ -496,7 +519,7 @@ def lex_query(
                 query=v,
                 using=LEX_VECTOR_NAME,
                 filter=None,
-                search_params=models.SearchParams(hnsw_ef=ef),
+                search_params=_get_search_params(ef),
                 limit=per_query,
                 with_payload=True,
             )
@@ -576,21 +599,24 @@ def dense_query(
     query_text: str | None = None
 ) -> List[Any]:
     """Query using dense embedding vector."""
+    # Default EF: scale with per_query for adequate recall
     ef = max(EF_SEARCH, 32 + 4 * int(per_query))
 
     # Apply dynamic EF optimization if query text provided
-    try:
-        from scripts.query_optimizer import optimize_query
-        if query_text and os.environ.get("QUERY_OPTIMIZER_ADAPTIVE", "1") == "1":
+    if query_text:
+        try:
+            from scripts.query_optimizer import optimize_query
             result = optimize_query(query_text)
-            ef = result["recommended_ef"]
+            # Only override EF when adaptive optimization is enabled
+            if result.get("adaptive_enabled", False):
+                ef = result["recommended_ef"]
+                if os.environ.get("DEBUG_HYBRID_SEARCH"):
+                    logger.debug(f"Dynamic EF: {ef} (complexity={result['complexity']}, type={result['query_type']})")
+        except ImportError:
+            pass
+        except Exception as e:
             if os.environ.get("DEBUG_HYBRID_SEARCH"):
-                logger.debug(f"Dynamic EF: {ef} (complexity={result['complexity']}, type={result['query_type']})")
-    except ImportError:
-        pass
-    except Exception as e:
-        if os.environ.get("DEBUG_HYBRID_SEARCH"):
-            logger.debug(f"Query optimizer failed, using default EF: {e}")
+                logger.debug(f"Query optimizer failed, using default EF: {e}")
 
     flt = _sanitize_filter_obj(flt)
     collection = _collection(collection_name)
@@ -605,7 +631,7 @@ def dense_query(
             query=v,
             using=vec_name,
             query_filter=flt,
-            search_params=models.SearchParams(hnsw_ef=ef),
+            search_params=_get_search_params(ef),
             limit=per_query,
             with_payload=True,
         )
@@ -618,7 +644,7 @@ def dense_query(
             query=v,
             using=vec_name,
             filter=flt,
-            search_params=models.SearchParams(hnsw_ef=ef),
+            search_params=_get_search_params(ef),
             limit=per_query,
             with_payload=True,
         )
@@ -637,7 +663,7 @@ def dense_query(
                 query=v,
                 using=vec_name,
                 query_filter=None,
-                search_params=models.SearchParams(hnsw_ef=ef),
+                search_params=_get_search_params(ef),
                 limit=per_query,
                 with_payload=True,
             )
@@ -649,7 +675,7 @@ def dense_query(
                     query=v,
                     using=vec_name,
                     filter=None,
-                    search_params=models.SearchParams(hnsw_ef=ef),
+                    search_params=_get_search_params(ef),
                     limit=per_query,
                     with_payload=True,
                 )

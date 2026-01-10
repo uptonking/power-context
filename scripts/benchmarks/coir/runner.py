@@ -44,13 +44,19 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from dotenv import load_dotenv
+load_dotenv()
 
 from scripts.benchmarks.coir import DEFAULT_TASKS, COIR_TASKS
 from scripts.benchmarks.coir.retriever import ContextEngineRetriever
-from scripts.benchmarks.common import get_runtime_info
+from scripts.benchmarks.common import get_runtime_info, save_run_meta
+from scripts.benchmarks.qdrant_utils import get_qdrant_client, probe_pseudo_tags
 
 
 @dataclass
@@ -517,6 +523,10 @@ def main() -> None:
         os.environ.setdefault("HYBRID_EXPAND", "1")
         os.environ.setdefault("SEMANTIC_EXPANSION_ENABLED", "1")
     os.environ.setdefault("HYBRID_IN_PROCESS", "1")
+    
+    
+    # Default: Enable LLM-based pseudo/tags generation
+    os.environ.setdefault("REFRAG_PSEUDO_DESCRIBE", "1")
 
     report = run_coir_benchmark_sync(
         tasks=args.tasks,
@@ -529,8 +539,6 @@ def main() -> None:
     )
 
     # Auto-generate output filename if not specified
-    import json
-    from datetime import datetime
 
     out_dir = args.output_folder or "bench_results/coir"
     os.makedirs(out_dir, exist_ok=True)
@@ -542,6 +550,16 @@ def main() -> None:
     with open(output_file, "w") as f:
         json.dump(report.to_dict(), f, indent=2)
     print(f"\n✓ Saved report to: {output_file}")
+
+    # Save standalone metadata file for audit (env snapshot, git sha, platform info)
+    run_id = f"coir_{task_slug}_{ts}"
+    meta_path = save_run_meta(
+        out_dir,
+        run_id,
+        report.runtime_info or {},
+        extra={"benchmark": "coir", "tasks": args.tasks or list(DEFAULT_TASKS)},
+    )
+    print(f"✓ Saved metadata to: {meta_path}")
 
     if args.json_out:
         print(json.dumps(report.to_dict(), indent=2))

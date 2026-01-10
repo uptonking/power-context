@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.11
 """
 CoSQA Evaluation Runner for Context-Engine Benchmarks.
 
@@ -49,6 +49,7 @@ References:
 """
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 import math
@@ -57,8 +58,24 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field, asdict
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from dotenv import load_dotenv
+
+# Load .env immediately to ensure all subsequent imports (like scripts.ingest.config)
+# see the correct environment variables.
+load_dotenv(override=True)
+
+from scripts.benchmarks.qdrant_utils import (
+    get_qdrant_client, 
+    probe_pseudo_tags, 
+    verify_config_compatibility
+)
+
+# Force-disable OpenLit/OTel for benchmarks so they never try to talk to openlit-dashboard
+os.environ["OPENLIT_ENABLED"] = "0"
+os.environ["OTEL_SDK_DISABLED"] = "true"
 
 # Ensure project root is in path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
@@ -81,15 +98,42 @@ def _load_benchmark_env() -> None:
     except ImportError:
         pass  # dotenv optional
 
-# Critical reranker settings - ensure these are set for proper benchmark scoring
-os.environ.setdefault("RERANKER_MODEL", "jinaai/jina-reranker-v2-base-multilingual")
-os.environ.setdefault("RERANK_IN_PROCESS", "1")
-os.environ.setdefault("RERANK_LEARNING", "0")  # Default off for benchmarks; CLI can override
+    # Disable repo auto-filter for benchmarks (benchmark docs don't have metadata.repo)
+    if "REPO_AUTO_FILTER" not in os.environ:
+        os.environ["REPO_AUTO_FILTER"] = "0"
+
+    # Force localhost for Qdrant - benchmarks run outside Docker
+    # Override any .env setting that might use Docker hostname (e.g., "qdrant:6333")
+    qdrant_url = os.environ.get("QDRANT_URL", "")
+    if not qdrant_url or "qdrant:" in qdrant_url:
+        os.environ["QDRANT_URL"] = "http://localhost:6333"
+
+    # Set defaults AFTER loading .env so .env takes priority
+    os.environ.setdefault("RERANKER_MODEL", "jinaai/jina-reranker-v2-base-multilingual")
+    os.environ.setdefault("RERANK_IN_PROCESS", "1")
+    # Hard-disable learning/recursive reranker for deterministic benchmarks
+    # (unless explicitly enabled via --learning-worker flag or COSQA_ENABLE_LEARNING env var)
+    if not os.environ.get("COSQA_ENABLE_LEARNING") and os.environ.get("RERANK_LEARNING") != "1":
+        os.environ["RERANK_LEARNING"] = "0"
+        os.environ["RERANK_EVENTS_ENABLED"] = "0"
+    # Disable sparse vectors for CoSQA benchmarks to avoid missing lex-sparse dims
+    os.environ["LEX_SPARSE_MODE"] = "0"
+    # Benchmarks should not be scoped or cached by workspace repo state
+    os.environ["REPO_AUTO_FILTER"] = "0"          # search all repos (no auto-detected repo)
+    os.environ["CURRENT_REPO"] = ""               # clear any inherited repo name
+    os.environ.setdefault("HYBRID_RESULTS_CACHE_ENABLED", "0")
+    os.environ.setdefault("HYBRID_RESULTS_CACHE", "0")
 
 # Avoid tokenizers fork warning in benchmark runs.
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
-from scripts.benchmarks.common import percentile, get_runtime_info
+from scripts.benchmarks.common import percentile, get_runtime_info, save_run_meta
+
+# NOTE: scripts.benchmarks.core_indexer imports scripts.ingest.config, which reads
+# env-derived constants (e.g. LEX_VECTOR_DIM) at import time. This runner
+# intentionally loads .env lazily in _load_benchmark_env(), so we must avoid
+# importing core_indexer at module import-time to prevent config drift when
+# LEX_VECTOR_DIM is not the default.
 
 # Collection name for CoSQA corpus
 DEFAULT_COLLECTION = "cosqa-corpus"
@@ -260,12 +304,47 @@ def has_hit(relevant_ids: List[str], retrieved_ids: List[str], k: int) -> bool:
 # Search Interface
 # ---------------------------------------------------------------------------
 
+
+def _scaled_rerank_top_n(corpus_size: int) -> int:
+    """Return rerank_top_n scaled by corpus size for CoSQA benchmarks.
+
+    Respects RERANKER_TOPN env var if set, otherwise uses heuristic:
+        - <= 10k docs: 100 candidates
+        - 10k–50k docs: 200 candidates
+        - > 50k docs: 400 candidates (cap to keep reranking tractable)
+    """
+    # Respect env var if explicitly set
+    env_topn = os.environ.get("RERANKER_TOPN", "").strip()
+    if env_topn:
+        try:
+            return int(env_topn)
+        except ValueError:
+            pass
+
+    # Fallback to corpus-scaled heuristic
+    if corpus_size <= 0:
+        return 100
+    if corpus_size <= 500:
+        return 100
+    if corpus_size <= 2_000:
+        # Scale linearly: 100 + (corpus_size / 20)
+        # e.g. 1000 docs -> 150, 2000 docs -> 200
+        return min(200, 100 + corpus_size // 20)
+    if corpus_size <= 10_000:
+        return 200
+    if corpus_size <= 50_000:
+        return 200
+    return 400
+
+
 async def search_cosqa_corpus(
     query: str,
     collection: str = DEFAULT_COLLECTION,
     limit: int = 10,
     rerank_enabled: bool = True,
     mode: str = "hybrid",
+    rerank_top_n: Optional[int] = None,
+    debug: bool = False,
 ) -> Tuple[List[str], float]:
     """Search CoSQA corpus using Context-Engine's repo_search.
 
@@ -277,6 +356,8 @@ async def search_cosqa_corpus(
         limit: Maximum results to return
         rerank_enabled: Whether to use reranker
         mode: Search mode (passed to repo_search)
+        rerank_top_n: Optional candidate pool size for reranker
+        debug: If True, print detailed debug info
 
     Returns:
         Tuple of (list of code_ids, latency_ms)
@@ -285,24 +366,118 @@ async def search_cosqa_corpus(
 
     start = time.perf_counter()
 
-    # Use repo_search for consistency with CoIR and production
-    # Retrieve larger candidate pool for reranking (100 candidates -> top limit)
+    # Use repo_search for consistency with CoIR and production.
+    # If rerank_top_n is provided, use it; otherwise fall back to legacy default (100).
+    eff_rerank_top_n = None
+    if rerank_enabled:
+        eff_rerank_top_n = rerank_top_n if rerank_top_n is not None else 100
+
+    # When not reranking, request more results to allow for deduplication.
+    # Chunked indexing may return multiple chunks per code_id, so we need
+    # extra candidates to ensure we get `limit` unique code_ids after dedup.
+    eff_limit = limit
+    if not rerank_enabled:
+        eff_limit = limit * 5  # Request 5x to account for chunk duplicates
+
     result = await repo_search(
         query=query,
-        limit=limit,
+        limit=eff_limit,
         collection=collection,
         rerank_enabled=rerank_enabled,
-        rerank_top_n=100 if rerank_enabled else None,  # Retrieve 100 candidates
+        rerank_top_n=eff_rerank_top_n,
         rerank_return_m=limit if rerank_enabled else None,  # Rerank down to limit
         mode=mode,
     )
 
-    # Extract code_ids from results (same pattern as CoIR)
-    code_ids = []
-    for r in result.get("results", []):
-        code_id = r.get("code_id") or r.get("doc_id") or (r.get("payload") or {}).get("code_id")
-        if code_id:
+    # Debug: dump full result
+    if debug:
+        print(f"\n{'='*70}")
+        print(f"DEBUG SEARCH: {query[:80]}...")
+        print(f"{'='*70}")
+        for i, r in enumerate((result.get("results") or [])[:10]):
+            payload = r.get("payload") or {}
+            meta = payload.get("metadata") or {}
+            code_id = r.get("code_id") or r.get("doc_id") or payload.get("code_id") or payload.get("_id")
+            print(f"\n[{i+1}] code_id={code_id}")
+            print(f"    path: {(r.get('path') or meta.get('path', ''))[:60]}")
+            print(f"    score: {r.get('score', 0):.4f}")
+            print(f"    why: {r.get('why', [])}")
+            comps = r.get("components") or {}
+            print(f"    components: rerank={comps.get('rerank_onnx', 'N/A')}, blend={comps.get('blended', 'N/A')}")
+            # Show pseudo/tags if available
+            pseudo = payload.get("pseudo") or meta.get("pseudo") or ""
+            tags = payload.get("tags") or meta.get("tags") or ""
+            if pseudo:
+                print(f"    pseudo: {str(pseudo)[:100]}...")
+            if tags:
+                print(f"    tags: {str(tags)[:100]}...")
+            # Code snippet
+            code = payload.get("text") or payload.get("code") or ""
+            if code:
+                print(f"    code: {code[:120].replace(chr(10), ' ')}...")
+        print(f"{'='*70}\n")
+
+    def _coerce_id(val: Any) -> Optional[str]:
+        if val is None:
+            return None
+        try:
+            s = str(val).strip()
+        except Exception:
+            return None
+        return s or None
+
+    def _cosqa_id_from_path(p: str) -> Optional[str]:
+        if not p:
+            return None
+        s = str(p).strip().replace("\\", "/")
+        if not s:
+            return None
+        # Accept either "cosqa/<id>.py" or any path containing "/cosqa/<id>.py".
+        # If no cosqa segment is present, fall back to basename (still useful for synthetic paths).
+        if "/cosqa/" in s:
+            s = s.split("/cosqa/", 1)[1]
+        elif s.startswith("cosqa/"):
+            s = s[len("cosqa/") :]
+        # Use last path segment
+        name = s.rsplit("/", 1)[-1]
+        if name.endswith(".py"):
+            name = name[: -3]
+        return name.strip() or None
+
+    # Extract stable code_ids for evaluation.
+    # NOTE: rerank paths may not include payload; for CoSQA we can fall back to parsing
+    # the synthetic path "cosqa/<code_id>.py".
+    # IMPORTANT: Deduplicate by code_id to avoid wasting top-k slots on chunks from same doc.
+    code_ids: List[str] = []
+    seen_ids: set[str] = set()
+    for idx, r in enumerate(result.get("results", []) or []):
+        if not isinstance(r, dict):
+            continue
+        payload = r.get("payload")
+        if not isinstance(payload, dict):
+            payload = {}
+        code_id = (
+            _coerce_id(r.get("code_id"))
+            or _coerce_id(r.get("doc_id"))
+            or _coerce_id(payload.get("code_id"))
+            or _coerce_id(payload.get("doc_id"))
+            or _coerce_id(payload.get("_id"))
+            or _coerce_id(payload.get("id"))
+        )
+        # DEBUG: Log extraction
+        if debug and idx < 5:
+            print(f"  [extract {idx}] r.code_id={r.get('code_id')}, payload.code_id={payload.get('code_id')}, final={code_id}")
+        if not code_id:
+            code_id = _cosqa_id_from_path(str(r.get("path") or ""))
+            if debug and idx < 5:
+                print(f"    -> fell back to path: {code_id}")
+        if code_id and code_id not in seen_ids:
             code_ids.append(code_id)
+            seen_ids.add(code_id)
+
+    # Defensive: ensure we never return more than requested.
+    if limit is not None and limit > 0:
+        code_ids = code_ids[:limit]
 
     latency_ms = (time.perf_counter() - start) * 1000
     return code_ids, latency_ms
@@ -318,6 +493,7 @@ async def run_cosqa_benchmark(
     corpus_size: int = 0,
     limit: int = 10,
     rerank_enabled: bool = True,
+    mode: str = "hybrid",
     name: str = "cosqa",
     subset_note: Optional[str] = None,
     progress_callback: Optional[callable] = None,
@@ -330,14 +506,36 @@ async def run_cosqa_benchmark(
         corpus_size: Size of indexed corpus
         limit: Max results per query
         rerank_enabled: Whether to use reranker
+        mode: Search mode passed to repo_search ("hybrid" or "dense")
         name: Benchmark run name
         progress_callback: Optional callback(completed, total)
 
     Returns:
         CoSQAReport with all metrics
     """
+
     # Load .env for benchmark config (only when actually running benchmark)
     _load_benchmark_env()
+
+    # Get actual points_count from Qdrant for proper scaling (chunks != docs)
+    from scripts.benchmarks.qdrant_utils import get_qdrant_client
+    try:
+        _client = get_qdrant_client()
+        _coll_info = _client.get_collection(collection)
+        points_count = _coll_info.points_count or corpus_size
+    except Exception:
+        points_count = corpus_size
+
+    # Scale rerank_top_n with points_count (not corpus_size) so relevant docs reach reranker
+    scaled_top_n = _scaled_rerank_top_n(points_count)
+
+    # When rerank is disabled, widen candidate pool for hybrid search to avoid
+    # recall collapse as corpus grows. The default per_query=24 is too small.
+    # Use points_count for scaling since chunked indexing creates multiple points per doc.
+    if not rerank_enabled and points_count > 0:
+        # At least 100 candidates, up to 10x limit, capped by points_count
+        hybrid_per_query = min(points_count, max(100, 10 * limit))
+        os.environ["HYBRID_PER_QUERY"] = str(hybrid_per_query)
 
     results: List[CoSQAQueryResult] = []
     latencies: List[float] = []
@@ -346,30 +544,98 @@ async def run_cosqa_benchmark(
         "collection": collection,
         "limit": limit,
         "rerank_enabled": rerank_enabled,
+        "rerank_top_n": scaled_top_n,
         "query_count": len(queries),
-        # Capture reranker config for reproducibility
+        "mode": mode,
+        # Capture full config for reproducibility and auditability
         "env": {
+            # Embedding & Model
+            "EMBEDDING_MODEL": os.environ.get("EMBEDDING_MODEL", ""),
+            "INDEX_DENSE_MODE": os.environ.get("INDEX_DENSE_MODE", ""),
+            # Reranker
             "RERANKER_MODEL": os.environ.get("RERANKER_MODEL", ""),
             "RERANK_IN_PROCESS": os.environ.get("RERANK_IN_PROCESS", ""),
             "RERANK_LEARNING": os.environ.get("RERANK_LEARNING", ""),
+            # Hybrid search
             "HYBRID_IN_PROCESS": os.environ.get("HYBRID_IN_PROCESS", ""),
             "HYBRID_EXPAND": os.environ.get("HYBRID_EXPAND", ""),
+            "HYBRID_PER_QUERY": os.environ.get("HYBRID_PER_QUERY", ""),
             "SEMANTIC_EXPANSION_ENABLED": os.environ.get("SEMANTIC_EXPANSION_ENABLED", ""),
+            "HYBRID_LEXICAL_TEXT_MODE": os.environ.get("HYBRID_LEXICAL_TEXT_MODE", ""),
+            "QDRANT_TIMEOUT": os.environ.get("QDRANT_TIMEOUT", ""),
+            # Boost/penalty settings (should all be "0" for fair benchmarks)
+            "FNAME_BOOST": os.environ.get("FNAME_BOOST", ""),
+            "HYBRID_SYMBOL_BOOST": os.environ.get("HYBRID_SYMBOL_BOOST", ""),
+            "HYBRID_IMPLEMENTATION_BOOST": os.environ.get("HYBRID_IMPLEMENTATION_BOOST", ""),
+            "HYBRID_TEST_FILE_PENALTY": os.environ.get("HYBRID_TEST_FILE_PENALTY", ""),
+            "POST_RERANK_SYMBOL_BOOST": os.environ.get("POST_RERANK_SYMBOL_BOOST", ""),
+            # LLM features (should be "0" for baseline benchmarks)
+            "REFRAG_PSEUDO_DESCRIBE": os.environ.get("REFRAG_PSEUDO_DESCRIBE", ""),
+            "LLM_EXPAND_MAX": os.environ.get("LLM_EXPAND_MAX", ""),
+            "DENSE_LLM_EXPAND": os.environ.get("DENSE_LLM_EXPAND", ""),
         },
     }
     if subset_note:
         config["subset_note"] = subset_note
 
-    print(f"Running CoSQA benchmark: {len(queries)} queries, limit={limit}, rerank={rerank_enabled}")
+    print(
+        f"Running CoSQA benchmark: {len(queries)} queries, limit={limit}, "
+        f"mode={mode}, rerank={rerank_enabled}, rerank_top_n={scaled_top_n}"
+    )
+    
+    # Warmup query to avoid cold-start latency in first real query
+    # This ensures embedding model and reranker are loaded before timing
+    if queries:
+        warmup_query = queries[0][1]  # Use first query text
+        try:
+            await search_cosqa_corpus(
+                query=warmup_query,
+                collection=collection,
+                limit=5,
+                rerank_enabled=rerank_enabled,
+                rerank_top_n=50 if rerank_enabled else None,
+                mode=mode,
+            )
+            print("  [warmup] Completed warmup query")
+        except Exception as e:
+            print(f"  [warmup] Warning: warmup failed: {e}")
+    
+    error_count = 0  # Track silent failures
 
-    for idx, (query_id, query_text, relevant_ids) in enumerate(queries):
-        # Search
-        retrieved_ids, latency_ms = await search_cosqa_corpus(
-            query=query_text,
-            collection=collection,
-            limit=limit,
-            rerank_enabled=rerank_enabled,
-        )
+    # Parallel query evaluation with controlled concurrency
+    concurrency = int(os.environ.get("COSQA_QUERY_CONCURRENCY", "16"))
+    semaphore = asyncio.Semaphore(concurrency)
+
+    async def eval_single_query(idx: int, query_id: str, query_text: str, relevant_ids: List[str]):
+        """Evaluate a single query with semaphore-controlled concurrency."""
+        async with semaphore:
+            try:
+                retrieved_ids, latency_ms = await search_cosqa_corpus(
+                    query=query_text,
+                    collection=collection,
+                    limit=limit,
+                    rerank_enabled=rerank_enabled,
+                    rerank_top_n=scaled_top_n if rerank_enabled else None,
+                    mode=mode,
+                )
+            except Exception as e:
+                print(f"  [ERROR] Query {idx+1} failed: {e}")
+                retrieved_ids = []
+                latency_ms = 0.0
+                return (idx, query_id, query_text, relevant_ids, retrieved_ids, latency_ms, True)
+            return (idx, query_id, query_text, relevant_ids, retrieved_ids, latency_ms, False)
+
+    # Launch all queries in parallel
+    tasks = [
+        eval_single_query(idx, query_id, query_text, relevant_ids)
+        for idx, (query_id, query_text, relevant_ids) in enumerate(queries)
+    ]
+    query_results = await asyncio.gather(*tasks)
+
+    # Process results in order
+    for idx, query_id, query_text, relevant_ids, retrieved_ids, latency_ms, had_error in query_results:
+        if had_error:
+            error_count += 1
         latencies.append(latency_ms)
 
         # Compute metrics
@@ -383,11 +649,17 @@ async def run_cosqa_benchmark(
         hit_5 = has_hit(relevant_ids, retrieved_ids, 5)
         hit_10 = has_hit(relevant_ids, retrieved_ids, 10)
 
+        # DEBUG: Print miss details inline
+        if not hit_10:
+            print(f"\n  [MISS] q={query_id} expected={relevant_ids}")
+            print(f"         got={retrieved_ids[:5]}")
+            print(f"         query: {query_text[:60]}...")
+
         results.append(CoSQAQueryResult(
             query_id=query_id,
             query_text=query_text,
             relevant_code_ids=relevant_ids,
-            retrieved_code_ids=retrieved_ids[:10],
+            retrieved_code_ids=retrieved_ids[:limit],
             mrr=mrr,
             ndcg_5=ndcg_5,
             ndcg_10=ndcg_10,
@@ -400,11 +672,10 @@ async def run_cosqa_benchmark(
             hit_at_10=hit_10,
         ))
 
-        # Progress
-        if progress_callback:
-            progress_callback(idx + 1, len(queries))
-        elif (idx + 1) % 50 == 0:
-            print(f"  Evaluated {idx + 1}/{len(queries)} queries")
+    # Progress (after parallel completion)
+    if progress_callback:
+        progress_callback(len(queries), len(queries))
+    print(f"  Evaluated {len(queries)}/{len(queries)} queries (parallel, concurrency={concurrency})")
 
     # Aggregate metrics
     n = len(results)
@@ -428,6 +699,11 @@ async def run_cosqa_benchmark(
             "delta": round(delta, 4),
             "improvement": f"{delta/mrr_b*100:+.1f}%" if mrr_b else "N/A",
         }
+
+    # Add error count to config for visibility in report
+    if error_count > 0:
+        config["error_count"] = error_count
+        config["error_rate"] = f"{error_count / n * 100:.1f}%" if n else "N/A"
 
     report = CoSQAReport(
         name=name,
@@ -461,6 +737,7 @@ def print_report(report: CoSQAReport) -> None:
     print("\n" + "=" * 70)
     print(f"CoSQA BENCHMARK REPORT: {report.name}")
     print("=" * 70)
+
     print(f"Queries: {report.total_queries} | Corpus: {report.corpus_size}")
     print(f"Config: {report.config}")
     if report.config.get("subset_note"):
@@ -470,12 +747,18 @@ def print_report(report: CoSQAReport) -> None:
     print("METRICS:")
     print(f"  MRR:        {report.mrr:.4f}")
     print(f"  NDCG@5:     {report.ndcg_5:.4f}  |  NDCG@10:    {report.ndcg_10:.4f}")
-    print(f"  Recall@1:   {report.recall_1:.4f}  |  Recall@5:   {report.recall_5:.4f}  |  Recall@10:  {report.recall_10:.4f}")
-    print(f"  Hit@1:      {report.hit_rate_1:.4f}  |  Hit@5:      {report.hit_rate_5:.4f}  |  Hit@10:     {report.hit_rate_10:.4f}")
+    print(
+        f"  Recall@1:   {report.recall_1:.4f}  |  Recall@5:   {report.recall_5:.4f}  |  Recall@10:  {report.recall_10:.4f}"
+    )
+    print(
+        f"  Hit@1:      {report.hit_rate_1:.4f}  |  Hit@5:      {report.hit_rate_5:.4f}  |  Hit@10:     {report.hit_rate_10:.4f}"
+    )
 
     print("\n" + "-" * 70)
     print("LATENCY:")
-    print(f"  Avg: {report.avg_latency_ms:.1f}ms | P50: {report.p50_latency_ms:.1f}ms | P90: {report.p90_latency_ms:.1f}ms | P99: {report.p99_latency_ms:.1f}ms")
+    print(
+        f"  Avg: {report.avg_latency_ms:.1f}ms | P50: {report.p50_latency_ms:.1f}ms | P90: {report.p90_latency_ms:.1f}ms | P99: {report.p99_latency_ms:.1f}ms"
+    )
 
     print("\n" + "-" * 70)
     print("BASELINE COMPARISON (MRR):")
@@ -487,6 +770,73 @@ def print_report(report: CoSQAReport) -> None:
     print("=" * 70)
 
 
+def _prepare_cosqa_subset(
+    dataset: "CoSQADataset",
+    *,
+    query_limit: Optional[int],
+    corpus_limit: Optional[int],
+    corpus_seed: int = 42,
+) -> Tuple[List[Dict[str, Any]], List[Tuple[str, str, List[str]]]]:
+    """Prepare (corpus, queries) for a CoSQA run.
+
+    If corpus_limit is set, we build a qrels-covered subset:
+    - take the first `query_limit` evaluation queries (or all queries)
+    - include *all* their relevant docs in the corpus subset
+    - fill remaining slots with random distractors (seeded)
+
+    This is meant for tuning/smoke runs so the subset behaves like the full
+    benchmark (no missing-qrels collapse).
+    """
+    from scripts.benchmarks.cosqa.dataset import get_queries_for_evaluation
+
+    all_queries = get_queries_for_evaluation(dataset, limit=None)
+    queries = all_queries[:query_limit] if query_limit else all_queries
+
+    import random
+
+    all_corpus_entries = list(dataset.iter_corpus())
+
+    # Full corpus
+    if not corpus_limit:
+        corpus = [entry.to_index_payload() for entry in all_corpus_entries]
+        return corpus, queries
+
+    all_corpus_ids = {e.code_id for e in all_corpus_entries}
+
+    # Collect all relevant docs for the selected queries
+    required_ids: set[str] = set()
+    for _qid, _qtext, rel_ids in queries:
+        required_ids.update(rel_ids)
+
+    # Debug: check if required docs exist in corpus
+    missing_ids = required_ids - all_corpus_ids
+    if missing_ids:
+        print(f"  [WARN] {len(missing_ids)} required docs NOT in corpus: {list(missing_ids)[:5]}...")
+
+    # Preserve corpus order for required docs (deterministic)
+    required_entries = [e for e in all_corpus_entries if e.code_id in required_ids]
+    print(f"  [subset] {len(required_ids)} required docs, {len(required_entries)} found in corpus")
+
+    # If the limit is too small to include all required docs, expand it.
+    eff_corpus_limit = int(corpus_limit)
+    if len(required_entries) > eff_corpus_limit:
+        print(
+            f"  [WARN] corpus_limit={corpus_limit} is smaller than required relevant docs "
+            f"({len(required_entries)}). Expanding corpus to include all required docs."
+        )
+        eff_corpus_limit = len(required_entries)
+
+    # Fill remaining slots with random distractors
+    remaining = [e for e in all_corpus_entries if e.code_id not in required_ids]
+    rng = random.Random(int(corpus_seed))
+    extra_n = max(0, min(eff_corpus_limit - len(required_entries), len(remaining)))
+    extra_entries = rng.sample(remaining, extra_n) if extra_n else []
+
+    corpus_entries = required_entries + extra_entries
+    corpus = [entry.to_index_payload() for entry in corpus_entries]
+    return corpus, queries
+
+
 async def run_full_benchmark(
     split: str = "test",
     collection: str = DEFAULT_COLLECTION,
@@ -494,7 +844,10 @@ async def run_full_benchmark(
     query_limit: Optional[int] = None,
     corpus_limit: Optional[int] = None,
     rerank_enabled: bool = True,
+    mode: str = "hybrid",
     recreate_index: bool = False,
+    index_only: bool = False,
+    skip_index: bool = False,
 ) -> CoSQAReport:
     """Run complete CoSQA benchmark: download, index, evaluate.
 
@@ -505,6 +858,7 @@ async def run_full_benchmark(
         query_limit: Limit number of queries (for quick testing)
         corpus_limit: Limit corpus size (for quick testing)
         rerank_enabled: Whether to use reranker
+        mode: Search mode passed to repo_search ("hybrid" or "dense")
         recreate_index: Whether to recreate the index
 
     Returns:
@@ -513,95 +867,77 @@ async def run_full_benchmark(
     # Load .env for benchmark config (only when actually running benchmark)
     _load_benchmark_env()
 
-    from scripts.benchmarks.cosqa.dataset import load_cosqa, get_corpus_for_indexing, get_queries_for_evaluation
+    # Disable ALL artificial boosts/penalties for pure semantic/lexical benchmarking.
+    # These heuristics inflate/deflate scores based on file type, path, symbol matches etc.,
+    # obscuring the true retrieval quality of the embedding + lexical pipeline.
+    # Use --pure-semantic=false if you want prod-like behavior with heuristics enabled.
+    
+    # Filename/symbol match boosts
+    os.environ["FNAME_BOOST"] = "0"
+    os.environ["HYBRID_SYMBOL_BOOST"] = "0"
+    os.environ["HYBRID_SYMBOL_EQUALITY_BOOST"] = "0"
+    os.environ["POST_RERANK_SYMBOL_BOOST"] = "1.0"  # Neutral (no boost)
+    
+    # File-type boosts/penalties
+    os.environ["HYBRID_CORE_FILE_BOOST"] = "0"
+    os.environ["HYBRID_IMPLEMENTATION_BOOST"] = "0"
+    os.environ["HYBRID_TEST_FILE_PENALTY"] = "0"
+    os.environ["HYBRID_CONFIG_FILE_PENALTY"] = "0"
+    os.environ["HYBRID_DOCUMENTATION_PENALTY"] = "0"
+    os.environ["HYBRID_VENDOR_PENALTY"] = "0"
+    os.environ["HYBRID_INTENT_IMPL_BOOST"] = "0"
+    os.environ["HYBRID_LANG_MATCH_BOOST"] = "0"
+    os.environ["HYBRID_RECENCY_WEIGHT"] = "0"
+
+    # Set EMBEDDING_SEED for deterministic embeddings (like CoIR)
+    os.environ.setdefault("EMBEDDING_SEED", "42")
+
+    # Keep search env aligned with the requested collection to avoid stale defaults
+    os.environ["COLLECTION_NAME"] = collection
+
+    from scripts.benchmarks.cosqa.dataset import load_cosqa
     from scripts.benchmarks.cosqa.indexer import index_corpus
 
     # Step 1: Load dataset
     print("\n▶ Step 1: Loading CoSQA dataset...")
     dataset = load_cosqa(split=split)
 
-    # Prepare queries and corpus (corpus-limit uses query-matched subset)
-    all_queries = get_queries_for_evaluation(dataset, limit=None)
-    desired_queries = all_queries[:query_limit] if query_limit else all_queries
-    corpus_cap = corpus_limit
-
-    if corpus_cap:
-        corpus_by_id = {entry.code_id: entry for entry in dataset.iter_corpus()}
-        selected_queries = []
-        selected_ids: set[str] = set()
-        skipped_queries = 0
-
-        for query_id, query_text, relevant_ids in desired_queries:
-            rel_ids = [rid for rid in relevant_ids if rid in corpus_by_id]
-            if not rel_ids:
-                continue
-            new_ids = [rid for rid in rel_ids if rid not in selected_ids]
-            if selected_ids and len(selected_ids) + len(new_ids) > corpus_cap:
-                skipped_queries += 1
-                continue
-            selected_queries.append((query_id, query_text, rel_ids))
-            selected_ids.update(new_ids)
-
-        if not selected_queries:
-            for query_id, query_text, relevant_ids in desired_queries:
-                rel_ids = [rid for rid in relevant_ids if rid in corpus_by_id]
-                if rel_ids:
-                    selected_queries = [(query_id, query_text, rel_ids)]
-                    selected_ids.update(rel_ids)
-                    break
-
-        if not selected_queries:
-            print("  [WARN] No queries with relevant docs found; evaluation will be empty")
-        else:
-            if len(selected_ids) > corpus_cap:
-                print(
-                    f"  [WARN] corpus-limit too small for selected queries; "
-                    f"expanding corpus to {len(selected_ids)}"
-                )
-                corpus_cap = None
-            elif skipped_queries or (query_limit and len(selected_queries) < len(desired_queries)):
-                print(
-                    f"  [WARN] corpus-limit active; selected {len(selected_queries)}/"
-                    f"{len(desired_queries)} queries to fit {len(selected_ids)} docs"
-                )
-            else:
-                print(
-                    f"  [WARN] corpus-limit active; selected {len(selected_queries)} queries "
-                    f"with {len(selected_ids)} relevant docs"
-                )
-
-        subset_entries = []
-        if selected_ids:
-            for entry in dataset.iter_corpus():
-                if entry.code_id in selected_ids:
-                    subset_entries.append(entry)
-        if corpus_cap:
-            for entry in dataset.iter_corpus():
-                if entry.code_id not in selected_ids:
-                    subset_entries.append(entry)
-                    if len(subset_entries) >= corpus_cap:
-                        break
-
-        corpus = [entry.to_index_payload() for entry in subset_entries]
-        queries = selected_queries
-    else:
-        corpus = get_corpus_for_indexing(dataset)
-        queries = desired_queries
+    corpus, queries = _prepare_cosqa_subset(
+        dataset,
+        query_limit=query_limit,
+        corpus_limit=corpus_limit,
+        corpus_seed=42,
+    )
 
     # Step 2: Index corpus
     print("\n▶ Step 2: Indexing corpus...")
-    if corpus_cap:
+    if corpus_limit:
         print(f"  Limited corpus to {len(corpus)} entries")
 
-    # Check if already indexed (use fingerprint matching, not just points_count)
-    # The indexer handles fingerprint checking internally and will recreate if needed
-    result = index_corpus(corpus, collection=collection, recreate=recreate_index or bool(corpus_limit))
+    if skip_index:
+        print("  [skip-index] Skipping indexing...")
+        result = {"reused": True, "indexed": len(corpus), "skipped": 0, "errors": 0}
+    else:
+        # Check if already indexed (use fingerprint matching, not just points_count)
+        # The indexer handles fingerprint checking internally and will recreate if needed
+        result = index_corpus(corpus, collection=collection, recreate=recreate_index)
     if result.get("reused"):
         print(f"  Corpus already indexed (fingerprint match, {result.get('indexed', 0)} entries)")
+        # Warn if current config doesn't match how collection was indexed
+        from scripts.benchmarks.core_indexer import BenchmarkDoc, warn_config_mismatch
+        docs = [BenchmarkDoc(doc_id=c.get("code_id", ""), text=c.get("code", ""), metadata=c) for c in corpus[:100]]
+        warning = warn_config_mismatch(None, collection, docs)  # Pass None to use default client
+        if warning:
+            print(f"\n{warning}\n")
     else:
         print(f"  Indexed {result.get('indexed', 0)} entries ({result.get('skipped', 0)} skipped, {result.get('errors', 0)} errors)")
 
-    # Step 3: Get queries
+    # Probe collection for pseudo/tags presence (validation)
+    probe_pseudo_tags(collection)
+
+    if index_only:
+        print("\n[index-only] Ingestion complete. Exiting.")
+        return None  # Early exit, no report
     print("\n▶ Step 3: Preparing queries...")
     print(f"  {len(queries)} queries with relevance judgments")
 
@@ -621,6 +957,7 @@ async def run_full_benchmark(
         corpus_size=len(corpus),
         limit=limit,
         rerank_enabled=rerank_enabled,
+        mode=mode,
         name=f"cosqa-{split}",
         subset_note=subset_note,
     )
@@ -641,8 +978,6 @@ def _spawn_learning_worker(collection: str, project_root: Path) -> subprocess.Po
 
 def main():
     """CLI entrypoint for CoSQA benchmark."""
-    import argparse
-    import os
 
     parser = argparse.ArgumentParser(description="CoSQA Benchmark for Context-Engine")
     parser.add_argument("--split", default="test", choices=["train", "validation", "test"],
@@ -663,32 +998,105 @@ def main():
                         help="Recreate index from scratch")
     parser.add_argument("--learning-worker", action="store_true",
                         help="Spawn learning reranker worker during the run (enables learning + event logging)")
-    parser.add_argument("--output", type=str,
-                        help="Output JSON file")
+    parser.add_argument("--pure-semantic", action="store_true",
+                        help="Disable FNAME_BOOST and other heuristics (old hardened mode)")
+    parser.add_argument("--enable-llm", action="store_true",
+                        help="Enable search-time LLM query expansion (for semantic-rich eval)")
+    # Generate default output filename with timestamp
+    default_output = f"cosqa_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    parser.add_argument("--output", type=str, default=default_output,
+                        help="Output JSON file (default: timestamped file in current directory)")
+    parser.add_argument("--failures", action="store_true",
+                        help="Show failed queries (recall@10 = 0)")
+    parser.add_argument("--debug-failures", action="store_true",
+                        help="Re-run failed queries with detailed debug output")
+    parser.add_argument("--index-only", action="store_true",
+                        help="Run ingestion only and exit")
+    parser.add_argument("--skip-index", action="store_true",
+                        help="Skip indexing if collection already exists")
+    parser.add_argument("--mode", type=str, default="hybrid", choices=["hybrid", "dense", "lexical"],
+                        help="Search mode: 'hybrid' (default), 'dense' (pure semantic), or 'lexical' (pure BM25-style)")
     args = parser.parse_args()
 
-    # Enable Context-Engine features for accurate benchmarking
-    # These are the features that differentiate us from basic embedding search
+    # Enable Context-Engine features for accurate benchmarking.
+    # Semantic expansion is always enabled (it may still be a no-op if query expansion is disabled).
+    os.environ["SEMANTIC_EXPANSION_ENABLED"] = "1"
     if not args.no_expand:
-        os.environ.setdefault("HYBRID_EXPAND", "1")
-        os.environ.setdefault("SEMANTIC_EXPANSION_ENABLED", "1")
-    os.environ.setdefault("HYBRID_IN_PROCESS", "1")  # Use in-process hybrid search
-    os.environ.setdefault("RERANK_IN_PROCESS", "1")  # Use in-process reranker (required)
+        os.environ["HYBRID_EXPAND"] = "1"
+    else:
+        # Avoid env drift from shell/.env: explicitly disable query expansion when requested.
+        os.environ["HYBRID_EXPAND"] = "0"
+    os.environ["HYBRID_IN_PROCESS"] = "1"  # Use in-process hybrid search
+    os.environ["RERANK_IN_PROCESS"] = "1"  # Use in-process reranker (required)
+
+    # Handle --mode dense: pure semantic search without lexical components
+    if args.mode == "dense":
+        os.environ["HYBRID_LEXICAL_WEIGHT"] = "0"
+        os.environ["HYBRID_LEX_VECTOR_WEIGHT"] = "0"
+        os.environ["HYBRID_EXPAND"] = "0"
+        os.environ["SEMANTIC_EXPANSION_ENABLED"] = "0"
+        print("  [mode=dense] Pure semantic search enabled (no lexical, no expansion)")
+        # NOTE: Previously auto-disabled rerank for dense mode, but we want to test dense+rerank
+        # Use --no-rerank explicitly if you want dense without reranking
+
+    # Handle --mode lexical: pure lexical search without dense components
+    elif args.mode == "lexical":
+        os.environ["HYBRID_DENSE_WEIGHT"] = "0"
+        os.environ["HYBRID_LEXICAL_WEIGHT"] = "1.0"
+        os.environ["HYBRID_LEX_VECTOR_WEIGHT"] = "1.0"
+        os.environ["HYBRID_EXPAND"] = "0"
+        os.environ["SEMANTIC_EXPANSION_ENABLED"] = "0"
+        print("  [mode=lexical] Pure lexical search enabled (no dense embeddings)")
+
+    # Disable all LLM calls by default for fast benchmarking
+    # Use --enable-llm to enable search-time LLM query expansion
+    # Note: GLM pseudo/tags at index time is controlled by .env (REFRAG_PSEUDO_DESCRIBE=1) + reindex
+    if not args.enable_llm:
+        os.environ["LLM_EXPAND_MAX"] = "0"  # Disable LLM query expansion
+        os.environ["REFRAG_DECODER"] = "0"  # Disable decoder entirely
+    else:
+        # Enable search-time LLM query expansion
+        os.environ.setdefault("LLM_EXPAND_MAX", "3")
+        print("  [enable-llm] LLM query expansion ENABLED (search-time)")
+
+    if args.pure_semantic:
+        print("  [pure-semantic] Boosts disabled (now default behavior)")
 
     # Set reranker model paths (relative to project root)
     _project_root = Path(__file__).parent.parent.parent.parent
-    os.environ.setdefault("RERANKER_ONNX_PATH", str(_project_root / "models" / "model_qint8_avx512_vnni.onnx"))
-    os.environ.setdefault("RERANKER_TOKENIZER_PATH", str(_project_root / "models" / "tokenizer.json"))
+    os.environ["RERANKER_ONNX_PATH"] = str(_project_root / "models" / "model_qint8_avx512_vnni.onnx")
+    os.environ["RERANKER_TOKENIZER_PATH"] = str(_project_root / "models" / "tokenizer.json")
 
     learning_proc = None
     if args.learning_worker:
         if args.no_rerank:
             print("  [WARN] --learning-worker ignored because --no-rerank is set")
         else:
+            # Pre-compute PCA initialization for projection layer (cold-start fix)
+            print("  [learning] Pre-computing PCA initialization...")
+            from scripts.benchmarks.cosqa.pca_init import compute_pca_init_for_collection
+            pca_success = compute_pca_init_for_collection(
+                collection=args.collection,
+                sample_limit=1000,
+            )
+            if not pca_success:
+                print("  [WARN] PCA initialization failed, using random init")
+
             os.environ["RERANK_LEARNING"] = "1"
             os.environ["RERANK_EVENTS_ENABLED"] = "1"
             learning_proc = _spawn_learning_worker(args.collection, _project_root)
             print(f"  [learning-worker] Started (pid {learning_proc.pid}) for {args.collection}")
+
+    # Verify config compatibility BEFORE running anything
+    if not args.recreate:
+        try:
+            # We use get_qdrant_client() which is already imported
+            verify_config_compatibility(get_qdrant_client(), args.collection)
+        except Exception as e:
+            print(f"\nCONFIGURATION ERROR: {e}")
+            if learning_proc and learning_proc.poll() is None:
+                learning_proc.kill()
+            sys.exit(1)
 
     try:
         report = asyncio.run(run_full_benchmark(
@@ -698,7 +1106,10 @@ def main():
             query_limit=args.query_limit,
             corpus_limit=args.corpus_limit,
             rerank_enabled=not args.no_rerank,
+            mode=args.mode,
             recreate_index=args.recreate,
+            index_only=args.index_only,
+            skip_index=args.skip_index,
         ))
     finally:
         if learning_proc and learning_proc.poll() is None:
@@ -708,12 +1119,55 @@ def main():
             except subprocess.TimeoutExpired:
                 learning_proc.kill()
 
-    print_report(report)
+    if report:
+        print_report(report)
 
-    if args.output:
-        with open(args.output, "w") as f:
-            json.dump(report.to_dict(), f, indent=2)
-        print(f"\nSaved report to: {args.output}")
+        # Show failures if requested
+        if args.failures:
+            failures = [r for r in report.results if not r.hit_at_10]
+            if failures:
+                print("\n" + "=" * 70)
+                print(f"FAILED QUERIES ({len(failures)} with recall@10 = 0):")
+                print("=" * 70)
+                for f in failures:
+                    print(f"\n[{f.query_id}] {f.query_text[:100]}...")
+                    print(f"  Expected: {f.relevant_code_ids}")
+                    print(f"  Got top 5: {f.retrieved_code_ids[:5]}")
+
+                # Re-run failed queries with debug output
+                if args.debug_failures:
+                    print("\n" + "=" * 70)
+                    print("DEBUG OUTPUT FOR FAILED QUERIES:")
+                    print("=" * 70)
+                    debug_top_n = report.config.get("rerank_top_n")
+                    for f in failures:
+                        asyncio.run(search_cosqa_corpus(
+                            query=f.query_text,
+                            collection=args.collection,
+                            limit=args.limit,
+                            rerank_enabled=not args.no_rerank,
+                            rerank_top_n=debug_top_n,
+                            mode=args.mode,
+                            debug=True,
+                        ))
+            else:
+                print("\n✓ No failures - all queries have recall@10 > 0")
+
+        if args.output:
+            with open(args.output, "w") as f:
+                json.dump(report.to_dict(), f, indent=2)
+            print(f"\nSaved report to: {args.output}")
+            
+            # Save standalone metadata file for audit
+            output_dir = str(Path(args.output).parent)
+            run_id = f"cosqa_{report.config.get('collection', 'unknown')}_{Path(args.output).stem}"
+            meta_path = save_run_meta(
+                output_dir,
+                run_id,
+                report.config,
+                extra={"benchmark": "cosqa", "corpus_size": report.corpus_size, "queries": report.total_queries},
+            )
+            print(f"Saved metadata to: {meta_path}")
 
 
 if __name__ == "__main__":

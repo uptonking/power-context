@@ -11,7 +11,7 @@ __all__ = [
     "LEX_VECTOR_NAME", "LEX_VECTOR_DIM", "LEX_SPARSE_NAME", "LEX_SPARSE_MODE",
     "MINI_VECTOR_NAME", "MINI_VEC_DIM", "HYBRID_MINI_WEIGHT",
     "RRF_K", "DENSE_WEIGHT", "LEXICAL_WEIGHT", "LEX_VECTOR_WEIGHT", "EF_SEARCH",
-    "SYMBOL_BOOST", "SYMBOL_EQUALITY_BOOST", "RECENCY_WEIGHT", "CORE_FILE_BOOST",
+    "SYMBOL_BOOST", "SYMBOL_EQUALITY_BOOST", "FNAME_BOOST", "RECENCY_WEIGHT", "CORE_FILE_BOOST",
     "VENDOR_PENALTY", "LANG_MATCH_BOOST", "CLUSTER_LINES", "TEST_FILE_PENALTY",
     "CONFIG_FILE_PENALTY", "IMPLEMENTATION_BOOST", "DOCUMENTATION_PENALTY",
     "PSEUDO_BOOST", "COMMENT_PENALTY", "COMMENT_RATIO_THRESHOLD", "INTENT_IMPL_BOOST",
@@ -51,10 +51,15 @@ def _safe_float(val: Any, default: float) -> float:
 
 
 def _env_truthy(val: str | None, default: bool) -> bool:
-    """Check if an environment variable value is truthy."""
+    """Check if an environment variable value is truthy or falsy."""
     if val is None:
         return default
-    return val.strip().lower() in {"1", "true", "yes", "on"}
+    v = val.strip().lower()
+    if v in {"1", "true", "yes", "on"}:
+        return True
+    if v in {"0", "false", "no", "off"}:
+        return False
+    return default
 
 
 # ---------------------------------------------------------------------------
@@ -66,14 +71,18 @@ QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
 API_KEY = os.environ.get("QDRANT_API_KEY")
 
 # Lexical vector configuration
-LEX_VECTOR_NAME = os.environ.get("LEX_VECTOR_NAME", "lex")
-LEX_VECTOR_DIM = _safe_int(os.environ.get("LEX_VECTOR_DIM"), 4096)
-LEX_SPARSE_NAME = os.environ.get("LEX_SPARSE_NAME", "lex_sparse")
-LEX_SPARSE_MODE = os.environ.get("LEX_SPARSE_MODE", "0").strip().lower() in ("1", "true", "yes", "on")
+# Lexical vector configuration
+# Imported from ingest config to ensure Single Source of Truth
+from scripts.ingest.config import (
+    LEX_VECTOR_NAME,
+    LEX_VECTOR_DIM,
+    LEX_SPARSE_NAME,
+    LEX_SPARSE_MODE,
+    MINI_VECTOR_NAME,
+    MINI_VEC_DIM,
+)
 
-# Optional mini vector (ReFRAG gating)
-MINI_VECTOR_NAME = os.environ.get("MINI_VECTOR_NAME", "mini")
-MINI_VEC_DIM = _safe_int(os.environ.get("MINI_VEC_DIM", "64"), 64)
+# Optional mini vector (ReFRAG gating) weights (hybrid-specific)
 HYBRID_MINI_WEIGHT = _safe_float(os.environ.get("HYBRID_MINI_WEIGHT", "0.5"), 0.5)
 
 
@@ -93,6 +102,10 @@ EF_SEARCH = _safe_int(os.environ.get("QDRANT_EF_SEARCH", "128"), 128)
 SYMBOL_BOOST = _safe_float(os.environ.get("HYBRID_SYMBOL_BOOST", "0.15"), 0.15)
 SYMBOL_EQUALITY_BOOST = _safe_float(
     os.environ.get("HYBRID_SYMBOL_EQUALITY_BOOST", "0.25"), 0.25
+)
+FNAME_BOOST = _safe_float(
+    os.environ.get("HYBRID_FNAME_BOOST", str(SYMBOL_EQUALITY_BOOST * 0.5)),
+    SYMBOL_EQUALITY_BOOST * 0.5,
 )
 RECENCY_WEIGHT = _safe_float(os.environ.get("HYBRID_RECENCY_WEIGHT", "0.1"), 0.1)
 CORE_FILE_BOOST = _safe_float(os.environ.get("HYBRID_CORE_FILE_BOOST", "0.1"), 0.1)

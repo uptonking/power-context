@@ -8,12 +8,13 @@ from hybrid_search.py for reuse and testing.
 
 __all__ = [
     "rrf", "_scale_rrf_k", "_adaptive_per_query", "_normalize_scores",
-    "sparse_lex_score", "lexical_score",
+    "sparse_lex_score", "lexical_score", "lexical_text_score",
+    "tokenize_queries",
     "_compute_query_stats", "_adaptive_weights", "_bm25_token_weights_from_results",
     "_mmr_diversify", "_merge_and_budget_spans",
-    "_detect_implementation_intent", "_IMPL_INTENT_PATTERNS",
     "_get_collection_stats", "_COLL_STATS_CACHE", "_COLL_STATS_TTL",
     "_get_symbol_extent", "ADAPTIVE_SPAN_SIZING",
+    "_detect_implementation_intent", "_IMPL_INTENT_PATTERNS",
 ]
 
 import os
@@ -68,6 +69,11 @@ SPARSE_LEX_MAX_SCORE = _safe_float(os.environ.get("HYBRID_SPARSE_LEX_MAX", "15.0
 SPARSE_RRF_MAX = 1.0 / (RRF_K + 1)
 SPARSE_RRF_MIN = 1.0 / (RRF_K + 50)
 
+# Lexical text normalization (keeps lexical and dense on comparable scales)
+LEXICAL_TEXT_MODE = (os.environ.get("HYBRID_LEXICAL_TEXT_MODE", "raw") or "").strip().lower()
+LEXICAL_TEXT_SAT = _safe_float(os.environ.get("HYBRID_LEXICAL_TEXT_SAT", "12.0"), 12.0)
+BM25_ENT_WEIGHT = _safe_float(os.environ.get("HYBRID_BM25_ENT_WEIGHT", "0.0"), 0.0)
+
 # Micro-span budgeting defaults
 def _get_micro_defaults() -> Tuple[int, int, int, int]:
     """Return (max_spans, merge_lines, budget_tokens, tokens_per_line) based on runtime and micro chunk mode.
@@ -101,16 +107,6 @@ ADAPTIVE_SPAN_SIZING = os.environ.get("ADAPTIVE_SPAN_SIZING", "1").strip().lower
 _ADAPTIVE_MAX_EXPAND_LINES = 80      # Max extra lines per expansion
 _ADAPTIVE_MAX_BUDGET_PCT = 0.4       # Max % of budget a single expansion can use
 _ADAPTIVE_MAX_EXPANDED = 3           # Max spans to expand
-
-# Intent detection for implementation preference
-INTENT_IMPL_BOOST = _safe_float(os.environ.get("HYBRID_INTENT_IMPL_BOOST", "0.15"), 0.15)
-
-_IMPL_INTENT_PATTERNS = frozenset({
-    "implementation", "how does", "how is", "where is", "code for",
-    "function that", "method that", "class that", "implements",
-    "defined", "definition", "source", "logic", "algorithm",
-    "where", "find", "locate", "show me", "actual code",
-})
 
 # ---------------------------------------------------------------------------
 # Collection stats cache (for large collection scaling)
@@ -163,17 +159,38 @@ def _scale_rrf_k(base_k: int, collection_size: int) -> int:
 def _adaptive_per_query(base_limit: int, collection_size: int, has_filters: bool) -> int:
     """Increase candidate retrieval for larger collections.
 
-    Uses sublinear sqrt scaling to avoid excessive retrieval.
+    Uses sublinear scaling to avoid excessive retrieval while preventing
+    recall collapse as collections grow.
     Filters reduce the need for extra candidates.
+
+    Args:
+        base_limit: Base per_query limit (typically max(24, limit))
+        collection_size: Actual Qdrant points_count (NOT corpus doc count).
+                        Critical for chunked indexing where multiple points per doc
+                        means we need deeper retrieval to maintain recall.
+        has_filters: Whether query has filters (reduces scaling need)
+
+    Returns:
+        Scaled per_query limit, capped at HYBRID_MAX_PER_QUERY (default 400)
     """
-    if collection_size < LARGE_COLLECTION_THRESHOLD:
+    if collection_size <= 0:
         return base_limit
-    ratio = collection_size / LARGE_COLLECTION_THRESHOLD
-    scale = math.sqrt(ratio)
+
+    # Start scaling earlier than LARGE_COLLECTION_THRESHOLD.
+    # LARGE_COLLECTION_THRESHOLD is tuned for score normalization/rrf_k, but candidate recall
+    # often needs more headroom at smaller sizes (e.g., benchmarks and medium repos).
+    base_size = max(1000, LARGE_COLLECTION_THRESHOLD // 10)
+    ratio = collection_size / base_size
+
+    # Smooth ramp: 1.0x at base_size, ~2.0x at 2*base_size, ~5.4x at 20*base_size.
+    scale = 1.0 if ratio <= 1.0 else (1.0 + math.sqrt(ratio - 1.0))
     if has_filters:
         scale = max(1.0, scale * 0.7)
-    scaled = int(base_limit * min(scale, 3.0))
-    return max(base_limit, min(scaled, 200))
+    scaled = int(base_limit * min(scale, 8.0))
+    # Cap at 400 (was 200) to support chunked indexing where multiple points per doc
+    # means we need more candidates to get adequate coverage after deduplication.
+    max_per_query = _safe_int(os.environ.get("HYBRID_MAX_PER_QUERY", "400"), 400)
+    return max(base_limit, min(scaled, max_per_query))
 
 
 def _normalize_scores(score_map: Dict[str, Dict[str, Any]], collection_size: int) -> None:
@@ -207,7 +224,7 @@ def _normalize_scores(score_map: Dict[str, Dict[str, Any]], collection_size: int
 # Sparse lexical scoring
 # ---------------------------------------------------------------------------
 
-def sparse_lex_score(raw_score: float, weight: float = LEX_VECTOR_WEIGHT) -> float:
+def sparse_lex_score(raw_score: float, weight: float = LEX_VECTOR_WEIGHT, rrf_k: int | None = None) -> float:
     """Normalize sparse lexical vector score to RRF-equivalent range.
 
     Maps sparse similarity scores to the same range as RRF(rank) scores,
@@ -217,12 +234,19 @@ def sparse_lex_score(raw_score: float, weight: float = LEX_VECTOR_WEIGHT) -> flo
     - Sparse score 0 maps to RRF_MIN (like worst rank)
     - Sparse score max maps to RRF_MAX (like rank 1)
     - Quality ordering preserved, but doesn't dominate dense embedding scores
+
+    If rrf_k provided, computes dynamic RRF bounds.
     """
     if raw_score <= 0:
         return 0.0
+    
+    k = rrf_k if rrf_k is not None else RRF_K
+    r_min = 1.0 / (k + 50)
+    r_max = 1.0 / (k + 1)
+    
     clamped = min(raw_score, SPARSE_LEX_MAX_SCORE)
     ratio = clamped / SPARSE_LEX_MAX_SCORE
-    rrf_equiv = SPARSE_RRF_MIN + ratio * (SPARSE_RRF_MAX - SPARSE_RRF_MIN)
+    rrf_equiv = r_min + ratio * (r_max - r_min)
     return weight * rrf_equiv
 
 
@@ -270,14 +294,18 @@ def lexical_score(
     phrases: List[str],
     md: Dict[str, Any],
     token_weights: Dict[str, float] | None = None,
-    bm25_weight: float | None = None
+    bm25_weight: float | None = None,
+    *,
+    _precomputed_tokens: List[str] | None = None,
 ) -> float:
     """Smarter lexical: split identifiers, weight matches in symbol/path higher.
-    
+
     If token_weights provided, apply a small BM25-style multiplicative factor per token:
         factor = 1 + bm25_weight * (w - 1) where w are normalized around 1.0
+
+    Performance: pass _precomputed_tokens to avoid re-tokenizing queries on each call.
     """
-    tokens = tokenize_queries(phrases)
+    tokens = _precomputed_tokens if _precomputed_tokens is not None else tokenize_queries(phrases)
     if not tokens:
         return 0.0
     path = str(md.get("path", "")).lower()
@@ -314,6 +342,93 @@ def lexical_score(
             contrib *= (1.0 + float(bm25_weight) * (w - 1.0))
         s += contrib
     return s
+
+
+def lexical_text_score(
+    phrases: List[str],
+    md: Dict[str, Any],
+    *,
+    weight: float = LEXICAL_WEIGHT,
+    token_weights: Dict[str, float] | None = None,
+    bm25_weight: float | None = None,
+    rrf_k: int | None = None,
+    _precomputed_tokens: List[str] | None = None,
+) -> float:
+    """Compute a *weighted* lexical text score suitable for fusion.
+
+    `lexical_score()` returns an unbounded additive score (token matches across
+    symbol/path/code). That can swamp RRF-based dense scoring. This wrapper
+    normalizes it into a bounded range while preserving ordering.
+
+    Modes (HYBRID_LEXICAL_TEXT_MODE):
+      - "raw":  legacy behavior (weight * raw_score)
+      - "tanh": fixed saturating nonlinearity (weight * tanh(raw/sat))
+      - "tanh_adaptive": query-adaptive saturation; scales by token count
+      - "rrf":  map to RRF-equivalent range (weight * rrf_equiv)
+
+    Performance: pass _precomputed_tokens to avoid re-tokenizing queries on each call.
+    """
+    raw = lexical_score(phrases, md, token_weights=token_weights, bm25_weight=bm25_weight,
+                        _precomputed_tokens=_precomputed_tokens)
+    if raw <= 0 or weight <= 0:
+        return 0.0
+
+    mode = LEXICAL_TEXT_MODE
+    if mode == "raw":
+        return float(weight) * float(raw)
+
+    if mode == "rrf":
+        # Clamp raw score into a tunable range, then map to the same scale as RRF.
+        # Default max chosen to cover typical 2–6 token matches.
+        max_raw = _safe_float(os.environ.get("HYBRID_LEXICAL_TEXT_MAX", "20.0"), 20.0)
+        max_raw = max(1e-6, max_raw)
+        
+        k = rrf_k if rrf_k is not None else RRF_K
+        r_min = 1.0 / (k + 50)
+        r_max = 1.0 / (k + 1)
+        
+        clamped = min(float(raw), float(max_raw))
+        ratio = clamped / float(max_raw)
+        rrf_equiv = r_min + ratio * (r_max - r_min)
+        return float(weight) * float(rrf_equiv)
+
+    if mode == "tanh_adaptive":
+        # Query-adaptive tanh saturation: scale by token count
+        # Principle: saturation ∝ expected max score ∝ token count
+        # Per-token max contrib ~4.1 (sym:2 + path:1.1 + code:1), so base_sat ~4
+        tokens = _precomputed_tokens if _precomputed_tokens is not None else tokenize_queries(phrases)
+        n_tokens = max(1, len(tokens))
+        base_sat = 4.0  # ~1 token's perfect match score
+        adaptive_sat = base_sat * n_tokens
+        return float(weight) * float(math.tanh(float(raw) / adaptive_sat))
+
+    # Default: tanh saturation (bounded in [0, weight])
+    sat = max(1e-6, float(LEXICAL_TEXT_SAT))
+    return float(weight) * float(math.tanh(float(raw) / sat))
+
+
+# ---------------------------------------------------------------------------
+# Implementation intent detection (for dynamic boost adjustment)
+# ---------------------------------------------------------------------------
+
+# Patterns that indicate user wants implementation code (not docs/tests)
+_IMPL_INTENT_PATTERNS = frozenset({
+    "implementation", "how does", "how is", "where is", "code for",
+    "function that", "method that", "class that", "implements",
+    "defined", "definition", "source", "logic", "algorithm",
+    "where", "find", "locate", "show me", "actual code",
+})
+
+
+def _detect_implementation_intent(queries: List[str]) -> bool:
+    """Detect if query signals user wants implementation code."""
+    if not queries:
+        return False
+    joined = " ".join(queries).lower()
+    for pattern in _IMPL_INTENT_PATTERNS:
+        if pattern in joined:
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -382,13 +497,19 @@ def _adaptive_weights(stats: Dict[str, Any]) -> Tuple[float, float, float]:
     return base_d * dens_scale, base_lv * lv_scale, base_lx * lx_scale
 
 
-def _bm25_token_weights_from_results(phrases: List[str], results: List[Any]) -> Dict[str, float]:
+def _bm25_token_weights_from_results(
+    phrases: List[str],
+    results: List[Any],
+    *,
+    base_phrases: List[str] | None = None,
+) -> Dict[str, float]:
     """Compute lightweight per-token IDF-like weights from a small sample of lex results.
     
     Returns weights normalized to mean 1.0 over tokens present in phrases.
     """
     try:
-        tokens = [t for t in tokenize_queries(phrases) if t]
+        _phr = base_phrases if base_phrases is not None else phrases
+        tokens = [t for t in tokenize_queries(_phr) if t]
         if not tokens or not results:
             return {}
         tok_set = set(tokens)
@@ -413,7 +534,14 @@ def _bm25_token_weights_from_results(phrases: List[str], results: List[Any]) -> 
         mean = sum(idf.values()) / max(1, len(idf))
         if mean <= 0:
             return {t: 1.0 for t in tok_set}
-        return {t: (idf[t] / mean) for t in tok_set}
+        weights: Dict[str, float] = {}
+        for t in tok_set:
+            base = idf[t] / mean
+            # BMX-style entropy-ish boost: reward rarer tokens (lower df/N) gently and keep bounded.
+            p = (df[t] + 1.0) / (N + 1.0)
+            ent_boost = 1.0 + BM25_ENT_WEIGHT * (1.0 - p)
+            weights[t] = base * ent_boost
+        return weights
     except Exception:
         return {}
 
@@ -423,64 +551,83 @@ def _bm25_token_weights_from_results(phrases: List[str], results: List[Any]) -> 
 # ---------------------------------------------------------------------------
 
 def _mmr_diversify(ranked: List[Dict[str, Any]], k: int = 60, lambda_: float = 0.7) -> List[Dict[str, Any]]:
-    """Maximal Marginal Relevance over fused list.
-    
-    Preserves top-1 by relevance, then balances relevance vs. diversity by path/symbol.
+    """Maximal Marginal Relevance via Lazy Greedy optimization.
+
+    Uses submodularity of MMR objective: marginal gain can only decrease as selected
+    set grows. This allows lazy evaluation with a priority queue - only recompute
+    scores when items reach the top with stale values.
+
+    Complexity: O(n log n) average case vs O(k * n * k) naive. Worst case still
+    O(k * n) recomputations but rarely triggered in practice.
+
     Returns a reordered list (top-k diversified, remainder appended in original order).
     """
+    import heapq
+
     if not ranked:
         return []
-    k = max(1, min(int(k or 1), len(ranked)))
+    n = len(ranked)
+    k = max(1, min(int(k or 1), n))
 
-    def _path(md: Dict[str, Any]) -> str:
-        return str(md.get("path") or "")
+    if n == 1:
+        return ranked[:]
 
-    def _symp(md: Dict[str, Any]) -> str:
-        return str(md.get("symbol_path") or md.get("symbol") or "")
+    # Precompute features once - path, symbol, path-parts for Jaccard
+    def _extract(m: Dict[str, Any]) -> tuple:
+        md = (m.get("pt", {}).payload or {}).get("metadata") or {}
+        path = str(md.get("path") or "")
+        sym = str(md.get("symbol_path") or md.get("symbol") or "")
+        parts = frozenset(p for p in re.split(r"[/\\]+", path.lower()) if p) if path else frozenset()
+        return (path, sym, parts)
 
-    def _sim(a: Dict[str, Any], b: Dict[str, Any]) -> float:
-        mda = (a["pt"].payload or {}).get("metadata") or {}
-        mdb = (b["pt"].payload or {}).get("metadata") or {}
-        pa, pb = _path(mda), _path(mdb)
+    features = [_extract(m) for m in ranked]
+    rel = [float(m.get("s", 0.0)) for m in ranked]
+
+    # Similarity function using precomputed features
+    def _sim(i: int, j: int) -> float:
+        pa, sa, ta = features[i]
+        pb, sb, tb = features[j]
         if pa and pb and pa == pb:
             return 1.0
-        sa, sb = _symp(mda), _symp(mdb)
         if sa and sb and sa == sb:
             return 0.8
-        if pa and pb:
-            ta = set(re.split(r"[/\\]+", pa.lower()))
-            tb = set(re.split(r"[/\\]+", pb.lower()))
-            ta.discard("")
-            tb.discard("")
-            if ta and tb:
-                inter = len(ta & tb)
-                union = max(1, len(ta | tb))
+        if ta and tb:
+            inter = len(ta & tb)
+            union = len(ta | tb)
+            if union > 0:
                 return 0.5 * (inter / union)
         return 0.0
 
-    rel = [float(m.get("s", 0.0)) for m in ranked]
-    selected_idx = [0]
-    candidates = list(range(1, len(ranked)))
-    while len(selected_idx) < k and candidates:
-        best_idx = None
-        best_score = -1e18
-        for i in candidates:
-            r = rel[i]
-            if selected_idx:
-                max_sim = max(_sim(ranked[i], ranked[j]) for j in selected_idx)
-            else:
-                max_sim = 0.0
-            mmr = lambda_ * r - (1.0 - lambda_) * max_sim
-            if mmr > best_score:
-                best_score = mmr
-                best_idx = i
-        selected_idx.append(best_idx)
-        candidates.remove(best_idx)
+    # Start with highest-relevance item
+    selected = [0]
 
-    sel_set = set(selected_idx)
-    diversified = [ranked[i] for i in selected_idx]
-    diversified.extend([ranked[i] for i in range(len(ranked)) if i not in sel_set])
-    return diversified
+    # Priority queue: (-score, staleness_marker, index)
+    # staleness_marker = len(selected) when score was computed
+    # Initialize: compute exact scores w.r.t. item 0
+    heap = []
+    for i in range(1, n):
+        sim_to_first = _sim(i, 0)
+        score = lambda_ * rel[i] - (1.0 - lambda_) * sim_to_first
+        heapq.heappush(heap, (-score, 1, i))  # computed when |selected|=1
+
+    # Lazy greedy selection
+    while len(selected) < k and heap:
+        neg_score, computed_at, i = heapq.heappop(heap)
+
+        if computed_at == len(selected):
+            # Score is fresh - this is the best candidate
+            selected.append(i)
+        else:
+            # Stale score - recompute with current selected set
+            max_sim = max(_sim(i, j) for j in selected)
+            new_score = lambda_ * rel[i] - (1.0 - lambda_) * max_sim
+            heapq.heappush(heap, (-new_score, len(selected), i))
+
+    # Build result: selected first, then remainder in original order
+    sel_set = set(selected)
+    result = [ranked[i] for i in selected]
+    result.extend(ranked[i] for i in range(n) if i not in sel_set)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -795,18 +942,3 @@ def _merge_and_budget_spans(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]
             m["_adaptive_expanded"] = True
         result.append(m)
     return result
-
-
-# ---------------------------------------------------------------------------
-# Intent detection
-# ---------------------------------------------------------------------------
-
-def _detect_implementation_intent(queries: List[str]) -> bool:
-    """Detect if query signals user wants implementation code."""
-    if not queries:
-        return False
-    joined = " ".join(queries).lower()
-    for pattern in _IMPL_INTENT_PATTERNS:
-        if pattern in joined:
-            return True
-    return False

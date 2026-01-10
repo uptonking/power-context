@@ -34,7 +34,7 @@ def _start_pseudo_backfill_worker(
     or None if the worker was not started (disabled via env).
     """
     
-    if not get_boolean_env("PSEUDO_BACKFILL_ENABLED"):
+    if not get_boolean_env("PSEUDO_DEFER_TO_WORKER"):
         return None
 
     try:

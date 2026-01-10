@@ -392,12 +392,22 @@ class ASTAnalyzer:
         }
     
     # ---- Python-specific analysis (using ast module) ----
-    
+
     def _analyze_python(self, content: str, file_path: str) -> Dict[str, Any]:
-        """Analyze Python code using ast module."""
+        """Analyze Python code. Prefers tree-sitter, falls back to ast module."""
+        # Prefer tree-sitter: handles Python 2/3, no SyntaxWarnings for escape sequences
+        if self.use_tree_sitter and "python" in _TS_LANGUAGES:
+            return self._analyze_python_treesitter(content, file_path)
+        
+        # Fallback to ast module (may emit SyntaxWarnings on Python 3.12+ for invalid escapes)
         try:
             tree = ast.parse(content)
         except SyntaxError as e:
+            # Python 2 code can't be parsed by Python 3's ast module
+            # Fall back to tree-sitter which handles both Python 2 and 3
+            if self.use_tree_sitter and "python" in _TS_LANGUAGES:
+                logger.debug(f"Falling back to tree-sitter for Python 2 code in {file_path}: {e}")
+                return self._analyze_python_treesitter(content, file_path)
             logger.warning(f"Python syntax error in {file_path}: {e}")
             return self._empty_analysis()
         
@@ -542,7 +552,199 @@ class ASTAnalyzer:
             # Return just the method name for simplicity
             return node.attr
         return ""
-    
+
+    # ---- Python tree-sitter analysis (fallback for Python 2) ----
+
+    def _analyze_python_treesitter(self, content: str, file_path: str) -> Dict[str, Any]:
+        """Analyze Python code using tree-sitter (handles Python 2 and 3)."""
+        parser = self._get_ts_parser("python")
+        if not parser:
+            return self._analyze_generic(content, file_path, "python")
+
+        try:
+            tree = parser.parse(content.encode("utf-8"))
+            root = tree.root_node
+        except Exception as e:
+            logger.warning(f"Tree-sitter parse error in {file_path}: {e}")
+            return self._analyze_generic(content, file_path, "python")
+
+        symbols = []
+        imports = []
+        calls = []
+
+        def node_text(n):
+            return content.encode("utf-8")[n.start_byte:n.end_byte].decode("utf-8", errors="ignore")
+
+        def extract_docstring(body_node) -> Optional[str]:
+            """Extract docstring from function/class body."""
+            if not body_node:
+                return None
+            for child in body_node.children:
+                if child.type == "expression_statement":
+                    for expr in child.children:
+                        if expr.type == "string":
+                            text = node_text(expr)
+                            # Remove quotes
+                            if text.startswith('"""') or text.startswith("'''"):
+                                return text[3:-3].strip()
+                            elif text.startswith('"') or text.startswith("'"):
+                                return text[1:-1].strip()
+                    break
+            return None
+
+        def walk(node, parent_class=None):
+            node_type = node.type
+
+            # Function definitions
+            if node_type == "function_definition":
+                name_node = node.child_by_field_name("name")
+                func_name = node_text(name_node) if name_node else ""
+
+                # Get parameters
+                params_node = node.child_by_field_name("parameters")
+                params = []
+                if params_node:
+                    for child in params_node.children:
+                        if child.type == "identifier":
+                            params.append(node_text(child))
+                        elif child.type in ("default_parameter", "typed_parameter", "typed_default_parameter"):
+                            name = child.child_by_field_name("name")
+                            if name:
+                                params.append(node_text(name))
+
+                signature = f"def {func_name}({', '.join(params)})"
+
+                # Get decorators
+                decorators = []
+                prev = node.prev_sibling
+                while prev and prev.type == "decorator":
+                    dec_text = node_text(prev).lstrip("@").split("(")[0]
+                    decorators.insert(0, dec_text)
+                    prev = prev.prev_sibling
+
+                # Get docstring
+                body = node.child_by_field_name("body")
+                docstring = extract_docstring(body)
+
+                symbols.append(CodeSymbol(
+                    name=func_name,
+                    kind="method" if parent_class else "function",
+                    start_line=node.start_point[0] + 1,
+                    end_line=node.end_point[0] + 1,
+                    parent=parent_class,
+                    path=f"{parent_class}.{func_name}" if parent_class else func_name,
+                    signature=signature,
+                    decorators=decorators,
+                    docstring=docstring,
+                ))
+
+            # Class definitions
+            elif node_type == "class_definition":
+                name_node = node.child_by_field_name("name")
+                class_name = node_text(name_node) if name_node else ""
+
+                # Get base classes
+                bases = []
+                args_node = node.child_by_field_name("superclasses")
+                if args_node:
+                    for child in args_node.children:
+                        if child.type in ("identifier", "attribute"):
+                            bases.append(node_text(child))
+
+                signature = f"class {class_name}({', '.join(bases)})" if bases else f"class {class_name}"
+
+                # Get docstring
+                body = node.child_by_field_name("body")
+                docstring = extract_docstring(body)
+
+                symbols.append(CodeSymbol(
+                    name=class_name,
+                    kind="class",
+                    start_line=node.start_point[0] + 1,
+                    end_line=node.end_point[0] + 1,
+                    signature=signature,
+                    docstring=docstring,
+                ))
+
+                # Recurse into class body
+                for child in node.children:
+                    walk(child, class_name)
+                return
+
+            # Import statements
+            elif node_type == "import_statement":
+                for child in node.children:
+                    if child.type == "dotted_name":
+                        imports.append(ImportReference(
+                            module=node_text(child),
+                            names=[],
+                            line=node.start_point[0] + 1,
+                            is_from=False,
+                        ))
+                    elif child.type == "aliased_import":
+                        name = child.child_by_field_name("name")
+                        alias = child.child_by_field_name("alias")
+                        if name:
+                            imports.append(ImportReference(
+                                module=node_text(name),
+                                names=[],
+                                alias=node_text(alias) if alias else None,
+                                line=node.start_point[0] + 1,
+                                is_from=False,
+                            ))
+
+            # From imports
+            elif node_type == "import_from_statement":
+                module_node = node.child_by_field_name("module_name")
+                module = node_text(module_node) if module_node else ""
+                names = []
+                for child in node.children:
+                    if child.type in ("dotted_name", "identifier"):
+                        if child != module_node:
+                            names.append(node_text(child))
+                    elif child.type == "aliased_import":
+                        name = child.child_by_field_name("name")
+                        if name:
+                            names.append(node_text(name))
+                imports.append(ImportReference(
+                    module=module,
+                    names=names,
+                    line=node.start_point[0] + 1,
+                    is_from=True,
+                ))
+
+            # Function calls
+            elif node_type == "call":
+                func = node.child_by_field_name("function")
+                if func:
+                    callee = ""
+                    if func.type == "identifier":
+                        callee = node_text(func)
+                    elif func.type == "attribute":
+                        attr = func.child_by_field_name("attribute")
+                        if attr:
+                            callee = node_text(attr)
+                    if callee:
+                        calls.append(CallReference(
+                            caller="",
+                            callee=callee,
+                            line=node.start_point[0] + 1,
+                            context="call",
+                        ))
+
+            # Recurse
+            for child in node.children:
+                walk(child, parent_class)
+
+        walk(root)
+
+        return {
+            "symbols": symbols,
+            "imports": imports,
+            "calls": calls,
+            "language": "python",
+        }
+
     # ---- JavaScript/TypeScript analysis (using tree-sitter) ----
     
     def _analyze_js_ts(
