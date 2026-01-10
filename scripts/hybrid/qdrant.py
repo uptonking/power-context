@@ -67,10 +67,14 @@ def _safe_float(val: Any, default: float) -> float:
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
 API_KEY = os.environ.get("QDRANT_API_KEY")
 
-LEX_VECTOR_NAME = os.environ.get("LEX_VECTOR_NAME", "lex")
-LEX_VECTOR_DIM = _safe_int(os.environ.get("LEX_VECTOR_DIM"), 4096)
-LEX_SPARSE_NAME = os.environ.get("LEX_SPARSE_NAME", "lex_sparse")
-LEX_SPARSE_MODE = os.environ.get("LEX_SPARSE_MODE", "0").strip().lower() in ("1", "true", "yes", "on")
+# Lexical vector configuration
+# Imported from ingest config to ensure Single Source of Truth
+from scripts.ingest.config import (
+    LEX_VECTOR_NAME,
+    LEX_VECTOR_DIM,
+    LEX_SPARSE_NAME,
+    LEX_SPARSE_MODE,
+)
 
 EF_SEARCH = _safe_int(os.environ.get("QDRANT_EF_SEARCH", "128"), 128)
 

@@ -104,8 +104,9 @@ def verify_config_compatibility(client: Any, collection_name: str) -> None:
     vectors = info.config.params.vectors
     
     # Check Lexical Vector Dimension
-    lex_name = os.environ.get("LEX_VECTOR_NAME", "lex")
-    expected_dim = int(os.environ.get("LEX_VECTOR_DIM", "4096"))
+    from scripts.ingest.config import LEX_VECTOR_NAME, LEX_VECTOR_DIM
+    lex_name = LEX_VECTOR_NAME
+    expected_dim = LEX_VECTOR_DIM
     
     # Handle dict-style vector config (named vectors)
     if isinstance(vectors, dict):
