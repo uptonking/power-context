@@ -750,24 +750,26 @@ async def _context_search_impl(
 
             model_name = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
             model = get_embedding_model_fn(model_name) if get_embedding_model_fn else None
-            items2 = run_hybrid_search(
-                queries=queries,
-                limit=int(code_limit),
-                per_path=int(per_path_val),
-                language=language or None,
-                under=under or None,
-                kind=kind or None,
-                symbol=symbol or None,
-                ext=ext or None,
-                not_filter=not_ or None,
-                case=case or None,
-                path_regex=path_regex or None,
-                path_glob=path_glob or None,
-                not_glob=not_glob or None,
-                expand=str(os.environ.get("HYBRID_EXPAND", "0")).strip().lower()
-                in {"1", "true", "yes", "on"},
-                model=model,
-                collection=coll,
+            items2 = await asyncio.to_thread(
+                lambda: run_hybrid_search(
+                    queries=queries,
+                    limit=int(code_limit),
+                    per_path=int(per_path_val),
+                    language=language or None,
+                    under=under or None,
+                    kind=kind or None,
+                    symbol=symbol or None,
+                    ext=ext or None,
+                    not_filter=not_ or None,
+                    case=case or None,
+                    path_regex=path_regex or None,
+                    path_glob=path_glob or None,
+                    not_glob=not_glob or None,
+                    expand=str(os.environ.get("HYBRID_EXPAND", "0")).strip().lower()
+                    in {"1", "true", "yes", "on"},
+                    model=model,
+                    collection=coll,
+                )
             )
             if isinstance(items2, list):
                 for obj in items2:

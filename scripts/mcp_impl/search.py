@@ -544,13 +544,15 @@ async def _repo_search_impl(
         query_text = " ".join(queries)
         
         # run_pure_dense_search handles embedding + candidate expansion
-        items = run_pure_dense_search(
-            query=query_text,
-            limit=eff_limit,
-            collection=collection,
-            language=language or None,
-            under=under or None,
-            repo=repo_filter,
+        items = await asyncio.to_thread(
+            lambda: run_pure_dense_search(
+                query=query_text,
+                limit=eff_limit,
+                collection=collection,
+                language=language or None,
+                under=under or None,
+                repo=repo_filter,
+            )
         )
         
         # Apply post-filters (path_regex, path_glob, not_glob, not_) that aren't
@@ -640,30 +642,32 @@ async def _repo_search_impl(
                         eff_limit = rt
                 # In-process path_glob/not_glob accept a single string; reduce list inputs safely
                 print(f"[debug] DEBUG_SEARCH_TIMING={os.environ.get('DEBUG_SEARCH_TIMING', 'not set')}", flush=True)
-                items = run_hybrid_search(
-                    queries=queries,
-                    limit=eff_limit,
-                    per_path=(
-                        int(per_path)
-                        if (per_path is not None and str(per_path).strip() != "")
-                        else 1
-                    ),
-                    language=language or None,
-                    under=under or None,
-                    kind=kind or None,
-                    symbol=symbol or None,
-                    ext=ext or None,
-                    not_filter=not_ or None,
-                    case=case or None,
-                    path_regex=path_regex or None,
-                    path_glob=(path_globs or None),
-                    not_glob=(not_globs or None),
-                    expand=str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower()
-                    in {"1", "true", "yes", "on"},
-                    model=model,
-                    collection=collection,
-                    mode=mode_str or None,
-                    repo=repo_filter,  # Cross-codebase isolation
+                items = await asyncio.to_thread(
+                    lambda: run_hybrid_search(
+                        queries=queries,
+                        limit=eff_limit,
+                        per_path=(
+                            int(per_path)
+                            if (per_path is not None and str(per_path).strip() != "")
+                            else 1
+                        ),
+                        language=language or None,
+                        under=under or None,
+                        kind=kind or None,
+                        symbol=symbol or None,
+                        ext=ext or None,
+                        not_filter=not_ or None,
+                        case=case or None,
+                        path_regex=path_regex or None,
+                        path_glob=(path_globs or None),
+                        not_glob=(not_globs or None),
+                        expand=str(os.environ.get("HYBRID_EXPAND", "1")).strip().lower()
+                        in {"1", "true", "yes", "on"},
+                        model=model,
+                        collection=collection,
+                        mode=mode_str or None,
+                        repo=repo_filter,  # Cross-codebase isolation
+                    )
                 )
                 # items are already in structured dict form
                 json_lines = items  # reuse downstream shaping
@@ -741,30 +745,32 @@ async def _repo_search_impl(
 
                     model_name = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
                     model = get_embedding_model_fn(model_name) if get_embedding_model_fn else None
-                    items = run_hybrid_search(
-                        queries=queries,
-                        limit=int(limit),
-                        per_path=(
-                            int(per_path)
-                            if (per_path is not None and str(per_path).strip() != "")
-                            else 1
-                        ),
-                        language=language or None,
-                        under=under or None,
-                        kind=kind or None,
-                        symbol=symbol or None,
-                        ext=ext or None,
-                        not_filter=not_ or None,
-                        case=case or None,
-                        path_regex=path_regex or None,
-                        path_glob=(path_globs or None),
-                        not_glob=(not_globs or None),
-                        expand=str(os.environ.get("HYBRID_EXPAND", "0")).strip().lower()
-                        in {"1", "true", "yes", "on"},
-                        model=model,
-                        collection=collection,
-                        mode=mode_str or None,
-                        repo=repo_filter,  # Cross-codebase isolation
+                    items = await asyncio.to_thread(
+                        lambda: run_hybrid_search(
+                            queries=queries,
+                            limit=int(limit),
+                            per_path=(
+                                int(per_path)
+                                if (per_path is not None and str(per_path).strip() != "")
+                                else 1
+                            ),
+                            language=language or None,
+                            under=under or None,
+                            kind=kind or None,
+                            symbol=symbol or None,
+                            ext=ext or None,
+                            not_filter=not_ or None,
+                            case=case or None,
+                            path_regex=path_regex or None,
+                            path_glob=(path_globs or None),
+                            not_glob=(not_globs or None),
+                            expand=str(os.environ.get("HYBRID_EXPAND", "0")).strip().lower()
+                            in {"1", "true", "yes", "on"},
+                            model=model,
+                            collection=collection,
+                            mode=mode_str or None,
+                            repo=repo_filter,  # Cross-codebase isolation
+                        )
                     )
                     json_lines = items
                 except Exception:
