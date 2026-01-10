@@ -63,6 +63,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from dotenv import load_dotenv
 
+# Load .env immediately to ensure all subsequent imports (like scripts.ingest.config)
+# see the correct environment variables.
+load_dotenv(override=True)
+
 from scripts.benchmarks.qdrant_utils import (
     get_qdrant_client, 
     probe_pseudo_tags, 
