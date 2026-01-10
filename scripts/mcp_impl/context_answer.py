@@ -2695,25 +2695,27 @@ async def _context_answer_impl(
 
         try:
             # Refactored retrieval pipeline (filters + hybrid search)
-            _retr = _retrieve_fn(
-                queries=queries,
-                lim=lim,
-                ppath=ppath,
-                filters=_cfg["filters"],
-                model=model,
-                did_local_expand=did_local_expand,
-                kwargs={
-                    "language": _cfg["filters"].get("language"),
-                    "under": _cfg["filters"].get("under"),
-                    "path_glob": _cfg["filters"].get("path_glob"),
-                    "not_glob": _cfg["filters"].get("not_glob"),
-                    "path_regex": _cfg["filters"].get("path_regex"),
-                    "ext": _cfg["filters"].get("ext"),
-                    "kind": _cfg["filters"].get("kind"),
-                    "case": _cfg["filters"].get("case"),
-                    "symbol": _cfg["filters"].get("symbol"),
-                },
-                repo=repo,
+            _retr = await asyncio.to_thread(
+                lambda: _retrieve_fn(
+                    queries=queries,
+                    lim=lim,
+                    ppath=ppath,
+                    filters=_cfg["filters"],
+                    model=model,
+                    did_local_expand=did_local_expand,
+                    kwargs={
+                        "language": _cfg["filters"].get("language"),
+                        "under": _cfg["filters"].get("under"),
+                        "path_glob": _cfg["filters"].get("path_glob"),
+                        "not_glob": _cfg["filters"].get("not_glob"),
+                        "path_regex": _cfg["filters"].get("path_regex"),
+                        "ext": _cfg["filters"].get("ext"),
+                        "kind": _cfg["filters"].get("kind"),
+                        "case": _cfg["filters"].get("case"),
+                        "symbol": _cfg["filters"].get("symbol"),
+                    },
+                    repo=repo,
+                )
             )
             items = _retr["items"]
             eff_language = _retr["eff_language"]
@@ -2732,28 +2734,30 @@ async def _context_answer_impl(
             for key in ("path_glob", "language", "under"):
                 fallback_kwargs.pop(key, None)
 
-            spans = _ca_fallback_and_budget(
-                items=items,
-                queries=queries,
-                lim=lim,
-                ppath=ppath,
-                eff_language=eff_language,
-                eff_path_glob=eff_path_glob,
-                eff_not_glob=eff_not_glob,
-                path_regex=path_regex,
-                sym_arg=sym_arg,
-                ext=ext,
-                kind=kind,
-                override_under=override_under,
-                did_local_expand=did_local_expand,
-                model=model,
-                req_language=req_language,
-                not_=not_,
-                case=case,
-                cwd_root=cwd_root,
-                include_snippet=bool(include_snippet),
-                kwargs=fallback_kwargs,
-                repo=repo,
+            spans = await asyncio.to_thread(
+                lambda: _ca_fallback_and_budget(
+                    items=items,
+                    queries=queries,
+                    lim=lim,
+                    ppath=ppath,
+                    eff_language=eff_language,
+                    eff_path_glob=eff_path_glob,
+                    eff_not_glob=eff_not_glob,
+                    path_regex=path_regex,
+                    sym_arg=sym_arg,
+                    ext=ext,
+                    kind=kind,
+                    override_under=override_under,
+                    did_local_expand=did_local_expand,
+                    model=model,
+                    req_language=req_language,
+                    not_=not_,
+                    case=case,
+                    cwd_root=cwd_root,
+                    include_snippet=bool(include_snippet),
+                    kwargs=fallback_kwargs,
+                    repo=repo,
+                )
             )
         except Exception as e:
             err = str(e)
@@ -2783,10 +2787,12 @@ async def _context_answer_impl(
     # Ensure final retrieval call reflects Tier-2 relaxed filters
     try:
         from scripts.hybrid_search import run_hybrid_search as _rh
-        _ = _rh(
-            queries=queries,
-            limit=int(max(lim, 1)),
-            per_path=int(max(ppath, 1)),
+        await asyncio.to_thread(
+            lambda: _rh(
+                queries=queries,
+                limit=int(max(lim, 1)),
+                per_path=int(max(ppath, 1)),
+            )
         )
     except Exception:
         pass
