@@ -23,7 +23,8 @@ def test_handler_invalidate_cache_handles_errors(monkeypatch, tmp_path):
     
     # Should not raise despite errors
     result = h._invalidate_cache(tmp_path / "test.py")
-    assert result is None  # No repo_name when not in multi-repo mode
+    # Root-aware repo detection now returns the top-level path component.
+    assert result == "test.py"
 
 
 def test_processor_handles_cache_read_errors(monkeypatch, tmp_path):
@@ -90,8 +91,12 @@ def test_processor_handles_cache_remove_errors(monkeypatch, tmp_path):
     assert not missing.exists()
 
     # Mock other dependencies
-    monkeypatch.setattr(proc_mod, "_detect_repo_for_file", lambda p: tmp_path)
-    monkeypatch.setattr(proc_mod, "_get_collection_for_file", lambda p: "coll")
+    monkeypatch.setattr(proc_mod, "_detect_repo_for_file", lambda p, root=None: tmp_path)
+    monkeypatch.setattr(
+        proc_mod,
+        "_get_collection_for_file",
+        lambda p, **kwargs: "coll",
+    )
     monkeypatch.setattr(proc_mod, "_set_status_indexing", lambda *a, **k: None)
     monkeypatch.setattr(proc_mod, "persist_indexing_config", lambda *a, **k: None)
     monkeypatch.setattr(proc_mod, "update_indexing_status", lambda *a, **k: None)
@@ -127,8 +132,12 @@ def test_processor_delete_clears_cache_even_without_client(monkeypatch, tmp_path
     missing = tmp_path / "missing.py"
     assert not missing.exists()
 
-    monkeypatch.setattr(proc_mod, "_detect_repo_for_file", lambda p: tmp_path)
-    monkeypatch.setattr(proc_mod, "_get_collection_for_file", lambda p: "coll")
+    monkeypatch.setattr(proc_mod, "_detect_repo_for_file", lambda p, root=None: tmp_path)
+    monkeypatch.setattr(
+        proc_mod,
+        "_get_collection_for_file",
+        lambda p, **kwargs: "coll",
+    )
     monkeypatch.setattr(proc_mod, "_set_status_indexing", lambda *a, **k: None)
     monkeypatch.setattr(proc_mod, "persist_indexing_config", lambda *a, **k: None)
     monkeypatch.setattr(proc_mod, "update_indexing_status", lambda *a, **k: None)
@@ -150,3 +159,45 @@ def test_processor_delete_clears_cache_even_without_client(monkeypatch, tmp_path
     )
 
     remove_mock.assert_called_once_with(str(missing), "repo")
+
+
+def test_processor_passes_root_and_collection_override(monkeypatch, tmp_path):
+    proc_mod = importlib.import_module("scripts.watch_index_core.processor")
+
+    existing = tmp_path / "repo-a" / "main.py"
+    existing.parent.mkdir(parents=True, exist_ok=True)
+    existing.write_text("print('ok')\n", encoding="utf-8")
+
+    captured = {}
+
+    def _fake_detect_repo_for_file(path, root=None):
+        captured["detect_root"] = root
+        return (root or tmp_path) / "repo-a"
+
+    def _fake_get_collection_for_file(path, **kwargs):
+        captured["collection_kwargs"] = kwargs
+        return "forced-coll"
+
+    monkeypatch.setattr(proc_mod, "_detect_repo_for_file", _fake_detect_repo_for_file)
+    monkeypatch.setattr(proc_mod, "_get_collection_for_file", _fake_get_collection_for_file)
+    monkeypatch.setattr(proc_mod, "_set_status_indexing", lambda *a, **k: None)
+    monkeypatch.setattr(proc_mod, "persist_indexing_config", lambda *a, **k: None)
+    monkeypatch.setattr(proc_mod, "update_indexing_status", lambda *a, **k: None)
+    monkeypatch.setattr(proc_mod, "get_workspace_state", lambda *a, **k: {})
+    monkeypatch.setattr(proc_mod, "is_staging_enabled", lambda: False)
+    monkeypatch.setattr(proc_mod, "_log_activity", lambda *a, **k: None)
+    monkeypatch.setattr(proc_mod, "_extract_repo_name_from_path", lambda *_: "repo-a")
+
+    proc_mod._process_paths(
+        [existing],
+        client=None,
+        model=None,
+        vector_name="vec",
+        model_dim=1,
+        workspace_path=str(tmp_path),
+        collection_override="explicit-coll",
+    )
+
+    assert captured.get("detect_root") == tmp_path.resolve()
+    assert captured.get("collection_kwargs", {}).get("root") == tmp_path.resolve()
+    assert captured.get("collection_kwargs", {}).get("collection_override") == "explicit-coll"

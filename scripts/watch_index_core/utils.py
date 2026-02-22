@@ -91,15 +91,16 @@ def create_observer(use_polling: bool, observer_cls: Type[Observer] = Observer) 
     return observer_cls()
 
 
-def _detect_repo_for_file(file_path: Path) -> Optional[Path]:
-    """Detect repository root for a file under WATCH root."""
+def _detect_repo_for_file(file_path: Path, root: Path | None = None) -> Optional[Path]:
+    """Detect repository root for a file under the active watch root."""
+    base_root = root or ROOT
     try:
-        rel_path = file_path.resolve().relative_to(ROOT.resolve())
+        rel_path = file_path.resolve().relative_to(base_root.resolve())
     except Exception:
         return None
     if not rel_path.parts:
-        return ROOT
-    return ROOT / rel_path.parts[0]
+        return base_root
+    return base_root / rel_path.parts[0]
 
 
 def _repo_name_or_none(repo_path: Optional[Path]) -> Optional[str]:
@@ -212,10 +213,17 @@ def _get_collection_for_repo(repo_path: Path) -> str:
     return default_coll
 
 
-def _get_collection_for_file(file_path: Path) -> str:
+def _get_collection_for_file(
+    file_path: Path,
+    *,
+    collection_override: str | None = None,
+    root: Path | None = None,
+) -> str:
+    if collection_override:
+        return collection_override
     if not is_multi_repo_mode():
         return default_collection_name()
-    repo_path = _detect_repo_for_file(file_path)
+    repo_path = _detect_repo_for_file(file_path, root=root)
     if repo_path is not None:
         return _get_collection_for_repo(repo_path)
     return default_collection_name()

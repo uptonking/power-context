@@ -6,7 +6,7 @@ Provides Qdrant-native queries for:
 - "who calls X" (callers)
 - "where is X defined" (definition)
 - "what imports Y" (importers)
-- "who is called by X" (called_by - post-index computed)
+- "who is called by X" (called_by)
 """
 from __future__ import annotations
 
@@ -118,7 +118,7 @@ async def _symbol_graph_impl(
 
     Args:
         symbol: The symbol name to search for (function, class, module name)
-        query_type: One of "callers", "definition", "importers"
+        query_type: One of "callers", "definition", "importers", "called_by"
         limit: Maximum number of results
         language: Optional language filter
         under: Optional path prefix filter
@@ -129,9 +129,6 @@ async def _symbol_graph_impl(
     Returns:
         Dict with "results" list and metadata
     """
-    from qdrant_client import QdrantClient
-    from qdrant_client import models as qmodels
-
     # Get collection using engine's standard approach
     coll = str(collection or "").strip()
     if not coll:
@@ -142,6 +139,30 @@ async def _symbol_graph_impl(
             coll = os.environ.get("COLLECTION_NAME", "codebase")
     if not coll:
         coll = os.environ.get("COLLECTION_NAME", "codebase")
+
+    # Validate query_type before touching Qdrant dependencies.
+    if query_type not in ("callers", "definition", "importers", "called_by"):
+        return {
+            "results": [],
+            "error": (
+                f"Invalid query_type: {query_type}. "
+                "Use 'callers', 'definition', 'importers', or 'called_by'"
+            ),
+            "symbol": symbol,
+            "query_type": query_type,
+            "collection": coll,
+        }
+
+    try:
+        from qdrant_client import QdrantClient
+    except Exception as e:
+        return {
+            "results": [],
+            "error": f"Qdrant client unavailable: {e}",
+            "symbol": symbol,
+            "query_type": query_type,
+            "collection": coll,
+        }
 
     # Connect to Qdrant using engine's standard env vars
     try:
@@ -155,16 +176,6 @@ async def _symbol_graph_impl(
         return {
             "results": [],
             "error": f"Qdrant connection failed: {e}",
-            "symbol": symbol,
-            "query_type": query_type,
-            "collection": coll,
-        }
-
-    # Validate query_type
-    if query_type not in ("callers", "definition", "importers"):
-        return {
-            "results": [],
-            "error": f"Invalid query_type: {query_type}. Use 'callers', 'definition', or 'importers'",
             "symbol": symbol,
             "query_type": query_type,
             "collection": coll,
@@ -205,9 +216,18 @@ async def _symbol_graph_impl(
                 language=language,
                 under=_norm_under(under),
             )
+        elif query_type == "called_by":
+            called_by_result = await _compute_called_by(
+                symbol=symbol,
+                limit=limit,
+                language=language,
+                under=under,
+                collection=coll,
+            )
+            results = called_by_result.get("called_by", [])
 
         # If no results, fall back to semantic search
-        if not results:
+        if not results and query_type != "called_by":
             results = await _fallback_semantic_search(
                 symbol=symbol,
                 query_type=query_type,

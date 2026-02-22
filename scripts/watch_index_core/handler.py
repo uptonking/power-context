@@ -148,7 +148,7 @@ class IndexHandler(FileSystemEventHandler):
         self._delete_points(p, collection)
 
         try:
-            repo_path = _detect_repo_for_file(p) or self.root
+            repo_path = _detect_repo_for_file(p, root=self.root) or self.root
             _log_activity(str(repo_path), "deleted", p)
         except Exception as exc:
             safe_print(f"[delete_error] {p}: {exc}")
@@ -177,7 +177,7 @@ class IndexHandler(FileSystemEventHandler):
                         if self.client is not None and coll is not None:
                             idx.delete_points_by_path(self.client, coll, str(src))
                         safe_print(f"[moved:ignored_dest_deleted_src] {src} -> {dest}")
-                        src_repo_path = _detect_repo_for_file(src)
+                        src_repo_path = _detect_repo_for_file(src, root=self.root)
                         src_repo_name = _repo_name_or_none(src_repo_path)
                         try:
                             if src_repo_name:
@@ -208,8 +208,8 @@ class IndexHandler(FileSystemEventHandler):
         if moved_count and moved_count > 0:
             try:
                 safe_print(f"[moved] {src} -> {dest} ({moved_count} chunk(s) relinked)")
-                src_repo_path = _detect_repo_for_file(src)
-                dest_repo_path = _detect_repo_for_file(dest)
+                src_repo_path = _detect_repo_for_file(src, root=self.root)
+                dest_repo_path = _detect_repo_for_file(dest, root=self.root)
                 src_repo_name = _repo_name_or_none(src_repo_path)
                 dest_repo_name = _repo_name_or_none(dest_repo_path)
                 try:
@@ -260,7 +260,7 @@ class IndexHandler(FileSystemEventHandler):
         if self.collection is not None:
             return self.collection
         try:
-            return _get_collection_for_file(path)
+            return _get_collection_for_file(path, root=self.root)
         except Exception:
             return self.default_collection
 
@@ -275,7 +275,7 @@ class IndexHandler(FileSystemEventHandler):
             pass
 
     def _invalidate_cache(self, path: Path) -> Optional[str]:
-        detected_repo_path = _detect_repo_for_file(path)
+        detected_repo_path = _detect_repo_for_file(path, root=self.root)
         repo_path = detected_repo_path or self.root
         repo_name = _extract_repo_name_from_path(str(repo_path)) if repo_path else None
         try:
