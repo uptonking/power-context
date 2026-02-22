@@ -31,7 +31,7 @@ uvicorn[standard]
 python-multipart
 jinja2
 openai>=2.11.0
-openlit>=1.0.0  # LLM observability SDK
+# openlit>=1.0.0  # LLM observability SDK (disabled for Python 3.13 compatibility)
 
 # Test-only
 pytest

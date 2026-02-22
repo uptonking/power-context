@@ -112,3 +112,17 @@ def test_multi_repo_ignores_placeholder_collection_in_state(monkeypatch, tmp_pat
     resolved = utils._get_collection_for_file(target)
     assert resolved == f"derived-{repo_slug}"
 
+
+def test_detect_repo_for_file_uses_explicit_root(monkeypatch, tmp_path):
+    monkeypatch.setenv("WATCH_ROOT", str(tmp_path / "default-root"))
+
+    utils = importlib.import_module("scripts.watch_index_core.utils")
+    utils = importlib.reload(utils)
+
+    active_root = tmp_path / "active-root"
+    file_path = active_root / "repo-a" / "src" / "main.py"
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    file_path.write_text("print('x')\n", encoding="utf-8")
+
+    detected = utils._detect_repo_for_file(file_path, root=active_root)
+    assert detected == active_root / "repo-a"

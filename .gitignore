@@ -1,4 +1,13 @@
+-bak/
+*.bak
+
 .env
+.env.local
+.env.private
+
+.venv
+*.egg-info
+
 
 # Model artifacts
 models/

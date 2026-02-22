@@ -1405,10 +1405,11 @@ async def symbol_graph(
     - "Who calls X?" → query_type="callers"
     - "Where is X defined?" → query_type="definition"
     - "What imports Y?" → query_type="importers"
+    - "Who calls into X?" → query_type="called_by"
 
     Key parameters:
     - symbol: str. The function, class, or module name to search for.
-    - query_type: str. One of "callers", "definition", "importers".
+    - query_type: str. One of "callers", "definition", "importers", "called_by".
     - limit: int (default 20). Maximum results to return.
     - language: str (optional). Filter by programming language.
     - under: str (optional). Filter by path prefix.

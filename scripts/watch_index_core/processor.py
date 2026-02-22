@@ -189,16 +189,19 @@ def _process_paths(
     vector_name: str,
     model_dim: int,
     workspace_path: str,
+    *,
+    collection_override: str | None = None,
 ) -> None:
     unique_paths = sorted(set(Path(x) for x in paths))
     if not unique_paths:
         return
 
+    workspace_root = Path(workspace_path).resolve()
     started_at = datetime.now().isoformat()
 
     repo_groups: Dict[str, List[Path]] = {}
     for p in unique_paths:
-        repo_path = _detect_repo_for_file(p) or Path(workspace_path)
+        repo_path = _detect_repo_for_file(p, root=workspace_root) or workspace_root
         repo_groups.setdefault(str(repo_path), []).append(p)
 
     for repo_path, repo_files in repo_groups.items():
@@ -220,11 +223,15 @@ def _process_paths(
     repo_progress: Dict[str, int] = {key: 0 for key in repo_groups.keys()}
 
     for p in unique_paths:
-        repo_path = _detect_repo_for_file(p) or Path(workspace_path)
+        repo_path = _detect_repo_for_file(p, root=workspace_root) or workspace_root
         repo_key = str(repo_path)
         repo_files = repo_groups.get(repo_key, [])
         repo_name = _extract_repo_name_from_path(repo_key)
-        collection = _get_collection_for_file(p)
+        collection = _get_collection_for_file(
+            p,
+            collection_override=collection_override,
+            root=workspace_root,
+        )
         state_env: Optional[Dict[str, str]] = None
         try:
             st = get_workspace_state(repo_key, repo_name) if get_workspace_state else None

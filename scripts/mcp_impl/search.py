@@ -39,7 +39,14 @@ from scripts.mcp_impl.utils import (
     _tokens_from_queries,
     safe_int,
 )
-from scripts.mcp_impl.workspace import _default_collection, _work_script
+from scripts.mcp_impl.workspace import (
+    SESSION_DEFAULTS,
+    SESSION_DEFAULTS_BY_SESSION,
+    _SESSION_CTX_LOCK,
+    _SESSION_LOCK,
+    _default_collection,
+    _work_script,
+)
 from scripts.mcp_impl.admin_tools import _detect_current_repo, _run_async
 from scripts.mcp_toon import _should_use_toon, _format_results_as_toon
 from scripts.mcp_auth import require_collection_access as _require_collection_access
@@ -641,7 +648,6 @@ async def _repo_search_impl(
                     if rt > eff_limit:
                         eff_limit = rt
                 # In-process path_glob/not_glob accept a single string; reduce list inputs safely
-                print(f"[debug] DEBUG_SEARCH_TIMING={os.environ.get('DEBUG_SEARCH_TIMING', 'not set')}", flush=True)
                 items = await asyncio.to_thread(
                     lambda: run_hybrid_search(
                         queries=queries,
@@ -674,10 +680,13 @@ async def _repo_search_impl(
             except Exception as e:
                 # Fallback to subprocess path if in-process fails
                 logger.debug(f"In-process hybrid search failed, falling back to subprocess: {type(e).__name__}: {e}")
-                # VISIBLE ERROR for debugging silent failures during benchmark runs
-                print(f"[ERROR] In-process hybrid failed: {type(e).__name__}: {e}", flush=True)
-                import traceback
-                traceback.print_exc()
+                if str(os.environ.get("DEBUG_SEARCH_TIMING", "")).strip().lower() in {
+                    "1",
+                    "true",
+                    "yes",
+                    "on",
+                }:
+                    logger.exception("In-process hybrid search traceback")
                 use_hybrid_inproc = False
 
         if not use_hybrid_inproc:
