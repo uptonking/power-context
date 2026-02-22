@@ -1,3 +1,0 @@
-[features]
-# Use the stable RMCP client (replaces deprecated experimental_use_rmcp_client).
-rmcp_client = true

@@ -1,13 +1,13 @@
 [![CI](https://github.com/m1rl0k/Context-Engine/actions/workflows/ci.yml/badge.svg)](https://github.com/m1rl0k/Context-Engine/actions/workflows/ci.yml)
 [![npm version](https://img.shields.io/npm/v/@context-engine-bridge/context-engine-mcp-bridge.svg)](https://www.npmjs.com/package/@context-engine-bridge/context-engine-mcp-bridge)
-[![VS Code Marketplace](https://img.shields.io/visual-studio-marketplace/i/context-engine.context-engine-uploader.svg?label=VS%20Code)](https://marketplace.visualstudio.com/items?itemName=context-engine.context-engine-uploader)
-[![Join our Discord](https://img.shields.io/badge/Discord-Join%20Chat-5865F2?logo=discord&logoColor=white)](https://discord.gg/tCxvqmP4QT)
+<!-- [![VS Code Marketplace](https://img.shields.io/visual-studio-marketplace/i/context-engine.context-engine-uploader.svg?label=VS%20Code)](https://marketplace.visualstudio.com/items?itemName=context-engine.context-engine-uploader) -->
+<!-- [![Join our Discord](https://img.shields.io/badge/Discord-Join%20Chat-5865F2?logo=discord&logoColor=white)](https://discord.gg/tCxvqmP4QT) -->
 
 **Documentation:** [Getting Started](docs/GETTING_STARTED.md) · README · [Configuration](docs/CONFIGURATION.md) · [IDE Clients](docs/IDE_CLIENTS.md) · [MCP API](docs/MCP_API.md) · [ctx CLI](docs/CTX_CLI.md) · [Memory Guide](docs/MEMORY_GUIDE.md) · [Architecture](docs/ARCHITECTURE.md) · [Multi-Repo](docs/MULTI_REPO_COLLECTIONS.md) · [Observability](docs/OBSERVABILITY.md) · [Kubernetes](deploy/kubernetes/README.md) · [VS Code Extension](docs/vscode-extension.md) · [Troubleshooting](docs/TROUBLESHOOTING.md) · [Development](docs/DEVELOPMENT.md)
 
 ---
 
-## Context-Engine
+## power-context
 
 Open-source, self-improving code search that gets smarter every time you use it.
 
@@ -20,6 +20,7 @@ Open-source, self-improving code search that gets smarter every time you use it.
 ## Quick Start: Stack in 30 Seconds
 
 ### VS Code Extension (Easiest)
+
 1. Install [Context Engine Uploader](https://marketplace.visualstudio.com/items?itemName=context-engine.context-engine-uploader)
 2. Open any project → extension prompts to set up Context-Engine stack
 3. Opened workspace is indexed
@@ -32,18 +33,21 @@ Open-source, self-improving code search that gets smarter every time you use it.
 - Writes MCP configs for Claude Code, Windsurf, and Augment
 
 **Claude Code users:** Install the skill plugin:
+
 ```
 /plugin marketplace add m1rl0k/Context-Engine
 /plugin install context-engine
 ```
 
 ### Manual Setup (Alternative)
+
 ```bash
 git clone https://github.com/m1rl0k/Context-Engine.git && cd Context-Engine
 make bootstrap  # One-shot: up → wait → index → warm → health
 ```
 
 Or step-by-step:
+
 ```bash
 docker compose up -d
 HOST_INDEX_PATH=/path/to/your/project docker compose run --rm indexer
@@ -75,14 +79,17 @@ HOST_INDEX_PATH=/path/to/your/project docker compose run --rm indexer
 - **Optional LLM features**: Local decoder (llama.cpp), cloud integration (GLM, MiniMax), adaptive rerank learning
 
 ### Works With Your Local Files
+
 No complicated path setup - Context-Engine automatically handles the mapping between your local files and the search index.
 
 ### Enterprise-Ready Features
+
 - **Built-in authentication** with session management (optional)
 - **Unified MCP endpoint** that combines indexer and memory services
 - **Automatic collection injection** for workspace-aware queries
 
 **Alternative: Direct HTTP endpoints**
+
 ```json
 {
   "mcpServers": {
@@ -147,7 +154,7 @@ See [docs/vscode-extension.md](docs/vscode-extension.md) for full documentation.
 - `repo_search` — Hybrid code search with filters
 - `context_search` — Blend code + memory results
 - `context_answer` — LLM-generated answers with citations
-- `search_tests_for`, `search_config_for`, `search_callers_for`
+- `search_tests_for`,   `search_config_for`,   `search_callers_for`
 
 **Memory** (Memory MCP):
 - `store` — Save knowledge with metadata
@@ -223,12 +230,15 @@ Python, TypeScript/JavaScript, Go, Java, Rust, C#, PHP, Shell, Terraform, YAML, 
 | BM25 (Lucene) | 0.167 | - | - | - | - |
 | BoW | 0.065 | - | - | - | - |
 
-*Corpus: 20,604 code snippets | 500 queries | Pure dense retrieval, no reranking*
+*Corpus: 20, 604 code snippets | 500 queries | Pure dense retrieval, no reranking*
 *Jina-Code: jinaai/jina-embeddings-v2-base-code (code-specific, 8k context)*
 
 ---
 
+## Acknowledgements
+
+forked from https://github.com/Context-Engine-AI/Context-Engine/tree/4c05ad8a1c46e8c61dff41dd88feb15dda2dde26 (MIT License until 2026-01-11)
+
 ## License
 
 MIT
-

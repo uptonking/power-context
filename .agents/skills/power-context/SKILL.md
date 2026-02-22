@@ -1,6 +1,6 @@
 ---
 name: power-context
-description: Use this skill when an agent needs local code indexing or code search via the power-context CLI (without MCP calls). Covers indexing, auto-reindex watch mode, and code retrieval commands for implementations, symbols, tests, and config files.
+description: Use this skill for local code indexing or code search. Covers indexing, auto-reindex watch mode, and code retrieval commands for implementations, symbols, tests, and config files.
 ---
 
 # Power Context
